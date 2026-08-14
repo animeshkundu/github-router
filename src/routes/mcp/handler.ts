@@ -22,6 +22,7 @@ import {
   type McpGroup,
   type McpScope,
   type WorkspaceSource,
+  resolveGeminiPersona,
 } from "~/lib/peer-mcp-personas"
 import {
   createChatCompletions,
@@ -44,6 +45,7 @@ import {
   browserToolsEnabled,
   fleetToolsEnabled,
   geminiAvailable,
+  resolveGeminiReviewModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
@@ -286,6 +288,9 @@ function activePersonas(): Array<PersonaSpec> {
   return PERSONAS_READ.filter(
     (p) => !p.requiresGeminiCatalog || geminiAvailable(),
   ).map((p) => {
+    if (p.requiresGeminiCatalog) {
+      return resolveGeminiPersona(p, resolveGeminiReviewModel())
+    }
     if (p.toolNameHttp !== "opus_critic") return p
     const model = resolveOpusCriticModel()
     const allowedEfforts: ReadonlyArray<Effort> =

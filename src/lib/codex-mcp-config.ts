@@ -87,9 +87,11 @@ export function resolveCodexCliBackend(
 interface BuildOpts {
   /** Whether the codex-cli stdio server should be added. */
   codexCli: boolean
-  /** Whether gemini-3.1-pro-preview is in the live model catalog. Gates both
+  /** Whether a supported Gemini review model is in the live catalog. Gates both
    *  gemini-critic and gemini-reviewer. */
   geminiAvailable: boolean
+  /** Preferred Gemini persona model resolved from the live catalog. */
+  geminiModel?: string
   /** Resolved config key per enabled group — one `mcpServers` HTTP entry is
    *  emitted per present key, pointing at its scoped `/mcp/<group>` URL. */
   groupKeys: ResolvedGroupKeys
@@ -118,6 +120,9 @@ interface BuildOpts {
   /** Model for `reviewer`. Google-first and deliberately NOT `implementer`'s
    *  model, so a review is cross-lab against whoever produced the work. */
   reviewerModel?: string
+  /** Model for `reviewer-fast` (the cheaper review tier). Absent → the agent is
+   *  OMITTED rather than inheriting the lead's model. */
+  reviewerFastModel?: string
   /** Model for `brainstorm` (a third lab, for options the lead would not
    *  generate). Absent → the agent inherits the lead's model. */
   brainstormModel?: string
@@ -375,8 +380,8 @@ export const BUILTIN_SUBAGENT_DEFINITIONS: PeerAgentDefinitions = {
  *
  * This is a NAME REGISTRY for the sweep allowlist in `paths.ts` and its drift
  * test, NOT a list of agents that are guaranteed to exist in a given launch.
- * `scout`, `implementer-fast`, and `general-purpose-fast` are conditionally
- * emitted (see `buildPeerAgentDefinitions`) yet are listed here on purpose: the sweep must
+ * `scout`, `implementer-fast`, `reviewer-fast`, and `general-purpose-fast` are
+ * conditionally emitted (see `buildPeerAgentDefinitions`) yet are listed here on purpose: the sweep must
  * recognize their filenames so a file written by a launch that DID resolve a
  * model gets reaped by a later launch that did not. Do not iterate this
  * expecting a definition back from `buildPeerAgentDefinitions` for every entry;
@@ -390,6 +395,7 @@ export const BUILTIN_SUBAGENT_DEFINITIONS: PeerAgentDefinitions = {
 export const ALL_NATIVE_AGENT_NAMES = [
   "implementer",
   "reviewer",
+  "reviewer-fast",
   "brainstorm",
   "scout",
   "scribe",
@@ -494,6 +500,7 @@ export function buildPeerAgentDefinitions(
   const personas = personasFor({
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    geminiModel: opts.geminiModel,
   })
   const peersKey = peersKeyOf(opts.groupKeys)
   // Inline the `peers` HTTP server into each peer subagent's frontmatter so it
@@ -535,6 +542,7 @@ export function buildPeerAgentDefinitions(
   // `brainstorm` carry the read-only allowlist.
   const nativeModel = nonEmptyModel(opts.nativeSubagentModel)
   const reviewerModel = nonEmptyModel(opts.reviewerModel)
+  const reviewerFastModel = nonEmptyModel(opts.reviewerFastModel)
   const brainstormModel = nonEmptyModel(opts.brainstormModel)
   const scoutModel = nonEmptyModel(opts.scoutModel)
   const scribeModel = nonEmptyModel(opts.scribeModel)
@@ -567,17 +575,25 @@ export function buildPeerAgentDefinitions(
       + " Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
     ...modelField,
   }
+  const reviewerPrompt =
+    "You are a feedback subagent. Your job is to tell the caller what is actually true about the artifact you are given — code, a plan, a document, a failure report — and what is wrong with it. "
+    + "Verify against the ACTUAL code by reading it; never assume. Do whatever the assessment requires: reproduce a failure end to end as close to how a real user hits it as you can, form hypotheses and test them against the code and runtime, and isolate the true root cause rather than a symptom. "
+    + "Where the change warrants it, author tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), run them, and report which pass and which fail; do NOT modify production code just to make tests pass. "
+    + fileToolSteer("builds")
+    + " Do the work yourself — do not spawn further subagents. Report severity-ranked findings with `file:line` citations, the evidence behind each, and end with a clear go/no-go."
   out.reviewer = {
     description: reviewerModel
       ? `Feedback subagent running ${reviewerModel}, a DIFFERENT lab from both the lead and the implementer, so its blind spots are decorrelated from whoever produced the work. Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. Unlike the stateless peer critics, it reads the repo and can RUN things, so prefer it whenever the assessment needs execution or repo context (reproduce a failure, run the suite, bisect); prefer a peer critic when you already hold the artifact and want a fresh-context opinion on it. It can also REVIEW SCREENSHOTS and other images: just point it at the file and it will look at them. Model is overridable at spawn.`
       : `Feedback subagent (native tools, runs on the lead's model in its own context). Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. Unlike the stateless peer critics, it reads the repo and can RUN things, so prefer it whenever the assessment needs execution or repo context; prefer a peer critic when you already hold the artifact and want a fresh-context opinion on it. Model is overridable at spawn.`,
-    prompt:
-      "You are a feedback subagent. Your job is to tell the caller what is actually true about the artifact you are given — code, a plan, a document, a failure report — and what is wrong with it. "
-      + "Verify against the ACTUAL code by reading it; never assume. Do whatever the assessment requires: reproduce a failure end to end as close to how a real user hits it as you can, form hypotheses and test them against the code and runtime, and isolate the true root cause rather than a symptom. "
-      + "Where the change warrants it, author tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), run them, and report which pass and which fail; do NOT modify production code just to make tests pass. "
-      + fileToolSteer("builds")
-      + " Do the work yourself — do not spawn further subagents. Report severity-ranked findings with `file:line` citations, the evidence behind each, and end with a clear go/no-go.",
+    prompt: reviewerPrompt,
     ...(reviewerModel ? { model: withOneMSuffix(reviewerModel) } : {}),
+  }
+  if (reviewerFastModel) {
+    out["reviewer-fast"] = {
+      description: `Cheaper feedback subagent running ${reviewerFastModel} (1M context, typically faster than the pro-tier reviewer and cross-lab from the OpenAI-backed implementer). Use for lower-stakes assessments that still need repository access or execution; escalate higher-stakes review to reviewer. Full toolset, so it can read the repo and run builds, tests, and reproductions in its own context. Model is overridable at spawn.`,
+      prompt: reviewerPrompt,
+      model: withOneMSuffix(reviewerFastModel),
+    }
   }
   out.brainstorm = {
     description: brainstormModel
@@ -718,6 +734,8 @@ interface WriteOpts {
   /** Stable invocation baked into persisted headersHelper commands. */
   selfInvocation: SelfInvocation
   geminiAvailable: boolean
+  /** Preferred Gemini persona model resolved from the live catalog. */
+  geminiModel?: string
   /** Resolved config keys per enabled group (from `resolveGroupKeysFromMirror`).
    *  Threaded into both the --mcp-config payload and the persona .md routing
    *  strings so every reference points at OUR server even after a collision
@@ -734,6 +752,8 @@ interface WriteOpts {
   nativeSubagentModel?: string
   /** Model for `reviewer`. Cross-lab from `implementer` by design. */
   reviewerModel?: string
+  /** Model for `reviewer-fast`. Absent → the agent is omitted entirely. */
+  reviewerFastModel?: string
   /** Model for `brainstorm`. Absent → inherits the lead's model. */
   brainstormModel?: string
   /** Model for `scout`. Absent → the agent is omitted entirely. */
@@ -1248,6 +1268,7 @@ export async function writePeerMcpRuntimeFiles(
   const mcpConfig = buildPeerMcpConfig(serverUrl, {
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    geminiModel: opts.geminiModel,
     groupKeys: opts.groupKeys,
     nonce,
     codexHome,
@@ -1256,11 +1277,13 @@ export async function writePeerMcpRuntimeFiles(
   const agents = buildPeerAgentDefinitions({
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    geminiModel: opts.geminiModel,
     groupKeys: opts.groupKeys,
     workerToolsAvailable: opts.workerToolsAvailable,
     browseAvailable: opts.browseAvailable,
     nativeSubagentModel: opts.nativeSubagentModel,
     reviewerModel: opts.reviewerModel,
+    reviewerFastModel: opts.reviewerFastModel,
     brainstormModel: opts.brainstormModel,
     scoutModel: opts.scoutModel,
     scribeModel: opts.scribeModel,
@@ -1304,6 +1327,7 @@ export async function writePeerMcpRuntimeFiles(
   const personas = personasFor({
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
+    geminiModel: opts.geminiModel,
   })
 
   const cleanup = async (): Promise<void> => {

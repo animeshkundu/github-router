@@ -2,7 +2,7 @@
  * stand_in: 3-lab away-mode advisor.
  *
  * Polls gpt-5.6-sol xhigh (OpenAI) + claude-opus-5 xhigh (Anthropic) +
- * gemini-3.1-pro-preview high (Google) across two structured voting
+ * the preferred Gemini review model high (Google) across two structured voting
  * rounds and returns a ranked-choice verdict. Bounded to advisor:
  * recommends, never decides — irreversible actions (push, delete, drop,
  * deploy) remain gated by the user-confirmation discipline in CLAUDE.md
@@ -21,7 +21,11 @@
  */
 
 import type { Effort } from "~/lib/peer-mcp-personas"
-import { resolveOpenAiFrontier } from "~/lib/mcp-capabilities"
+import {
+  REVIEW_FAST_DEFAULT_MODEL,
+  resolveGeminiReviewModel,
+  resolveOpenAiFrontier,
+} from "~/lib/mcp-capabilities"
 import { dispatchModelCall } from "~/routes/mcp/handler"
 
 // ─── Public types ───────────────────────────────────────────────────
@@ -114,11 +118,20 @@ interface ModelConfig {
  * gemini-3.1-pro-preview is pinned to `high` because the model rejects
  * `xhigh` at the wire with a Copilot 400. `high` is the realistic ceiling.
  */
-export const STAND_IN_MODELS: ReadonlyArray<ModelConfig> = Object.freeze([
+const STAND_IN_MODELS_BASE: ReadonlyArray<ModelConfig> = Object.freeze([
   { key: "gpt-5.6-sol",            model: "gpt-5.6-sol",            endpoint: "/v1/responses",        effort: "xhigh" },
   { key: "claude-opus-5",          model: "claude-opus-5",          endpoint: "/v1/messages",         effort: "xhigh" },
   { key: "gemini-3.1-pro-preview", model: "gemini-3.1-pro-preview", endpoint: "/v1/chat/completions", effort: "high"  },
 ])
+
+export function standInModels(): ReadonlyArray<ModelConfig> {
+  const geminiModel = resolveGeminiReviewModel()
+  return STAND_IN_MODELS_BASE.map((config) =>
+    config.key === "gemini-3.1-pro-preview"
+      ? { ...config, model: geminiModel ?? REVIEW_FAST_DEFAULT_MODEL }
+      : config,
+  )
+}
 
 // ─── Prompt templates ───────────────────────────────────────────────
 
@@ -184,7 +197,7 @@ export async function runStandIn(
   // ── Round 1: blind parallel fan-out ──────────────────────────────
   const r1UserText = buildRound1UserText(input)
   const r1 = await Promise.all(
-    STAND_IN_MODELS.map((cfg) =>
+    standInModels().map((cfg) =>
       callAndParse(cfg, SYSTEM_PROMPT_R1, r1UserText, validIds, signal),
     ),
   )
@@ -239,7 +252,7 @@ export async function runStandIn(
   // ── Round 2: informed parallel fan-out ───────────────────────────
   const r2UserTextBase = buildRound2UserTextBase(input, r1)
   const r2 = await Promise.all(
-    STAND_IN_MODELS.map((cfg) =>
+    standInModels().map((cfg) =>
       callAndParse(
         cfg,
         SYSTEM_PROMPT_R2,
@@ -500,7 +513,7 @@ function aggregateVotes(
     }
   }
 
-  const total = STAND_IN_MODELS.length // always 3
+  const total = standInModels().length // always 3
   if (topChoice && topCount === total) {
     return {
       verdict: "consensus",
@@ -574,7 +587,7 @@ function gapAbstainVerdict(
 
   const gaps = gapVotes.map((r) => `- ${r.key}: ${r.vote.needMoreInfo}`).join("\n")
   const header =
-    gapVotes.length === STAND_IN_MODELS.length
+    gapVotes.length === standInModels().length
       ? "All three models reported they need more context to decide:"
       : `${gapVotes.length} of 3 models reported they need more context to decide:`
   return withDerivedNotes(
@@ -600,7 +613,7 @@ function freshestVotes(
   r2: ReadonlyArray<CallResult> | null,
 ): Array<{ key: ModelKey; vote: Vote }> {
   const out: Array<{ key: ModelKey; vote: Vote }> = []
-  for (const cfg of STAND_IN_MODELS) {
+  for (const cfg of standInModels()) {
     const r2Entry = r2?.find((r) => r.key === cfg.key)
     const r1Entry = r1.find((r) => r.key === cfg.key)
     const vote =
@@ -657,7 +670,7 @@ function voteRecord(
   r2: ReadonlyArray<CallResult> | null,
 ): StandInResult["votes"] {
   const record = {} as StandInResult["votes"]
-  for (const cfg of STAND_IN_MODELS) {
+  for (const cfg of standInModels()) {
     const r1Entry = r1.find((r) => r.key === cfg.key)
     const r2Entry = r2?.find((r) => r.key === cfg.key) ?? null
     record[cfg.key] = {

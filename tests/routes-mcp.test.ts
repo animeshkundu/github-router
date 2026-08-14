@@ -334,6 +334,35 @@ describe("/mcp protocol methods", () => {
     ])
   })
 
+  // Regression: activePersonas() (the actual /mcp dispatch path, distinct from
+  // personasFor()'s own already-covered test) used to set `.model` to the
+  // resolved fallback while leaving `.description` unchanged, so `tools/list`
+  // would advertise "backed by gemini-3.1-pro-preview" for a persona actually
+  // dispatching to gemini-3.7-flash. Assert the two never disagree.
+  test("tools/list persona descriptions agree with the resolved model when Pro is absent and Flash is present", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        ...baseModels.data.filter((m) => !m.id.startsWith("gemini")),
+        fakeModel("gemini-3.7-flash", ["/v1/chat/completions"]),
+      ],
+    }
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/list",
+    })
+    const result = json.result as { tools: Array<{ name: string; description: string }> }
+    const critic = result.tools.find((t) => t.name === "gemini_critic")
+    const reviewer = result.tools.find((t) => t.name === "gemini_reviewer")
+    expect(critic).toBeDefined()
+    expect(reviewer).toBeDefined()
+    for (const t of [critic, reviewer]) {
+      expect(t!.description).toContain("gemini-3.7-flash")
+      expect(t!.description).not.toContain("gemini-3.1-pro-preview")
+    }
+  })
+
   test("tools/list web entry has {query} input schema (no prompt/effort)", async () => {
     const { json } = await rpc({
       jsonrpc: "2.0",

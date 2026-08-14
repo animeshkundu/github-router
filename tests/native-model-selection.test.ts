@@ -149,6 +149,13 @@ describe("nativeSelectableModelsInCatalog", () => {
     expect(ids).toContain("gemini-3.1-pro-preview")
     expect(ids).not.toContain("gemini-3.1-pro")
   })
+
+  test("seeds gemini-3.7-flash when the deprecated Pro preview is absent", () => {
+    setCatalog(["gemini-3.7-flash"])
+    expect(nativeSelectableModelsInCatalog()).toEqual([
+      { id: "gemini-3.7-flash", display_name: "Gemini 3.7 Flash" },
+    ])
+  })
 })
 
 // Claude Code budgets a gateway-discovered row off the id alone — the cache

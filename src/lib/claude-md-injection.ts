@@ -125,8 +125,9 @@ const STYLE_DIRECTIVE =
  * Self-referentially compliant with the style directive: no em dashes, no
  * Claude / Anthropic attribution.
  *
- * Availability-aware: three of the natives (`scout`, `implementer-fast`, and
- * `general-purpose-fast`) are DROPPED rather than downgraded when no model in
+ * Availability-aware: four of the natives (`scout`, `implementer-fast`,
+ * `reviewer-fast`, and `general-purpose-fast`) are DROPPED rather than
+ * downgraded when no model in
  * their chain resolves, so naming them unconditionally here would tell the lead to delegate
  * to an agent that has no `.md` file and is absent from the Task
  * `subagent_type` enum. Build the directive with
@@ -143,6 +144,7 @@ const STYLE_DIRECTIVE =
 export interface NativeAgentAvailability {
   scoutAvailable?: boolean
   implementerFastAvailable?: boolean
+  reviewerFastAvailable?: boolean
   generalPurposeFastAvailable?: boolean
   /** True when this launch's LEAD is a lighter Claude tier (sonnet, haiku)
    *  rather than an Opus. Reorders the delegation clauses so the cheap tiers
@@ -195,6 +197,11 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
   clauses.push(
     "`reviewer` when something exists and you want it assessed (including "
       + "reproducing and root-causing a failure)",
+  )
+  if (opts.reviewerFastAvailable !== false) {
+    clauses.push("`reviewer-fast` for lower-stakes assessments")
+  }
+  clauses.push(
     "`brainstorm` when you do not yet know which approach to take",
   )
   if (opts.scoutAvailable !== false) {

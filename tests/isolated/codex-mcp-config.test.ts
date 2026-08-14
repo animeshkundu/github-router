@@ -444,6 +444,7 @@ describe("buildPeerAgentDefinitions", () => {
       groupKeys: { peers: "peers" },
       nativeSubagentModel: "gpt-5.5",
       reviewerModel: "gemini-3.1-pro-preview",
+      reviewerFastModel: "gemini-3.7-flash",
       brainstormModel: "gemini-3.1-pro-preview",
       scoutModel: "gemini-3.6-flash",
       scribeModel: "gpt-5.6-terra",
@@ -457,6 +458,7 @@ describe("buildPeerAgentDefinitions", () => {
       // Cross-lab by design: reviewer must NOT resolve to implementer's model,
       // or a review of implementer-produced work is one model checking itself.
       reviewer: { description: "Feedback subagent", model: "gemini-3.1-pro-preview", readOnly: false },
+      "reviewer-fast": { description: "Cheaper feedback subagent", model: "gemini-3.7-flash", readOnly: false },
       brainstorm: { description: "Divergent-options", model: "gemini-3.1-pro-preview", readOnly: true },
       scout: { description: "Read-only exploration", model: "gemini-3.6-flash", readOnly: true },
       scribe: { description: "Documentation subagent", model: "gpt-5.6-terra", readOnly: false },
@@ -507,7 +509,7 @@ describe("buildPeerAgentDefinitions", () => {
       expect("model" in def).toBe(false)
       expect(def.description).toContain("Model is overridable at spawn")
     }
-    for (const name of ["scout", "implementer-fast", "general-purpose-fast"]) {
+    for (const name of ["scout", "implementer-fast", "reviewer-fast", "general-purpose-fast"]) {
       expect(withoutModel[name]).toBeUndefined()
     }
 
@@ -522,6 +524,20 @@ describe("buildPeerAgentDefinitions", () => {
     })
     expect(onlyCatchAll["general-purpose-fast"]).toBeDefined()
     expect(onlyCatchAll["implementer-fast"]).toBeUndefined()
+
+    const onlyReviewerFast = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: false,
+      groupKeys: { peers: "peers" },
+      reviewerFastModel: "gemini-3.7-flash",
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+    })
+    expect(onlyReviewerFast["reviewer-fast"]).toBeDefined()
+    expect(onlyReviewerFast["reviewer-fast"]!.tools).toBeUndefined()
+    expect(onlyReviewerFast["reviewer-fast"]!.description).toContain("lower-stakes")
+    expect(onlyReviewerFast["reviewer-fast"]!.description).toContain("escalate higher-stakes review to reviewer")
+    expect(onlyReviewerFast["reviewer-fast"]!.description).not.toMatch(/xhigh|max effort/i)
   })
 
   // Description-quality invariant across the whole native roster. Each of these
@@ -533,6 +549,7 @@ describe("buildPeerAgentDefinitions", () => {
     const models: Record<string, string> = {
       implementer: "gpt-5.6-sol",
       reviewer: "gemini-3.1-pro-preview",
+      "reviewer-fast": "gemini-3.7-flash",
       brainstorm: "gemini-3.1-pro-preview",
       scout: "gemini-3.6-flash",
       scribe: "gpt-5.6-terra",
@@ -545,6 +562,7 @@ describe("buildPeerAgentDefinitions", () => {
       groupKeys: { peers: "peers" },
       nativeSubagentModel: models.implementer,
       reviewerModel: models.reviewer,
+      reviewerFastModel: models["reviewer-fast"],
       brainstormModel: models.brainstorm,
       scoutModel: models.scout,
       scribeModel: models.scribe,
@@ -570,9 +588,9 @@ describe("buildPeerAgentDefinitions", () => {
       // token that would read as part of the model name.
       expect(d).not.toContain("[1m]")
     }
-    // The two cheaper-tier agents must say they carry the full toolset: that is
+    // The cheaper-tier agents must say they carry the full toolset: that is
     // what distinguishes them from `scout`, which cannot finish write work.
-    for (const n of ["implementer-fast", "general-purpose-fast"]) {
+    for (const n of ["implementer-fast", "reviewer-fast", "general-purpose-fast"]) {
       expect(agents[n]!.description).toMatch(/full toolset|read-and-edit/i)
     }
   })
@@ -607,6 +625,7 @@ describe("buildPeerAgentDefinitions", () => {
           entry("gpt-5.6-sol", 1_050_000),
           entry("gemini-3.1-pro-preview", 1_000_000),
           entry("gpt-5.6-terra", 1_050_000),
+          entry("gemini-3.7-flash", 1_000_000),
           entry("gemini-3.6-flash", 1_000_000),
           entry("gemini-3.5-flash", 1_000_000),
           entry("gpt-5.6-luna", 1_050_000),
@@ -620,6 +639,7 @@ describe("buildPeerAgentDefinitions", () => {
         groupKeys: { peers: "peers" },
         nativeSubagentModel: "gpt-5.6-sol",
         reviewerModel: "gemini-3.1-pro-preview",
+        reviewerFastModel: "gemini-3.7-flash",
         brainstormModel: "synthetic-sub-1m",
         scoutModel: "gpt-5.6-luna",
         scribeModel: "gpt-5.6-terra",
@@ -630,6 +650,7 @@ describe("buildPeerAgentDefinitions", () => {
       })
       expect(agents.implementer!.model).toBe("gpt-5.6-sol[1m]")
       expect(agents.reviewer!.model).toBe("gemini-3.1-pro-preview[1m]")
+      expect(agents["reviewer-fast"]!.model).toBe("gemini-3.7-flash[1m]")
       // Synthetic sub-1M model: bare, so Claude Code keeps its conservative
       // accounting rather than over-budgeting a 400K model into an overflow.
       expect(agents.brainstorm!.model).toBe("synthetic-sub-1m")

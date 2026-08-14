@@ -24,6 +24,7 @@
 import path from "node:path"
 
 import { ARTIFACT_TOOLS } from "./artifact/tools"
+import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
 import type { McpToolResult } from "./attachments"
 import { FLEET_TOOLS } from "./fleet/tools"
 import { FIRST_MATE_TOOLS } from "./first-mate/tools"
@@ -371,7 +372,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
   {
     agentName: "gemini-critic",
     toolNameHttp: "gemini_critic",
-    model: "gemini-3.1-pro-preview",
+    model: GEMINI_REVIEW_DEFAULT_MODEL,
     endpoint: "/v1/chat/completions",
     description:
       "Adversarial third-lab critic backed by gemini-3.1-pro-preview (Google), strong on formal reasoning, invariants, proofs, and cross-checking another critic's conclusion. It reviews plans, designs, mathematical arguments, and large artifacts for assumption gaps or invariant failures, then returns a focused critique or no-material-objection style verdict. Use when codex_critic's result needs an independent lab check or when the artifact hinges on formal correctness. Not for line-level diff review, use gemini_reviewer or codex_reviewer; pass the artifact and constraints verbatim.",
@@ -400,7 +401,7 @@ export const PERSONAS_READ: ReadonlyArray<PersonaSpec> = Object.freeze([
   {
     agentName: "gemini-reviewer",
     toolNameHttp: "gemini_reviewer",
-    model: "gemini-3.1-pro-preview",
+    model: GEMINI_REVIEW_DEFAULT_MODEL,
     endpoint: "/v1/chat/completions",
     description:
       "Line-level code reviewer backed by gemini-3.1-pro-preview (Google), providing second-lab coverage that catches a different slice of concrete-code defects than codex_reviewer. It reviews diffs, files, or function bodies and returns severity-ranked findings with file:line citations and suggested fixes. Use alongside codex_reviewer when a non-trivial diff benefits from cross-lab code-review coverage, especially around invariants or edge cases. Not for architecture or product-design review, use codex_critic or gemini_critic; pass the code artifact verbatim.",
@@ -591,6 +592,7 @@ export function buildAgentPrompt(
 export function buildPeerAwarenessSnippet(opts: {
   codexCli: boolean
   geminiAvailable: boolean
+  geminiModel?: string
   workerToolsAvailable: boolean
   standInAvailable: boolean
   browseAvailable: boolean
@@ -606,6 +608,9 @@ export function buildPeerAwarenessSnippet(opts: {
   /** Whether `implementer-fast` resolved a model and was therefore emitted.
    *  Like `scout`, it is dropped rather than downgraded to the lead's model. */
   implementerFastAvailable?: boolean
+  /** Whether `reviewer-fast` resolved its cheaper review model and was emitted.
+   *  Like `scout`, it is dropped rather than downgraded. */
+  reviewerFastAvailable?: boolean
   /** Whether `general-purpose-fast` resolved a model and was therefore emitted.
    *  Like `scout`, it is dropped rather than downgraded. */
   generalPurposeFastAvailable?: boolean
@@ -633,9 +638,9 @@ export function buildPeerAwarenessSnippet(opts: {
     "`codex_reviewer` (gpt-5.3-codex)",
   ]
   if (opts.geminiAvailable) {
-    // Both gemini personas share the gemini-3.x-pro catalog gate.
-    criticList.push("`gemini_reviewer` (gemini-3.1-pro, line-level code review)")
-    criticList.push("`gemini_critic` (gemini-3.1-pro)")
+    const geminiModel = opts.geminiModel ?? GEMINI_REVIEW_DEFAULT_MODEL
+    criticList.push(`\`gemini_reviewer\` (${geminiModel}, line-level code review)`)
+    criticList.push(`\`gemini_critic\` (${geminiModel})`)
   }
   criticList.push("`opus_critic` (Opus 5)")
 
@@ -659,7 +664,7 @@ export function buildPeerAwarenessSnippet(opts: {
     ? ""
     : " Catch-all on a fast, economical non-lead model for work no specialist fits: `general-purpose-fast`."
   para2Parts.push(
-    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (coding changes needing judgment or with ambiguous scope)${opts.implementerFastAvailable === false ? "" : ", `implementer-fast` (well-specified, mechanical coding changes)"}, \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure), \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${catchAllClause}`,
+    `Native subagents (Task), each in its own context so heavy work never fills yours: \`implementer\` (coding changes needing judgment or with ambiguous scope)${opts.implementerFastAvailable === false ? "" : ", `implementer-fast` (well-specified, mechanical coding changes)"}, \`reviewer\` (something exists and you want it assessed, including reproducing and root-causing a failure)${opts.reviewerFastAvailable === false ? "" : ", `reviewer-fast` (lower-stakes assessment on a cheaper cross-lab model)"}, \`brainstorm\` (you do not yet know which approach to take)${opts.scoutAvailable === false ? "" : ", `scout` (find or understand something in the repo, cheap)"}, \`scribe\` (docs and ADRs that trail the code).${catchAllClause}`,
   )
   if (opts.workerToolsAvailable) {
     para2Parts.push(
@@ -727,6 +732,7 @@ export type NativeAgentName =
   | "implementer"
   | "implementer-fast"
   | "reviewer"
+  | "reviewer-fast"
   | "brainstorm"
   | "scout"
   | "scribe"
@@ -750,7 +756,7 @@ export function buildPeerAwarenessSummary(opts: {
   /** Which conditionally-emitted natives this launch wrote. `undefined` means
    *  available, matching `buildPeerAwarenessSnippet`. Load-bearing here for the
    *  same reason it is there and in the operating-defaults directive: `scout`,
-   *  `implementer-fast`, and `general-purpose-fast` are DROPPED rather than
+   *  `implementer-fast`, `reviewer-fast`, and `general-purpose-fast` are DROPPED rather than
    *  downgraded when their chain misses, so naming one unconditionally in
    *  the always-in-context surface points the lead at an agent absent from the
    *  Task `subagent_type` enum. This surface previously took no availability at
@@ -758,6 +764,7 @@ export function buildPeerAwarenessSummary(opts: {
    *  snippet. */
   scoutAvailable?: boolean
   implementerFastAvailable?: boolean
+  reviewerFastAvailable?: boolean
   generalPurposeFastAvailable?: boolean
   /** Resolved native agent model ids from the current launch. Values are only
    *  used to derive live catalog prices and measured speed hints for this
@@ -778,6 +785,7 @@ export function buildPeerAwarenessSummary(opts: {
     renderNative("implementer"),
     opts.implementerFastAvailable === false ? undefined : renderNative("implementer-fast"),
     renderNative("reviewer"),
+    opts.reviewerFastAvailable === false ? undefined : renderNative("reviewer-fast"),
     renderNative("brainstorm"),
     opts.scoutAvailable === false ? undefined : renderNative("scout"),
     renderNative("scribe"),
@@ -838,19 +846,47 @@ export function buildPeerAwarenessSummary(opts: {
   return lines.join("\n")
 }
 
+/**
+ * Applies the resolved Gemini review model to a persona requiring the Gemini
+ * catalog: swaps `.model` and rewrites every literal occurrence of the
+ * default id in `.description` so the two never disagree about which model
+ * actually backs the tool. A mismatch here is user-visible — `tools/list`
+ * would advertise "backed by gemini-3.1-pro-preview" while dispatch actually
+ * ran the flash fallback — so every call site that resolves a
+ * `requiresGeminiCatalog` persona MUST go through this helper rather than
+ * setting `.model` directly (a prior draft of this fix did exactly that in
+ * `routes/mcp/handler.ts`'s `activePersonas()` and left the description
+ * stale). Relies on every `requiresGeminiCatalog` persona's description
+ * literally containing `GEMINI_REVIEW_DEFAULT_MODEL`'s exact string — true
+ * for both current entries (gemini-critic, gemini-reviewer); keep it true for
+ * any future one, or `replaceAll` silently no-ops.
+ */
+export function resolveGeminiPersona(p: PersonaSpec, geminiModel: string | undefined): PersonaSpec {
+  const model = geminiModel ?? GEMINI_REVIEW_DEFAULT_MODEL
+  return {
+    ...p,
+    model,
+    description: p.description.replaceAll(GEMINI_REVIEW_DEFAULT_MODEL, model),
+  }
+}
+
 /** Convenience: every persona that should be registered for the given mode. */
 export function personasFor(opts: {
   codexCli: boolean
   geminiAvailable: boolean
+  geminiModel?: string
 }): Array<PersonaSpec> {
   const result: Array<PersonaSpec> = []
   for (const p of PERSONAS_READ) {
     // Drop personas whose model family is missing from Copilot's live catalog.
-    // Both gemini personas (gemini-critic and gemini-reviewer) gate on the
-    // gemini-3.x-pro family via `requiresGeminiCatalog`. Decoupled from
-    // `requiresHttp` so a persona can require HTTP without also requiring
-    // gemini in the catalog (e.g. opus-critic).
-    if (p.requiresGeminiCatalog && !opts.geminiAvailable) continue
+    // Both gemini personas share the preferred Pro -> Flash resolver. Copy the
+    // resolved id into the launch definition so their generated subagents and
+    // server dispatch agree after the Pro preview's 2026-09-01 removal.
+    if (p.requiresGeminiCatalog) {
+      if (!opts.geminiAvailable) continue
+      result.push(resolveGeminiPersona(p, opts.geminiModel))
+      continue
+    }
     result.push(p)
   }
   if (opts.codexCli) {

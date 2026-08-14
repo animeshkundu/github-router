@@ -109,6 +109,15 @@ test("standInToolEnabled passes on a gpt-5.5-only (rollout-lag) catalog when opu
   expect(standInToolEnabled()).toBe(true)
 })
 
+test("standInToolEnabled keeps the Google slot on the Flash fallback", () => {
+  setCatalog([
+    entry("gpt-5.6-sol", true),
+    entry("claude-opus-5", true),
+    entry("gemini-3.7-flash", true),
+  ])
+  expect(standInToolEnabled()).toBe(true)
+})
+
 test("standInToolEnabled fails closed when neither gpt-5.6-sol nor gpt-5.5 is present", () => {
   setCatalog([
     entry("gpt-5.4", true), // no OpenAI frontier model
