@@ -259,6 +259,18 @@ describe("personasFor", () => {
     expect(off).not.toContain("gemini-critic")
     expect(off).not.toContain("gemini-reviewer")
   })
+
+  test("both Gemini personas use the resolved Flash fallback model", () => {
+    const gemini = personasFor({
+      codexCli: false,
+      geminiAvailable: true,
+      geminiModel: "gemini-3.7-flash",
+    }).filter((p) => p.requiresGeminiCatalog)
+    expect(gemini).toHaveLength(2)
+    expect(gemini.every((p) => p.model === "gemini-3.7-flash")).toBe(true)
+    expect(gemini.every((p) => p.description.includes("gemini-3.7-flash"))).toBe(true)
+    expect(gemini.every((p) => !p.description.includes("gemini-3.1-pro-preview"))).toBe(true)
+  })
 })
 
 describe("buildAgentPrompt — HTTP mode", () => {
@@ -370,7 +382,7 @@ describe("buildPeerAwarenessSnippet", () => {
     // envelope the actual implementation fits inside, not a target driving copy
     // growth. If a future tightening shaves bytes, lower this cap too.
     const minimal = buildPeerAwarenessSnippet(MINIMAL)
-    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2300)
+    expect(Buffer.byteLength(minimal, "utf8")).toBeLessThan(2370)
   })
 
   test("snippet stays under ~930 tokens (~5580 bytes) in the maximal case", () => {
@@ -388,7 +400,7 @@ describe("buildPeerAwarenessSnippet", () => {
     // singular `general-purpose-fast` roster now measures 5634 bytes, so the cap
     // tightens to 5640. If a future tightening shaves bytes, lower it again.
     const full = buildPeerAwarenessSnippet(MAXIMAL)
-    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5640)
+    expect(Buffer.byteLength(full, "utf8")).toBeLessThan(5730)
   })
 
   test("the system-prompt summary names every native and carries the reviewer-vs-critic tiebreak", () => {
@@ -439,8 +451,8 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(summary).toContain("Cost is per 1M tokens in/out, tok/s approximate")
     expect(summary).toContain("`implementer` 500/3000 ~75t/s")
     expect(summary).toContain("`implementer-fast` 200/1200 ~100t/s")
-    expect(summary).toContain("`reviewer` 200/1200 ~25t/s")
-    expect(summary).toContain("`brainstorm` 200/1200 ~25t/s")
+    expect(summary).toContain("`reviewer` 200/1200 ~33t/s")
+    expect(summary).toContain("`brainstorm` 200/1200 ~33t/s")
     expect(summary).toContain("`scout` 20/120 ~120t/s")
     expect(summary).toContain("`scribe` 200/1200 ~100t/s")
     expect(summary).toContain("`general-purpose-fast` 20/120 ~120t/s")
@@ -449,7 +461,7 @@ describe("buildPeerAwarenessSnippet", () => {
     // Keep it as a compact roster and cross-cutting tiebreak, not a third copy
     // of each agent's routing description. Measured at 1493 bytes with the
     // cost/speed annotations; the small envelope catches real growth.
-    expect(Buffer.byteLength(summary, "utf8")).toBeLessThan(1500)
+    expect(Buffer.byteLength(summary, "utf8")).toBeLessThan(1520)
     for (const removedRoleProse of [
       "coding changes needing judgment",
       "docs and ADRs that trail the code",
@@ -514,10 +526,12 @@ describe("buildPeerAwarenessSnippet", () => {
       browseAvailable: false,
       scoutAvailable: false,
       implementerFastAvailable: false,
+      reviewerFastAvailable: false,
       generalPurposeFastAvailable: false,
     })
     expect(none).not.toContain("`scout`")
     expect(none).not.toContain("`implementer-fast`")
+    expect(none).not.toContain("`reviewer-fast`")
     expect(none).not.toContain("`general-purpose-fast`")
     // The unconditional natives survive: they inherit the lead's model rather
     // than being dropped, so they are always in the Task enum.
@@ -536,7 +550,18 @@ describe("buildPeerAwarenessSnippet", () => {
     })
     expect(onlyCatchAll).toContain("`general-purpose-fast`")
     expect(onlyCatchAll).not.toContain("`implementer-fast`")
+    expect(onlyCatchAll).toContain("`reviewer-fast`")
     expect(onlyCatchAll).toContain("`scout`")
+
+    const withoutReviewerFast = buildPeerAwarenessSummary({
+      workerToolsAvailable: true,
+      standInAvailable: true,
+      browseAvailable: false,
+      reviewerFastAvailable: false,
+    })
+    expect(withoutReviewerFast).not.toContain("`reviewer-fast`")
+    expect(withoutReviewerFast).toContain("`reviewer`")
+    expect(withoutReviewerFast).toContain("`implementer-fast`")
   })
 
   test("mentions Claude Code's advisor built-in tool", () => {
@@ -650,21 +675,22 @@ describe("buildPeerAwarenessSnippet", () => {
     // advertise an agent that is not in the Task enum.
     expect(buildPeerAwarenessSnippet({ ...MINIMAL, scoutAvailable: true })).toContain("`scout`")
     expect(buildPeerAwarenessSnippet({ ...MINIMAL, scoutAvailable: false })).not.toContain("`scout`")
-    // The two cheaper-tier full-toolset agents follow the same rule and drop
+    // The cheaper-tier full-toolset agents follow the same rule and drop
     // INDEPENDENTLY. The default fixtures leave these flags unset (= available),
     // so without an explicitly-false build nothing exercises the omission.
-    for (const [flag, name] of [
+    const conditionalNatives = [
       ["implementerFastAvailable", "`implementer-fast`"],
+      ["reviewerFastAvailable", "`reviewer-fast`"],
       ["generalPurposeFastAvailable", "`general-purpose-fast`"],
-    ] as const) {
+    ] as const
+    for (const [flag, name] of conditionalNatives) {
       expect(buildPeerAwarenessSnippet({ ...MINIMAL, [flag]: true })).toContain(name)
       const dropped = buildPeerAwarenessSnippet({ ...MINIMAL, [flag]: false })
       expect(dropped).not.toContain(name)
-      const [otherFlag, otherName] = flag === "implementerFastAvailable"
-        ? ["generalPurposeFastAvailable", "`general-purpose-fast`"] as const
-        : ["implementerFastAvailable", "`implementer-fast`"] as const
-      expect(dropped).toContain(otherName)
-      expect(buildPeerAwarenessSnippet({ ...MINIMAL, [otherFlag]: true })).toContain(otherName)
+      for (const [otherFlag, otherName] of conditionalNatives) {
+        if (otherFlag === flag) continue
+        expect(dropped).toContain(otherName)
+      }
     }
     // The catch-all gone: its singular clause disappears cleanly.
     const noCatchAll = buildPeerAwarenessSnippet({
@@ -990,6 +1016,7 @@ test("the cost/speed preamble appears only when figures actually rendered", () =
     implementer: "gpt-5.6-sol",
     "implementer-fast": "gpt-5.6-terra",
     reviewer: "gemini-3.1-pro-preview",
+    "reviewer-fast": "gemini-3.7-flash",
     brainstorm: "gemini-3.1-pro-preview",
     scout: "gpt-5.6-luna",
     scribe: "gpt-5.6-terra",
@@ -1019,6 +1046,7 @@ test("the cost/speed preamble appears only when figures actually rendered", () =
       implementer: "unpriceable-model-a",
       "implementer-fast": "unpriceable-model-b",
       reviewer: "unpriceable-model-c",
+      "reviewer-fast": "unpriceable-model-e",
       brainstorm: "unpriceable-model-c",
       scout: "unpriceable-model-d",
       scribe: "unpriceable-model-b",

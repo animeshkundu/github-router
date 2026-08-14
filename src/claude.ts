@@ -103,6 +103,8 @@ import {
   nativeSubagentModel,
   brainstormModel,
   reviewerModel,
+  reviewerFastModel,
+  resolveGeminiReviewModel,
   scoutModel,
   scribeModel,
   implementerFastModel,
@@ -608,6 +610,7 @@ export const claude = defineCommand({
       implementer: nativeSubagentModel(),
       "implementer-fast": implementerFastModel(),
       reviewer: reviewerModel(),
+      "reviewer-fast": reviewerFastModel(),
       brainstorm: brainstormModel(),
       scout: scoutModel(),
       scribe: scribeModel(),
@@ -616,6 +619,7 @@ export const claude = defineCommand({
     const nativeAvailability: NativeAgentAvailability = {
       scoutAvailable: nativeAgentModels.scout != null,
       implementerFastAvailable: nativeAgentModels["implementer-fast"] != null,
+      reviewerFastAvailable: nativeAgentModels["reviewer-fast"] != null,
       generalPurposeFastAvailable: nativeAgentModels["general-purpose-fast"] != null,
       // Read from the FINAL `chosenSlug`, after the fallback walk above may have
       // reassigned it, so the prose describes the lead this session actually
@@ -670,11 +674,13 @@ export const claude = defineCommand({
           codexCli: backend === "cli",
           selfInvocation,
           geminiAvailable: geminiModelsAvailable,
+          geminiModel: resolveGeminiReviewModel(),
           groupKeys,
           workerToolsAvailable: workerToolsEnabled(),
           browseAvailable: browseAgentEnabled(),
           nativeSubagentModel: nativeAgentModels.implementer,
           reviewerModel: nativeAgentModels.reviewer,
+          reviewerFastModel: nativeAgentModels["reviewer-fast"],
           brainstormModel: nativeAgentModels.brainstorm,
           scoutModel: nativeAgentModels.scout,
           scribeModel: nativeAgentModels.scribe,
@@ -1184,6 +1190,7 @@ export const claude = defineCommand({
         const peerSnippet = buildPeerAwarenessSnippet({
           codexCli: backend === "cli",
           geminiAvailable: geminiModelsAvailable,
+          geminiModel: resolveGeminiReviewModel(),
           workerToolsAvailable: workerToolsEnabled(),
           standInAvailable: standInToolEnabled(),
           browseAvailable: browserToolsEnabled(),

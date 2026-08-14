@@ -227,6 +227,9 @@ mock.module("~/lib/mcp-capabilities", () => ({
   geminiAvailable: geminiAvailableMock,
   nativeSubagentModel: mock(() => undefined),
   reviewerModel: mock(() => undefined),
+  reviewerFastModel: mock(() => "gemini-3.7-flash"),
+  resolveGeminiReviewModel: mock(() => undefined),
+  REVIEW_FAST_DEFAULT_MODEL: "gemini-3.7-flash",
   brainstormModel: mock(() => undefined),
   scribeModel: mock(() => undefined),
   // `scout` is emitted only when a cheap-tier model resolves; undefined here

@@ -70,7 +70,7 @@ Description-line (routing) review in [`skills/README.md`](./skills/README.md).
 | implementer (native) | gpt-5.6-sol → gpt-5.5, else lead | implementation, full toolset | always emitted; frontier model only when it has `tool_calls` | [implementer](./subagents/implementer.md) |
 | reviewer (native) | gemini-3.1-pro-preview → frontier, else lead | artifact assessment, full toolset; cross-lab from implementer by design | always emitted; preferred model only when it has `tool_calls` | [reviewer](./subagents/reviewer.md) |
 | brainstorm (native) | gemini-3.1-pro-preview → frontier, else lead | read-only divergent options | always emitted; preferred model only when it has `tool_calls` | [brainstorm](./subagents/brainstorm.md) |
-| scout (native) | gpt-5.6-luna → gemini-3.6-flash | read-only low-cost repository exploration | omitted unless a chain model has `tool_calls` and 1M context | [scout](./subagents/scout.md) |
+| scout (native) | gpt-5.6-luna → gemini-3.7-flash | read-only low-cost repository exploration | omitted unless a chain model has `tool_calls` and 1M context | [scout](./subagents/scout.md) |
 | scribe (native) | gpt-5.6-terra → frontier, else lead | repository-grounded documentation, full toolset | always emitted; preferred model only when it has `tool_calls` | [scribe](./subagents/scribe.md) |
 | implementer-fast (native) | gpt-5.6-terra → gemini-3.1-pro-preview | well-specified mechanical implementation, full toolset | omitted unless a chain model has `tool_calls` and 1M context | [implementer-fast](./subagents/implementer-fast.md) |
 | general-purpose-fast (native) | gpt-5.6-luna only | fastest measured, lowest-cost full-toolset catch-all | omitted unless Luna has `tool_calls` and 1M context | [general-purpose-fast](./subagents/general-purpose-fast.md) |
@@ -161,9 +161,9 @@ These share one root class: a text surface (awareness snippet, root CLAUDE.md, o
 
 ### Important — description / doc drift (the model's mental model is wrong)
 
-- **Worker + peer model defaults updated** — opus_critic now prefers Opus 5 (4.6 fallback), review stays gemini-3.1-pro-preview, explore defaults to gemini-3.6-flash/high, and plan defaults to Opus 5/xhigh. The worker model override remains a free string, with the documented sol/terra/flash 1M ladder.
+- **Worker + peer model defaults updated** — opus_critic now prefers Opus 5 (4.6 fallback), review stays gemini-3.1-pro-preview, explore defaults to gpt-5.6-luna/high, and plan defaults to Opus 5/xhigh. The worker model override remains a free string, with the documented sol/terra/flash 1M ladder.
 - **Descriptions naming removed / non-surfaced tools produce `-32601`** — MCP. browser `type` routes to removed `browser_fill`; `codex_implementer` is documented as a peers HTTP tool but is stdio-only (404); `web`/`implement` error strings still say the old names. Detail: [FINDINGS S6](./mcp/FINDINGS.md).
-- **`peer-mcp-design.md` model rows refreshed** — the design anchor now records Opus 5 for opus_critic and stand_in, gemini-3.6-flash/high for explore, Opus 5/xhigh for plan, and the worker override ladder.
+- **`peer-mcp-design.md` model rows refreshed** — the design anchor now records Opus 5 for opus_critic and stand_in, gpt-5.6-luna/high for explore, Opus 5/xhigh for plan, and the worker override ladder.
 - **worker-browse dispatcher/schema field mismatch (hard error)** — spans hooks/subagents and MCP. `dispatcherPrompt` passes `prompt`; the browse tool requires `task` and rejects unknown keys → hard `isError`. Detail: [FINDINGS S13](./mcp/FINDINGS.md), [subagents A3](./subagents/README.md).
 
 ### Suggestion — minimality / schema-honesty

@@ -19,15 +19,17 @@ import { compressorAvailable } from "./browser-mcp/compressor"
 import {
   colbertSearchEnabled,
 } from "./colbert"
+import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
 import { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 import { ONE_M_TOKENS } from "./one-m-context"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
   DEFAULT_MODEL_CHAIN as WORKER_DEFAULT_MODEL_CHAIN,
-  REVIEW_DEFAULT_MODEL,
 } from "./worker-agent"
 import { pickEndpoint } from "../services/copilot/endpoint"
+
+export const REVIEW_FAST_DEFAULT_MODEL = "gemini-3.7-flash"
 
 /**
  * Gate for the `stand_in` tool.
@@ -37,9 +39,8 @@ import { pickEndpoint } from "../services/copilot/endpoint"
  *   - an OpenAI frontier model (`gpt-5.6-sol`, else `gpt-5.5` — see
  *     `resolveOpenAiFrontier`)
  *   - `claude-opus-5`       (stand_in's Anthropic slot)
- *   - any `gemini-3.X.*pro` (gemini_critic's model family — matches the
- *     same regex `geminiAvailable()` uses, so the gate stays in sync if
- *     the GA slug renames `gemini-3.1-pro-preview` → `gemini-3.1-pro`)
+ *   - the preferred Gemini reviewer model (`gemini-3.1-pro-preview`, falling
+ *     back to `gemini-3.7-flash` after the preview's 2026-09-01 removal)
  *
  * If any one is missing, `stand_in` is dropped from `tools/list` AND
  * fails `tools/call` with -32601 (mirroring the `worker` capability's
@@ -48,10 +49,56 @@ import { pickEndpoint } from "../services/copilot/endpoint"
  * `claude-opus-5` is a single-segment slug (dotted == dashed), so the
  * catalog probe matches Copilot's actual id shape directly.
  */
-export function geminiAvailable(source: Pick<State, "models"> = state): boolean {
+/**
+ * Any live-catalog model matching Google's `gemini-3.x-pro` family, excluding
+ * the two known literals — catches a GA rename of the preview slug (e.g.
+ * `gemini-3.1-pro-preview` -> `gemini-3.1-pro`) so a vendor rename doesn't
+ * silently downgrade every Gemini-gated resolver to the flash fallback while a
+ * real pro-tier successor is actually present in the catalog. This is the
+ * same regex the removed `geminiAvailable()` used, for the same reason —
+ * losing it here was a real regression caught in review, not a deliberate
+ * simplification.
+ */
+function findGeminiProGaRename(models: ReadonlyArray<{ id: string }>): string | undefined {
+  return models.find(
+    (m) => /^gemini-3\..*pro/i.test(m.id)
+      && m.id !== GEMINI_REVIEW_DEFAULT_MODEL
+      && m.id !== REVIEW_FAST_DEFAULT_MODEL,
+  )?.id
+}
+
+export function resolveGeminiReviewModel(
+  source: Pick<State, "models"> = state,
+): string | undefined {
   const models = source.models?.data
-  if (!models) return false
-  return models.some((m) => /^gemini-3\..*pro/i.test(m.id))
+  if (!models) return undefined
+  if (models.some((m) => m.id === GEMINI_REVIEW_DEFAULT_MODEL)) return GEMINI_REVIEW_DEFAULT_MODEL
+  const gaRename = findGeminiProGaRename(models)
+  if (gaRename) return gaRename
+  if (models.some((m) => m.id === REVIEW_FAST_DEFAULT_MODEL)) {
+    return REVIEW_FAST_DEFAULT_MODEL
+  }
+  return undefined
+}
+
+/**
+ * Gemini review candidates in preference order, for resolvers that ALSO need
+ * `firstPresentInCatalog`'s `requireToolCalls`/`minContextTokens` enforcement
+ * (`resolveGeminiReviewModel()` only checks id presence, not those capability
+ * flags). Mirrors `resolveGeminiReviewModel()`'s own preference order: the
+ * known preview id, then a GA rename of it, then the flash fallback — kept as
+ * a shared helper so `reviewerModel()`/`brainstormModel()` can't drift from
+ * `resolveGeminiReviewModel()`'s GA-rename handling the way the hardcoded
+ * per-resolver chains did before this was extracted.
+ */
+function geminiReviewChainCandidates(): Array<string> {
+  const models = state.models?.data ?? []
+  const gaRename = findGeminiProGaRename(models)
+  return [GEMINI_REVIEW_DEFAULT_MODEL, ...(gaRename ? [gaRename] : []), REVIEW_FAST_DEFAULT_MODEL]
+}
+
+export function geminiAvailable(source: Pick<State, "models"> = state): boolean {
+  return resolveGeminiReviewModel(source) != null
 }
 
 /**
@@ -151,7 +198,7 @@ export function nativeSubagentModel(): string | undefined {
  * was one model checking its own output. Not merely the same lab: the same
  * model. Two independent blind audits flagged it, and the repo already applies
  * the opposite rule one layer down, where `worker-review` runs
- * `REVIEW_DEFAULT_MODEL` precisely so the reviewer's lab is decorrelated from the
+ * `GEMINI_REVIEW_DEFAULT_MODEL` precisely so the reviewer's lab is decorrelated from the
  * producer's.
  *
  * The Anthropic lead and the OpenAI-frontier `implementer` are the two producers
@@ -160,7 +207,13 @@ export function nativeSubagentModel(): string | undefined {
  */
 export function reviewerModel(): string | undefined {
   return firstPresentInCatalog(
-    [REVIEW_DEFAULT_MODEL, ...OPENAI_FRONTIER_MODELS],
+    // GEMINI_REVIEW_DEFAULT_MODEL is deprecated for 2026-09-01 removal.
+    // geminiReviewChainCandidates() also catches a GA rename of it ahead of
+    // the Flash fallback, which stays ahead of OpenAI so review remains
+    // decorrelated from implementer. Once Pro disappears (and no GA successor
+    // has shipped), reviewer and reviewer-fast intentionally converge on Flash
+    // until Google ships a real pro-tier successor.
+    [...geminiReviewChainCandidates(), ...OPENAI_FRONTIER_MODELS],
     { requireToolCalls: true },
   )
 }
@@ -169,7 +222,7 @@ export function reviewerModel(): string | undefined {
  * The per-agent preference chains are built INSIDE their resolvers, not as
  * module-level consts. `./worker-agent` participates in an import cycle with
  * this module, so its exported bindings are still in the temporal dead zone
- * while this module's top level runs — a `const CHAIN = [REVIEW_DEFAULT_MODEL]`
+ * while this module's top level runs — a `const CHAIN = [GEMINI_REVIEW_DEFAULT_MODEL]`
  * throws `Cannot access ... before initialization` at load. Referencing them
  * lazily inside a function body defers the read until after both modules have
  * initialized, which is why reads of the worker fallback chain below stay
@@ -184,7 +237,10 @@ export function reviewerModel(): string | undefined {
  *  what the lead already thought of. */
 export function brainstormModel(): string | undefined {
   return firstPresentInCatalog(
-    [REVIEW_DEFAULT_MODEL, ...OPENAI_FRONTIER_MODELS],
+    // Match reviewerModel's same-lab deprecation + GA-rename fallback. The
+    // temporary reviewer/reviewer-fast convergence after Pro removal is
+    // deliberate.
+    [...geminiReviewChainCandidates(), ...OPENAI_FRONTIER_MODELS],
     { requireToolCalls: true },
   )
 }
@@ -213,10 +269,16 @@ export function scribeModel(): string | undefined {
  * impostor wearing the cheap agent's name.
  *
  * `gpt-5.6-luna` leads because it is the cheapest 1M-context model in the
- * catalog; `gemini-3.6-flash` remains the cross-vendor fallback so an OpenAI-side
+ * catalog; `gemini-3.7-flash` remains the cross-vendor fallback so an OpenAI-side
  * outage does not remove the scout. Both entries must continue advertising at
  * least 1M context so Claude Code's `[1m]` accounting remains honest if an
  * upstream catalog entry shrinks.
+ *
+ * The fallback moved off `gemini-3.6-flash` on 2026-08-13: `gemini-3.7-flash`
+ * is strictly better on every axis this chain cares about — half the price
+ * (75/375 vs 150/750 per 1M), materially faster (measured tool-call p50 ~1.2s
+ * against 3.6's ~2.6s), same 1M window, same vendor, so the cross-vendor
+ * property the fallback exists for is preserved.
  *
  * This chain deliberately uses literal ids rather than `EXPLORE_DEFAULT_MODEL`:
  * the explore worker default and scout's cross-vendor fallback are independent
@@ -226,7 +288,7 @@ export function scribeModel(): string | undefined {
  */
 export const SCOUT_MODEL_CHAIN = Object.freeze([
   "gpt-5.6-luna",
-  "gemini-3.6-flash",
+  "gemini-3.7-flash",
 ] as const)
 
 export function scoutModel(): string | undefined {
@@ -259,7 +321,18 @@ export function scoutModel(): string | undefined {
  *  their different speed and effort properties stay out of shared claims. */
 export function implementerFastModel(): string | undefined {
   return firstPresentInCatalog(
-    ["gpt-5.6-terra", REVIEW_DEFAULT_MODEL],
+    ["gpt-5.6-terra", GEMINI_REVIEW_DEFAULT_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+}
+
+/** Model for `reviewer-fast` — the cheaper Google review tier. Absent → the
+ *  agent is dropped. Single-entry by design: inheriting the lead or falling
+ *  across labs would defeat both its cost purpose and its decorrelation from
+ *  the OpenAI-backed implementer. */
+export function reviewerFastModel(): string | undefined {
+  return firstPresentInCatalog(
+    [REVIEW_FAST_DEFAULT_MODEL],
     { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
   )
 }

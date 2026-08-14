@@ -19,8 +19,13 @@
 import { afterEach, expect, test } from "bun:test"
 
 import {
+  brainstormModel,
   generalPurposeFastModel,
+  geminiAvailable,
   implementerFastModel,
+  resolveGeminiReviewModel,
+  reviewerFastModel,
+  reviewerModel,
   SCOUT_MODEL_CHAIN,
   scoutModel,
 } from "~/lib/mcp-capabilities"
@@ -63,6 +68,66 @@ afterEach(() => {
   state.models = savedModels
 })
 
+test("reviewer and brainstorm prefer Pro, then Flash, then OpenAI frontier", () => {
+  setCatalog(
+    entry("gemini-3.1-pro-preview", { ctx: ONE_M }),
+    entry("gemini-3.7-flash", { ctx: ONE_M }),
+    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
+  )
+  expect(reviewerModel()).toBe("gemini-3.1-pro-preview")
+  expect(brainstormModel()).toBe("gemini-3.1-pro-preview")
+
+  setCatalog(
+    entry("gemini-3.7-flash", { ctx: ONE_M }),
+    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
+  )
+  expect(reviewerModel()).toBe("gemini-3.7-flash")
+  expect(brainstormModel()).toBe("gemini-3.7-flash")
+
+  setCatalog(entry("gpt-5.6-sol", { ctx: 1_050_000 }))
+  expect(reviewerModel()).toBe("gpt-5.6-sol")
+  expect(brainstormModel()).toBe("gpt-5.6-sol")
+})
+
+// Regression: an earlier draft of the deprecation fix replaced the
+// gemini-3.x-pro FAMILY regex `geminiAvailable()` used to use with exact
+// string matches only, silently losing resilience to a GA rename. If Google
+// ships `gemini-3.1-pro-preview` -> `gemini-3.1-pro` (drops "-preview") as the
+// deprecation successor, that new id must still outrank Flash and OpenAI
+// rather than being treated as an unrecognized model.
+test("reviewer and brainstorm recognize a GA rename of the preview slug ahead of Flash", () => {
+  setCatalog(
+    entry("gemini-3.1-pro", { ctx: ONE_M }),
+    entry("gemini-3.7-flash", { ctx: ONE_M }),
+    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
+  )
+  expect(reviewerModel()).toBe("gemini-3.1-pro")
+  expect(brainstormModel()).toBe("gemini-3.1-pro")
+  expect(resolveGeminiReviewModel()).toBe("gemini-3.1-pro")
+  expect(geminiAvailable()).toBe(true)
+
+  // Without a GA rename present, Flash still wins over OpenAI as before.
+  setCatalog(
+    entry("gemini-3.7-flash", { ctx: ONE_M }),
+    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
+  )
+  expect(resolveGeminiReviewModel()).toBe("gemini-3.7-flash")
+})
+
+test("reviewerFastModel is single-entry and enforces tool calls plus 1M", () => {
+  setCatalog(entry("gemini-3.7-flash", { ctx: ONE_M }))
+  expect(reviewerFastModel()).toBe("gemini-3.7-flash")
+
+  setCatalog(entry("gemini-3.7-flash", { ctx: ONE_M, toolCalls: false }))
+  expect(reviewerFastModel()).toBeUndefined()
+
+  setCatalog(entry("gemini-3.7-flash", { ctx: 999_999 }))
+  expect(reviewerFastModel()).toBeUndefined()
+
+  setCatalog(entry("gemini-3.1-pro-preview", { ctx: ONE_M }))
+  expect(reviewerFastModel()).toBeUndefined()
+})
+
 test("implementerFastModel prefers gpt-5.6-terra, falls back to gemini-3.1-pro-preview", () => {
   setCatalog(
     entry("gpt-5.6-terra", { ctx: 1_050_000 }),
@@ -91,7 +156,7 @@ test("generalPurposeFastModel is single-entry: gpt-5.6-luna or nothing", () => {
 
   setCatalog(
     entry("gpt-5.6-terra", { ctx: 1_050_000 }),
-    entry("gemini-3.6-flash", { ctx: ONE_M }),
+    entry("gemini-3.7-flash", { ctx: ONE_M }),
     entry("gemini-3.5-flash", { ctx: ONE_M }),
     entry("gpt-5.4-mini", { ctx: 400_000 }),
   )
@@ -103,10 +168,12 @@ test("generalPurposeFastModel is single-entry: gpt-5.6-luna or nothing", () => {
 test("every conditional resolver returns undefined on an empty or absent catalog", () => {
   setCatalog()
   expect(implementerFastModel()).toBeUndefined()
+  expect(reviewerFastModel()).toBeUndefined()
   expect(generalPurposeFastModel()).toBeUndefined()
 
   state.models = undefined
   expect(implementerFastModel()).toBeUndefined()
+  expect(reviewerFastModel()).toBeUndefined()
   expect(generalPurposeFastModel()).toBeUndefined()
 })
 
@@ -161,7 +228,7 @@ test("absent context metadata fails closed under the 1M floor", () => {
 // referencing EXPLORE_DEFAULT_MODEL here previously let an explore retune collapse
 // both entries to Luna without a type error or failed behavior test.
 test("scout chain has two distinct literal entries", () => {
-  expect(SCOUT_MODEL_CHAIN).toEqual(["gpt-5.6-luna", "gemini-3.6-flash"])
+  expect(SCOUT_MODEL_CHAIN).toEqual(["gpt-5.6-luna", "gemini-3.7-flash"])
   expect(new Set(SCOUT_MODEL_CHAIN).size).toBe(2)
 })
 
@@ -169,19 +236,19 @@ test("scout chain has two distinct literal entries", () => {
 // 1M Gemini fallback gets no scout rather than a 400K last resort.
 test("scoutModel walks luna -> flash, enforces 1M, and otherwise drops", () => {
   setCatalog(
-    entry("gemini-3.6-flash", { ctx: ONE_M }),
+    entry("gemini-3.7-flash", { ctx: ONE_M }),
     entry("gpt-5.6-luna", { ctx: 1_050_000 }),
   )
   expect(scoutModel()).toBe("gpt-5.6-luna")
 
   // Exactly 1M must remain eligible. If this floor comparison ever becomes
   // exclusive, scout silently loses its cross-vendor fallback.
-  setCatalog(entry("gemini-3.6-flash", { ctx: ONE_M }))
-  expect(scoutModel()).toBe("gemini-3.6-flash")
+  setCatalog(entry("gemini-3.7-flash", { ctx: ONE_M }))
+  expect(scoutModel()).toBe("gemini-3.7-flash")
 
   setCatalog(
     entry("gpt-5.6-luna", { ctx: 400_000 }),
-    entry("gemini-3.6-flash", { ctx: 200_000 }),
+    entry("gemini-3.7-flash", { ctx: 200_000 }),
     entry("gpt-5.4-mini", { ctx: 400_000 }),
   )
   expect(scoutModel()).toBeUndefined()

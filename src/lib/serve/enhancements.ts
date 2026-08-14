@@ -36,6 +36,8 @@ import {
   nativeSubagentModel,
   brainstormModel,
   reviewerModel,
+  reviewerFastModel,
+  resolveGeminiReviewModel,
   scoutModel,
   scribeModel,
   implementerFastModel,
@@ -88,6 +90,26 @@ export interface ServeEnhancementOpts {
 
 const NOOP: ServeEnhancementsHandle = { cleanup: async () => {} }
 
+export function resolveServeNativeAgentOptions() {
+  const models = {
+    nativeSubagentModel: nativeSubagentModel(),
+    reviewerModel: reviewerModel(),
+    reviewerFastModel: reviewerFastModel(),
+    brainstormModel: brainstormModel(),
+    scoutModel: scoutModel(),
+    scribeModel: scribeModel(),
+    implementerFastModel: implementerFastModel(),
+    generalPurposeFastModel: generalPurposeFastModel(),
+  }
+  const nativeAvailability: NativeAgentAvailability = {
+    scoutAvailable: models.scoutModel != null,
+    implementerFastAvailable: models.implementerFastModel != null,
+    reviewerFastAvailable: models.reviewerFastModel != null,
+    generalPurposeFastAvailable: models.generalPurposeFastModel != null,
+  }
+  return { models, nativeAvailability }
+}
+
 /**
  * Wire the github-router enhancement layer into the router-owned
  * CLAUDE_CONFIG_DIR mirror so a CloudCLI-spawned Claude session gets the same
@@ -126,26 +148,18 @@ export async function provisionServeEnhancements(
     // Resolved once and reused by the `.md` generation, the awareness snippet,
     // and the operating-defaults directive, so the three surfaces cannot
     // disagree about which conditionally-emitted natives exist.
-    const nativeAvailability: NativeAgentAvailability = {
-      scoutAvailable: scoutModel() != null,
-      implementerFastAvailable: implementerFastModel() != null,
-      generalPurposeFastAvailable: generalPurposeFastModel() != null,
-    }
+    const { models: nativeModels, nativeAvailability } =
+      resolveServeNativeAgentOptions()
 
     const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
       codexCli: opts.codexCli === true,
       selfInvocation: opts.selfInvocation,
       geminiAvailable: gem,
+      geminiModel: resolveGeminiReviewModel(),
       groupKeys,
       workerToolsAvailable: workerToolsEnabled(),
       browseAvailable: browseAllowed && browseAgentEnabled(),
-      nativeSubagentModel: nativeSubagentModel(),
-      reviewerModel: reviewerModel(),
-      brainstormModel: brainstormModel(),
-      scoutModel: scoutModel(),
-      scribeModel: scribeModel(),
-      implementerFastModel: implementerFastModel(),
-      generalPurposeFastModel: generalPurposeFastModel(),
+      ...nativeModels,
       // Serve-only: register Claude Code's built-in Explore/Plan/general-purpose
       // subagents (the Agent SDK doesn't) so the model's habitual Agent() calls
       // resolve. Never passed by `github-router claude` (would shadow the CLI's
@@ -167,6 +181,7 @@ export async function provisionServeEnhancements(
     const peerSnippet = buildPeerAwarenessSnippet({
       codexCli: opts.codexCli === true,
       geminiAvailable: gem,
+      geminiModel: resolveGeminiReviewModel(),
       workerToolsAvailable: workerToolsEnabled(),
       standInAvailable: standInToolEnabled(),
       browseAvailable: browseAllowed,

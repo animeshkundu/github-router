@@ -49,7 +49,7 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 ### workers — `NON_PERSONA_MCP_TOOLS`  ·  gate: `capability:"worker"` / `browse_agent`
 | Tool | Line | Default model | Gate |
 |---|---|---|---|
-| explore | 1194 | gemini-3.6-flash high | worker |
+| explore | 1194 | gpt-5.6-luna high | worker |
 | implement | 1276 | gpt-5.6-sol xhigh | worker |
 | review | 1367 | gemini-3.1-pro-preview | worker |
 | plan | 1451 | claude-opus-5 high | worker |

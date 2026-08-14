@@ -66,7 +66,7 @@ opus_critic now prefers `claude-opus-5`, whose single base slug is natively 1M. 
 
 ### S5. Worker model defaults refreshed
 
-Worker defaults now match `engine.ts`: review uses `gemini-3.1-pro-preview` (`xhigh`, clamped to high), explore uses `gemini-3.6-flash` at `high`, plan uses `claude-opus-5` at `high`, implement/test use `gpt-5.6-sol` at `high`, and browse uses `gpt-5.6-luna` at `high`. Per-call and session overrides can restore higher effort where supported. Explore/implement/review keep a free-string `model` override and document the recommended 1M sol/terra/flash ladder.
+Worker defaults now match `engine.ts`: review uses `gemini-3.1-pro-preview` (`xhigh`, clamped to high), explore uses `gpt-5.6-luna` at `high`, plan uses `claude-opus-5` at `high`, implement/test use `gpt-5.6-sol` at `high`, and browse uses `gpt-5.6-luna` at `high`. Per-call and session overrides can restore higher effort where supported. Explore/implement/review keep a free-string `model` override and document the recommended 1M sol/terra/flash ladder.
 
 ### S6. Descriptions naming removed/non-surfaced tools produce `-32601`
 
@@ -192,7 +192,7 @@ The shared `dispatcherPrompt` tells the `worker-browse` dispatcher to pass `prom
 | search | code | Y | Clean; record that `context_lines` is an intentional omission |
 | search | web | Y | Error strings still say `web_search`, not the renamed `web` (S6) |
 | workers | browse | Y | `gpt-5.6-luna`/high; dispatcher field mismatch tracked in S13 |
-| workers | explore | Y | `gemini-3.6-flash`/high; free-string 1M override ladder documented (S5) |
+| workers | explore | Y | `gpt-5.6-luna`/high; free-string 1M override ladder documented (S5) |
 | workers | implement | Y | No when-to-prefer clause vs `implementer` subagent + `codex_implementer` (S6) |
 | workers | plan | Y | `claude-opus-5`/high; higher effort remains caller-selectable (S3/S5) |
 | workers | review | N | Description says `gpt-5.5`; actual `gemini-3.1-pro-preview` (S5) |
@@ -207,7 +207,7 @@ Ordered by leverage. Model-facing behavior fixes first (misroutes, `-32601`, wro
 - [ ] A1 -- Critical, conditional (S1/sec 2). `src/lib/claude-md-injection.ts:48-53` + `src/claude.ts:807-811`: thread the resolved `peersKey` into `ARTIFACT_PANEL_DIRECTIVE`; build `mcp__<peersKey>__artifact_*` dynamically. Update `tests/isolated/claude-md-injection.test.ts:623` to assert the resolved-key path.
 - [ ] A2 (S6). `src/lib/browser-mcp/index.ts:466`: repoint `browser type`'s description from `browser_fill` to `browser_act` with `action:"fill"` (removes a `-32601`).
 - [ ] A3 (S13). `src/lib/worker-dispatch.ts:236-237`: make `dispatcherPrompt` name `task` (not `prompt`) for `mode === "browse"`; add a test. Removes a hard `isError` on a literal-following `worker-browse` dispatch.
-- [x] A4 (S5). Worker model descriptions now match the live defaults: review `gemini-3.1-pro-preview`, explore `gemini-3.6-flash`/high, plan `claude-opus-5`/high, implement/test `gpt-5.6-sol`/high, and browse `gpt-5.6-luna`/high.
+- [x] A4 (S5). Worker model descriptions now match the live defaults: review `gemini-3.1-pro-preview`, explore `gpt-5.6-luna`/high, plan `claude-opus-5`/high, implement/test `gpt-5.6-sol`/high, and browse `gpt-5.6-luna`/high.
 - [x] A5 (S3). Worker thinking descriptions reflect each mode's effective default and clamp behavior.
 - [x] A6 (S4). opus_critic now prefers Opus 5, exposes xhigh, and documents the 4.6 fallback chain.
 - [ ] A7 (S2). Thread `compoundBrowseAvailable` (= `browserCompoundToolsEnabled()`) into `buildPeerAwarenessSnippet` (`src/claude.ts:1024`); gate the `__act` INTENT / `__observe` / `__extract` clauses on it. Also gate `act` INTENT behind `browserCompoundToolsEnabled()` (or return a clean isError) in `src/lib/browser-mcp/index.ts:622` so it cannot raw-throw.

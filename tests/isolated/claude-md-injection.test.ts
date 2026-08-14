@@ -856,6 +856,7 @@ test("digest and directive complement rather than duplicate each other", () => {
   for (const agent of [
     "implementer",
     "reviewer",
+    "reviewer-fast",
     "brainstorm",
     "scout",
     "scribe",
@@ -907,7 +908,12 @@ test("digest and directive complement rather than duplicate each other", () => {
 // way. Only building with a false flag proves the omission actually happens.
 test("the operating-defaults directive omits natives this launch dropped", () => {
   const all = buildOperatingDefaultsDirective()
-  for (const agent of ["scout", "implementer-fast", "general-purpose-fast"]) {
+  for (const agent of [
+    "scout",
+    "implementer-fast",
+    "reviewer-fast",
+    "general-purpose-fast",
+  ]) {
     expect(all).toContain(agent)
   }
   // The zero-arg form is the all-available one, so it must equal the const the
@@ -917,10 +923,12 @@ test("the operating-defaults directive omits natives this launch dropped", () =>
   const none = buildOperatingDefaultsDirective({
     scoutAvailable: false,
     implementerFastAvailable: false,
+    reviewerFastAvailable: false,
     generalPurposeFastAvailable: false,
   })
   expect(none).not.toContain("scout")
   expect(none).not.toContain("implementer-fast")
+  expect(none).not.toContain("reviewer-fast")
   expect(none).not.toContain("general-purpose-fast")
   // The unconditional natives survive: they inherit the lead's model rather
   // than being dropped, so they are always in the enum.
@@ -939,6 +947,15 @@ test("the operating-defaults directive omits natives this launch dropped", () =>
   expect(onlyCatchAll).toContain("`general-purpose-fast`")
   expect(onlyCatchAll).not.toContain("`implementer-fast`")
   expect(onlyCatchAll).toContain("scout")
+  expect(onlyCatchAll).toContain("`reviewer-fast`")
+
+  const withoutReviewerFast = buildOperatingDefaultsDirective({
+    reviewerFastAvailable: false,
+  })
+  expect(withoutReviewerFast).not.toContain("`reviewer-fast`")
+  expect(withoutReviewerFast).toContain("`reviewer`")
+  expect(withoutReviewerFast).toContain("`implementer-fast`")
+  expect(withoutReviewerFast).toContain("`general-purpose-fast`")
 })
 
 // Budget-mode delegation ordering. On a lighter lead the cheap tier must lead
@@ -976,4 +993,38 @@ test("budgetLead does not name implementer-fast when it was dropped", () => {
   expect(dropped).not.toContain("`implementer-fast`")
   expect(dropped).toContain("`implementer`")
   expect(dropped).not.toContain("beyond what the fast tier can carry")
+})
+
+// The REVIEW pair gets the same budget-lead treatment as the coding pair. The
+// cost gap is the same shape (pro tier 200/1200 vs flash 75/375 per 1M), and
+// measured 2026-08-13 the flash model was also the faster of the two, so
+// leading with the cheap reviewer on a budget lead hides no quality trade.
+test("budgetLead reorders the review clauses without dropping either agent", () => {
+  const opusLead = buildOperatingDefaultsDirective()
+  const budgetLead = buildOperatingDefaultsDirective({ budgetLead: true })
+
+  for (const directive of [opusLead, budgetLead]) {
+    expect(directive).toContain("`reviewer`")
+    expect(directive).toContain("`reviewer-fast`")
+  }
+
+  expect(opusLead.indexOf("`reviewer`")).toBeLessThan(
+    opusLead.indexOf("`reviewer-fast`"),
+  )
+  expect(budgetLead.indexOf("`reviewer-fast`")).toBeLessThan(
+    budgetLead.indexOf("`reviewer`"),
+  )
+  expect(budgetLead).toContain("cheaper and faster review tier")
+})
+
+// Same precondition as the coding swap: never lead with an agent that was
+// dropped this launch.
+test("budgetLead does not name reviewer-fast when it was dropped", () => {
+  const dropped = buildOperatingDefaultsDirective({
+    budgetLead: true,
+    reviewerFastAvailable: false,
+  })
+  expect(dropped).not.toContain("`reviewer-fast`")
+  expect(dropped).toContain("`reviewer`")
+  expect(dropped).not.toContain("cheaper and faster review tier")
 })

@@ -7,7 +7,11 @@ import { createBodyTooLargeError, limitRequestBody } from "srvx/body-limit"
 
 import { PATHS, ensurePaths } from "./paths"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
-import { agentToolsEnabled } from "./mcp-capabilities"
+import {
+  agentToolsEnabled,
+  REVIEW_FAST_DEFAULT_MODEL,
+  resolveGeminiReviewModel,
+} from "./mcp-capabilities"
 import { withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
 import {
   BUDGET_SMALL_FAST_CATALOG_ID,
@@ -673,8 +677,8 @@ export function parseSharedArgs(args: Record<string, unknown>): {
  * agent loop runs on them through the `/v1/messages` translation shim
  * (`src/lib/anthropic-translate/*`, branched in `routes/messages/handler.ts`)
  * that forwards non-Claude targets to Copilot `/responses` (gpt) or
- * `/chat/completions` (gemini). The exact gemini id is
- * `gemini-3.1-pro-preview` (preview slug — NOT `gemini-3.1-pro`).
+ * `/chat/completions` (gemini). The Gemini review row prefers
+ * `gemini-3.1-pro-preview` and degrades to `gemini-3.7-flash`.
  *
  * Display labels only: the gateway-model cache schema Claude Code reads is
  * `{id, display_name?}` per model — there is NO per-model context-window
@@ -690,7 +694,6 @@ const NATIVE_NON_CLAUDE_MODELS: ReadonlyArray<{
   { id: "gpt-5.5", displayName: "GPT-5.5" },
   { id: "gpt-5.3-codex", displayName: "GPT-5.3 Codex" },
   { id: "gemini-3.5-flash", displayName: "Gemini 3.5 Flash" },
-  { id: "gemini-3.1-pro-preview", displayName: "Gemini 3.1 Pro (preview)" },
 ]
 
 /**
@@ -718,7 +721,17 @@ export function nativeSelectableModelsInCatalog(): Array<{
   const catalog = state.models?.data
   if (!catalog || catalog.length === 0) return []
   const present = new Set(catalog.map((m) => m.id))
-  return NATIVE_NON_CLAUDE_MODELS.filter((m) => present.has(m.id)).map((m) => ({
+  const models = NATIVE_NON_CLAUDE_MODELS.filter((m) => present.has(m.id))
+  const geminiReviewModel = resolveGeminiReviewModel()
+  if (geminiReviewModel) {
+    models.push({
+      id: geminiReviewModel,
+      displayName: geminiReviewModel === REVIEW_FAST_DEFAULT_MODEL
+        ? "Gemini 3.7 Flash"
+        : "Gemini 3.1 Pro (preview)",
+    })
+  }
+  return models.map((m) => ({
     id: withOneMSuffix(m.id),
     display_name: m.displayName,
   }))
