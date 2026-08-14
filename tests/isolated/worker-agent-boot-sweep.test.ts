@@ -96,7 +96,17 @@ function makeRepo(): { root: string; cleanup: () => void } {
     root,
     cleanup: (): void => {
       try {
-        rmSync(root, { recursive: true, force: true })
+        // `maxRetries`/`retryDelay` are Node's documented remedy for the
+        // transient EBUSY / ENOTEMPTY / EPERM a recursive delete hits when
+        // something still holds a handle under the tree — a lingering git
+        // child, or on macOS the indexer touching a fresh /var/folders temp
+        // dir. Without them this swallowed the failure as "best-effort" and
+        // left the directory behind, which the very next line of the
+        // "deleted repo" test asserts is gone: an observed macos-latest CI
+        // flake (green on re-run with unrelated changes). The assertion
+        // stays strict on purpose, so a removal that genuinely cannot
+        // succeed still fails loudly instead of being papered over.
+        rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
       } catch {
         // best-effort
       }
