@@ -32,6 +32,7 @@ export const MAX_INFLIGHT_TOOLS_CALL =
   parseIntEnv(process.env.GH_ROUTER_MAX_INFLIGHT_TOOLS_CALL) ?? 128
 
 let inFlight = 0
+let resetEpoch = 0
 
 /**
  * Acquire a slot if one is available. Returns a release function the
@@ -49,10 +50,15 @@ let inFlight = 0
 export function acquireInFlightSlot(): (() => void) | null {
   if (inFlight >= MAX_INFLIGHT_TOOLS_CALL) return null
   inFlight++
+  const acquiredEpoch = resetEpoch
   let released = false
   return () => {
     if (released) return
     released = true
+    // Tests may reset the process-global counter while an older async call is
+    // still unwinding. That stale callback belongs to the previous accounting
+    // epoch and must not decrement slots acquired after the reset.
+    if (acquiredEpoch !== resetEpoch) return
     inFlight--
   }
 }
@@ -64,5 +70,6 @@ export function currentInFlight(): number {
 
 /** Test helper: reset to a clean baseline between cases. */
 export function __resetInFlightForTests(): void {
+  resetEpoch++
   inFlight = 0
 }
