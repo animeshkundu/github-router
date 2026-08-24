@@ -198,12 +198,15 @@ test("responses injects web search and strips tools", async () => {
     tool_choice?: unknown
     max_output_tokens?: number
     instructions?: string
+    input?: Array<{ role?: string; content?: string }>
   }
   expect(forwarded.tools).toBeUndefined()
   expect(forwarded.tool_choice).toBeUndefined()
   // max_output_tokens is no longer injected — Codex CLI relies on server defaults
   expect(forwarded.max_output_tokens).toBeUndefined()
-  expect(forwarded.instructions).toContain("[Web Search Results]")
+  expect(forwarded.instructions).toBeUndefined()
+  expect(forwarded.input?.[0]?.role).toBe("system")
+  expect(forwarded.input?.[0]?.content).toContain("[Web Search Results]")
 })
 
 test("responses stream skips DONE chunks", async () => {

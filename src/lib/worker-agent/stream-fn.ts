@@ -64,6 +64,7 @@ import {
   type NeutralMessage,
   type NeutralTool,
 } from "~/services/copilot/responses-request"
+import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 
 import { type ContextBudget, IMAGE_BYTES_EQUIV, tokensFromBytes } from "./context-budget"
 
@@ -816,7 +817,11 @@ interface ResponsesUsage {
   input_tokens?: number
   output_tokens?: number
   total_tokens?: number
-  input_tokens_details?: { cached_tokens?: number }
+  input_tokens_details?: {
+    cached_tokens?: number
+    cache_write_tokens?: number
+    cache_creation_tokens?: number
+  }
 }
 
 function mapResponsesUsage(
@@ -828,8 +833,14 @@ function mapResponsesUsage(
     completion_tokens: u.output_tokens ?? 0,
     total_tokens: u.total_tokens ?? 0,
     prompt_tokens_details:
-      u.input_tokens_details?.cached_tokens != null
-        ? { cached_tokens: u.input_tokens_details.cached_tokens }
+      u.input_tokens_details != null
+        ? {
+            cached_tokens: u.input_tokens_details.cached_tokens ?? 0,
+            cache_write_tokens:
+              u.input_tokens_details.cache_write_tokens
+              ?? u.input_tokens_details.cache_creation_tokens
+              ?? 0,
+          }
         : undefined,
   }
 }
@@ -1209,6 +1220,7 @@ function buildResponsesPayload(
     messages,
     tools: piToolsToNeutral(context.tools),
     reasoningEffort: resolved.thinking,
+    cachePolicy: { workload: "conversation" },
     stream: true,
   })
 }
@@ -1464,12 +1476,13 @@ function emptyUsage(): Usage {
 
 function deriveUsage(u: ChatCompletionChunk["usage"] | undefined): Usage {
   if (!u) return emptyUsage()
+  const normalized = normalizeOpenAIUsage(u)
   return {
-    input: u.prompt_tokens ?? 0,
-    output: u.completion_tokens ?? 0,
-    cacheRead: u.prompt_tokens_details?.cached_tokens ?? 0,
-    cacheWrite: 0,
-    totalTokens: u.total_tokens ?? 0,
+    input: normalized.uncachedInput,
+    output: normalized.output,
+    cacheRead: normalized.cacheRead,
+    cacheWrite: normalized.cacheWrite,
+    totalTokens: normalized.totalTokens,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   }
 }

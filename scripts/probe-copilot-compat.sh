@@ -83,6 +83,12 @@ declare -a PROBE_REGISTRY=(
   "eager_input_streaming_stripped|claude-emits|tools[i].eager_input_streaming sent through proxy returns 200 (proxy strips before forwarding; Copilot would 400 on the raw field)"
   "eager_input_streaming_with_type_custom_stripped|claude-emits|Same field with explicit type:custom returns 200 (same strip path)"
 
+  # ===== Prompt caching =====
+  "cache_control_ephemeral_1h|claude-emits|Claude cache_control with ttl:1h returns 200"
+  "cache_control_marker_limit_5|exploratory|Five Claude cache_control markers return 400 (upstream maximum is four)"
+  "gpt56_explicit_cache_breakpoint|copilot-cli|GPT-5.6 Responses accepts prompt_cache_key + explicit prompt_cache_options + prompt_cache_breakpoint"
+  "gpt55_cache_retention_24h|vscode-source|GPT-5.5 Responses accepts prompt_cache_retention:24h (acceptance only; long-idle effectiveness is not claimed)"
+
   # ===== Native Anthropic tool types =====
   "tooltype_memory_20250818|anthropic-docs|memory_20250818 returns 200; model emits tool_use{name:memory, command:view}"
   "tooltype_text_editor_20250728|anthropic-docs|text_editor_20250728 returns 200"
@@ -351,6 +357,78 @@ probe_eager_input_streaming_with_type_custom_stripped() {
     "max_tokens": 50,
     "tools": [{"type":"custom","name":"echo","description":"t","input_schema":{"type":"object"},"eager_input_streaming":true}],
     "messages": [{"role":"user","content":"hi"}]
+  }'
+  assert_status 200
+}
+
+probe_cache_control_ephemeral_1h() {
+  local stable body
+  stable="$(printf 'stable %.0s' {1..800})"
+  body="$(jq -nc --arg stable "$stable" '{
+    model:"claude-sonnet-5",
+    max_tokens:16,
+    system:[{
+      type:"text",
+      text:$stable,
+      cache_control:{type:"ephemeral",ttl:"1h"}
+    }],
+    tools:[{
+      name:"echo",
+      description:"Echo a value.",
+      input_schema:{type:"object",properties:{value:{type:"string"}}},
+      cache_control:{type:"ephemeral",ttl:"1h"}
+    }],
+    messages:[{role:"user",content:"Reply OK without calling a tool."}]
+  }')"
+  do_request POST /v1/messages "$body"
+  assert_status 200
+}
+
+probe_cache_control_marker_limit_5() {
+  local body
+  body="$(jq -nc '{
+    model:"claude-sonnet-5",
+    max_tokens:16,
+    system:[
+      range(0;5) as $i
+      | {type:"text",text:("marker-\($i) " + ("stable " * 300)),cache_control:{type:"ephemeral"}}
+    ],
+    messages:[{role:"user",content:"Reply OK."}]
+  }')"
+  do_request POST /v1/messages "$body"
+  assert_status 400 \
+    && assert_body_contains "maximum of 4"
+}
+
+probe_gpt56_explicit_cache_breakpoint() {
+  local stable body
+  stable="$(printf 'stable %.0s' {1..800})"
+  body="$(jq -nc --arg stable "$stable" '{
+    model:"gpt-5.6-sol",
+    stream:false,
+    max_output_tokens:16,
+    prompt_cache_key:"github-router-probe-explicit-v1",
+    prompt_cache_options:{mode:"explicit",ttl:"30m"},
+    input:[
+      {role:"system",content:[{
+        type:"input_text",
+        text:$stable,
+        prompt_cache_breakpoint:{mode:"explicit"}
+      }]},
+      {role:"user",content:"Reply OK."}
+    ]
+  }')"
+  do_request POST /v1/responses "$body"
+  assert_status 200
+}
+
+probe_gpt55_cache_retention_24h() {
+  do_request POST /v1/responses '{
+    "model":"gpt-5.5",
+    "stream":false,
+    "max_output_tokens":16,
+    "prompt_cache_retention":"24h",
+    "input":[{"role":"user","content":"Reply OK."}]
   }'
   assert_status 200
 }

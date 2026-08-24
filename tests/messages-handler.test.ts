@@ -1,8 +1,11 @@
 import { describe, test, expect, mock, afterEach, beforeEach } from "bun:test"
 
+import { readFileSync } from "node:fs"
+import path from "node:path"
+
 import { state } from "../src/lib/state"
 import { __resetThinkingHistoryRepairsForTests } from "../src/lib/thinking-history-repair"
-import { bucketEffort, clampEffort, clampOutputConfigEffortInPlace } from "../src/routes/messages/handler"
+import { bucketEffort, clampEffort, clampOutputConfigEffortInPlace, anthropicTotalInputTokens } from "../src/routes/messages/handler"
 import { server } from "../src/server"
 
 const originalFetch = globalThis.fetch
@@ -1309,5 +1312,114 @@ describe("Anthropic-only body field stripping (Phase B P0.2)", () => {
       thinking: "",
       signature: "opaque",
     })
+  })
+})
+
+// --- Native Claude non-streaming cache-read/cache-write accounting ---
+//
+// Anthropic's own `/v1/messages` usage shape already reports disjoint
+// buckets (`cache_read_input_tokens` / `cache_creation_input_tokens`), unlike
+// OpenAI's inclusive totals — so unlike the `/v1/chat/completions` and
+// `/v1/responses` handlers (which run `normalizeOpenAIUsage` before calling
+// `logRequest`), the native Claude non-streaming path only needs to forward
+// the two fields straight off the upstream `usage` object. Live evidence
+// (native Claude, controlled prompts): a cold turn reported
+// `cache_creation_input_tokens: 7566, cache_read_input_tokens: 0`, and the
+// immediately following warm turn on the same prefix reported
+// `cache_creation_input_tokens: 44, cache_read_input_tokens: 7566` — proving
+// the two fields are real and worth surfacing in the per-request log line.
+describe("native Claude non-streaming cache accounting", () => {
+  test("cache_read_input_tokens / cache_creation_input_tokens round-trip unchanged to the client", async () => {
+    state.models = { object: "list", data: [makeModel({ id: "claude-opus-4.7" })] }
+    const fetchMock = mock((url: string) => {
+      if (url.includes("/v1/messages")) {
+        return new Response(
+          JSON.stringify({
+            id: "msg_cache_test",
+            type: "message",
+            role: "assistant",
+            model: "claude-opus-4.7",
+            content: [{ type: "text", text: "ok" }],
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: {
+              input_tokens: 26,
+              output_tokens: 12,
+              cache_creation_input_tokens: 44,
+              cache_read_input_tokens: 7566,
+            },
+          }),
+        )
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // @ts-expect-error - override fetch for this test
+    globalThis.fetch = fetchMock
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-opus-4.7",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      usage?: {
+        cache_creation_input_tokens?: number
+        cache_read_input_tokens?: number
+      }
+    }
+    // The client-facing response body is unaffected by the log-line wiring
+    // below; this pins that reading the fields for the log doesn't mutate or
+    // drop them from what upstream returned.
+    expect(body.usage?.cache_creation_input_tokens).toBe(44)
+    expect(body.usage?.cache_read_input_tokens).toBe(7566)
+  })
+
+  test("the non-streaming logRequest call is wired to Anthropic's own cache usage fields", () => {
+    // Consola capture is a documented anti-pattern in this repo (see the
+    // `logBodySizeStats routes its line through consola` test in
+    // `tests/request-log-body-sizes.test.ts`): it depends on which reporter a
+    // PRIOR test in the same process installed, and is measured to pass
+    // locally while failing in CI. Assert the wiring statically instead, the
+    // same way that test does.
+    const src = readFileSync(
+      path.join(import.meta.dir, "..", "src", "routes", "messages", "handler.ts"),
+      "utf8",
+    )
+    // Scope to the non-streaming `logRequest(` call specifically (the file
+    // has three `logRequest(` call sites; only the non-streaming one should
+    // read cache tokens off the parsed Anthropic response body).
+    const anchor = "logRequest(\n    {\n      method: \"POST\",\n      path: c.req.path,\n      model: originalModel,\n      resolvedModel,\n      inputTokens: anthropicTotalInputTokens(usage),"
+    const start = src.indexOf(anchor)
+    expect(start).toBeGreaterThan(-1)
+    const block = src.slice(start, src.indexOf("status: response.status,", start))
+    expect(block).toContain("cacheReadTokens: usage?.cache_read_input_tokens")
+    expect(block).toContain("cacheWriteTokens: usage?.cache_creation_input_tokens")
+  })
+
+  test("anthropicTotalInputTokens sums the new-input and both cache buckets, and is undefined only when usage itself is absent", () => {
+    // Pins the exact live-measured shape that motivated this: a warm-cache
+    // turn whose `input_tokens` alone (26) would have grossly understated the
+    // real ~97k-token prompt.
+    expect(
+      anthropicTotalInputTokens({
+        input_tokens: 26,
+        cache_read_input_tokens: 97304,
+        cache_creation_input_tokens: 0,
+      }),
+    ).toBe(97330)
+    // A cold turn: all-new input, no cache hit yet.
+    expect(
+      anthropicTotalInputTokens({ input_tokens: 7566, cache_creation_input_tokens: 0 }),
+    ).toBe(7566)
+    // Missing fields default to 0, not NaN or a dropped term.
+    expect(anthropicTotalInputTokens({})).toBe(0)
+    // Absent `usage` entirely stays undefined (never a fabricated 0), so the
+    // log line omits the `in:` field rather than reporting a confident zero.
+    expect(anthropicTotalInputTokens(undefined)).toBeUndefined()
   })
 })

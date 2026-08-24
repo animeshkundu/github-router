@@ -82,6 +82,7 @@ import { type TSchema, Type } from "@earendil-works/pi-ai"
 import { detectImageMimeType } from "~/lib/attachments"
 import { resolveRipgrep } from "~/lib/code-search"
 import { resolveExecutable, runManagedExeCapture } from "~/lib/exec"
+import { applyResponsesCachePolicy } from "~/lib/prompt-cache"
 import { runUnifiedCodeSearch } from "~/lib/unified-code-search"
 import {
   MAX_INFLIGHT_TOOLS_CALL,
@@ -101,6 +102,7 @@ import {
 import {
   createResponses,
   type ResponsesApiResponse,
+  type ResponsesPayload,
 } from "~/services/copilot/create-responses"
 import { searchWeb } from "~/services/copilot/web-search"
 
@@ -1832,8 +1834,7 @@ function advisorTool(
         )
       }
       try {
-        const response = (await createResponses(
-          {
+        const payload = applyResponsesCachePolicy({
             model: resolvedModel,
             instructions: advisorSystem,
             input: [
@@ -1844,7 +1845,9 @@ function advisorTool(
             ],
             stream: false,
             reasoning: { effort: ADVISOR_DEFAULT_EFFORT },
-          },
+          } satisfies ResponsesPayload, { workload: "reusable-prefix" })
+        const response = (await createResponses(
+          payload,
           undefined,
           signal,
           // retryTransient: true: non-streaming, whole call is pre-first-byte,
@@ -2073,4 +2076,3 @@ export const __testExports = {
   webSearchTool,
   writeTool,
 }
-

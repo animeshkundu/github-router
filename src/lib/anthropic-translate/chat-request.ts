@@ -184,6 +184,9 @@ export function parsedToChatPayload(
   if (parsed.instructions) {
     messages.push({ role: "system", content: parsed.instructions })
   }
+  if (parsed.dynamicInstructions) {
+    messages.push({ role: "system", content: parsed.dynamicInstructions })
+  }
   for (const m of parsed.messages) messages.push(neutralMessageToChat(m))
 
   const payload: ChatCompletionsPayload = {

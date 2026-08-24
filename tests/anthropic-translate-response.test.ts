@@ -68,7 +68,26 @@ describe("responsesResponseToAnthropicMessage", () => {
       MODEL_ID,
     )
     expect(msg.usage.cache_read_input_tokens).toBe(40)
-    expect(msg.usage.input_tokens).toBe(100)
+    expect(msg.usage.input_tokens).toBe(60)
+  })
+
+  test("cache writes are separated from uncached Anthropic input", () => {
+    const msg = responsesResponseToAnthropicMessage(
+      resp({
+        usage: {
+          input_tokens: 100,
+          output_tokens: 2,
+          input_tokens_details: {
+            cached_tokens: 40,
+            cache_write_tokens: 25,
+          },
+        },
+      }),
+      MODEL_ID,
+    )
+    expect(msg.usage.input_tokens).toBe(35)
+    expect(msg.usage.cache_read_input_tokens).toBe(40)
+    expect(msg.usage.cache_creation_input_tokens).toBe(25)
   })
 
   test("incomplete/max_output_tokens → max_tokens (wins over a partial tool call)", () => {

@@ -10,6 +10,8 @@ export interface RequestLogInfo {
   resolvedModel?: string
   inputTokens?: number
   outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
   status?: number
   streaming?: boolean
   errorBody?: string
@@ -183,6 +185,8 @@ function formatTokens(n: number): string {
 function formatTokenInfo(
   inputTokens: number | undefined,
   outputTokens: number | undefined,
+  cacheReadTokens: number | undefined,
+  cacheWriteTokens: number | undefined,
   model: Model | undefined,
 ): string | undefined {
   if (inputTokens === undefined) return undefined
@@ -199,6 +203,11 @@ function formatTokenInfo(
 
   if (outputTokens !== undefined) {
     parts.push(`out:${formatTokens(outputTokens)}`)
+  }
+  if ((cacheReadTokens ?? 0) > 0 || (cacheWriteTokens ?? 0) > 0) {
+    parts.push(
+      `cache:r${formatTokens(cacheReadTokens ?? 0)}/w${formatTokens(cacheWriteTokens ?? 0)}`,
+    )
   }
 
   return parts.join(" ")
@@ -250,7 +259,13 @@ export function logRequest(
   }
 
   // Token info with context window fill
-  const tokenInfo = formatTokenInfo(info.inputTokens, info.outputTokens, model)
+  const tokenInfo = formatTokenInfo(
+    info.inputTokens,
+    info.outputTokens,
+    info.cacheReadTokens,
+    info.cacheWriteTokens,
+    model,
+  )
   if (tokenInfo) {
     parts.push(tokenInfo)
   }

@@ -194,6 +194,39 @@ Both surface a `stop_reason` with the same precedence: a truncated (max-output)
 response is `max_tokens` even when a partial tool call is present; else a tool
 call → `tool_use`; else `end_turn`.
 
+### Prompt caching and usage accounting
+
+Translated GPT-5.6 conversations do **NOT** use Copilot's explicit Responses
+cache mode. They are built with `cachePolicy: {workload: "conversation"}`
+(`anthropic-request.ts`'s `parsedToResponsesPayload`), and
+`applyResponsesCachePolicy` (`src/lib/prompt-cache.ts`) deliberately excludes
+that workload as a no-op — a live-verified regression found that marking only
+the stable system block with an explicit breakpoint on a GROWING multi-turn
+conversation performs substantially worse than leaving caching provider-managed
+and implicit: explicit mode is a distinct caching strategy from Copilot's
+automatic caching,
+not an addition to it, so the entire un-marked, ever-growing message history
+stops receiving automatic prefix-growth caching too. Translated conversations
+therefore rely entirely on Copilot's own provider-managed automatic caching,
+same as Gemini/Grok/GPT-5.5/older GPT/Codex. GPT-5.6 explicit caching remains
+available, but only for `workload: "reusable-prefix"` calls elsewhere in the
+router (peer/advisor/worker-tool/browser-compressor prefixes reused verbatim
+across many discrete calls, never a single request whose own history keeps
+growing) — see [`prompt-caching.md`](prompt-caching.md) for the measured
+numbers and the full policy table.
+
+Gemini, Grok, GPT-5.5, and older GPT/Codex models remain on provider-managed
+implicit caching because no tested explicit field improved reuse. Public
+`/v1/responses` and `/v1/chat/completions` passthrough requests remain
+caller-owned and are not given synthetic cache fields.
+
+OpenAI usage totals include cached and cache-write input. The shim normalizes
+them into disjoint Anthropic fields: `input_tokens` is ordinary uncached input,
+`cache_read_input_tokens` is reused input, and
+`cache_creation_input_tokens` is newly written input. This prevents the prior
+double count that reported the inclusive OpenAI total as Anthropic
+`input_tokens` while also reporting cache reads.
+
 **Truncation guard.** A stream that ends WITHOUT its terminal marker (a
 `/responses` stream with no `completed`/`incomplete`/`failed`, or a chat stream
 with no `[DONE]`) was cut mid-flight — the underlying event iterator returns-done

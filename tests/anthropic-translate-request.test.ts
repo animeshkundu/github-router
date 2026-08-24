@@ -10,6 +10,7 @@ import {
 import { parsedToChatPayload } from "~/lib/anthropic-translate/chat-request"
 import type { AnthropicStreamEvent } from "~/lib/anthropic-translate/anthropic-sse"
 import { synthAnthropicFromResponses } from "~/lib/anthropic-translate/responses-egress"
+import { WEB_SEARCH_RESULT_INSTRUCTION } from "~/lib/web-search-context"
 import type { Model } from "~/services/copilot/get-models"
 
 const MODEL_ID = "gpt-5.5"
@@ -185,6 +186,65 @@ describe("anthropic-translate request mapping", () => {
       },
     ])
     expect(hasOwnKeyDeep(payload, "cache_control")).toBe(false)
+  })
+
+  test("gpt-5.6 shim conversations do NOT get GPT-5.6 explicit caching (growing-history regression fix)", () => {
+    // The shim always builds its Responses payload with `cachePolicy:
+    // {workload: "conversation"}` (`parsedToResponsesPayload`), and
+    // `applyResponsesCachePolicy` deliberately excludes that workload: a
+    // live-verified regression showed marking only the stable system block
+    // on a GROWING multi-turn conversation performs substantially worse than
+    // leaving caching implicit (see `prompt-cache.ts` for the measurements).
+    // A long stable system prefix through the shim must therefore stay
+    // exactly as parsed — no `prompt_cache_key`/`prompt_cache_options`, no
+    // `prompt_cache_breakpoint`, `instructions` untouched — relying entirely
+    // on Copilot's own provider-managed automatic caching instead.
+    const stable = "stable ".repeat(800)
+    const { payload } = buildFor("gpt-5.6-sol", {
+      system: stable,
+      messages: [{ role: "user", content: "dynamic" }],
+    })
+    expect(payload.instructions).toBe(stable)
+    expect(payload.prompt_cache_options).toBeUndefined()
+    expect(payload.prompt_cache_key).toBeUndefined()
+    expect(payload.input).toEqual([{ role: "user", content: "dynamic" }])
+  })
+
+  test("router web-search suffix stays after the stable translated prefix (no explicit-cache marking on the conversation path)", () => {
+    const stable = "stable ".repeat(800)
+    const search = "[Web Search Results]\nresult\n[End Web Search Results]"
+    const parsed = parseAnthropicRequest(
+      {
+        system: [
+          {
+            type: "text",
+            text: stable,
+            cache_control: { type: "ephemeral" },
+          },
+          { type: "text", text: search },
+          { type: "text", text: WEB_SEARCH_RESULT_INSTRUCTION },
+        ],
+        messages: [{ role: "user", content: "question" }],
+      },
+      "gpt-5.6-sol",
+    )
+    const payload = parsedToResponsesPayload(parsed)
+    // instructions carries the stable prefix untouched (no explicit-cache
+    // rewrite for the shim's "conversation" workload); the dynamic web-search
+    // suffix rides ahead of the user message as its own system input item.
+    expect(payload.instructions).toBe(stable)
+    expect(payload.prompt_cache_key).toBeUndefined()
+    expect(payload.input).toEqual([
+      {
+        role: "system",
+        // Two separate Anthropic text blocks (search results, then the
+        // authoritative tail) are joined with a blank-line delimiter, not
+        // concatenated raw — a bare join would glue "[End Web Search
+        // Results]Use factual claims…" into one run-on sentence.
+        content: `${search}\n\n${WEB_SEARCH_RESULT_INSTRUCTION}`,
+      },
+      { role: "user", content: "question" },
+    ])
   })
 
   test("unicode text survives intact into Responses input", () => {
@@ -919,7 +979,7 @@ describe("anthropic-translate request mapping", () => {
     })
     const delta = evs[4]
     expect((delta.delta as Record<string, unknown>).stop_reason).toBe("max_tokens")
-    expect((delta.usage as Record<string, unknown>).input_tokens).toBe(11)
+    expect((delta.usage as Record<string, unknown>).input_tokens).toBe(8)
     expect((delta.usage as Record<string, unknown>).output_tokens).toBe(7)
     expect((delta.usage as Record<string, unknown>).cache_read_input_tokens).toBe(3)
   })
@@ -1075,6 +1135,71 @@ describe("anthropic-translate file-tool steering", () => {
       if (prev === undefined) delete process.env.GH_ROUTER_DISABLE_SHIM_TOOL_STEERING
       else process.env.GH_ROUTER_DISABLE_SHIM_TOOL_STEERING = prev
     }
+  })
+
+  test("guidance stays in the stable prefix when a web-search dynamic suffix is present (cache determinism)", () => {
+    const search = "[Web Search Results]\nresult\n[End Web Search Results]"
+    const withoutSearch = build({
+      system: "You are Claude Code.",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [editTool],
+    })
+    const withSearch = build({
+      system: [
+        { type: "text", text: "You are Claude Code." },
+        { type: "text", text: search },
+        { type: "text", text: WEB_SEARCH_RESULT_INSTRUCTION },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+      tools: [editTool],
+    })
+    // The stable prefix — and therefore the guidance riding on it — is byte-
+    // identical whether or not a dynamic web-search suffix trails it.
+    expect(withSearch.parsed.instructions).toBe(withoutSearch.parsed.instructions)
+    expect(withSearch.parsed.instructions).toContain(MARKER)
+    // The dynamic suffix carries only the search content, never the guidance.
+    expect(withSearch.parsed.dynamicInstructions).not.toContain(MARKER)
+    expect(withSearch.parsed.dynamicInstructions).toBe(
+      `${search}\n\n${WEB_SEARCH_RESULT_INSTRUCTION}`,
+    )
+    expect(withoutSearch.parsed.dynamicInstructions).toBeUndefined()
+  })
+
+  test("the stable prefix payload.instructions is byte-identical whether or not the web-search suffix is present", () => {
+    // GPT-5.6 explicit caching does not apply on this (shim/"conversation")
+    // path at all (see the dedicated regression test above and
+    // `prompt-cache.ts`'s doc comment), so there is no `prompt_cache_key` to
+    // compare here. What still matters for Copilot's own provider-managed
+    // automatic caching is that `payload.instructions` — the literal bytes a
+    // prefix-matching cache keys off — is identical regardless of whether a
+    // volatile web-search suffix trails it on a given turn.
+    const longSystem = "You are Claude Code. ".repeat(300)
+    const search = "[Web Search Results]\nresult\n[End Web Search Results]"
+
+    const without = buildFor("gpt-5.6-sol", {
+      system: longSystem,
+      messages: [{ role: "user", content: "hi" }],
+      tools: [editTool],
+    })
+    const withSearch = buildFor("gpt-5.6-sol", {
+      system: [
+        { type: "text", text: longSystem },
+        { type: "text", text: search },
+        { type: "text", text: WEB_SEARCH_RESULT_INSTRUCTION },
+      ],
+      messages: [{ role: "user", content: "hi" }],
+      tools: [editTool],
+    })
+
+    expect(without.payload.prompt_cache_key).toBeUndefined()
+    expect(without.payload.instructions).toContain(MARKER)
+    expect(without.payload.instructions).toBe(withSearch.payload.instructions)
+
+    // The dynamic web-search item is the only extra input item on that turn.
+    const withoutInput = without.payload.input as Array<Record<string, unknown>>
+    const withSearchInput = withSearch.payload.input as Array<Record<string, unknown>>
+    expect(withSearchInput).toHaveLength(2)
+    expect(withoutInput).toHaveLength(1)
   })
 })
 

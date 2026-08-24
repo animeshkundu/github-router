@@ -7,6 +7,7 @@ import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
+import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest } from "~/lib/request-log"
@@ -17,6 +18,10 @@ import { tryRefreshAndRetry } from "~/lib/token"
 import { guardResponsesPayload } from "~/lib/tool-loop-guard"
 import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 import { resolveModel } from "~/lib/utils"
+import {
+  buildWebSearchContext,
+  injectResponsesWebSearchContext,
+} from "~/lib/web-search-context"
 import {
   createResponses,
   type ResponsesApiResponse,
@@ -128,6 +133,19 @@ export async function handleResponses(c: Context) {
     },
   )
   const isStreaming = !isNonStreaming(response)
+  // Guard on the RAW usage field's presence, not on the normalized result:
+  // `normalizeOpenAIUsage(undefined)` returns a defined all-zero object (by
+  // design), so gating on `!isStreaming` alone would read a confident `0`
+  // whenever a non-streaming upstream response simply omitted `usage`,
+  // logging "in:0" instead of omitting the token-info field the way an
+  // undefined `inputTokens` does.
+  const rawUsage = !isStreaming
+    ? (response as ResponsesApiResponse).usage
+    : undefined
+  const responseUsage =
+    rawUsage && typeof rawUsage === "object" && !Array.isArray(rawUsage)
+      ? normalizeOpenAIUsage(rawUsage)
+      : undefined
 
   logRequest(
     {
@@ -135,6 +153,10 @@ export async function handleResponses(c: Context) {
       path: c.req.path,
       model: originalModel,
       resolvedModel,
+      inputTokens: responseUsage?.totalInput,
+      outputTokens: responseUsage?.output,
+      cacheReadTokens: responseUsage?.cacheRead,
+      cacheWriteTokens: responseUsage?.cacheWrite,
       status: 200,
       streaming: isStreaming,
     },
@@ -353,18 +375,7 @@ async function injectWebSearchIfNeeded(
   if (query) {
     try {
       const results = await searchWeb(query)
-      const searchContext = [
-        "[Web Search Results]",
-        results.content,
-        "",
-        results.references.map((r) => `- [${r.title}](${r.url})`).join("\n"),
-        "[End Web Search Results]",
-      ].join("\n")
-
-      payload.instructions =
-        payload.instructions ?
-          `${searchContext}\n\n${payload.instructions}`
-        : searchContext
+      injectResponsesWebSearchContext(payload, buildWebSearchContext(results))
     } catch (error) {
       consola.warn("Web search failed, continuing without results:", error)
     }
