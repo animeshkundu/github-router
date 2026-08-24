@@ -62,7 +62,9 @@ describe("selectCacheProbeTargets", () => {
 
   test("reports missing exact targets honestly rather than substituting", () => {
     const selection = selectCacheProbeTargets([makeModel("claude-opus-5", 1_000_000)])
+    expect(selection.missing).toContain("claude-haiku-4.5")
     expect(selection.missing).toContain("gpt-5.6-sol")
+    expect(selection.missing).toContain("gpt-5.6-terra")
     expect(selection.missing).toContain("gpt-5.6-luna")
     expect(selection.missing).toContain("gemini-3.7-flash")
     const gptSol = selection.targets.find((t) => t.requestedId === "gpt-5.6-sol")
@@ -98,6 +100,7 @@ describe("cacheOracleClassFor", () => {
     expect(cacheOracleClassFor("claude-opus-5")).toBe("strict")
     expect(cacheOracleClassFor("claude-sonnet-5")).toBe("strict")
     expect(cacheOracleClassFor("gpt-5.6-sol")).toBe("strict")
+    expect(cacheOracleClassFor("gpt-5.6-terra")).toBe("strict")
     expect(cacheOracleClassFor("gpt-5.6-luna")).toBe("strict")
     expect(cacheOracleClassFor("gpt-5.6")).toBe("strict")
   })
@@ -360,13 +363,15 @@ describe("buildCacheProbeClaudeArgs", () => {
     expect(args.some((a) => a.includes("resume") || a.includes("continue"))).toBe(false)
   })
 
-  test("authentic (non-controlled) trial keeps the default toolset and system prompt", () => {
-    const args = buildCacheProbeClaudeArgs({ modelId: "claude-opus-5", controlled: false })
-    expect(args).not.toContain("--tools")
-    expect(args).not.toContain("--strict-mcp-config")
-    expect(args).not.toContain("--system-prompt")
-    expect(args).not.toContain("--bare")
-    expect(args).not.toContain("--safe-mode")
+  test("authentic native-Claude trial keeps the default toolset and system prompt", () => {
+    for (const modelId of ["claude-opus-5", "claude-haiku-4.5"]) {
+      const args = buildCacheProbeClaudeArgs({ modelId, controlled: false })
+      expect(args).not.toContain("--tools")
+      expect(args).not.toContain("--strict-mcp-config")
+      expect(args).not.toContain("--system-prompt")
+      expect(args).not.toContain("--bare")
+      expect(args).not.toContain("--safe-mode")
+    }
   })
 
   test("forwards --max-budget-usd only when provided", () => {
@@ -379,14 +384,17 @@ describe("buildCacheProbeClaudeArgs", () => {
 })
 
 describe("systemPrefixCharsFor", () => {
-  test("gives Gemini and Grok the larger prefix by default", () => {
+  test("gives Haiku, Gemini, and Grok the larger prefix by default", () => {
+    expect(systemPrefixCharsFor("claude-haiku-4.5")).toBe(LARGE_SYSTEM_PREFIX_CHARS)
     expect(systemPrefixCharsFor("gemini-3.7-flash")).toBe(LARGE_SYSTEM_PREFIX_CHARS)
     expect(systemPrefixCharsFor("grok-4.6")).toBe(LARGE_SYSTEM_PREFIX_CHARS)
   })
 
-  test("gives native Claude and gpt-5.6 the default (smaller) prefix", () => {
+  test("gives Opus and every gpt-5.6 tier the default prefix", () => {
     expect(systemPrefixCharsFor("claude-opus-5")).toBe(DEFAULT_SYSTEM_PREFIX_CHARS)
     expect(systemPrefixCharsFor("gpt-5.6-sol")).toBe(DEFAULT_SYSTEM_PREFIX_CHARS)
+    expect(systemPrefixCharsFor("gpt-5.6-terra")).toBe(DEFAULT_SYSTEM_PREFIX_CHARS)
+    expect(systemPrefixCharsFor("gpt-5.6-luna")).toBe(DEFAULT_SYSTEM_PREFIX_CHARS)
   })
 
   test("an explicit override always wins, for every model", () => {

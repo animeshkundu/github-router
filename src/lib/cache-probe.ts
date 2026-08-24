@@ -19,7 +19,9 @@ import type { Model } from "~/services/copilot/get-models"
 /** Exact catalog ids the probe measures unconditionally. */
 export const EXACT_CACHE_PROBE_TARGETS: ReadonlyArray<string> = [
   "claude-opus-5",
+  "claude-haiku-4.5",
   "gpt-5.6-sol",
+  "gpt-5.6-terra",
   "gpt-5.6-luna",
   "gemini-3.7-flash",
 ]
@@ -58,9 +60,9 @@ function contextWindowOf(model: Model): number | undefined {
 }
 
 /**
- * Resolves the five probe targets against a live (or fixture) model
- * catalog. Exact-id match for the first four; a highest-advertised-context
- * walk over every `grok-4.6*` sibling for the fifth. Deterministic given a
+ * Resolves the seven probe targets against a live (or fixture) model
+ * catalog. Exact-id match for the six fixed targets; a highest-advertised-
+ * context walk over every `grok-4.6*` sibling for the seventh. Deterministic given a
  * stable catalog: ties keep whichever candidate the catalog listed first.
  */
 export function selectCacheProbeTargets(
@@ -613,12 +615,20 @@ export const DEFAULT_SYSTEM_PREFIX_CHARS = 6_000
  * (Gemini) or unmeasured (Grok, grouped conservatively with Gemini). */
 export const LARGE_SYSTEM_PREFIX_CHARS = 40_000
 
-const LARGE_PREFIX_FAMILY_PREFIXES: ReadonlyArray<string> = ["gemini-", "grok-"]
+/** Haiku 4.5 has a materially higher cacheable-prefix floor than current
+ * Opus/Sonnet models. Its live controlled probe therefore uses the same
+ * conservative 40k-character fixture as Gemini/Grok rather than the 6k
+ * Claude/GPT default. */
+const LARGE_PREFIX_FAMILY_PREFIXES: ReadonlyArray<string> = [
+  "claude-haiku-",
+  "gemini-",
+  "grok-",
+]
 
 /**
  * Picks the deterministic system-prefix size for `catalogId`. An explicit
- * `override` (e.g. a user-set env var) always wins; otherwise Gemini/Grok
- * get `LARGE_SYSTEM_PREFIX_CHARS` and everything else gets
+ * `override` (e.g. a user-set env var) always wins; otherwise Haiku,
+ * Gemini, and Grok get `LARGE_SYSTEM_PREFIX_CHARS` and everything else gets
  * `DEFAULT_SYSTEM_PREFIX_CHARS`.
  */
 export function systemPrefixCharsFor(catalogId: string, override?: number): number {

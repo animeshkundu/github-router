@@ -78,8 +78,9 @@ Set GH_ROUTER_RUN_CACHE_PROBE=1 to run it, e.g.:
 
   GH_ROUTER_RUN_CACHE_PROBE=1 bun run probe:cache
 
-It resolves claude-opus-5, gpt-5.6-sol, gpt-5.6-luna, gemini-3.7-flash, and the
-highest-context grok-4.6* sibling from the LIVE Copilot catalog, then spawns
+It resolves claude-opus-5, claude-haiku-4.5, all three GPT-5.6 tiers
+(sol/terra/luna), gemini-3.7-flash, and the highest-context grok-4.6* sibling
+from the LIVE Copilot catalog, then spawns
 the real launcher ("bun run ./src/main.ts claude") and the real installed
 Claude Code CLI for each, feeding multi-turn stdin traffic and reading the
 per-turn result-event usage's cache fields (NOT assistant.message.usage,
@@ -522,17 +523,16 @@ async function main(): Promise<void> {
           console.log(`  controlled trial ${i}: ${trial.verdict.verdict} — ${trial.verdict.reason}`)
         }
 
-        // "One native Claude authentic trial": default toolset, default
-        // system prompt, salted first turn, single execution (not
-        // multiplied by trialsPerModel) — deliberately scoped to
-        // claude-opus-5 per the task's own instruction. The salt is
+        // One authentic trial per native-Claude target: default toolset,
+        // default system prompt, salted first turn, single execution (not
+        // multiplied by trialsPerModel). The salt is
         // forwarded via `--append-system-prompt` (not `--system-prompt`) so
         // Claude Code's own default system prompt/toolset stays intact;
         // that shared built-in boilerplate is common across every session
         // ever run and will still legitimately cache-hit regardless of this
         // salt — expected provider-level caching, not contamination.
         let authenticTrial: TrialRecord | undefined
-        if (catalogId === "claude-opus-5") {
+        if (catalogId.startsWith("claude-")) {
           const salt = randomSaltHex()
           authenticTrial = await runOneTrial({
             catalogId,
