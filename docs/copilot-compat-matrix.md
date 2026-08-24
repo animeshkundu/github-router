@@ -56,7 +56,7 @@ markers when any caller-owned policy is present.
 
 | Field / shape | End-to-end status | Source | Probe id | Notes |
 |---|---|---|---|---|
-| GPT-5.6 `prompt_cache_key` + `prompt_cache_options:{mode:"explicit",ttl:"30m"}` + content `prompt_cache_breakpoint:{mode:"explicit"}` | ✅ 200 | copilot-cli | `gpt56_explicit_cache_breakpoint` | Exact explicit-cache arm used only by router-owned GPT-5.6 reusable-prefix/conversation calls. Statistical trials, not this acceptance probe, established the cost benefit. |
+| GPT-5.6 `prompt_cache_key` + `prompt_cache_options:{mode:"explicit",ttl:"30m"}` + content `prompt_cache_breakpoint:{mode:"explicit"}` | ✅ 200 | copilot-cli | `gpt56_explicit_cache_breakpoint` | Exact explicit-cache arm used only by router-owned GPT-5.6 reusable-prefix/conversation calls. This probe confirms Copilot ACCEPTS the shape; it does not measure a cost benefit — that is pending the live evidence harness (see `prompt-caching.md`). |
 | GPT-5.5 `prompt_cache_retention:"24h"` | ✅ 200 | vscode-source | `gpt55_cache_retention_24h` | Acceptance only. The router does not synthesize this field until a long-inactivity trial proves effectiveness. |
 | `prompt_cache_key` alone | ✅ accepted, no measured incremental benefit | vscode-source | (covered by research harness, not strict probe) | Preserved for passthrough callers; not synthesized. |
 | Chat message `copilot_cache_control` | ✅ accepted, no measured incremental benefit on tested GPT/Gemini models | vscode-source | (covered by research harness, not strict probe) | Preserved for passthrough callers; not synthesized. |

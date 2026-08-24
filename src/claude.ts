@@ -278,7 +278,25 @@ export const claude = defineCommand({
   },
   args: claudeArgs,
   async run({ args, rawArgs }) {
-    if (!process.stdout.isTTY) {
+    // TTY requirement, with a narrowly-scoped opt-in bypass for headless
+    // verification harnesses. `claude` normally assumes an interactive
+    // terminal (the spawned Claude Code renders a TUI), so a piped-stdout
+    // invocation (e.g. `bun run ./src/main.ts claude | cat`) is refused by
+    // default. But `--print --input-format stream-json --output-format
+    // stream-json` is Claude Code's own documented non-interactive mode —
+    // it never touches the TTY — so an internal harness (e.g.
+    // `scripts/probe-prompt-cache.ts`, see docs/prompt-caching.md) that
+    // spawns exactly that combination has a legitimate reason to run with
+    // piped stdio. `GH_ROUTER_ALLOW_HEADLESS_CLAUDE=1` opts into that path;
+    // the default remains a hard TTY requirement for ordinary interactive
+    // use, and the flag is not advertised as a general-purpose CLI option.
+    const headlessProbeRequested =
+      process.env.GH_ROUTER_ALLOW_HEADLESS_CLAUDE === "1"
+      && rawArgs.includes("--print")
+      && rawArgs.includes("--input-format")
+      && rawArgs.includes("--output-format")
+      && rawArgs.filter((arg) => arg === "stream-json").length >= 2
+    if (!process.stdout.isTTY && !headlessProbeRequested) {
       consola.error("The claude subcommand requires a TTY (interactive terminal).")
       process.exit(1)
     }

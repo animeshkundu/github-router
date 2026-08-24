@@ -1,3 +1,4 @@
+import { parseBoolEnv } from "~/lib/exec"
 import type {
   ChatCompletionsPayload,
   Message,
@@ -18,11 +19,22 @@ export const WEB_SEARCH_RESULT_INSTRUCTION =
 
 export type WebSearchCacheRepairRoute = "messages" | "chat" | "responses"
 
+/**
+ * The three per-route emergency rollback flags
+ * (`GH_ROUTER_DISABLE_{MESSAGES,CHAT,RESPONSES}_WEB_CACHE_REPAIR`) share the
+ * project's single `parseBoolEnv` parser rather than a bespoke `=== "1"`
+ * check, so `true`/`yes`/`on` disable the repair exactly like `1` does, and
+ * `0`/`false`/`off`/empty/unset all leave it enabled (the safe default).
+ * `parseBoolEnv` returning `undefined` (unset or unrecognized) is treated as
+ * "not disabled" — an operator typo in the flag's value must never silently
+ * turn OFF the cache-safe placement.
+ */
 export function webSearchCacheRepairEnabled(
   route: WebSearchCacheRepairRoute,
 ): boolean {
   const suffix = route.toUpperCase().replace("-", "_")
-  return process.env[`GH_ROUTER_DISABLE_${suffix}_WEB_CACHE_REPAIR`] !== "1"
+  const raw = process.env[`GH_ROUTER_DISABLE_${suffix}_WEB_CACHE_REPAIR`]
+  return parseBoolEnv(raw) !== true
 }
 
 export function buildWebSearchContext(results: WebSearchResult): string {

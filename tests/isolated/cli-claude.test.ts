@@ -498,6 +498,45 @@ describe("claude command", () => {
     expect(setupAndServeMock).toHaveBeenCalled()
   })
 
+  test("TTY check: GH_ROUTER_ALLOW_HEADLESS_CLAUDE unset still rejects a non-TTY stdout", async () => {
+    isTTY = false
+    delete mockProcessEnv.GH_ROUTER_ALLOW_HEADLESS_CLAUDE
+    const run = getRunFn()
+
+    await expect(run({ args: {} })).rejects.toThrow(ExitError)
+    expect(exitMock).toHaveBeenCalledWith(1)
+  })
+
+  test("TTY check: headless probe flag alone does not bypass the non-TTY rejection", async () => {
+    isTTY = false
+    mockProcessEnv.GH_ROUTER_ALLOW_HEADLESS_CLAUDE = "1"
+    const run = getRunFn()
+
+    await expect(run({ args: {}, rawArgs: [] })).rejects.toThrow(ExitError)
+    expect(exitMock).toHaveBeenCalledWith(1)
+    delete mockProcessEnv.GH_ROUTER_ALLOW_HEADLESS_CLAUDE
+  })
+
+  test("TTY check: headless probe flag plus both stream-json modes bypasses the rejection", async () => {
+    isTTY = false
+    mockProcessEnv.GH_ROUTER_ALLOW_HEADLESS_CLAUDE = "1"
+    const run = getRunFn()
+
+    await run({
+      args: {},
+      rawArgs: [
+        "--print",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+      ],
+    })
+
+    expect(setupAndServeMock).toHaveBeenCalled()
+    delete mockProcessEnv.GH_ROUTER_ALLOW_HEADLESS_CLAUDE
+  })
+
   test("calls setupAndServe with silent: true", async () => {
     const run = getRunFn()
 

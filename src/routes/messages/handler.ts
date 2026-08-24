@@ -734,7 +734,12 @@ export async function handleCompletion(c: Context) {
   const responseBody = cappedResult.value
 
   const usage = responseBody.usage as
-    | { input_tokens?: number; output_tokens?: number }
+    | {
+        input_tokens?: number
+        output_tokens?: number
+        cache_read_input_tokens?: number
+        cache_creation_input_tokens?: number
+      }
     | undefined
 
   logRequest(
@@ -743,8 +748,14 @@ export async function handleCompletion(c: Context) {
       path: c.req.path,
       model: originalModel,
       resolvedModel,
-      inputTokens: usage?.input_tokens,
+      inputTokens: anthropicTotalInputTokens(usage),
       outputTokens: usage?.output_tokens,
+      // Anthropic's own usage shape already reports disjoint buckets (unlike
+      // OpenAI's inclusive totals), so these ride straight through with no
+      // `normalizeOpenAIUsage` step — see that function's doc for why the
+      // OpenAI-shaped routes need one and this one doesn't.
+      cacheReadTokens: usage?.cache_read_input_tokens,
+      cacheWriteTokens: usage?.cache_creation_input_tokens,
       status: response.status,
     },
     selectedModel,
@@ -935,6 +946,37 @@ export function clampOutputConfigEffortInPlace(
   if (clamped === current) return false
   oc.effort = clamped
   return true
+}
+
+/**
+ * Sum native Claude `/v1/messages` usage into the TOTAL input-token figure
+ * `logRequest`'s context-window-fill display expects.
+ *
+ * Anthropic's `input_tokens` is the NEW (uncached) portion ONLY — unlike
+ * OpenAI's inclusive total, it excludes both `cache_read_input_tokens` and
+ * `cache_creation_input_tokens`. Forwarding it alone understates the real
+ * prompt size on any cache hit, sometimes drastically: a live warm-cache turn
+ * measured `input_tokens: 26` alongside `cache_read_input_tokens: 97304` — the
+ * actual prompt was ~97k tokens, not 26. Returns `undefined` only when
+ * `usage` itself is absent, so the log line omits the field entirely rather
+ * than reporting a fabricated total (matching how `formatTokenInfo` treats an
+ * undefined `inputTokens`).
+ */
+export function anthropicTotalInputTokens(
+  usage:
+    | {
+        input_tokens?: number
+        cache_read_input_tokens?: number
+        cache_creation_input_tokens?: number
+      }
+    | undefined,
+): number | undefined {
+  if (usage === undefined) return undefined
+  return (
+    (usage.input_tokens ?? 0)
+    + (usage.cache_read_input_tokens ?? 0)
+    + (usage.cache_creation_input_tokens ?? 0)
+  )
 }
 
 /**

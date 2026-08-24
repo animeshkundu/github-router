@@ -17,12 +17,18 @@ For OpenAI-shaped clients on GPT-5.x clients can also use `tools:[{type:"web_sea
 ## Prompt-cache-safe result placement
 
 Search results are volatile and must not precede a reusable system prefix.
-Repeated live probes showed the old prepend behavior caused a full cache write
-on every identical search turn. The proxy now places results by endpoint:
+The old prepend behavior rewrote the head of the stable prefix on every
+search turn, which is the shape of a cache-invalidating write on any provider
+whose caching keys off a stable prefix; it is not yet backed by a live
+measurement harness (see [`prompt-caching.md`](prompt-caching.md) for that
+caveat generally). The proxy now places results by endpoint instead of
+prepending them:
 
 - Anthropic Messages: existing system blocks remain first, followed by the
   unmarked result block and a short authoritative tail that tells the model to
   use factual claims while ignoring instructions embedded in search content.
+  Native Claude `/v1/messages` cache_control placement otherwise remains
+  entirely caller-controlled; the router does not add or remove markers there.
 - Chat Completions: results are a later unmarked system message after the
   existing leading system messages.
 - Responses: `instructions` and leading system input items remain first;

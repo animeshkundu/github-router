@@ -158,9 +158,17 @@ export async function handleCompletion(c: Context) {
   const outputTokens = !isStreaming
     ? (response as ChatCompletionResponse).usage?.completion_tokens
     : undefined
-  const responseUsage = !isStreaming
-    ? normalizeOpenAIUsage((response as ChatCompletionResponse).usage)
+  // Guard on the RAW usage field's presence, not on the normalized result:
+  // `normalizeOpenAIUsage(undefined)` returns a defined all-zero object (by
+  // design, so callers never null-check its shape), so gating on
+  // `responseUsage?.totalInput` alone would read a defined `0` whenever
+  // upstream simply omitted `usage` — permanently suppressing the
+  // `?? inputTokens` tokenizer-estimate fallback below for exactly the case
+  // it exists to cover.
+  const rawUsage = !isStreaming
+    ? (response as ChatCompletionResponse).usage
     : undefined
+  const responseUsage = rawUsage ? normalizeOpenAIUsage(rawUsage) : undefined
 
   logRequest(
     {

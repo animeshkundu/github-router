@@ -82,13 +82,22 @@ You have dedicated tools for files: use Read to read a file, Edit to modify an e
 </file_tools>`
 
 /**
- * Append `FILE_TOOL_GUIDANCE` to the flattened system `instructions` iff the
- * request carries Claude Code's canonical `Edit` or `Write` tool. The exact
+ * Append `FILE_TOOL_GUIDANCE` to the STABLE system prefix iff the request
+ * carries Claude Code's canonical `Edit` or `Write` tool. The exact
  * capitalized-name match is deliberately precise: it fires for a Claude Code
  * editing session but not for arbitrary MCP tools like `write_file`, and not for
  * non-editing chats (so a plain gpt-5.5 conversation is not polluted). The block
- * is appended AFTER the existing instructions (end-of-prompt recency) and the
- * original system text is preserved, never replaced. Opt out with
+ * is appended AFTER the existing stable text (end-of-prompt recency within the
+ * stable prefix) and the original system text is preserved, never replaced.
+ *
+ * Always lands in `system.stable`, never `system.dynamic` — the guidance is
+ * static content that never changes per request, so it belongs in the part of
+ * the prompt the cache key is derived from (`applyResponsesCachePolicy` hashes
+ * `stablePrefix`, not the dynamic web-search suffix). Landing it in `dynamic`
+ * would make the stable prefix — and therefore the GPT-5.6 `prompt_cache_key`
+ * and which bytes carry the Claude cache marker — differ depending on whether a
+ * web-search dynamic suffix happened to be present on a given turn, which
+ * defeats the whole point of a stable prefix. Opt out with
  * `GH_ROUTER_DISABLE_SHIM_TOOL_STEERING=1`.
  */
 function appendFileToolGuidance(
@@ -115,6 +124,16 @@ interface SystemSegments {
  * web-search suffix. The translated endpoints can then keep stable system
  * bytes before volatile results instead of flattening both into one changing
  * instruction string.
+ *
+ * `dynamic` blocks are joined with a blank-line delimiter, never
+ * concatenated raw: `injectAnthropicWebSearchContext` appends the search
+ * results block and the authoritative-instruction block as two SEPARATE
+ * system text blocks, and Anthropic's own text blocks carry no delimiter of
+ * their own. A bare `.join("")` therefore glued `[End Web Search
+ * Results]Use factual claims…` into one run-on sentence with no boundary.
+ * `stable` keeps the historical no-delimiter join: it reassembles the
+ * caller's OWN adjacent text blocks (e.g. Claude Code's own system-prompt
+ * segments), which are not this router's to reformat.
  */
 function splitSystem(system: unknown): SystemSegments {
   if (typeof system === "string") {
@@ -148,7 +167,7 @@ function splitSystem(system: unknown): SystemSegments {
   const dynamic = textBlocks
     .slice(boundary)
     .map((block) => block.text as string)
-    .join("")
+    .join("\n\n")
   return {
     ...(stable.length > 0 ? { stable } : {}),
     ...(dynamic.length > 0 ? { dynamic } : {}),
@@ -539,11 +558,9 @@ export function parseAnthropicRequest(
 
   const tools = parseTools(body.tools)
   const system = splitSystem(body.system)
-  if (system.dynamic) {
-    system.dynamic = appendFileToolGuidance(system.dynamic, tools)
-  } else {
-    system.stable = appendFileToolGuidance(system.stable, tools)
-  }
+  // Always lands in `stable`, regardless of whether a dynamic (e.g.
+  // web-search) suffix is present — see `appendFileToolGuidance`'s doc.
+  system.stable = appendFileToolGuidance(system.stable, tools)
 
   return {
     model: resolvedModel,

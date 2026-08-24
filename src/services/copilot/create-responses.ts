@@ -14,6 +14,7 @@ import {
   rememberImageCeiling,
 } from "~/lib/vision-preflight"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
+import type { OpenAIUsageLike } from "~/lib/prompt-cache"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { state } from "~/lib/state"
 import { tryRefreshAndRetry } from "~/lib/token"
@@ -256,5 +257,6 @@ export interface ResponsesApiResponse {
   object: "response"
   status: string
   output: Array<unknown>
+  usage?: OpenAIUsageLike
   [key: string]: unknown
 }

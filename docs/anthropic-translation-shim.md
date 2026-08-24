@@ -196,15 +196,24 @@ call → `tool_use`; else `end_turn`.
 
 ### Prompt caching and usage accounting
 
-Translated GPT-5.6 conversations use Copilot's explicit Responses cache mode
-when the stable system/tool prefix is large enough. The stable system prefix is
-emitted as a system `input_text` carrying
-`prompt_cache_breakpoint:{mode:"explicit"}`; volatile system suffixes such as
-web-search results remain in later unmarked system input items. The request also
-carries an opaque SHA-256-derived `prompt_cache_key` and
-`prompt_cache_options:{mode:"explicit",ttl:"30m"}`. The key contains no prompt,
-path, repository, user, or raw session data. Disable this policy with
-`GH_ROUTER_DISABLE_GPT56_EXPLICIT_CACHE=1`.
+Translated GPT-5.6 conversations do **NOT** use Copilot's explicit Responses
+cache mode. They are built with `cachePolicy: {workload: "conversation"}`
+(`anthropic-request.ts`'s `parsedToResponsesPayload`), and
+`applyResponsesCachePolicy` (`src/lib/prompt-cache.ts`) deliberately excludes
+that workload as a no-op — a live-verified regression found that marking only
+the stable system block with an explicit breakpoint on a GROWING multi-turn
+conversation performs substantially worse than leaving caching provider-managed
+and implicit: explicit mode is a distinct caching strategy from Copilot's
+automatic caching,
+not an addition to it, so the entire un-marked, ever-growing message history
+stops receiving automatic prefix-growth caching too. Translated conversations
+therefore rely entirely on Copilot's own provider-managed automatic caching,
+same as Gemini/Grok/GPT-5.5/older GPT/Codex. GPT-5.6 explicit caching remains
+available, but only for `workload: "reusable-prefix"` calls elsewhere in the
+router (peer/advisor/worker-tool/browser-compressor prefixes reused verbatim
+across many discrete calls, never a single request whose own history keeps
+growing) — see [`prompt-caching.md`](prompt-caching.md) for the measured
+numbers and the full policy table.
 
 Gemini, Grok, GPT-5.5, and older GPT/Codex models remain on provider-managed
 implicit caching because no tested explicit field improved reuse. Public

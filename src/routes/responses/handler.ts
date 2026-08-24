@@ -133,13 +133,19 @@ export async function handleResponses(c: Context) {
     },
   )
   const isStreaming = !isNonStreaming(response)
-  const responseUsage = !isStreaming
-    ? normalizeOpenAIUsage(
-        (response as ResponsesApiResponse).usage as
-          | Parameters<typeof normalizeOpenAIUsage>[0]
-          | undefined,
-      )
+  // Guard on the RAW usage field's presence, not on the normalized result:
+  // `normalizeOpenAIUsage(undefined)` returns a defined all-zero object (by
+  // design), so gating on `!isStreaming` alone would read a confident `0`
+  // whenever a non-streaming upstream response simply omitted `usage`,
+  // logging "in:0" instead of omitting the token-info field the way an
+  // undefined `inputTokens` does.
+  const rawUsage = !isStreaming
+    ? (response as ResponsesApiResponse).usage
     : undefined
+  const responseUsage =
+    rawUsage && typeof rawUsage === "object" && !Array.isArray(rawUsage)
+      ? normalizeOpenAIUsage(rawUsage)
+      : undefined
 
   logRequest(
     {
