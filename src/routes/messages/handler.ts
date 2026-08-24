@@ -27,6 +27,10 @@ import {
 } from "~/lib/thinking-history-repair"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import {
+  buildWebSearchContext,
+  injectAnthropicWebSearchContext,
+} from "~/lib/web-search-context"
+import {
   ADVISOR_INTERNAL_TOOL_NAME,
   buildAdvisorStream,
   injectAdvisorTool,
@@ -102,27 +106,6 @@ function hasToolResultContent(messages: Array<AnyRecord>): boolean {
         (block: AnyRecord) => block.type === "tool_result",
       ),
   )
-}
-
-/**
- * Inject web search results into the Anthropic system field.
- * Handles three cases: absent, string, or array of content blocks.
- * When array, prepends without cache_control to preserve existing directives.
- */
-function injectSearchResults(
-  body: AnyRecord,
-  searchContext: string,
-): void {
-  if (body.system === undefined || body.system === null) {
-    body.system = searchContext
-  } else if (typeof body.system === "string") {
-    body.system = `${searchContext}\n\n${body.system}`
-  } else if (Array.isArray(body.system)) {
-    body.system = [
-      { type: "text", text: searchContext },
-      ...body.system,
-    ]
-  }
 }
 
 /**
@@ -240,15 +223,7 @@ async function processWebSearch(rawBody: string): Promise<string> {
   if (query) {
     try {
       const results = await searchWeb(query)
-      const searchContext = [
-        "[Web Search Results]",
-        results.content,
-        "",
-        results.references.map((r) => `- [${r.title}](${r.url})`).join("\n"),
-        "[End Web Search Results]",
-      ].join("\n")
-
-      injectSearchResults(body, searchContext)
+      injectAnthropicWebSearchContext(body, buildWebSearchContext(results))
     } catch (error) {
       consola.warn("Web search failed, continuing without results:", error)
     }

@@ -290,7 +290,7 @@ test("terminal usage block populates message_end.usage with cost zeros", async (
   )
 
   expect(final.usage).toEqual({
-    input: 100,
+    input: 70,
     output: 5,
     cacheRead: 30,
     cacheWrite: 0,

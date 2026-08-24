@@ -31,6 +31,7 @@ import consola from "consola"
 import { deterministicResolve } from "./matcher"
 import { parseIntent } from "./parse-intent"
 import { acquireInFlightSlot } from "~/lib/mcp-inflight"
+import { applyResponsesCachePolicy } from "~/lib/prompt-cache"
 import { state } from "~/lib/state"
 import {
   createChatCompletions,
@@ -219,7 +220,7 @@ async function callViaResponses(
     { role: "system", content: systemPrompt },
     { role: "user", content: toResponsesContent(userMessage) },
   ]
-  const payload: ResponsesPayload = {
+  const payload = applyResponsesCachePolicy({
     model,
     stream: false,
     input,
@@ -227,7 +228,10 @@ async function callViaResponses(
       { type: "function", name: tool.name, description: tool.description, parameters: tool.parameters },
     ],
     tool_choice: { type: "function", name: tool.name },
-  }
+  } satisfies ResponsesPayload, {
+    workload: "reusable-prefix",
+    stablePrefix: systemPrompt,
+  })
   // retryTransient: true: non-streaming (stream:false), pre-first-byte, safe.
   const resp = (await createResponses(payload, undefined, signal, true)) as ResponsesApiResponse
   const output = Array.isArray(resp.output) ? resp.output : []

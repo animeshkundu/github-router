@@ -117,7 +117,7 @@ describe("chatResponseToAnthropicMessage", () => {
       MODEL_ID,
     )
     expect(msg.usage.cache_read_input_tokens).toBe(40)
-    expect(msg.usage.input_tokens).toBe(100)
+    expect(msg.usage.input_tokens).toBe(60)
   })
 
   test("malformed tool arguments degrade to empty input", () => {

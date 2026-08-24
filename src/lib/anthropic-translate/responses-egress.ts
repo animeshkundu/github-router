@@ -31,6 +31,7 @@
 import { randomUUID } from "node:crypto"
 
 import type { ResponsesApiResponse } from "~/services/copilot/create-responses"
+import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 
 import {
   type AnthropicStreamEvent,
@@ -79,7 +80,11 @@ interface ResponsesUsage {
   input_tokens?: number
   output_tokens?: number
   total_tokens?: number
-  input_tokens_details?: { cached_tokens?: number }
+  input_tokens_details?: {
+    cached_tokens?: number
+    cache_write_tokens?: number
+    cache_creation_tokens?: number
+  }
 }
 
 /**
@@ -110,12 +115,12 @@ function firstNonEmpty(...vals: Array<string | undefined>): string {
 }
 
 function anthropicUsageFromResponses(u: ResponsesUsage | undefined): AnthropicUsage {
-  if (!u) return {}
+  const normalized = normalizeOpenAIUsage(u)
   return {
-    input_tokens: u.input_tokens ?? 0,
-    output_tokens: u.output_tokens ?? 0,
-    cache_read_input_tokens: u.input_tokens_details?.cached_tokens ?? 0,
-    cache_creation_input_tokens: 0,
+    input_tokens: normalized.uncachedInput,
+    output_tokens: normalized.output,
+    cache_read_input_tokens: normalized.cacheRead,
+    cache_creation_input_tokens: normalized.cacheWrite,
   }
 }
 
@@ -296,6 +301,7 @@ export async function* synthAnthropicFromResponses(
   let usageIn = 0
   let usageOut = 0
   let usageCacheRead = 0
+  let usageCacheWrite = 0
   let sawTool = false
   let hitMaxTokens = false
   // I4: a terminal event (`completed`/`incomplete`/`failed`) was seen. If the
@@ -526,6 +532,12 @@ export async function* synthAnthropicFromResponses(
           usageIn = Math.max(usageIn, u.input_tokens ?? 0)
           usageOut = Math.max(usageOut, u.output_tokens ?? 0)
           usageCacheRead = Math.max(usageCacheRead, u.input_tokens_details?.cached_tokens ?? 0)
+          usageCacheWrite = Math.max(
+            usageCacheWrite,
+            u.input_tokens_details?.cache_write_tokens
+              ?? u.input_tokens_details?.cache_creation_tokens
+              ?? 0,
+          )
         }
         if (
           ev.type === "response.incomplete"
@@ -569,12 +581,20 @@ export async function* synthAnthropicFromResponses(
   // stop_reason precedence: a truncated (max-output) response is `max_tokens`
   // even with a partial tool call; else a tool call → `tool_use`; else end_turn.
   const stopReason = hitMaxTokens ? "max_tokens" : sawTool ? "tool_use" : "end_turn"
+  const usage = normalizeOpenAIUsage({
+    input_tokens: usageIn,
+    output_tokens: usageOut,
+    input_tokens_details: {
+      cached_tokens: usageCacheRead,
+      cache_write_tokens: usageCacheWrite,
+    },
+  })
   q.push(
     makeMessageDelta(stopReason, null, {
-      input_tokens: usageIn,
-      output_tokens: usageOut,
-      cache_read_input_tokens: usageCacheRead,
-      cache_creation_input_tokens: 0,
+      input_tokens: usage.uncachedInput,
+      output_tokens: usage.output,
+      cache_read_input_tokens: usage.cacheRead,
+      cache_creation_input_tokens: usage.cacheWrite,
     }),
   )
   q.push(makeMessageStop())

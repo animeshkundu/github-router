@@ -213,14 +213,15 @@ describe("synthAnthropicFromResponses — sequence", () => {
     const evs = await collect([
       { type: "response.output_text.delta", output_index: 0, delta: "x" },
       { type: "response.output_text.done", output_index: 0, text: "x" },
-      { type: "response.completed", response: { usage: { input_tokens: 20, output_tokens: 7, input_tokens_details: { cached_tokens: 4 } } } },
+      { type: "response.completed", response: { usage: { input_tokens: 20, output_tokens: 7, input_tokens_details: { cached_tokens: 4, cache_write_tokens: 3 } } } },
       // a stray later terminal frame carrying zeros must not overwrite
       { type: "response.completed", response: { usage: { input_tokens: 0, output_tokens: 0 } } },
     ])
     const delta = evs.find((e) => e.type === "message_delta")!
-    expect((delta.usage as Record<string, unknown>).input_tokens).toBe(20)
+    expect((delta.usage as Record<string, unknown>).input_tokens).toBe(13)
     expect((delta.usage as Record<string, unknown>).output_tokens).toBe(7)
     expect((delta.usage as Record<string, unknown>).cache_read_input_tokens).toBe(4)
+    expect((delta.usage as Record<string, unknown>).cache_creation_input_tokens).toBe(3)
   })
 
   test("response.failed makes the generator throw (surfaces as a terminal error)", async () => {

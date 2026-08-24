@@ -38,12 +38,14 @@ import {
   type Effort,
 } from "~/lib/reasoning-effort"
 import { parseBoolEnv } from "~/lib/exec"
+import { isRouterDynamicSystemText } from "~/lib/web-search-context"
 
 type AnyRecord = Record<string, unknown>
 
 export interface ParsedAnthropicRequest {
   model: string
   instructions?: string
+  dynamicInstructions?: string
   messages: Array<NeutralMessage>
   tools?: Array<NeutralTool>
   toolChoice?: ResponsesPayload["tool_choice"]
@@ -103,20 +105,54 @@ function appendFileToolGuidance(
     : FILE_TOOL_GUIDANCE
 }
 
-/** Flatten Anthropic `system` (string | array of text blocks) into a string. */
-function flattenSystem(system: unknown): string | undefined {
-  if (typeof system === "string") return system.length > 0 ? system : undefined
-  if (Array.isArray(system)) {
-    let s = ""
-    for (const block of system) {
-      if (block && typeof block === "object" && (block as AnyRecord).type === "text") {
-        const t = (block as AnyRecord).text
-        if (typeof t === "string") s += t
-      }
-    }
-    return s.length > 0 ? s : undefined
+interface SystemSegments {
+  stable?: string
+  dynamic?: string
+}
+
+/**
+ * Preserve the caller's last system cache boundary and the router's dynamic
+ * web-search suffix. The translated endpoints can then keep stable system
+ * bytes before volatile results instead of flattening both into one changing
+ * instruction string.
+ */
+function splitSystem(system: unknown): SystemSegments {
+  if (typeof system === "string") {
+    return system.length > 0 ? { stable: system } : {}
   }
-  return undefined
+  if (!Array.isArray(system)) return {}
+
+  const textBlocks = system.filter(
+    (block): block is AnyRecord =>
+      !!block
+      && typeof block === "object"
+      && (block as AnyRecord).type === "text"
+      && typeof (block as AnyRecord).text === "string",
+  )
+  let boundary = textBlocks.findIndex((block) =>
+    isRouterDynamicSystemText(block.text),
+  )
+  if (boundary < 0) {
+    const lastMarked = textBlocks.findLastIndex(
+      (block) => block.cache_control !== undefined,
+    )
+    boundary = lastMarked >= 0 && lastMarked < textBlocks.length - 1
+      ? lastMarked + 1
+      : textBlocks.length
+  }
+
+  const stable = textBlocks
+    .slice(0, boundary)
+    .map((block) => block.text as string)
+    .join("")
+  const dynamic = textBlocks
+    .slice(boundary)
+    .map((block) => block.text as string)
+    .join("")
+  return {
+    ...(stable.length > 0 ? { stable } : {}),
+    ...(dynamic.length > 0 ? { dynamic } : {}),
+  }
 }
 
 /**
@@ -502,10 +538,17 @@ export function parseAnthropicRequest(
       : undefined
 
   const tools = parseTools(body.tools)
+  const system = splitSystem(body.system)
+  if (system.dynamic) {
+    system.dynamic = appendFileToolGuidance(system.dynamic, tools)
+  } else {
+    system.stable = appendFileToolGuidance(system.stable, tools)
+  }
 
   return {
     model: resolvedModel,
-    instructions: appendFileToolGuidance(flattenSystem(body.system), tools),
+    instructions: system.stable,
+    dynamicInstructions: system.dynamic,
     messages,
     tools,
     toolChoice: parseToolChoice(body.tool_choice),
@@ -528,6 +571,7 @@ export function parsedToResponsesPayload(
   return assembleResponsesPayload({
     model: parsed.model,
     instructions: parsed.instructions,
+    dynamicInstructions: parsed.dynamicInstructions,
     messages: parsed.messages,
     tools: parsed.tools,
     toolChoice: parsed.toolChoice,
@@ -535,6 +579,7 @@ export function parsedToResponsesPayload(
     maxOutputTokens: parsed.maxOutputTokens,
     stopSequences: parsed.stopSequences,
     parallelToolCalls: parsed.parallelToolCalls,
+    cachePolicy: { workload: "conversation" },
     stream: parsed.stream,
   })
 }

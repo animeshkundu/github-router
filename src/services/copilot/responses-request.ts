@@ -21,6 +21,10 @@ import type {
   ResponsesPayload,
   ResponsesTool,
 } from "~/services/copilot/create-responses"
+import {
+  applyResponsesCachePolicy,
+  type ResponsesCachePolicyOptions,
+} from "~/lib/prompt-cache"
 
 /**
  * Copilot's `/responses` endpoint rejects a positive `max_output_tokens` below
@@ -76,6 +80,8 @@ export interface NeutralTool {
 export interface AssembleResponsesOptions {
   model: string
   instructions?: string
+  /** Volatile system material that must remain after the stable prefix. */
+  dynamicInstructions?: string
   messages: ReadonlyArray<NeutralMessage>
   tools?: ReadonlyArray<NeutralTool>
   /**
@@ -99,6 +105,8 @@ export interface AssembleResponsesOptions {
    * omitted-by-default so the worker hot path is unaffected.
    */
   parallelToolCalls?: false
+  /** Router-owned policy only; public passthrough callers omit this. */
+  cachePolicy?: ResponsesCachePolicyOptions
   stream: boolean
 }
 
@@ -220,6 +228,9 @@ export function assembleResponsesPayload(
   opts: AssembleResponsesOptions,
 ): ResponsesPayload {
   const input: Array<ResponsesInputItem> = []
+  if (opts.dynamicInstructions) {
+    input.push({ role: "system", content: opts.dynamicInstructions })
+  }
   for (const m of opts.messages) {
     for (const item of neutralMessageToResponsesInput(m)) input.push(item)
   }
@@ -258,5 +269,10 @@ export function assembleResponsesPayload(
     payload.parallel_tool_calls = false
   }
 
-  return payload
+  return opts.cachePolicy
+    ? applyResponsesCachePolicy(payload, {
+        ...opts.cachePolicy,
+        stablePrefix: opts.cachePolicy.stablePrefix ?? opts.instructions,
+      })
+    : payload
 }

@@ -44,8 +44,22 @@ Canonical Copilot tool-type allowlist (verbatim from a 400 in probe `tooltype_co
 |---|---|---|---|---|
 | `name`, `description`, `input_schema` | ✅ 200 | anthropic-docs | `tool_baseline_custom` | Required baseline |
 | `eager_input_streaming` | ✅ 200 (proxy strips) | claude-emits | `eager_input_streaming_stripped` / `eager_input_streaming_with_type_custom_stripped` | Copilot 400s on raw field; proxy strips before forwarding (Phase 0 of long-horizon plan). Auto-emitted by Claude Code under `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING=1`. Strip disables only chunk-size optimization; correctness unaffected. |
-| `cache_control: {type, ttl?}` | ✅ 200 | claude-emits | (TODO) | Standard Anthropic cache-control; preserved |
+| `cache_control: {type, ttl?}` | ✅ 200 | claude-emits | `cache_control_ephemeral_1h` | Standard Anthropic cache-control; preserved. The probe covers both system and tool blocks; `ttl:"1h"` is accepted. |
 | `cache_control.scope` | ✅ 200 (proxy strips) | claude-emits | `signed_thinking_cache_scope_stripped` | Copilot 400s on raw `.scope`. On a signed thinking/redacted-thinking block it rejects the whole `cache_control` object (`...thinking.cache_control: Extra inputs`), so the proxy removes that unsigned cache metadata while preserving thinking/signature/data exactly. The probe obtains a real signed thinking+tool response and verifies the replay remains valid. |
+
+Claude accepts at most four `cache_control` blocks per request. Probe
+`cache_control_marker_limit_5` asserts the fifth marker remains an upstream 400,
+which is why the router-owned allocator is hard-bounded at four and never adds
+markers when any caller-owned policy is present.
+
+## Prompt-cache fields on OpenAI-shaped routes
+
+| Field / shape | End-to-end status | Source | Probe id | Notes |
+|---|---|---|---|---|
+| GPT-5.6 `prompt_cache_key` + `prompt_cache_options:{mode:"explicit",ttl:"30m"}` + content `prompt_cache_breakpoint:{mode:"explicit"}` | ✅ 200 | copilot-cli | `gpt56_explicit_cache_breakpoint` | Exact explicit-cache arm used only by router-owned GPT-5.6 reusable-prefix/conversation calls. Statistical trials, not this acceptance probe, established the cost benefit. |
+| GPT-5.5 `prompt_cache_retention:"24h"` | ✅ 200 | vscode-source | `gpt55_cache_retention_24h` | Acceptance only. The router does not synthesize this field until a long-inactivity trial proves effectiveness. |
+| `prompt_cache_key` alone | ✅ accepted, no measured incremental benefit | vscode-source | (covered by research harness, not strict probe) | Preserved for passthrough callers; not synthesized. |
+| Chat message `copilot_cache_control` | ✅ accepted, no measured incremental benefit on tested GPT/Gemini models | vscode-source | (covered by research harness, not strict probe) | Preserved for passthrough callers; not synthesized. |
 
 ## Top-level body fields
 
@@ -182,11 +196,11 @@ Resolution of the long-standing `tooltype_web_search_20250305` "inconclusive" ro
 
 | Endpoint | Tool shape sent | Direct upstream Copilot | End-to-end through proxy | Probe id |
 |---|---|---|---|---|
-| `/v1/messages` | `tools[].type=web_search_20250305` (Anthropic native) | ❌ 400 `unsupported_value: "The use of the web search tool is not supported."` | ✅ 200 (proxy intercepts in `processWebSearch`, fulfils via Copilot `/mcp` server-side, strips tool, injects results in `system`) | `web_search_anthropic_tool_messages` |
+| `/v1/messages` | `tools[].type=web_search_20250305` (Anthropic native) | ❌ 400 `unsupported_value: "The use of the web search tool is not supported."` | ✅ 200 (proxy intercepts in `processWebSearch`, fulfils via Copilot `/mcp` server-side, strips the tool, and appends an unmarked result block plus authoritative tail after the stable system prefix) | `web_search_anthropic_tool_messages` |
 | `/v1/responses` | `tools[].type=web_search_preview` (OpenAI Responses native) | ✅ 200 — model invokes natively; output stream contains `web_search_call` block (action.queries[]) followed by `message` | ✅ 200 (proxy passes through; no MCP hop) | `web_search_responses_preview` |
 | `/v1/responses` | `tools[].type=web_search_preview_2025_03_11` (versioned variant) | ✅ 200 — model invokes natively (same shape as bare preview) | (untested via proxy — covered by upstream confirmation) | (TODO) |
-| `/v1/responses` | `tools[].type=web_search` (bare/legacy) | ✅ 200 — body validator accepts AND model invokes natively (proven with real query). Comment in `src/routes/responses/handler.ts:314-316` saying Copilot rejects this is now stale. | ✅ 200 — but proxy strips the `web_search` tool and substitutes MCP results in `instructions` instead, so the model never gets the chance to invoke natively | (no probe — proxy strips so untestable end-to-end without bypass) |
-| `/v1/chat/completions` | `tools[].type=web_search` | ❌ 400 `invalid_request_body: "Invalid 'tools[0].function.name': empty string."` (validator only accepts strict OpenAI function tools) | ✅ 200 (proxy intercepts in `injectWebSearchIfNeeded`, fulfils via MCP, strips tool, prepends results to `system` message) | `web_search_chat_completions` |
+| `/v1/responses` | `tools[].type=web_search` (bare/legacy) | ✅ 200 — body validator accepts AND model invokes natively (proven with real query). Comment in `src/routes/responses/handler.ts:314-316` saying Copilot rejects this is now stale. | ✅ 200 — but proxy strips the `web_search` tool and inserts MCP results as a later system input item, preserving prior instructions/system prefix | (no probe — proxy strips so untestable end-to-end without bypass) |
+| `/v1/chat/completions` | `tools[].type=web_search` | ❌ 400 `invalid_request_body: "Invalid 'tools[0].function.name': empty string."` (validator only accepts strict OpenAI function tools) | ✅ 200 (proxy intercepts in `injectWebSearchIfNeeded`, fulfils via MCP, strips the tool, and inserts results after leading stable system messages) | `web_search_chat_completions` |
 | `/v1/chat/completions` | `tools[].type=web_search_preview` | ❌ 400 (same shape error) | ✅ 200 (same proxy strip+substitute path as above) | (TODO — same code path as above) |
 | `/v1/chat/completions` | top-level `web_search_options: {}` (gpt-4o-search-preview style) | ✅ 200 (validator accepts) — but vanilla `gpt-4o` has no native search wiring; model returns "I cannot provide real-time data, knowledge ends Oct 2023". Field is silently ignored. | (proxy passthrough — no `web_search_options` strip) | (TODO) |
 

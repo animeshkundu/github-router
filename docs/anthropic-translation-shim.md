@@ -194,6 +194,30 @@ Both surface a `stop_reason` with the same precedence: a truncated (max-output)
 response is `max_tokens` even when a partial tool call is present; else a tool
 call → `tool_use`; else `end_turn`.
 
+### Prompt caching and usage accounting
+
+Translated GPT-5.6 conversations use Copilot's explicit Responses cache mode
+when the stable system/tool prefix is large enough. The stable system prefix is
+emitted as a system `input_text` carrying
+`prompt_cache_breakpoint:{mode:"explicit"}`; volatile system suffixes such as
+web-search results remain in later unmarked system input items. The request also
+carries an opaque SHA-256-derived `prompt_cache_key` and
+`prompt_cache_options:{mode:"explicit",ttl:"30m"}`. The key contains no prompt,
+path, repository, user, or raw session data. Disable this policy with
+`GH_ROUTER_DISABLE_GPT56_EXPLICIT_CACHE=1`.
+
+Gemini, Grok, GPT-5.5, and older GPT/Codex models remain on provider-managed
+implicit caching because no tested explicit field improved reuse. Public
+`/v1/responses` and `/v1/chat/completions` passthrough requests remain
+caller-owned and are not given synthetic cache fields.
+
+OpenAI usage totals include cached and cache-write input. The shim normalizes
+them into disjoint Anthropic fields: `input_tokens` is ordinary uncached input,
+`cache_read_input_tokens` is reused input, and
+`cache_creation_input_tokens` is newly written input. This prevents the prior
+double count that reported the inclusive OpenAI total as Anthropic
+`input_tokens` while also reporting cache reads.
+
 **Truncation guard.** A stream that ends WITHOUT its terminal marker (a
 `/responses` stream with no `completed`/`incomplete`/`failed`, or a chat stream
 with no `[DONE]`) was cut mid-flight — the underlying event iterator returns-done

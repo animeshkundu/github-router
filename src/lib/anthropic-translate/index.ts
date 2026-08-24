@@ -171,6 +171,7 @@ export async function handleNonClaudeResponses(
     result as ResponsesApiResponse,
     opts.modelId,
   )
+  const usage = anthropic.usage
 
   logRequest(
     {
@@ -178,8 +179,13 @@ export async function handleNonClaudeResponses(
       path: routePath,
       model: opts.originalModel,
       resolvedModel: opts.modelId,
-      inputTokens: anthropic.usage.input_tokens,
-      outputTokens: anthropic.usage.output_tokens,
+      inputTokens:
+        usage.input_tokens
+        + usage.cache_read_input_tokens
+        + usage.cache_creation_input_tokens,
+      outputTokens: usage.output_tokens,
+      cacheReadTokens: usage.cache_read_input_tokens,
+      cacheWriteTokens: usage.cache_creation_input_tokens,
       status: 200,
     },
     opts.model,
@@ -279,6 +285,7 @@ export async function handleNonClaudeChat(
     result as ChatCompletionResponse,
     opts.modelId,
   )
+  const usage = anthropic.usage
 
   logRequest(
     {
@@ -286,8 +293,13 @@ export async function handleNonClaudeChat(
       path: routePath,
       model: opts.originalModel,
       resolvedModel: opts.modelId,
-      inputTokens: anthropic.usage.input_tokens,
-      outputTokens: anthropic.usage.output_tokens,
+      inputTokens:
+        usage.input_tokens
+        + usage.cache_read_input_tokens
+        + usage.cache_creation_input_tokens,
+      outputTokens: usage.output_tokens,
+      cacheReadTokens: usage.cache_read_input_tokens,
+      cacheWriteTokens: usage.cache_creation_input_tokens,
       status: 200,
     },
     opts.model,

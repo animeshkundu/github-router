@@ -51,6 +51,10 @@ import { events } from "fetch-event-stream"
 import { HTTPError } from "~/lib/error"
 import { isBudgetClaudeLead } from "~/lib/port"
 import {
+  applyClaudeCachePolicy,
+  applyResponsesCachePolicy,
+} from "~/lib/prompt-cache"
+import {
   EFFORT_ORDER,
   bucketEffort,
   clampEffort,
@@ -752,7 +756,7 @@ async function runAdvisor(
   const useResponses = advisorUsesResponses(resolvedAdvisorModel)
 
   if (useResponses) {
-    const payload: ResponsesPayload = {
+    const payload = applyResponsesCachePolicy({
       model: resolvedAdvisorModel,
       instructions: advisorSystem,
       input: [
@@ -767,7 +771,7 @@ async function runAdvisor(
       // advisor adds most of its value on the FIRST call (per cc-backup
       // ADVISOR_TOOL_INSTRUCTIONS line 31), so don't be cheap.
       reasoning: { effort: advisorEffort },
-    }
+    } satisfies ResponsesPayload, { workload: "reusable-prefix" })
     const response = (await withTransientRetry(
       () => createResponses(payload, undefined, signal),
       { signal, label: resolvedAdvisorModel },
@@ -823,7 +827,7 @@ async function runAdvisor(
     limits?.max_non_streaming_output_tokens
     ?? limits?.max_output_tokens
     ?? ADVISOR_FALLBACK_MAX_OUTPUT_TOKENS
-  const advisorBody = JSON.stringify({
+  const advisorBody = applyClaudeCachePolicy(JSON.stringify({
     model: resolvedAdvisorModel,
     max_tokens: maxTokens,
     system: advisorSystem,
@@ -847,7 +851,7 @@ async function runAdvisor(
             : {}),
         }
       : {}),
-  })
+  }), { workload: "reusable-prefix" })
   const response = await withTransientRetry(
     () => createMessages(advisorBody, {}, signal),
     { signal, label: resolvedAdvisorModel },

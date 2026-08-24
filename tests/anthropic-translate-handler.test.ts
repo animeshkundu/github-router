@@ -960,7 +960,15 @@ describe("/v1/messages branch routing", () => {
     expect(urls.some((u) => u.includes("/responses"))).toBe(true)
     expect(payload.tools).toBeUndefined()
     expect(payload.tool_choice).toBeUndefined()
-    expect(stringFrom(payload.instructions)).toContain("Search result body")
+    const input = arrayFrom(payload.input)
+    expect(
+      input.some(
+        (item) =>
+          isRecord(item)
+          && item.role === "system"
+          && stringFrom(item.content).includes("Search result body"),
+      ),
+    ).toBe(true)
   })
 
   test("count_tokens with a gpt model forwards to native count_tokens and returns input_tokens", async () => {

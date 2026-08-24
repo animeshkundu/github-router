@@ -4,6 +4,10 @@ import path from "node:path"
 import consola from "consola"
 import type { Context } from "hono"
 
+import {
+  applyClaudeCachePolicy,
+  applyResponsesCachePolicy,
+} from "~/lib/prompt-cache"
 import { MCP_WORKSPACE_HEADER } from "~/lib/mcp-workspace-header"
 import { loadPeerImages } from "~/lib/peer-attachments"
 import { state } from "~/lib/state"
@@ -778,7 +782,7 @@ export async function dispatchModelCall(args: {
   const resolvedModel = resolveModel(args.model)
 
   if (args.endpoint === "/v1/responses") {
-    const payload: ResponsesPayload = {
+    const payload = applyResponsesCachePolicy({
       model: resolvedModel,
       instructions: args.instructions,
       input: [
@@ -798,7 +802,7 @@ export async function dispatchModelCall(args: {
       // directly. Copilot's translator buckets to its own internal
       // levels (CLAUDE.md "Thinking-mode translation").
       reasoning: { effort: args.effort },
-    }
+    } satisfies ResponsesPayload, { workload: "reusable-prefix" })
     const response = (await withTransientRetry(
       () => createResponses(payload, undefined, args.signal),
       { signal: args.signal, label: resolvedModel },
@@ -826,7 +830,7 @@ export async function dispatchModelCall(args: {
       : args.effort === "medium" ? 8192
       : args.effort === "high" ? 16384
       : 32768  // xhigh
-    const body = JSON.stringify({
+    const body = applyClaudeCachePolicy(JSON.stringify({
       model: resolvedModel,
       max_tokens: maxTokens,
       system: args.instructions,
@@ -849,7 +853,7 @@ export async function dispatchModelCall(args: {
             }
           : { role: "user", content: args.userText },
       ],
-    })
+    }), { workload: "reusable-prefix" })
     const response = await withTransientRetry(
       () => createMessages(body, undefined, args.signal),
       { signal: args.signal, label: resolvedModel },

@@ -10,6 +10,7 @@ import {
 import { parsedToChatPayload } from "~/lib/anthropic-translate/chat-request"
 import type { AnthropicStreamEvent } from "~/lib/anthropic-translate/anthropic-sse"
 import { synthAnthropicFromResponses } from "~/lib/anthropic-translate/responses-egress"
+import { WEB_SEARCH_RESULT_INSTRUCTION } from "~/lib/web-search-context"
 import type { Model } from "~/services/copilot/get-models"
 
 const MODEL_ID = "gpt-5.5"
@@ -185,6 +186,67 @@ describe("anthropic-translate request mapping", () => {
       },
     ])
     expect(hasOwnKeyDeep(payload, "cache_control")).toBe(false)
+  })
+
+  test("gpt-5.6 translates a long stable system prefix to explicit caching", () => {
+    const stable = "stable ".repeat(800)
+    const { payload } = buildFor("gpt-5.6-sol", {
+      system: stable,
+      messages: [{ role: "user", content: "dynamic" }],
+    })
+    expect(payload.instructions).toBeUndefined()
+    expect(payload.prompt_cache_options).toEqual({
+      mode: "explicit",
+      ttl: "30m",
+    })
+    expect(payload.prompt_cache_key).toMatch(/^ghr-cache-v1-[0-9a-f]{48}$/)
+    expect(payload.input).toEqual([
+      {
+        role: "system",
+        content: [{
+          type: "input_text",
+          text: stable,
+          prompt_cache_breakpoint: { mode: "explicit" },
+        }],
+      },
+      { role: "user", content: "dynamic" },
+    ])
+  })
+
+  test("router web-search suffix stays after the stable translated prefix", () => {
+    const stable = "stable ".repeat(800)
+    const search = "[Web Search Results]\nresult\n[End Web Search Results]"
+    const parsed = parseAnthropicRequest(
+      {
+        system: [
+          {
+            type: "text",
+            text: stable,
+            cache_control: { type: "ephemeral" },
+          },
+          { type: "text", text: search },
+          { type: "text", text: WEB_SEARCH_RESULT_INSTRUCTION },
+        ],
+        messages: [{ role: "user", content: "question" }],
+      },
+      "gpt-5.6-sol",
+    )
+    const payload = parsedToResponsesPayload(parsed)
+    expect(payload.input).toEqual([
+      {
+        role: "system",
+        content: [{
+          type: "input_text",
+          text: stable,
+          prompt_cache_breakpoint: { mode: "explicit" },
+        }],
+      },
+      {
+        role: "system",
+        content: `${search}${WEB_SEARCH_RESULT_INSTRUCTION}`,
+      },
+      { role: "user", content: "question" },
+    ])
   })
 
   test("unicode text survives intact into Responses input", () => {
@@ -919,7 +981,7 @@ describe("anthropic-translate request mapping", () => {
     })
     const delta = evs[4]
     expect((delta.delta as Record<string, unknown>).stop_reason).toBe("max_tokens")
-    expect((delta.usage as Record<string, unknown>).input_tokens).toBe(11)
+    expect((delta.usage as Record<string, unknown>).input_tokens).toBe(8)
     expect((delta.usage as Record<string, unknown>).output_tokens).toBe(7)
     expect((delta.usage as Record<string, unknown>).cache_read_input_tokens).toBe(3)
   })

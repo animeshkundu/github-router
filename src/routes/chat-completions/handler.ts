@@ -5,6 +5,7 @@ import consola from "consola"
 import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
+import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { logRequest, requestLogVisible } from "~/lib/request-log"
 import { UPSTREAM_INACTIVITY_TIMEOUT_MS } from "~/lib/port"
@@ -13,6 +14,10 @@ import { buildOpenAIErrorEvent, isControllerClosedError, logStreamError, readIte
 import { getTokenCount } from "~/lib/tokenizer"
 import { guardChatPayload } from "~/lib/tool-loop-guard"
 import { isNullish, resolveModel } from "~/lib/utils"
+import {
+  buildWebSearchContext,
+  injectChatWebSearchContext,
+} from "~/lib/web-search-context"
 import {
   createChatCompletions,
   type ChatCompletionResponse,
@@ -153,6 +158,9 @@ export async function handleCompletion(c: Context) {
   const outputTokens = !isStreaming
     ? (response as ChatCompletionResponse).usage?.completion_tokens
     : undefined
+  const responseUsage = !isStreaming
+    ? normalizeOpenAIUsage((response as ChatCompletionResponse).usage)
+    : undefined
 
   logRequest(
     {
@@ -160,8 +168,10 @@ export async function handleCompletion(c: Context) {
       path: c.req.path,
       model: originalModel,
       resolvedModel,
-      inputTokens,
+      inputTokens: responseUsage?.totalInput ?? inputTokens,
       outputTokens,
+      cacheReadTokens: responseUsage?.cacheRead,
+      cacheWriteTokens: responseUsage?.cacheWrite,
       status: 200,
       streaming: isStreaming,
     },
@@ -334,32 +344,7 @@ async function injectWebSearchIfNeeded(
   if (query) {
     try {
       const results = await searchWeb(query)
-      const searchContext = [
-        "[Web Search Results]",
-        results.content,
-        "",
-        results.references.map((r) => `- [${r.title}](${r.url})`).join("\n"),
-        "[End Web Search Results]",
-      ].join("\n")
-
-      // Prepend to existing system message or inject a new one
-      const systemMsg = payload.messages.find((msg) => msg.role === "system")
-      if (systemMsg) {
-        const existingContent =
-          typeof systemMsg.content === "string" ? systemMsg.content
-          : Array.isArray(systemMsg.content) ?
-            systemMsg.content
-              .filter((p) => p.type === "text")
-              .map((p) => ("text" in p ? p.text : ""))
-              .join("\n")
-          : ""
-        systemMsg.content = `${searchContext}\n\n${existingContent}`
-      } else {
-        payload.messages.unshift({
-          role: "system",
-          content: searchContext,
-        })
-      }
+      injectChatWebSearchContext(payload, buildWebSearchContext(results))
     } catch (error) {
       consola.warn("Web search failed, continuing without results:", error)
     }

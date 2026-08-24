@@ -162,7 +162,15 @@ test("/responses function_call SSE assembles into a Pi toolCall", async () => {
         type: "response.completed",
         response: {
           status: "completed",
-          usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
+          usage: {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            input_tokens_details: {
+              cached_tokens: 3,
+              cache_write_tokens: 2,
+            },
+          },
         },
       },
     ]),
@@ -179,8 +187,10 @@ test("/responses function_call SSE assembles into a Pi toolCall", async () => {
     arguments: { tabId: 1, action: "goto" },
   })
   expect(final.stopReason).toBe("toolUse")
-  expect(final.usage.input).toBe(10)
+  expect(final.usage.input).toBe(5)
   expect(final.usage.output).toBe(5)
+  expect(final.usage.cacheRead).toBe(3)
+  expect(final.usage.cacheWrite).toBe(2)
   expect(final.usage.totalTokens).toBe(15)
 
   // Pi event protocol: start → toolcall_start → toolcall_delta(s) → toolcall_end → done.

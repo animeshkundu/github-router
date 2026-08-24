@@ -215,13 +215,14 @@ describe("synthAnthropicFromChat — sequence", () => {
     const evs = await collect([
       { choices: [{ index: 0, delta: { content: "x" }, finish_reason: null }] },
       { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
-      { choices: [], usage: { prompt_tokens: 20, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 4 } } },
+      { choices: [], usage: { prompt_tokens: 20, completion_tokens: 7, prompt_tokens_details: { cached_tokens: 4, cache_write_tokens: 3 } } },
       { choices: [], usage: { prompt_tokens: 0, completion_tokens: 0 } },
     ])
     const delta = evs.find((e) => e.type === "message_delta")!
-    expect((delta.usage as Record<string, unknown>).input_tokens).toBe(20)
+    expect((delta.usage as Record<string, unknown>).input_tokens).toBe(13)
     expect((delta.usage as Record<string, unknown>).output_tokens).toBe(7)
     expect((delta.usage as Record<string, unknown>).cache_read_input_tokens).toBe(4)
+    expect((delta.usage as Record<string, unknown>).cache_creation_input_tokens).toBe(3)
   })
 
   test("truncated stream (no terminal finish_reason) throws", async () => {

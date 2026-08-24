@@ -41,6 +41,7 @@ import {
   makeMessageStop,
   makeTextDelta,
 } from "./anthropic-sse"
+import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 
 type AnyRecord = Record<string, unknown>
 
@@ -66,7 +67,11 @@ interface ChatSseChunk {
 interface ChatUsage {
   prompt_tokens?: number
   completion_tokens?: number
-  prompt_tokens_details?: { cached_tokens?: number }
+  prompt_tokens_details?: {
+    cached_tokens?: number
+    cache_write_tokens?: number
+    cache_creation_tokens?: number
+  }
 }
 
 /** Synthesize a matchable Anthropic tool_use id when the upstream id is absent. */
@@ -88,12 +93,12 @@ function parseToolArgs(raw: unknown): Record<string, unknown> {
 }
 
 function anthropicUsageFromChat(u: ChatUsage | undefined): AnthropicUsage {
-  if (!u) return {}
+  const normalized = normalizeOpenAIUsage(u)
   return {
-    input_tokens: u.prompt_tokens ?? 0,
-    output_tokens: u.completion_tokens ?? 0,
-    cache_read_input_tokens: u.prompt_tokens_details?.cached_tokens ?? 0,
-    cache_creation_input_tokens: 0,
+    input_tokens: normalized.uncachedInput,
+    output_tokens: normalized.output,
+    cache_read_input_tokens: normalized.cacheRead,
+    cache_creation_input_tokens: normalized.cacheWrite,
   }
 }
 
@@ -233,6 +238,7 @@ export async function* synthAnthropicFromChat(
   let usageIn = 0
   let usageOut = 0
   let usageCacheRead = 0
+  let usageCacheWrite = 0
   // The last finish_reason seen — informs stop_reason ONLY (null → end_turn).
   let finishReason: string | null = null
   // The `[DONE]` sentinel is the authoritative clean-end marker. A stream that
@@ -267,6 +273,12 @@ export async function* synthAnthropicFromChat(
       usageCacheRead = Math.max(
         usageCacheRead,
         chunk.usage.prompt_tokens_details?.cached_tokens ?? 0,
+      )
+      usageCacheWrite = Math.max(
+        usageCacheWrite,
+        chunk.usage.prompt_tokens_details?.cache_write_tokens
+          ?? chunk.usage.prompt_tokens_details?.cache_creation_tokens
+          ?? 0,
       )
     }
 
@@ -351,11 +363,19 @@ export async function* synthAnthropicFromChat(
   }
 
   const stopReason = chatStopReason(finishReason, sawTool)
+  const usage = normalizeOpenAIUsage({
+    prompt_tokens: usageIn,
+    completion_tokens: usageOut,
+    prompt_tokens_details: {
+      cached_tokens: usageCacheRead,
+      cache_write_tokens: usageCacheWrite,
+    },
+  })
   yield makeMessageDelta(stopReason, null, {
-    input_tokens: usageIn,
-    output_tokens: usageOut,
-    cache_read_input_tokens: usageCacheRead,
-    cache_creation_input_tokens: 0,
+    input_tokens: usage.uncachedInput,
+    output_tokens: usage.output,
+    cache_read_input_tokens: usage.cacheRead,
+    cache_creation_input_tokens: usage.cacheWrite,
   })
   yield makeMessageStop()
 }

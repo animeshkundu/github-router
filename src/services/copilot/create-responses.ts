@@ -241,6 +241,12 @@ export interface ResponsesPayload {
   store?: boolean
   metadata?: Record<string, string>
   previous_response_id?: string
+  prompt_cache_key?: string
+  prompt_cache_options?: {
+    mode: "explicit" | "implicit"
+    ttl?: "30m" | "1h" | "24h"
+  }
+  prompt_cache_retention?: string
   reasoning?: { effort?: string; summary?: string }
   [key: string]: unknown
 }
