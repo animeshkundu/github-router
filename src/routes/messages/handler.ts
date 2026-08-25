@@ -41,6 +41,7 @@ import {
 } from "~/lib/web-search-context"
 import {
   ADVISOR_INTERNAL_TOOL_NAME,
+  FAST_ADVISOR_TOOL_INSTRUCTIONS,
   buildAdvisorStream,
   injectAdvisorTool,
   isAdvisorRequested,
@@ -154,13 +155,10 @@ function stripWebSearchTool(body: AnyRecord): void {
 
 /**
  * Strip the injected `__anthropic_advisor` tool (and any Anthropic-native
- * `advisor_*` typed tool) from a request body. Used ONLY on the non-Claude
- * shim path: ADVISOR's server-side translate-loop (buildAdvisorStream) lives
- * on the native /v1/messages route, so a non-Claude model has no handler for
- * the tool and it must be removed before forwarding — otherwise the model
- * could emit a tool_use that nothing fulfils. Mirrors stripWebSearchTool's
- * tool_choice cleanup. Returns the original string (same reference) when
- * nothing was removed.
+ * `advisor_*` typed tool) from a request body. Used on non-Claude shim paths
+ * without an advisor handler and on authenticated fast Task-subagent requests,
+ * where Advisor is intentionally lead-only. Mirrors stripWebSearchTool's
+ * tool_choice cleanup. Returns the original string when nothing was removed.
  */
 function stripAdvisorTool(rawBody: string): string {
   let body: AnyRecord
@@ -365,7 +363,12 @@ export async function handleCompletion(c: Context) {
   // the advisor-tool- prefix from the outgoing header. We need the raw
   // incoming header to know whether the user asked for ADVISOR.
   const incomingBeta = c.req.header("anthropic-beta")
-  const advisorEnabled = isAdvisorRequested(incomingBeta)
+  const advisorRequested = isAdvisorRequested(incomingBeta)
+  const fastProfileRequest = identity.launch?.profileId === "fast"
+  const fastSubagentRequest =
+    fastProfileRequest && Boolean(c.req.header("x-claude-code-agent-id"))
+  const fastLeadAdvisor = fastProfileRequest && !fastSubagentRequest
+  const advisorEnabled = advisorRequested && !fastSubagentRequest
 
   const fastPreprocess = preprocessFastRequest(rawBody, identity.launch)
   if (fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
@@ -389,6 +392,14 @@ export async function handleCompletion(c: Context) {
   // Scoped narrowly to advisor pairs to avoid the ID round-trip trap
   // (see src/lib/sanitize-anthropic-body.ts header comment).
   finalBody = sanitizeAnthropicBody(finalBody)
+  // Fast Advisor is transcript-aware specifically because it sees the primary
+  // lead's conversation. A Task subagent has a different, narrower transcript,
+  // so exposing Advisor there adds cost and conflicting authority without the
+  // intended context. Strip both Claude Code's native typed tool and any
+  // replay-injected proxy tool before routing.
+  if (fastSubagentRequest) {
+    finalBody = stripAdvisorTool(finalBody)
+  }
 
   // Runaway-tool-loop guard. Placed before the Claude-passthrough vs
   // translation-shim fork so one site covers all three branches. Detection is
@@ -417,7 +428,10 @@ export async function handleCompletion(c: Context) {
     // ADVISOR_TOOL_INSTRUCTIONS as description) so the model knows
     // when to call it. Tool name uses double-underscore prefix to
     // avoid collision with any user MCP server's `advisor`.
-    finalBody = injectAdvisorTool(finalBody)
+    finalBody = injectAdvisorTool(
+      finalBody,
+      fastLeadAdvisor ? FAST_ADVISOR_TOOL_INSTRUCTIONS : undefined,
+    )
     consola.info(
       "ADVISOR enabled for this request — injecting __anthropic_advisor tool; will translate tool_use → server_tool_use{advisor} on the SSE stream",
     )
@@ -550,7 +564,8 @@ export async function handleCompletion(c: Context) {
           // type simplicity/back-compat with the default-`continueTurn` path.
           requestHeaders: {},
           advisorModel: advisorChoice.model,
-          advisorEscalated: advisorChoice.escalated || advisorChoice.fastProfile,
+          advisorEscalated: advisorChoice.escalated,
+          advisorFastProfile: advisorChoice.fastProfile,
           advisorEffort: resolveAdvisorEffort(rawBody, advisorChoice.model, true),
           externalAborter: fastAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {

@@ -1139,6 +1139,8 @@ describe("fastProfile rendering (buildPeerAwarenessSnippet / buildPeerAwarenessS
     for (const present of ["`scout`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
       expect(snippet).toContain(present)
     }
+    expect(snippet).toContain("lead-only")
+    expect(snippet).toContain("available to the lead, reviewer, and planner")
     for (const removed of [
       "gemini_critic", "codex_critic", "codex_reviewer", "opus_critic",
       "gemini_reviewer", "peer-review-coordinator", "worker-explore",
@@ -1154,6 +1156,7 @@ describe("fastProfile rendering (buildPeerAwarenessSnippet / buildPeerAwarenessS
     for (const present of ["`scout`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
       expect(summary).toContain(present)
     }
+    expect(summary).toContain("lead-only")
     for (const removed of [
       "gemini_critic", "peer-review-coordinator", "worker-*", "stand_in",
       "`implementer-fast`", "`reviewer-fast`", "`brainstorm`", "`scribe`",

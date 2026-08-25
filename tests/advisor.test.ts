@@ -10,6 +10,7 @@ import {
   ADVISOR_INTERNAL_TOOL_NAME,
   ADVISOR_MAX_CONVERSATION_CHARS,
   ADVISOR_TOOL_INSTRUCTIONS,
+  FAST_ADVISOR_TOOL_INSTRUCTIONS,
   injectAdvisorTool,
   isAdvisorRequested,
   renderConversationAsText,
@@ -140,6 +141,24 @@ describe("injectAdvisorTool (Phase I)", () => {
     expect(parsed.tools).toHaveLength(1)
     expect(parsed.tools[0].name).toBe(ADVISOR_INTERNAL_TOOL_NAME)
     expect(parsed.tools[0].description).toBe(ADVISOR_TOOL_INSTRUCTIONS)
+  })
+
+  test("fast policy replaces a replay-injected standard description", () => {
+    const body = JSON.stringify({
+      model: "gpt-5.6-luna",
+      messages: [],
+      tools: [
+        {
+          name: ADVISOR_INTERNAL_TOOL_NAME,
+          description: ADVISOR_TOOL_INSTRUCTIONS,
+          input_schema: { type: "object" },
+        },
+      ],
+    })
+    const parsed = JSON.parse(
+      injectAdvisorTool(body, FAST_ADVISOR_TOOL_INSTRUCTIONS),
+    ) as { tools: Array<{ description: string }> }
+    expect(parsed.tools[0]?.description).toBe(FAST_ADVISOR_TOOL_INSTRUCTIONS)
   })
 
   test("preserves existing tools array when injecting", () => {

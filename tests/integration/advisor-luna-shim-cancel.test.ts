@@ -160,6 +160,7 @@ test(
     let lunaResponsesCallCount = 0
     let advisorChatCallCount = 0
     let advisorSignalAborted = false
+    let advisorSystemPrompt = ""
     let responsesCallStartedAfterCancel = false
     let advisorCallStartedAfterCancel = false
     let cancelObservedAt = -1
@@ -175,6 +176,12 @@ test(
         // to fire through the threaded callerSignal — same pattern as the
         // Claude-lead twin test's /responses advisor mock.
         advisorChatCallCount++
+        const advisorBody = JSON.parse(String(init?.body ?? "{}")) as {
+          messages?: Array<{ role?: string; content?: string }>
+        }
+        advisorSystemPrompt =
+          advisorBody.messages?.find((message) => message.role === "system")?.content
+          ?? ""
         if (cancelObservedAt > 0) advisorCallStartedAfterCancel = true
         return new Promise((resolve, reject) => {
           const sig = init?.signal
@@ -333,6 +340,11 @@ test(
       await new Promise((r) => setTimeout(r, 10))
     }
     expect(advisorChatCallCount).toBe(1)
+    expect(advisorSystemPrompt).toContain("non-binding consultant")
+    expect(advisorSystemPrompt).toContain("Do not approve, veto, dictate")
+    expect(advisorSystemPrompt).not.toContain(
+      "Give a directive recommendation and commit to the decision",
+    )
 
     cancelObservedAt = Date.now()
     ac.abort()

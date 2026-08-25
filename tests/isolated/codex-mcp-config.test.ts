@@ -860,6 +860,11 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents.planner!.tools).toContain("mcp__peers__oracle")
       expect(agents.planner!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything(), search: expect.anything() }))
       expect(agents.reviewer!.tools).toBeUndefined()
+      expect(agents.reviewer!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything() }))
+      expect(agents.reviewer!.prompt).toContain("You do not have Advisor")
+      expect(agents.planner!.prompt).toContain("You do not have Advisor")
+      expect(agents.scout!.mcpServers).not.toHaveProperty("peers")
+      expect(agents.implementer!.mcpServers).toBeUndefined()
     })
 
     test("effort round-trips through markdown frontmatter", () => {

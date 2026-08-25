@@ -640,7 +640,7 @@ export function buildPeerAwarenessSnippet(opts: {
     return [
       "## Peer review and advisor",
       "",
-      `This is the fast launch profile. \`mcp__${fastPeersKey}__oracle\` is exact Opus 5 (1M/high), a stateless last-resort consultant after the primary Luna path, Advisor, and reviewer/planner remain stuck. Advisor is the transcript-aware brainstorming, sounding-board, fresh-look, uncertainty, and stuck path.`,
+      `This is the fast launch profile. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for consequential unresolved uncertainty or a genuinely stuck path, not routine progress, waiting, verification, approval, or completion. \`mcp__${fastPeersKey}__oracle\` is exact Opus 5 (1M/high), a stateless last-resort consultant available to the lead, reviewer, and planner.`,
       "",
       `\`mcp__${fastSearchKey}__code\` is semantic-first code search and \`mcp__${fastSearchKey}__web\` surfaces citable sources. Native Task roster: \`scout\` (broad discovery), \`implementer\` (mechanical implementation), \`reviewer\` (repo-aware verification/reproduction), and \`planner\` (Sol plan consultant/approver after Luna's draft). Before implementation obtain planner approval; before declaring done run relevant tests and ask reviewer to verify.${opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` is the opt-in browser surface.` : ""}`,
     ].join("\n")
@@ -809,7 +809,7 @@ export function buildPeerAwarenessSummary(opts: {
       "## Injected capabilities (summary)",
       "",
       "Fast launch profile. Task roster: `scout`, `implementer`, `reviewer`, `planner`. Luna investigates and drafts; `planner` must approve before implementation. Before declaring done, run relevant tests and ask `reviewer` to verify.",
-      `Advisor is the transcript-aware brainstorming/sounding-board/fresh-look path. \`mcp__${key("peers")}__oracle\` is exact Opus 5 (1M/high), stateless and last resort. \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""}`,
+      `Advisor is optional, non-binding, transcript-aware, and lead-only; use it for consequential unresolved uncertainty, not routine progress or workflow gates. \`mcp__${key("peers")}__oracle\` is exact Opus 5 (1M/high), stateless and last resort for the lead, reviewer, and planner. \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""}`,
     ].join("\n")
   }
   const renderNative = (name: NativeAgentName): string => {
