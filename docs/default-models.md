@@ -19,13 +19,234 @@ The `claude` and `codex` subcommands default to the latest Copilot-supported mod
 
 **On a budget lead this inverts.** When the lead is a lighter Claude tier (`isBudgetClaudeLead`), Sonnet IS the lead, so seeding the small/fast tier to Sonnet leaves no cheap tier at all — background ops would cost the same as real work. Both `ANTHROPIC_SMALL_FAST_MODEL` and the `ANTHROPIC_DEFAULT_HAIKU_MODEL` picker row therefore drop to Haiku, together: leaving the row on Sonnet while background ops ran on Haiku would make the cheap-tier pick disagree with the tier actually in use. The env vars get the Anthropic DASHED `claude-haiku-4-5` (`BUDGET_SMALL_FAST_SLUG`) because Claude Code's `/model` registry is keyed on Anthropic slugs, while the presence probe tests Copilot's DOTTED `claude-haiku-4.5` (`BUDGET_SMALL_FAST_CATALOG_ID`) because that is the id the catalog carries — the same dashed-vs-dotted trap documented for `claude-opus-5` above. A catalog without that entry falls back to `claude-sonnet-5` rather than naming a model the account cannot reach.
 
-### `-m fast`
+### `-m fast` is now a distinct Luna launch profile, not a Sonnet alias
 
-`-m fast` is a named alias for the budget lead, resolved by `resolveLeadSlugArg` in `src/lib/port.ts` alongside the `-m 4.7` / `-m 4.8` Opus-family shorthand, and like that shorthand it leaves `usingDefault` false so the fallback walk cannot override it. It resolves to an ordinary slug and sets no mode flag: every budget-mode surface keys off the RESOLVED lead through the single `isBudgetClaudeLead` predicate, so `-m fast` and `-m claude-sonnet-5` produce identical sessions. Besides the tier above, budget mode changes the advisor's model (see [`unsupported-features.md`](unsupported-features.md)) and the ordering of the injected delegation prose.
+`-m fast` used to be a named alias that resolved to `claude-sonnet-5` and therefore
+produced a session byte-identical to `-m claude-sonnet-5` (both keyed off the same
+`isBudgetClaudeLead` predicate). It now points to a dedicated **Luna** lead (`gpt-5.6-luna`) with its own
+narrowed agent/MCP surface — see [Fast launch
+profile](#fast-launch-profile--m-fast). Three model identities that must not be
+confused:
 
-Like every other lead branch, `-m fast` is `[1m]`-decorated against the live catalog — see [1M context opt-in](#1m-context-opt-in-1m-literal-bracket-suffix) below. That identity between `-m fast` and `-m claude-sonnet-5` includes the context budget: decorating one branch and not the other would reintroduce through the context window exactly the divergence the alias exists to avoid.
+- **`-m fast`** — the new fast launch profile: Luna lead, exactly `scout` /
+  `implementer-fast` / `reviewer-fast` natives, only the `gemini-critic` persona,
+  and only the `peers`/`search` MCP groups.
+- **`-m gpt-5.6-luna`** (direct Luna selection) — an ordinary standard-surface
+  launch on the Luna model. It does NOT imply the fast profile: the profile is
+  selected from the raw parsed alias (`fast`, trimmed/case-insensitive), never
+  inferred from the resolved model id, so this keeps the full native roster,
+  worker/orchestrate MCP groups, and all peer personas.
+- **`-m claude-sonnet-5`** (or any other lighter Claude-family pick) — still
+  reaches **budget mode** via the unchanged, Claude-family-only
+  `isBudgetClaudeLead` predicate (advisor escalation, Haiku small/fast tier,
+  delegation-prose ordering — see the paragraph above). Budget mode and the fast
+  profile are now two independent axes: one is keyed on the resolved lead being a
+  lighter Claude model, the other on the literal `-m fast` alias.
 
-Fallback chains only fire on the implicit-default path — explicit `-m`/`--model` is always respected as-is. Constants live in `src/lib/port.ts`.
+Explicit `-m`/`--model` is always respected as-is; fallback chains fire only on
+the implicit-default path. Constants live in `src/lib/port.ts`.
+
+## Fast launch profile (`-m fast`)
+
+`github-router claude -m fast` selects a deliberately lean, Luna-led launch
+profile distinct from an ordinary Opus or Sonnet launch. The profile is an
+explicit abstraction (`src/lib/launch-profile.ts`) with frozen `standard` and
+`fast` descriptors, selected purely from the raw `-m` argument being `fast`
+(trimmed, case-insensitive) — never inferred from the resolved model id, so a
+direct `-m gpt-5.6-luna` launch stays on the standard surface.
+
+### Lead and startup validation
+
+The fast lead is `gpt-5.6-luna`, requiring live catalog presence, `tool_calls`,
+and at least 1M advertised context (via `withOneMSuffixForLead`, same detector the
+standard lead branches use). On `-m fast` startup the proxy additionally validates
+that the live catalog carries `grok-4.6` (tool calls, `medium` effort, usable
+prompt-window metadata) and `gemini-3.7-flash` (tool calls, 1M context, `high`
+effort, chat-capable) — these are prerequisites for constructing the *exact* fast
+roster (the fast `reviewer-fast` and `gemini-critic` targets), not an allowlist the
+user is later restricted to. If any prerequisite is missing or invalid, launch
+**fails** rather than substituting a different model or silently shipping a
+partial roster: the failure message lists every missing/invalid model and gives
+the rollback command, plain `github-router claude`. Once a fast launch is up,
+switching the global picker to Sol or Opus changes only the active lead — it does
+not rerun startup validation or widen the profile's tool/agent surface.
+
+### Exact fast roster
+
+The fast profile emits exactly three native subagents, each pinned to a specific
+model AND effort via `effort:` frontmatter (an extension to `PeerAgentDefinition`
+in `src/lib/codex-mcp-config.ts`), with single-entry no-fallback resolution:
+
+| Agent | Model | Effort |
+|---|---|---|
+| `scout` | `gpt-5.6-luna[1m]` | `high` |
+| `implementer-fast` | `gpt-5.6-luna[1m]` | `max` |
+| `reviewer-fast` | `grok-4.6` | `medium` |
+
+Unlike the standard surface, where a subagent's reasoning effort follows the
+Claude Code picker (see [Native subagents](../CLAUDE.md) in `CLAUDE.md`), the
+fast roster's per-agent effort is pinned in frontmatter and does not follow a
+mid-session picker change. Each of these three starts with its own fresh context
+window rather than inheriting the lead's or another subagent's transcript, so the
+Grok reviewer is never handed a 1M-token shared history it can't safely hold (see
+[Grok context accounting](#grok-context-accounting) below).
+
+The fast profile registers only the `peers` and `search` MCP groups — `workers`
+and `orchestrate` are omitted entirely, along with the peer-review coordinator,
+worker dispatcher subagents, worker/orchestration skills, the UserPromptSubmit
+worker-steer prose, and the worker PreToolUse guard. These exclusions are hard
+denies: no environment flag or catalog gate can re-enable `workers`/`orchestrate`
+inside a fast session. Only one peer persona is emitted, `gemini-critic`, backed
+by Gemini 3.7 Flash at `defaultEffort: high` — no coordinator, no other critics.
+The deterministic structural Stop gate stays on regardless of profile (it is
+MCP-independent and is the executable correctness floor).
+
+Every fast-profile description, the `OPERATING_DEFAULTS_DIRECTIVE`, the peer
+awareness snippet, and the startup persona banner are roster-aware: fast prose
+must not name `implementer`, `reviewer`, `brainstorm`, `scribe`,
+`general-purpose-fast`, the coordinator, any worker tool, or a worker/orchestration
+skill — only `scout`, `implementer-fast`, `reviewer-fast`, `gemini-critic`
+(Gemini 3.7 Flash), and the Gemini 3.7 Flash Advisor (see below). Standard-profile
+prose is unaffected (byte-identical except for the globally-replaced gateway
+picker rows and advisor-default changes described below).
+
+### Three Luna effort aliases
+
+Because the fast driver, the `/model` picker's Sonnet-tier row, and its
+Haiku-tier row would otherwise all resolve to the same bare `gpt-5.6-luna`
+catalog id — indistinguishable after canonicalization — the fast profile
+introduces a small router-owned alias registry (in or alongside
+`src/lib/launch-profile.ts`) so each tier gets its own absent-effort default:
+
+| Router-owned alias | Backing model | Absent-effort default | Role |
+|---|---|---|---|
+| `gh-router-luna-driver-max` | Luna | `max` | fast driver |
+| `gh-router-luna-sonnet-xhigh` | Luna | `xhigh` | `/model` picker Sonnet-tier row in fast mode |
+| `gh-router-luna-haiku-high` | Luna | `high` | `/model` picker Haiku-tier row in fast mode |
+
+The header-only `/v1/messages` identity preflight first authenticates the launch.
+Later, `resolveModelInBody` retains any `[1m]` metadata, resolves the alias
+descriptor, reads an explicit `output_config.effort` or `thinking` budget, applies
+the alias default ONLY when neither is present, then canonicalizes `body.model` to
+the real Luna id before route classification and outbound assembly. The loop guard
+runs before this step but is model-agnostic. Precedence is explicit
+`output_config.effort` > a client thinking budget > the alias/model default. A
+router-owned alias id never reaches Copilot.
+
+**Client UI limitation.** Claude Code's picker may initially label the canonical
+Luna gateway row "high" (or whatever effort the UI infers) while the proxy applies
+the driver alias's `max` default underneath. This is a documented UI cosmetic
+limitation, not a bug to paper over: the proxy does **not** forge GrowthBook
+experiment state and does **not** set `CLAUDE_CODE_EFFORT_LEVEL`, either of which
+would defeat the effort picker for every other model in the session, not just
+Luna.
+
+### Replaced gateway picker rows
+
+`src/lib/server-setup.ts`'s globally-seeded, live-catalog-gated `/model` picker
+rows are being replaced with exactly four (dropping the previous `gpt-5.5` /
+`gpt-5.3-codex` / `gemini-3.5-flash` list and the dynamic Gemini-review row
+append — see the current [Phase 3](anthropic-translation-shim.md#phase-3-native-model-selection-gateway-cache-seed)
+section for what ships today):
+
+1. `gpt-5.6-sol` (display "GPT-5.6 Sol"), `[1m]` when the live catalog permits
+2. `gpt-5.6-luna` (display "GPT-5.6 Luna"), `[1m]` when permitted
+3. `gemini-3.7-flash` (display "Gemini 3.7 Flash"), `[1m]` when permitted
+4. `grok-4.6` (display "Grok 4.6"), always bare at its current 500K window
+
+A row missing from the live catalog is omitted, never substituted with a
+different model. This picker change applies to BOTH standard and fast Claude
+launches — it does not change either surface's active default lead.
+
+### Grok context accounting
+
+Grok 4.6 advertises a 500K total context window but only a 372K maximum prompt
+and a 128K maximum output, with a `low..xhigh` effort ladder. The proxy does
+**not** append `[1m]` to Grok and does **not** pass `--autocompact`: a
+launch-global autocompact setting would incorrectly cap every other 1M model
+(Sol, Luna, Gemini) in the same session after a `/model` switch, and a
+process-global `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override cannot safely be made
+Grok-specific while Claude Code still permits arbitrary bare non-Claude ids or a
+runtime model switch. Grok therefore stays bare: Claude Code assumes the 200K
+default window for its own UI and proactive-compaction heuristics — a
+conservative client-side accounting choice, not a claim that 200K is Grok's real
+runtime ceiling.
+
+The shipped contract deliberately accepts that conservatism: the Grok
+`reviewer-fast` reviewer is locally budgeted as a 200K model even though Copilot
+can accept 372K of prompt, and the fast profile does not depend on exploiting the
+unused ~172K. A request-boundary/loop-budget guard sized from Claude Code's
+*effective local* prompt budget (200K minus actual system/tool/framing reserve —
+necessarily below Grok's live 372K upstream ceiling) must fail VISIBLY rather
+than silently truncate a review; the review artifact itself must stay
+byte-for-byte intact, with only prior tool/history material eligible for
+compaction. A recorded >200K (target 250K) probe documents whether the current
+Claude Code build compacts or refuses at that size — early compaction is not
+treated as an incompatibility, only as a data point.
+
+A pure helper derives (never hardcodes) a future per-model declaration:
+
+```text
+target trigger = floor(max_prompt_tokens * 0.85)
+assumed client window = target trigger + min(max_output_tokens, 20_000)
+```
+
+For Grok 4.6's current catalog entry this yields an **85%-of-prompt trigger of
+316,200** tokens, with Claude Code needing an **assumed window of 336,200**
+(it subtracts a 20K reserve). Neither number is activated yet — only computed and
+tested — pending either a supported per-model client declaration from Claude Code,
+or a fast profile that can block every incompatible bare-model switch and prove
+the override is request/profile scoped. This is a deliberate rejection of unsafe
+global state, not a claim that today's picker set is an exhaustive allowlist of
+what a user may select.
+
+### Gemini 3.7 Flash Advisor on the Luna translation path
+
+The authenticated fast profile makes `__anthropic_advisor` usable again by
+selecting `gemini-3.7-flash` as the Advisor model when the lead is Luna-via-shim
+(normal Opus-lead → Sol and budget-Claude-lead → Opus escalation are unchanged —
+see [`unsupported-features.md`](unsupported-features.md)). This is a
+from-scratch cross-protocol streaming workstream, landed as its own later commit
+so defects have an isolated bisect range: it is not a conditional strip of the
+existing Claude-only Advisor loop or a drop-in reuse of `dispatchModelCall`
+(non-streaming, caller-endpoint-driven; it can only donate request-shaping
+logic). Load-bearing pieces:
+
+- Advisor's default effort becomes `high` (no forced floor), clamped to whichever
+  advisor model is actually selected; an operator pin (`GH_ROUTER_ADVISOR_MODEL`)
+  still wins first.
+- Advisor stripping for non-Claude routes stays unconditional for every profile
+  except the fast Luna profile carrying the advisor beta.
+- `toClientServerToolUseId` becomes total for `/responses` `call_*` ids: it
+  preserves the original replay id, derives a distinct spec-valid client
+  `srvtoolu_*` id with collision-safe indexing, and leaves the existing Claude
+  `toolu_*` path byte-identical.
+- Advisor dispatch is generalized to pick `/responses`, `/chat/completions`, or
+  `/v1/messages` from the Advisor's own live catalog entry, reusing the
+  `dispatchModelCall` request-shaping logic so Gemini receives a real chat
+  payload with `reasoning_effort: high` — it never falls through to the Claude
+  Messages branch.
+- A context-free streaming lead shim entry (extracted from
+  `src/lib/anthropic-translate/index.ts`) returns Anthropic SSE and accepts the
+  caller's own shared `AbortController`, and `buildAdvisorStream` gains an
+  injectable `continueTurn(body, signal)` — defaulting to today's native
+  `createMessages` path, using the extracted shim only for Luna continuations.
+- Deferred advisor history (`server_tool_use{advisor}` / `advisor_tool_result`)
+  is translated into visible neutral text for a shim-routed lead instead of being
+  silently dropped, though a shim-routed lead still drops replayed assistant
+  *thinking* — the Gemini Advisor sees the lead's actions and transcript, not its
+  hidden reasoning.
+- A provider-neutral Advisor event algebra (message start; ordered content-block
+  start/delta/stop; buffered tool calls keyed separately by provider item id and
+  call id; terminal usage/stop; terminal error) governs cancellation, malformed or
+  fragmented JSON, parallel/interleaved tools, and duplicate terminal events, with
+  exactly one `message_start`, monotonic block indices, one-to-one provider-id ↔
+  client-id ↔ replay-id mappings, and exactly-once continuation across the initial
+  lead fetch, the Advisor call, and the continuation fetch.
+
+Gemini 3.7 Flash is a hard fast-profile prerequisite under the exact-roster
+contract described above: its absence fails the fast launch rather than silently
+omitting the Advisor or the `gemini-critic` persona.
 
 ## `/model` tier-default knobs
 

@@ -618,8 +618,33 @@ export function buildPeerAwarenessSnippet(opts: {
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
   groupKeys?: Partial<Record<McpGroup, string>>
+  /** `"fast"` for the fast launch profile: a hard roster RESTRICTION, not a
+   *  catalog-availability signal — every other `*Available` flag on this
+   *  launch is ignored in favor of a short, self-contained fast-profile
+   *  rendering that names only `scout`/`implementer-fast`/`reviewer-fast`,
+   *  `gemini_critic`, and the `peers`/`search` MCP groups. It must never
+   *  name `implementer`/`reviewer`/`brainstorm`/`scribe`/
+   *  `general-purpose-fast`, `peer-review-coordinator`, `workers`/
+   *  `orchestrate` tools or skills, or `stand_in` — none of those are
+   *  registered in this profile regardless of catalog state. Same field
+   *  name/values as `NativeAgentAvailability.profile` in
+   *  claude-md-injection.ts (deliberately) so a caller can spread ONE
+   *  `nativeAvailability`-shaped object into both builders without a
+   *  field-name translation layer. Absent/`"standard"` is today's behavior. */
+  profile?: "standard" | "fast"
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
+  if (opts.profile === "fast") {
+    const fastPeersKey = key("peers")
+    const fastSearchKey = key("search")
+    return [
+      "## Peer review and advisor",
+      "",
+      `This is the fast launch profile: a deliberately lean roster. Cross-lab peer review under \`mcp__${fastPeersKey}__*\` is limited to \`gemini_critic\` (Gemini 3.7 Flash) for fresh-context adversarial judgment. Claude Code's built-in \`advisor\` tool catches approach drift and confabulation.`,
+      "",
+      `\`mcp__${fastSearchKey}__code\` is the one-stop code search (semantic-first via ColBERT, falling back to lexical BM25F) and \`mcp__${fastSearchKey}__web\` surfaces citable web sources. Native subagents (Task), each in its own context: \`scout\` (find or understand something in the repo, cheap), \`implementer-fast\` (well-specified, mechanical coding changes), and \`reviewer-fast\` (repo-aware assessment, including reproducing and root-causing a failure). This is the complete roster for this profile.`,
+    ].join("\n")
+  }
   const peersKey = key("peers")
   const searchKey = key("search")
   const workersKey = key("workers")
@@ -771,8 +796,23 @@ export function buildPeerAwarenessSummary(opts: {
    *  decision surface. */
   nativeAgentModels?: Partial<Record<NativeAgentName, string | undefined>>
   groupKeys?: Partial<Record<McpGroup, string>>
+  /** `"fast"` for the fast launch profile: a hard roster restriction (see the
+   *  matching option on `buildPeerAwarenessSnippet`). Every other flag on
+   *  this call is ignored in favor of a short fast-profile rendering. Same
+   *  field name/values as `NativeAgentAvailability.profile`. */
+  profile?: "standard" | "fast"
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
+  if (opts.profile === "fast") {
+    return [
+      "## Injected capabilities (summary)",
+      "",
+      "Fast launch profile — a deliberately lean roster. Native subagents (Task), each in its own context: `scout`, `implementer-fast`, `reviewer-fast`. This is the complete roster for this profile.",
+      `Cross-lab review under \`mcp__${key("peers")}__*\` is limited to \`gemini_critic\` (Gemini 3.7 Flash). \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
+      "",
+      "Each tool's own description carries when to use it and when not.",
+    ].join("\n")
+  }
   const renderNative = (name: NativeAgentName): string => {
     const modelId = opts.nativeAgentModels?.[name]
     if (!modelId) return `\`${name}\``
@@ -847,6 +887,27 @@ export function buildPeerAwarenessSummary(opts: {
 }
 
 /**
+ * Translate a `toolNameHttp`-keyed persona allowlist (the currency
+ * `LaunchProfileDescriptor.personaAllowlist` uses, since that is what the MCP
+ * boundary's `tools/call` narrowing filters on) into the `agentName`-keyed
+ * allowlist `personasFor`'s `agentAllowlist` consumes (since that is the key
+ * `buildPeerAgentDefinitions` uses to build subagent `.md` files). The two
+ * identifiers differ (`gemini_critic` vs `gemini-critic`), so a caller wiring
+ * a launch profile's persona restriction into subagent generation needs this
+ * translation rather than assuming the sets are interchangeable.
+ */
+export function agentNamesForToolAllowlist(
+  toolAllowlist: ReadonlySet<string> | ReadonlyArray<string>,
+): Set<string> {
+  const allow = toolAllowlist instanceof Set ? toolAllowlist : new Set(toolAllowlist)
+  const names = new Set<string>()
+  for (const p of [...PERSONAS_READ, ...PERSONAS_WRITE]) {
+    if (allow.has(p.toolNameHttp)) names.add(p.agentName)
+  }
+  return names
+}
+
+/**
  * Applies the resolved Gemini review model to a persona requiring the Gemini
  * catalog: swaps `.model` and rewrites every literal occurrence of the
  * default id in `.description` so the two never disagree about which model
@@ -875,9 +936,21 @@ export function personasFor(opts: {
   codexCli: boolean
   geminiAvailable: boolean
   geminiModel?: string
+  /** Optional restriction, keyed by `agentName`, applied ON TOP of the
+   *  existing catalog/codexCli gating. Absent → unrestricted (today's full
+   *  set). Used by profile-restricted launches (e.g. the fast profile) to
+   *  register only a subset of the standard persona roster; a name absent
+   *  from the live catalog stays dropped either way. */
+  agentAllowlist?: ReadonlySet<string> | ReadonlyArray<string>
 }): Array<PersonaSpec> {
+  const allow = opts.agentAllowlist == null
+    ? undefined
+    : opts.agentAllowlist instanceof Set
+      ? opts.agentAllowlist
+      : new Set(opts.agentAllowlist)
   const result: Array<PersonaSpec> = []
   for (const p of PERSONAS_READ) {
+    if (allow && !allow.has(p.agentName)) continue
     // Drop personas whose model family is missing from Copilot's live catalog.
     // Both gemini personas share the preferred Pro -> Flash resolver. Copy the
     // resolved id into the launch definition so their generated subagents and
@@ -890,7 +963,10 @@ export function personasFor(opts: {
     result.push(p)
   }
   if (opts.codexCli) {
-    for (const p of PERSONAS_WRITE) result.push(p)
+    for (const p of PERSONAS_WRITE) {
+      if (allow && !allow.has(p.agentName)) continue
+      result.push(p)
+    }
   }
   return result
 }

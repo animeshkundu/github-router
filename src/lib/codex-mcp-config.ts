@@ -17,6 +17,7 @@ import {
   MCP_GROUPS,
   type McpGroup,
 } from "./peer-mcp-personas"
+import { type Effort as SubagentEffort } from "./reasoning-effort"
 import {
   activeDispatchModes,
   dispatcherAgentName,
@@ -137,6 +138,32 @@ interface BuildOpts {
   /** Model for `general-purpose-fast` (the fast, cheapest catch-all). Absent →
    *  OMITTED. */
   generalPurposeFastModel?: string
+  /** Optional hard roster restriction, by native agent key (`"implementer"`,
+   *  `"scout"`, …). When present, ONLY keys in this set may be emitted —
+   *  each still subject to its usual model gate — regardless of whether an
+   *  excluded agent's model would otherwise resolve. Absent → unrestricted
+   *  (today's full catalog-driven roster). Used by profile-restricted
+   *  launches (e.g. the fast profile) so implementer/reviewer/brainstorm/
+   *  scribe/general-purpose-fast/coordinator are hard-excluded rather than
+   *  merely missing a model. */
+  nativeRoster?: ReadonlySet<string> | ReadonlyArray<string>
+  /** Optional persona allowlist (by `agentName`) forwarded to `personasFor`.
+   *  Absent → unrestricted (today's full persona set). */
+  personaAllowlist?: ReadonlySet<string> | ReadonlyArray<string>
+  /** Whether to emit the `peer-review-coordinator` meta-subagent. Default
+   *  true (today's behavior). A profile with too narrow a persona roster
+   *  for fan-out coordination to make sense (e.g. the fast profile, which
+   *  registers only `gemini-critic`) should pass `false`. */
+  includeCoordinator?: boolean
+  /** Fixed `effort:` frontmatter for `scout`/`implementer-fast`/
+   *  `reviewer-fast` respectively. Absent → no `effort:` frontmatter emitted
+   *  (today's behavior — the agent follows the Claude Code session's
+   *  reasoning-effort picker, per "no per-agent effort knob" for the
+   *  standard roster). Used by the fast profile, which pins each agent's
+   *  effort rather than following the picker. */
+  scoutEffort?: SubagentEffort
+  implementerFastEffort?: SubagentEffort
+  reviewerFastEffort?: SubagentEffort
 }
 
 export interface HttpMcpEntry {
@@ -229,6 +256,13 @@ export interface PeerAgentDefinition {
   description: string
   prompt: string
   model?: string
+  /** Fixed reasoning-effort frontmatter for this subagent, overriding the
+   *  Claude Code session's effort picker for this subagent only (documented
+   *  Claude Code subagent frontmatter behavior). Absent → the subagent
+   *  follows the session's picker, which is the standard-profile default for
+   *  every native today. Only the fast profile's `scout`/`implementer-fast`/
+   *  `reviewer-fast` set this. */
+  effort?: SubagentEffort
   tools?: ReadonlyArray<string>
   /** Inline MCP servers scoped to this subagent, emitted into its `.md`
    *  frontmatter as the connect-independently `mcpServers` list. Required
@@ -501,6 +535,7 @@ export function buildPeerAgentDefinitions(
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
     geminiModel: opts.geminiModel,
+    agentAllowlist: opts.personaAllowlist,
   })
   const peersKey = peersKeyOf(opts.groupKeys)
   // Inline the `peers` HTTP server into each peer subagent's frontmatter so it
@@ -519,13 +554,25 @@ export function buildPeerAgentDefinitions(
       ...peersMcp,
     }
   }
-  out["peer-review-coordinator"] = {
-    ...buildCoordinatorAgent({
-      codexCli: opts.codexCli,
-      geminiAvailable: opts.geminiAvailable,
-    }),
-    ...peersMcp,
+  if (opts.includeCoordinator !== false) {
+    out["peer-review-coordinator"] = {
+      ...buildCoordinatorAgent({
+        codexCli: opts.codexCli,
+        geminiAvailable: opts.geminiAvailable,
+      }),
+      ...peersMcp,
+    }
   }
+  // Optional hard roster restriction (e.g. the fast profile): a native key
+  // absent from this set is never emitted, independent of whether its model
+  // resolved. Absent `opts.nativeRoster` → unrestricted, matching every
+  // existing caller.
+  const rosterSet = opts.nativeRoster == null
+    ? undefined
+    : opts.nativeRoster instanceof Set
+      ? opts.nativeRoster
+      : new Set(opts.nativeRoster)
+  const rosterAllows = (name: string): boolean => !rosterSet || rosterSet.has(name)
   // The native subagents are ALWAYS injected — no catalog gate. Each runs on the
   // model chosen for its job when that model is live; otherwise its `model`
   // frontmatter is OMITTED and it inherits the lead's model, so a thin catalog
@@ -548,6 +595,12 @@ export function buildPeerAgentDefinitions(
   const scribeModel = nonEmptyModel(opts.scribeModel)
   const implementerFastModel = nonEmptyModel(opts.implementerFastModel)
   const generalPurposeFastModel = nonEmptyModel(opts.generalPurposeFastModel)
+  // Whether the sibling escalation targets are actually in this roster — used
+  // to strip a description's cross-reference to an agent a restricted profile
+  // never emits (e.g. the fast profile has no `implementer`/`reviewer` to
+  // "escalate" to).
+  const hasImplementer = rosterAllows("implementer")
+  const hasReviewer = rosterAllows("reviewer")
   // `[1m]` decorates the FRONTMATTER value only, never the description text.
   // Claude Code budgets a subagent's context off its model id, and its detector
   // (`/\[1m\]/i`) has no vendor gate — so without the suffix an `implementer` on
@@ -565,15 +618,17 @@ export function buildPeerAgentDefinitions(
     opts.serverUrl
       ? { mcpServers: { [searchKey]: httpEntryFor(opts.serverUrl, "search", opts.nonce, opts.workspaceHeaderCmd) } }
       : {}
-  out.implementer = {
-    description: nativeModel
-      ? `Bounded implementation subagent running ${nativeModel} (strong non-Claude coder, maximum reasoning). Use proactively for coding changes that need judgment or have ambiguous scope — edits, features, fixes — to keep the lead's context focused; use implementer-fast instead for well-specified, mechanical changes. Runs in its own context. Model is overridable at spawn.`
-      : `Bounded implementation subagent (native tools, runs on the lead's model in its own context). Use proactively for coding changes that need judgment or have ambiguous scope — edits, features, fixes — to keep the lead's context focused; use implementer-fast instead for well-specified, mechanical changes. Model is overridable at spawn.`,
-    prompt:
-      "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. "
-      + fileToolSteer("builds")
-      + " Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
-    ...modelField,
+  if (rosterAllows("implementer")) {
+    out.implementer = {
+      description: nativeModel
+        ? `Bounded implementation subagent running ${nativeModel} (strong non-Claude coder, maximum reasoning). Use proactively for coding changes that need judgment or have ambiguous scope — edits, features, fixes — to keep the lead's context focused; use implementer-fast instead for well-specified, mechanical changes. Runs in its own context. Model is overridable at spawn.`
+        : `Bounded implementation subagent (native tools, runs on the lead's model in its own context). Use proactively for coding changes that need judgment or have ambiguous scope — edits, features, fixes — to keep the lead's context focused; use implementer-fast instead for well-specified, mechanical changes. Model is overridable at spawn.`,
+      prompt:
+        "You are a bounded implementation subagent for well-scoped coding tasks. Implement the requested change surgically, matching the surrounding code style and minimizing unrelated churn. "
+        + fileToolSteer("builds")
+        + " Verify with the project's build or tests where applicable. Do the work yourself — do not spawn further subagents. Report exactly what changed and any risks.",
+      ...modelField,
+    }
   }
   const reviewerPrompt =
     "You are a feedback subagent. Your job is to tell the caller what is actually true about the artifact you are given — code, a plan, a document, a failure report — and what is wrong with it. "
@@ -581,52 +636,68 @@ export function buildPeerAgentDefinitions(
     + "Where the change warrants it, author tests that try to BREAK the implementation (edge cases, error paths, and the acceptance criteria as executable checks), run them, and report which pass and which fail; do NOT modify production code just to make tests pass. "
     + fileToolSteer("builds")
     + " Do the work yourself — do not spawn further subagents. Report severity-ranked findings with `file:line` citations, the evidence behind each, and end with a clear go/no-go."
-  out.reviewer = {
-    description: reviewerModel
-      ? `Feedback subagent running ${reviewerModel}, a DIFFERENT lab from both the lead and the implementer, so its blind spots are decorrelated from whoever produced the work. Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. Unlike the stateless peer critics, it reads the repo and can RUN things, so prefer it whenever the assessment needs execution or repo context (reproduce a failure, run the suite, bisect); prefer a peer critic when you already hold the artifact and want a fresh-context opinion on it. It can also REVIEW SCREENSHOTS and other images: just point it at the file and it will look at them. Model is overridable at spawn.`
-      : `Feedback subagent (native tools, runs on the lead's model in its own context). Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. Unlike the stateless peer critics, it reads the repo and can RUN things, so prefer it whenever the assessment needs execution or repo context; prefer a peer critic when you already hold the artifact and want a fresh-context opinion on it. Model is overridable at spawn.`,
-    prompt: reviewerPrompt,
-    ...(reviewerModel ? { model: withOneMSuffix(reviewerModel) } : {}),
-  }
-  if (reviewerFastModel) {
-    out["reviewer-fast"] = {
-      description: `Cheaper feedback subagent running ${reviewerFastModel} (1M context, typically faster than the pro-tier reviewer and cross-lab from the OpenAI-backed implementer). Use for lower-stakes assessments that still need repository access or execution; escalate higher-stakes review to reviewer. Full toolset, so it can read the repo and run builds, tests, and reproductions in its own context. Model is overridable at spawn.`,
+  if (rosterAllows("reviewer")) {
+    out.reviewer = {
+      description: reviewerModel
+        ? `Feedback subagent running ${reviewerModel}, a DIFFERENT lab from both the lead and the implementer, so its blind spots are decorrelated from whoever produced the work. Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. Unlike the stateless peer critics, it reads the repo and can RUN things, so prefer it whenever the assessment needs execution or repo context (reproduce a failure, run the suite, bisect); prefer a peer critic when you already hold the artifact and want a fresh-context opinion on it. It can also REVIEW SCREENSHOTS and other images: just point it at the file and it will look at them. Model is overridable at spawn.`
+        : `Feedback subagent (native tools, runs on the lead's model in its own context). Use proactively when something already exists and you want it assessed: a diff, a plan, a document, a failing test. Unlike the stateless peer critics, it reads the repo and can RUN things, so prefer it whenever the assessment needs execution or repo context; prefer a peer critic when you already hold the artifact and want a fresh-context opinion on it. Model is overridable at spawn.`,
       prompt: reviewerPrompt,
-      model: withOneMSuffix(reviewerFastModel),
+      ...(reviewerModel ? { model: withOneMSuffix(reviewerModel) } : {}),
     }
   }
-  out.brainstorm = {
-    description: brainstormModel
-      ? `Divergent-options subagent running ${brainstormModel} (third lab, for approaches the lead would not generate). Use proactively BEFORE an approach is chosen. Pass the decision, the constraints, what you have already ruled out, and the cost of being wrong; pass your current leading approach too if you have one, and it will try to beat it rather than restate it. Read-only; it proposes, then hands off to implementer. Model is overridable at spawn.`
-      : `Divergent-options subagent (runs on the lead's model in its own context). Use proactively BEFORE an approach is chosen. Pass the decision, the constraints, what you have already ruled out, and the cost of being wrong; pass your current leading approach too if you have one, and it will try to beat it rather than restate it. Read-only; it proposes, then hands off to implementer. Model is overridable at spawn.`,
-    prompt:
-      "You are a divergent-options subagent: the lead's sounding board while an approach is still open. Your job is to surface the option the lead would not have reached on its own. "
-      // Two modes, chosen by what the caller passes. A single pass cannot be
-      // both independent of an incumbent and comparative against one, since the
-      // model attends to the whole brief either way; so the modes are staged
-      // ACROSS calls, the same shape `stand_in` uses for its blind round 1 then
-      // informed round 2.
-      + "If the caller states its current leading approach, your job is to try to beat it, and you close with one verdict: `replace`, `retain`, or `insufficient evidence`. "
-      + "`replace` requires naming a concrete alternative that dominates it and the evidence that decides between them. `retain` is a real answer and a useful one: say it plainly when the approach survives a genuine attempt to beat it. "
-      // Calibration, matching CRITIC_RUBRIC's existing stance. Reflexive dissent
-      // is not skepticism; published work gets >99% disagreement from explicit
-      // devil's-advocate framing, which measures compliance, not judgment.
-      + "Manufactured disagreement is as useless as agreement; do neither. If the caller states no leading approach, generate independently and let the lead compare. "
-      + "Return 3 to 5 approaches that differ in MECHANISM, not in phrasing. For each: how it works, what it costs, what would have to be true for it to be the right answer, and the failure mode that would kill it. "
-      + "Near-duplicate options are the failure mode to avoid — if only one real approach exists, say so plainly and explain why the alternatives are dead, because one honest option beats four padded ones. "
-      // The one defect that reproduced across observed runs: sound mechanism,
-      // unexecutable concrete path. Screening only the winner is also
-      // selection-biased, hiding candidates that should have ranked higher.
-      + "Screen EVERY candidate against this repository and this environment before you rank them, then verify the one you are about to recommend can actually run here: read the code path it depends on, the guard that would refuse it, the artifact it assumes exists. "
-      + "A recommendation that cannot execute is worse than no recommendation. If checking kills your front-runner, rerank and say so. "
-      + "Ground every option in what the repository actually contains, and prefer reusing what is already there over inventing something new. "
-      + readOnlyToolSteer()
-      + " Do the work yourself — do not spawn further subagents.",
-    tools: readOnlyToolAllowlist(searchKey),
-    ...(brainstormModel ? { model: withOneMSuffix(brainstormModel) } : {}),
-    ...searchMcp,
+  if (reviewerFastModel && rosterAllows("reviewer-fast")) {
+    const isGrok = reviewerFastModel === "grok-4.6"
+    const windowClause = isGrok
+      ? "500K total context, 372K max prompt"
+      : "1M context"
+    const speedClause = isGrok ? "" : ", typically faster than the pro-tier reviewer"
+    const crossLabClause = !isGrok && hasImplementer
+      ? " and cross-lab from the OpenAI-backed implementer"
+      : ""
+    const bodyClause = hasReviewer
+      ? "Use for lower-stakes assessments that still need repository access or execution; escalate higher-stakes review to reviewer."
+      : "Use for lower-stakes assessments that still need repository access or execution."
+    out["reviewer-fast"] = {
+      description: `Cheaper feedback subagent running ${reviewerFastModel} (${windowClause}${speedClause}${crossLabClause}). ${bodyClause} Full toolset, so it can read the repo and run builds, tests, and reproductions in its own context. Model is overridable at spawn.`,
+      prompt: reviewerPrompt,
+      model: withOneMSuffix(reviewerFastModel),
+      ...(opts.reviewerFastEffort ? { effort: opts.reviewerFastEffort } : {}),
+    }
   }
-  if (scoutModel) {
+  if (rosterAllows("brainstorm")) {
+    out.brainstorm = {
+      description: brainstormModel
+        ? `Divergent-options subagent running ${brainstormModel} (third lab, for approaches the lead would not generate). Use proactively BEFORE an approach is chosen. Pass the decision, the constraints, what you have already ruled out, and the cost of being wrong; pass your current leading approach too if you have one, and it will try to beat it rather than restate it. Read-only; it proposes, then hands off to implementer. Model is overridable at spawn.`
+        : `Divergent-options subagent (runs on the lead's model in its own context). Use proactively BEFORE an approach is chosen. Pass the decision, the constraints, what you have already ruled out, and the cost of being wrong; pass your current leading approach too if you have one, and it will try to beat it rather than restate it. Read-only; it proposes, then hands off to implementer. Model is overridable at spawn.`,
+      prompt:
+        "You are a divergent-options subagent: the lead's sounding board while an approach is still open. Your job is to surface the option the lead would not have reached on its own. "
+        // Two modes, chosen by what the caller passes. A single pass cannot be
+        // both independent of an incumbent and comparative against one, since the
+        // model attends to the whole brief either way; so the modes are staged
+        // ACROSS calls, the same shape `stand_in` uses for its blind round 1 then
+        // informed round 2.
+        + "If the caller states its current leading approach, your job is to try to beat it, and you close with one verdict: `replace`, `retain`, or `insufficient evidence`. "
+        + "`replace` requires naming a concrete alternative that dominates it and the evidence that decides between them. `retain` is a real answer and a useful one: say it plainly when the approach survives a genuine attempt to beat it. "
+        // Calibration, matching CRITIC_RUBRIC's existing stance. Reflexive dissent
+        // is not skepticism; published work gets >99% disagreement from explicit
+        // devil's-advocate framing, which measures compliance, not judgment.
+        + "Manufactured disagreement is as useless as agreement; do neither. If the caller states no leading approach, generate independently and let the lead compare. "
+        + "Return 3 to 5 approaches that differ in MECHANISM, not in phrasing. For each: how it works, what it costs, what would have to be true for it to be the right answer, and the failure mode that would kill it. "
+        + "Near-duplicate options are the failure mode to avoid — if only one real approach exists, say so plainly and explain why the alternatives are dead, because one honest option beats four padded ones. "
+        // The one defect that reproduced across observed runs: sound mechanism,
+        // unexecutable concrete path. Screening only the winner is also
+        // selection-biased, hiding candidates that should have ranked higher.
+        + "Screen EVERY candidate against this repository and this environment before you rank them, then verify the one you are about to recommend can actually run here: read the code path it depends on, the guard that would refuse it, the artifact it assumes exists. "
+        + "A recommendation that cannot execute is worse than no recommendation. If checking kills your front-runner, rerank and say so. "
+        + "Ground every option in what the repository actually contains, and prefer reusing what is already there over inventing something new. "
+        + readOnlyToolSteer()
+        + " Do the work yourself — do not spawn further subagents.",
+      tools: readOnlyToolAllowlist(searchKey),
+      ...(brainstormModel ? { model: withOneMSuffix(brainstormModel) } : {}),
+      ...searchMcp,
+    }
+  }
+  if (scoutModel && rosterAllows("scout")) {
     out.scout = {
       description: `Read-only exploration subagent running ${scoutModel} (fast and cheap, so repository lookups do not run at the lead's model rates). Use proactively to find or understand something in the codebase: it sweeps widely and returns conclusions with file:line references rather than file dumps. Model is overridable at spawn.`,
       prompt:
@@ -636,20 +707,23 @@ export function buildPeerAgentDefinitions(
         + " Do the work yourself — do not spawn further subagents.",
       tools: readOnlyToolAllowlist(searchKey),
       model: withOneMSuffix(scoutModel),
+      ...(opts.scoutEffort ? { effort: opts.scoutEffort } : {}),
       ...searchMcp,
     }
   }
-  out.scribe = {
-    description: scribeModel
-      ? `Documentation subagent running ${scribeModel} (the mid tier: documentation is verifiable prose, not frontier reasoning). Use proactively for prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, and README updates that have gone stale. Keeps low-glamour upkeep off the lead's context. Model is overridable at spawn.`
-      : `Documentation subagent (runs on the lead's model in its own context). Use proactively for prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, and README updates that have gone stale. Model is overridable at spawn.`,
-    prompt:
-      "You are a documentation subagent. Write and maintain the prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, README rows. "
-      + "Read the code before describing it — every claim you write must be checkable against the repository as it is now, not as a summary said it was. Match the surrounding document's voice, structure, and level of detail. "
-      + "Prefer updating an existing document over adding a new one, and delete what has become false rather than layering a correction on top of it. "
-      + fileToolSteer("builds")
-      + " Do the work yourself — do not spawn further subagents. Report which documents changed and any claim you could not verify.",
-    ...(scribeModel ? { model: withOneMSuffix(scribeModel) } : {}),
+  if (rosterAllows("scribe")) {
+    out.scribe = {
+      description: scribeModel
+        ? `Documentation subagent running ${scribeModel} (the mid tier: documentation is verifiable prose, not frontier reasoning). Use proactively for prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, and README updates that have gone stale. Keeps low-glamour upkeep off the lead's context. Model is overridable at spawn.`
+        : `Documentation subagent (runs on the lead's model in its own context). Use proactively for prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, and README updates that have gone stale. Model is overridable at spawn.`,
+      prompt:
+        "You are a documentation subagent. Write and maintain the prose that trails the code: docs, ADRs, CLAUDE.md sections, changelog entries, README rows. "
+        + "Read the code before describing it — every claim you write must be checkable against the repository as it is now, not as a summary said it was. Match the surrounding document's voice, structure, and level of detail. "
+        + "Prefer updating an existing document over adding a new one, and delete what has become false rather than layering a correction on top of it. "
+        + fileToolSteer("builds")
+        + " Do the work yourself — do not spawn further subagents. Report which documents changed and any claim you could not verify.",
+      ...(scribeModel ? { model: withOneMSuffix(scribeModel) } : {}),
+    }
   }
   // `implementer-fast` is the cheaper implementation specialist;
   // `general-purpose-fast` is the catch-all for work no specialist fits.
@@ -657,26 +731,33 @@ export function buildPeerAgentDefinitions(
   // Description discipline: a description may claim only what is true of EVERY
   // member of that agent's chain, because the fallback is invisible to whoever
   // reads the prose. `implementer-fast` therefore branches its model-specific
-  // framing: terra may carry the speed/cost claim, while the gemini-pro fallback
-  // is described neutrally and may not claim terra's `max` effort tier.
-  // `general-purpose-fast` is single-entry, so it may state luna's measured and
-  // catalog properties exactly.
+  // framing: terra may carry the speed/cost claim, luna (the fast profile's
+  // single-entry pin) names the profile explicitly, while the gemini-pro
+  // fallback is described neutrally and may not claim terra's `max` effort
+  // tier. `general-purpose-fast` is single-entry, so it may state luna's
+  // measured and catalog properties exactly.
   const genericPromptFor = (role: string): string =>
     `You are a general-purpose subagent handling ${role} the lead has delegated to keep its own context free. `
     + "Work out what the task actually requires, then do it end to end. Verify against the real repository and the real runtime rather than assuming — read the code, run the command, check the exit code. "
     + fileToolSteer("builds")
     + " Do the work yourself — do not spawn further subagents. Report what you did, what you verified, and anything you could not settle."
-  if (implementerFastModel) {
+  if (implementerFastModel && rosterAllows("implementer-fast")) {
     const tierDescription = implementerFastModel === "gpt-5.6-terra"
       ? "the cheaper, faster implementation tier"
-      : "a non-lead implementation model"
+      : implementerFastModel === "gpt-5.6-luna"
+        ? "the fast, low-cost tier for this launch profile"
+        : "a non-lead implementation model"
+    const escalateClause = hasImplementer
+      ? "; use implementer instead when the change needs judgment or its scope is ambiguous"
+      : ""
     out["implementer-fast"] = {
-      description: `Implementation subagent running ${implementerFastModel} (1M context, ${tierDescription}). Use proactively for well-specified, mechanical coding changes; use implementer instead when the change needs judgment or its scope is ambiguous. Full toolset, so it can implement and verify the change end to end in its own context. Model is overridable at spawn.`,
+      description: `Implementation subagent running ${implementerFastModel} (1M context, ${tierDescription}). Use proactively for well-specified, mechanical coding changes${escalateClause}. Full toolset, so it can implement and verify the change end to end in its own context. Model is overridable at spawn.`,
       prompt: genericPromptFor("a well-specified, mechanical coding change"),
       model: withOneMSuffix(implementerFastModel),
+      ...(opts.implementerFastEffort ? { effort: opts.implementerFastEffort } : {}),
     }
   }
-  if (generalPurposeFastModel) {
+  if (generalPurposeFastModel && rosterAllows("general-purpose-fast")) {
     out["general-purpose-fast"] = {
       description: `Catch-all subagent running ${generalPurposeFastModel} (1.05M context, the lowest-cost model in the catalog and the fastest measured catch-all candidate, with the full reasoning-effort ladder). Use proactively for work no specialist fits when a fast, economical non-lead model can finish it. Full toolset, so it can complete the work rather than only research it. Runs in its own context. Model is overridable at spawn.`,
       prompt: genericPromptFor("work no specialist fits"),
@@ -764,6 +845,19 @@ interface WriteOpts {
   implementerFastModel?: string
   /** Model for `general-purpose-fast`. Absent → the agent is omitted entirely. */
   generalPurposeFastModel?: string
+  /** Optional hard roster restriction, by native agent key. See the matching
+   *  field on `BuildOpts`. */
+  nativeRoster?: ReadonlySet<string> | ReadonlyArray<string>
+  /** Optional persona allowlist, by `agentName`. See the matching field on
+   *  `BuildOpts`. */
+  personaAllowlist?: ReadonlySet<string> | ReadonlyArray<string>
+  /** Whether to emit `peer-review-coordinator`. Default true. */
+  includeCoordinator?: boolean
+  /** Fixed `effort:` frontmatter overrides. See the matching fields on
+   *  `BuildOpts`. */
+  scoutEffort?: SubagentEffort
+  implementerFastEffort?: SubagentEffort
+  reviewerFastEffort?: SubagentEffort
   /** Extra subagent definitions to register alongside the peer/worker agents
    *  (written as `.md` files so they appear in the Task `subagent_type` enum).
    *  Used by `serve` to inject Claude Code's built-in subagents (Explore/Plan/
@@ -894,6 +988,7 @@ export function buildAgentMd(spec: {
   description: string
   prompt: string
   model?: string
+  effort?: SubagentEffort
   tools?: ReadonlyArray<string>
   mcpServers?: Record<string, HttpMcpEntry>
 }): string {
@@ -904,6 +999,9 @@ export function buildAgentMd(spec: {
   ]
   if (spec.model) {
     lines.push(`model: ${escapeYamlString(spec.model)}`)
+  }
+  if (spec.effort) {
+    lines.push(`effort: ${escapeYamlString(spec.effort)}`)
   }
   if (spec.tools && spec.tools.length > 0) {
     // YAML flow array of quoted strings — matches how Claude Code's loader
@@ -970,6 +1068,7 @@ export async function writePeerAgentMdFiles(
           description: def.description,
           prompt: def.prompt,
           model: def.model,
+          effort: def.effort,
           tools: def.tools,
           mcpServers: def.mcpServers,
         }),
@@ -1289,6 +1388,12 @@ export async function writePeerMcpRuntimeFiles(
     scribeModel: opts.scribeModel,
     implementerFastModel: opts.implementerFastModel,
     generalPurposeFastModel: opts.generalPurposeFastModel,
+    nativeRoster: opts.nativeRoster,
+    personaAllowlist: opts.personaAllowlist,
+    includeCoordinator: opts.includeCoordinator,
+    scoutEffort: opts.scoutEffort,
+    implementerFastEffort: opts.implementerFastEffort,
+    reviewerFastEffort: opts.reviewerFastEffort,
     nonce,
     codexHome,
     serverUrl,
@@ -1328,6 +1433,7 @@ export async function writePeerMcpRuntimeFiles(
     codexCli: opts.codexCli,
     geminiAvailable: opts.geminiAvailable,
     geminiModel: opts.geminiModel,
+    agentAllowlist: opts.personaAllowlist,
   })
 
   const cleanup = async (): Promise<void> => {

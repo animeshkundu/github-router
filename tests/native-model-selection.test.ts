@@ -1,6 +1,8 @@
-// Phase 3 — native selection of the five non-Claude models
-// (gpt-5.6-sol, gpt-5.5, gpt-5.3-codex, gemini-3.5-flash,
-// gemini-3.1-pro-preview) in Claude Code's model picker.
+// Phase 3 — native selection of the four non-Claude models
+// (gpt-5.6-sol, gpt-5.6-luna, gemini-3.7-flash, grok-4.6) in Claude Code's
+// model picker. Modernized by the fast-launch-profile change from the
+// earlier five-model / dynamic-Gemini-review-append list to this EXACT,
+// STATIC four-row list.
 //
 // The mechanism (verified against installed Claude Code 2.1.201): enable
 // gateway model discovery AND pre-seed its on-disk cache
@@ -9,8 +11,8 @@
 // filter is only on the blocked network-fetch path), so the real ids
 // surface as picker rows and route through the /v1/messages shim. This
 // suite pins: catalog gating, cache schema/content, the additive+presence
-// -guarded env injection, and non-regression on the opus/sonnet/haiku
-// tier defaults.
+// -guarded env injection, non-regression on the opus/sonnet/haiku
+// tier defaults, and grok-4.6's deliberately-never-1M contract.
 
 import { afterEach, beforeEach, expect, test, describe } from "bun:test"
 import * as fs from "node:fs"
@@ -28,10 +30,9 @@ import { state } from "../src/lib/state"
 
 const SEED_TARGET_IDS = [
   "gpt-5.6-sol",
-  "gpt-5.5",
-  "gpt-5.3-codex",
-  "gemini-3.5-flash",
-  "gemini-3.1-pro-preview",
+  "gpt-5.6-luna",
+  "gemini-3.7-flash",
+  "grok-4.6",
 ] as const
 
 function catalogModel(id: string, contextWindow?: number) {
@@ -70,14 +71,14 @@ function setCatalogWithWindows(entries: Record<string, number>) {
   }
 }
 
-/** The live windows as of the enterprise catalog: four of the five targets are
- *  1M-class, `gpt-5.3-codex` is not. */
+/** The live windows: three of the four targets are 1M-class; `grok-4.6`'s
+ *  live window is 500K total (372K max prompt) and is deliberately NEVER
+ *  decorated regardless of what a catalog fixture claims here. */
 const LIVE_WINDOWS: Record<string, number> = {
   "gpt-5.6-sol": 1_050_000,
-  "gpt-5.5": 1_050_000,
-  "gpt-5.3-codex": 400_000,
-  "gemini-3.5-flash": 1_000_000,
-  "gemini-3.1-pro-preview": 1_000_000,
+  "gpt-5.6-luna": 1_050_000,
+  "gemini-3.7-flash": 1_000_000,
+  "grok-4.6": 500_000,
 }
 
 // getClaudeCodeEnvVars seeds PATHS.CLAUDE_CONFIG_DIR/cache when the catalog
@@ -134,27 +135,29 @@ describe("nativeSelectableModelsInCatalog", () => {
   })
 
   test("returns only the target models present in the catalog (graceful per-tier gating)", () => {
-    // Simulate a lower tier where only gpt-5.5 is licensed.
-    setCatalog(["claude-opus-4.8", "gpt-5.5"])
+    // Simulate a lower tier where only gpt-5.6-luna is licensed.
+    setCatalog(["claude-opus-4.8", "gpt-5.6-luna"])
     const got = nativeSelectableModelsInCatalog()
-    expect(got.map((m) => m.id)).toEqual(["gpt-5.5"])
-    expect(got[0].display_name).toBe("GPT-5.5")
+    expect(got.map((m) => m.id)).toEqual(["gpt-5.6-luna"])
+    expect(got[0].display_name).toBe("GPT-5.6 Luna")
   })
 
-  test("returns all five (with the exact -preview gemini id) when all are catalogued", () => {
+  test("returns exactly the four rows, in order, when all are catalogued", () => {
     setCatalog([...SEED_TARGET_IDS, "claude-opus-4.8"])
     const ids = nativeSelectableModelsInCatalog().map((m) => m.id)
     expect(ids).toEqual([...SEED_TARGET_IDS])
-    // The exact gemini slug is the preview id — never the bare one.
-    expect(ids).toContain("gemini-3.1-pro-preview")
-    expect(ids).not.toContain("gemini-3.1-pro")
   })
 
-  test("seeds gemini-3.7-flash when the deprecated Pro preview is absent", () => {
-    setCatalog(["gemini-3.7-flash"])
-    expect(nativeSelectableModelsInCatalog()).toEqual([
-      { id: "gemini-3.7-flash", display_name: "Gemini 3.7 Flash" },
-    ])
+  test("no dynamic fifth row: an unrelated Gemini pro-preview model does not appear", () => {
+    // The earlier design dynamically appended a Gemini review row
+    // (gemini-3.1-pro-preview preferred, gemini-3.7-flash fallback). That
+    // mechanism is retired — gemini-3.7-flash is now a first-class static
+    // row on its own, and gemini-3.1-pro-preview is simply not on the list
+    // at all, present in the catalog or not.
+    setCatalog([...SEED_TARGET_IDS, "gemini-3.1-pro-preview"])
+    const ids = nativeSelectableModelsInCatalog().map((m) => m.id)
+    expect(ids).toEqual([...SEED_TARGET_IDS])
+    expect(ids).not.toContain("gemini-3.1-pro-preview")
   })
 })
 
@@ -163,17 +166,25 @@ describe("nativeSelectableModelsInCatalog", () => {
 // vendor gate. Without the suffix a 1,050,000-token model is accounted at the
 // 200K default and auto-compacts at roughly a fifth of its real window.
 describe("nativeSelectableModelsInCatalog — [1m] context accounting", () => {
-  test("brackets only the ids whose catalog window is >=1M", () => {
+  test("brackets only the ids whose catalog window is >=1M, and NEVER grok-4.6", () => {
     setCatalogWithWindows(LIVE_WINDOWS)
     expect(nativeSelectableModelsInCatalog().map((m) => m.id)).toEqual([
       "gpt-5.6-sol[1m]",
-      "gpt-5.5[1m]",
-      // 400K — deliberately bare. Over-budgeting it would trade premature
-      // compaction for a hard overflow.
-      "gpt-5.3-codex",
-      "gemini-3.5-flash[1m]",
-      "gemini-3.1-pro-preview[1m]",
+      "gpt-5.6-luna[1m]",
+      "gemini-3.7-flash[1m]",
+      // 500K total / 372K max-prompt — deliberately bare, and deliberately
+      // never decorated even if the catalog advertised >=1M for it (see the
+      // next test).
+      "grok-4.6",
     ])
+  })
+
+  test("grok-4.6 stays bare even when its catalog window is (hypothetically) >=1M", () => {
+    setCatalogWithWindows({ ...LIVE_WINDOWS, "grok-4.6": 1_000_000 })
+    const grokRow = nativeSelectableModelsInCatalog().find((m) =>
+      m.id.startsWith("grok-4.6"),
+    )
+    expect(grokRow?.id).toBe("grok-4.6")
   })
 
   test("leaves display_name undecorated", () => {
@@ -181,10 +192,9 @@ describe("nativeSelectableModelsInCatalog — [1m] context accounting", () => {
     const got = nativeSelectableModelsInCatalog()
     expect(got.map((m) => m.display_name)).toEqual([
       "GPT-5.6 Sol",
-      "GPT-5.5",
-      "GPT-5.3 Codex",
-      "Gemini 3.5 Flash",
-      "Gemini 3.1 Pro (preview)",
+      "GPT-5.6 Luna",
+      "Gemini 3.7 Flash",
+      "Grok 4.6",
     ])
   })
 
@@ -197,10 +207,10 @@ describe("nativeSelectableModelsInCatalog — [1m] context accounting", () => {
   })
 
   test("a window just under 1M stays bare (threshold is inclusive at 1M)", () => {
-    setCatalogWithWindows({ "gpt-5.5": 999_999, "gpt-5.6-sol": 1_000_000 })
+    setCatalogWithWindows({ "gpt-5.6-luna": 999_999, "gpt-5.6-sol": 1_000_000 })
     expect(nativeSelectableModelsInCatalog().map((m) => m.id)).toEqual([
       "gpt-5.6-sol[1m]",
-      "gpt-5.5",
+      "gpt-5.6-luna",
     ])
   })
 
@@ -237,8 +247,8 @@ describe("seedGatewayModelCache", () => {
     const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "gw-cache-"))
     const serverUrl = "http://127.0.0.1:8787"
     const models = [
-      { id: "gpt-5.5", display_name: "GPT-5.5" },
-      { id: "gemini-3.1-pro-preview", display_name: "Gemini 3.1 Pro (preview)" },
+      { id: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" },
+      { id: "grok-4.6", display_name: "Grok 4.6" },
     ]
     const wrote = seedGatewayModelCache(serverUrl, models, dir)
     expect(wrote).toBe(true)
@@ -275,7 +285,7 @@ describe("seedGatewayModelCache", () => {
     expect(() => {
       result = seedGatewayModelCache(
         "http://127.0.0.1:8787",
-        [{ id: "gpt-5.5", display_name: "GPT-5.5" }],
+        [{ id: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" }],
         filePath,
       )
     }).not.toThrow()
@@ -286,7 +296,7 @@ describe("seedGatewayModelCache", () => {
     const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "gw-cache-"))
     seedGatewayModelCache(
       "http://127.0.0.1:8787",
-      [{ id: "gpt-5.5", display_name: "GPT-5.5" }],
+      [{ id: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" }],
       dir,
     )
     const leftovers = fs
@@ -301,7 +311,7 @@ describe("clearGatewayModelCache", () => {
     const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "gw-cache-"))
     seedGatewayModelCache(
       "http://127.0.0.1:8787",
-      [{ id: "gpt-5.5", display_name: "GPT-5.5" }],
+      [{ id: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" }],
       dir,
     )
     const file = nodePath.join(dir, "cache", "gateway-models.json")
@@ -372,15 +382,15 @@ describe("getClaudeCodeEnvVars — native model selection injection", () => {
   })
 
   test("seeds the gateway-model cache (real Copilot ids) under CLAUDE_CONFIG_DIR when targets are present", () => {
-    setCatalog(["gpt-5.5", "gemini-3.1-pro-preview"])
+    setCatalog(["gpt-5.6-sol", "gemini-3.7-flash"])
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     // CLAUDE_CONFIG_DIR the child reads is where we seed the cache.
     expect(vars.CLAUDE_CONFIG_DIR).toBe(PATHS.CLAUDE_CONFIG_DIR)
     const parsed = JSON.parse(fs.readFileSync(REAL_CACHE_FILE, "utf-8"))
     expect(parsed.baseUrl).toBe("http://127.0.0.1:8787")
     expect(parsed.models.map((m: { id: string }) => m.id)).toEqual([
-      "gpt-5.5",
-      "gemini-3.1-pro-preview",
+      "gpt-5.6-sol",
+      "gemini-3.7-flash",
     ])
   })
 })

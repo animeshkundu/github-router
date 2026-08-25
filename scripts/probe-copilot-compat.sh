@@ -227,6 +227,19 @@ declare -a PROBE_REGISTRY=(
   "shim_count_tokens_gpt53codex|exploratory|/v1/messages/count_tokens with gpt-5.3-codex model id: 200 + input_tokens count"
   "shim_thinking_effort_gpt55|exploratory|thinking.budget_tokens on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message"
   "shim_parallel_tool_emit_gpt55|exploratory|prompt asks gpt-5.5 /responses shim for two tool calls: 200 + tool_use block(s); asserts >=1 because parallel emission is model-nondeterministic"
+
+  # ===== Fast-launch-profile model shapes (Luna / Gemini 3.7 Flash / Grok 4.6) =====
+  # These probe the live upstream request shapes the fast launch profile design
+  # depends on (docs/default-models.md "Fast launch profile") — the profile's
+  # native/MCP/persona surface narrowing itself is a separate, in-progress
+  # workstream, but the model+endpoint+effort shapes below are ordinary
+  # Copilot passthrough/shim contracts and are testable against today's proxy.
+  "fast_luna_responses_reasoning_high|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's scout assignment)"
+  "fast_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the fast profile's implementer-fast assignment; 'max' is the top of Luna's none..max ladder)"
+  "fast_gemini37flash_chat_reasoning_high|exploratory|gemini-3.7-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (the fast profile's gemini-critic persona / Advisor assignment)"
+  "fast_grok46_responses_reasoning_medium|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'medium'} (the fast profile's reviewer-fast assignment)"
+  "shim_grok46_messages|exploratory|grok-4.6 on /v1/messages (→ /responses shim, generic supported_endpoints routing — no shim code change needed): 200 + well-formed Anthropic message (the translated Grok lead path)"
+  "shim_grok46_messages_tool_use|exploratory|grok-4.6 on /v1/messages with forced tool_choice (→ /responses shim): 200 + tool_use block with non-empty input (the translated Grok tool path)"
 )
 
 # ===========================================================================
@@ -1388,6 +1401,114 @@ probe_shim_parallel_tool_emit_gpt55() {
   assert_status 200 \
     && assert_anthropic_message \
     && assert_tool_use_count_at_least 1
+}
+
+# ===========================================================================
+# Fast-launch-profile model shapes (Luna / Gemini 3.7 Flash / Grok 4.6)
+# ===========================================================================
+# See docs/default-models.md "Fast launch profile" for the design these shapes
+# support: gpt-5.6-luna is the fast lead (and backs the scout/implementer-fast
+# natives at high/max effort respectively), gemini-3.7-flash backs the fast
+# profile's sole persona (gemini-critic) and its Advisor target, and grok-4.6
+# backs reviewer-fast at medium effort. None of that native/MCP roster
+# narrowing has landed yet; these probes only assert the underlying Copilot
+# request shapes, which are ordinary passthrough/shim contracts today.
+
+probe_fast_luna_responses_reasoning_high() {
+  # gpt-5.6-luna at reasoning.effort:"high" — the fast profile's scout
+  # assignment. Same flat function tools[] shape as the gpt-5.6-sol probe
+  # above; Luna is 1.05M context, /responses-capable, and advertises the full
+  # none..max effort ladder (so "high" is a real mid-tier choice, not a clamp).
+  do_request POST /v1/responses '{
+    "model": "gpt-5.6-luna",
+    "input": "reply with the literal string ok",
+    "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+    "tool_choice": "auto",
+    "reasoning": {"effort":"high"},
+    "max_output_tokens": 50
+  }'
+  assert_status 200
+}
+
+probe_fast_luna_responses_reasoning_max() {
+  # gpt-5.6-luna at reasoning.effort:"max" — the fast profile's
+  # implementer-fast assignment (the top of Luna's none..max ladder).
+  do_request POST /v1/responses '{
+    "model": "gpt-5.6-luna",
+    "input": "reply with the literal string ok",
+    "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+    "tool_choice": "auto",
+    "reasoning": {"effort":"max"},
+    "max_output_tokens": 50
+  }'
+  assert_status 200
+}
+
+probe_fast_gemini37flash_chat_reasoning_high() {
+  # gemini-3.7-flash on /v1/chat/completions at reasoning_effort:"high" — the
+  # fast profile's gemini-critic persona (defaultEffort: high) and its
+  # designed Advisor target. Same shape as the worker_gemini_tools_reasoning
+  # probe above (chat-style nested {function:{...}} tools[]), different model.
+  do_request POST /v1/chat/completions '{
+    "model": "gemini-3.7-flash",
+    "messages": [{"role":"user","content":"reply with the literal string ok"}],
+    "tools": [{"type":"function","function":{"name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}}],
+    "tool_choice": "auto",
+    "reasoning_effort": "high",
+    "max_tokens": 50
+  }'
+  assert_status 200
+}
+
+probe_fast_grok46_responses_reasoning_medium() {
+  # grok-4.6 on /v1/responses at reasoning.effort:"medium" — the fast
+  # profile's reviewer-fast assignment. Grok 4.6 advertises a low..xhigh
+  # ladder (no "max"), 500K total / 372K max-prompt / 128K max-output — see
+  # docs/default-models.md "Grok context accounting" for why the proxy keeps
+  # Grok bare (no [1m]) rather than decorating it.
+  do_request POST /v1/responses '{
+    "model": "grok-4.6",
+    "input": "reply with the literal string ok",
+    "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+    "tool_choice": "auto",
+    "reasoning": {"effort":"medium"},
+    "max_output_tokens": 50
+  }'
+  assert_status 200
+}
+
+probe_shim_grok46_messages() {
+  # grok-4.6 is a /responses-capable model per its catalog supported_endpoints,
+  # so naming it on /v1/messages diverts to the SAME generic Responses shim
+  # (handleNonClaudeResponses) that already serves gpt-5.5/gpt-5.6-sol — no
+  # shim code change is required for this to pass. This is "the translated
+  # Grok lead path": what a session running -m grok-4.6 (directly, or via the
+  # replaced gateway picker's Grok row) actually sends and receives.
+  do_request POST /v1/messages '{
+    "model": "grok-4.6",
+    "max_tokens": 128,
+    "messages": [{"role":"user","content":"Reply with the single word: ok"}]
+  }'
+  assert_status 200 \
+    && assert_anthropic_message
+}
+
+probe_shim_grok46_messages_tool_use() {
+  # "The translated Grok tool path" — forced tool_choice through the same
+  # Responses shim, symmetric to probe_shim_gpt55_messages_tool_use. This is
+  # the shape reviewer-fast's forced-review-tool calls would take once the
+  # fast profile lands.
+  do_request POST /v1/messages '{
+    "model": "grok-4.6",
+    "max_tokens": 512,
+    "tools": [{"name":"get_weather","description":"Get the current weather for a city","input_schema":{"type":"object","properties":{"city":{"type":"string","description":"City name"}},"required":["city"]}}],
+    "tool_choice": {"type":"tool","name":"get_weather"},
+    "messages": [{"role":"user","content":"What is the weather in Paris?"}]
+  }'
+  assert_status 200 \
+    && assert_body_contains '"type":"tool_use"' \
+    && assert_body_contains '"name":"get_weather"' \
+    && assert_body_contains '"city"'
 }
 
 probe_signed_thinking_cache_scope_stripped() {

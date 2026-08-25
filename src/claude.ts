@@ -73,6 +73,7 @@ import nodePath from "node:path"
 import { tmpdir } from "node:os"
 import { randomBytes } from "node:crypto"
 import {
+  agentNamesForToolAllowlist,
   buildPeerAwarenessSnippet,
   buildPeerAwarenessSummary,
   type McpGroup,
@@ -111,6 +112,12 @@ import {
   generalPurposeFastModel,
   standInToolEnabled,
   workerToolsEnabled,
+  fastScoutModel,
+  fastImplementerFastModel,
+  fastReviewerFastModel,
+  FAST_SCOUT_EFFORT,
+  FAST_IMPLEMENTER_FAST_EFFORT,
+  FAST_REVIEWER_FAST_EFFORT,
 } from "./lib/mcp-capabilities"
 import {
   getClaudeCodeEnvVars,
@@ -118,6 +125,15 @@ import {
   setupAndServe,
   sharedServerArgs,
 } from "./lib/server-setup"
+import {
+  formatFastPrerequisiteFailure,
+  LUNA_DRIVER_ALIAS_ID,
+  profileDescriptor,
+  resolveLaunchProfile,
+  validateFastProfilePrerequisites,
+} from "./lib/launch-profile"
+import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
+import { LAUNCH_SECRET_HEADER } from "./lib/messages-identity-preflight"
 import { state } from "./lib/state"
 import { resolveModel } from "./lib/utils"
 
@@ -450,12 +466,9 @@ export const claude = defineCommand({
     // for shorthand so the DEFAULT_CLAUDE_MODEL_FALLBACKS walk doesn't
     // override an explicit family request with the next-older Opus.
     //
-    // `-m fast` is the named alias for budget mode: sonnet-5 leads and does the
-    // legwork while the advisor escalates to Opus for direction. It resolves to
-    // an ordinary slug rather than setting a separate flag, because budget mode
-    // is keyed off the RESOLVED lead everywhere it matters — so `-m fast` and
-    // `-m claude-sonnet-5` must produce identical sessions, and a mode flag that
-    // only one of the two set would break that.
+    // `-m fast` now selects the explicit Luna profile. Profile selection uses the
+    // RAW alias below, while lead resolution maps it to gpt-5.6-luna; a direct
+    // Luna pin remains a standard-surface launch.
     // Trimmed, and it must stay in lockstep with `resolveLeadSlugArg`'s own
     // trim: that helper treats `-m "   "` as absent and returns the default, so
     // computing `usingDefault` from the untrimmed argument would pick the
@@ -463,8 +476,29 @@ export const claude = defineCommand({
     // it when the catalog lacks that family.
     const usingDefault = !args.model?.trim()
     const requestedSlug = resolveLeadSlugArg(args.model)
-    let chosenSlug = requestedSlug
-    let resolvedSlug = resolveModel(chosenSlug)
+    // Resolved from the RAW `-m` argument, never the resolved lead slug —
+    // see `resolveLaunchProfile`'s doc for why: only the literal "fast"
+    // alias narrows the surface, so a direct `-m gpt-5.6-luna` pin stays a
+    // standard-surface launch even though it drives the same model.
+    const launchProfileId = resolveLaunchProfile(args.model)
+    if (launchProfileId === "fast") {
+      // Capability-availability prerequisites for the EXACT fast roster —
+      // not an allowlist of models selectable later. Checked once, here,
+      // against the catalog `setupAndServe` just populated; a partial
+      // catalog fails the whole launch rather than silently substituting
+      // or dropping an agent.
+      const prereqCheck = validateFastProfilePrerequisites(state.models)
+      if (!prereqCheck.ok) {
+        consola.error(formatFastPrerequisiteFailure(prereqCheck.missing))
+        process.exit(1)
+      }
+    }
+    let chosenSlug =
+      launchProfileId === "fast"
+        ? (requestedSlug.endsWith("[1m]") ? `${LUNA_DRIVER_ALIAS_ID}[1m]` : LUNA_DRIVER_ALIAS_ID)
+        : requestedSlug
+    let resolvedSlug =
+      launchProfileId === "fast" ? resolveModel(requestedSlug) : resolveModel(chosenSlug)
 
     if (usingDefault && state.models) {
       const inCache = (slug: string) =>
@@ -513,7 +547,7 @@ export const claude = defineCommand({
     // Print to stderr directly — consola's terminal reporter is already gone
     process.stderr.write(`Server ready on ${serverUrl}, launching Claude Code (${banner})...\n`)
 
-    const envVars = getClaudeCodeEnvVars(serverUrl, chosenSlug)
+    const envVars = getClaudeCodeEnvVars(serverUrl, chosenSlug, launchProfileId)
     // Forward unrecognized flags (e.g. --print / --output-format / --resume)
     // to the spawned Claude Code child. citty is non-strict, so those land in
     // the parsed `args` object with their values swallowed rather than in
@@ -624,16 +658,29 @@ export const claude = defineCommand({
     // Three of them are dropped rather than downgraded when their chain misses,
     // and a prompt naming a dropped agent sends the lead at something absent
     // from the Task `subagent_type` enum.
-    const nativeAgentModels: Partial<Record<NativeAgentName, string | undefined>> = {
-      implementer: nativeSubagentModel(),
-      "implementer-fast": implementerFastModel(),
-      reviewer: reviewerModel(),
-      "reviewer-fast": reviewerFastModel(),
-      brainstorm: brainstormModel(),
-      scout: scoutModel(),
-      scribe: scribeModel(),
-      "general-purpose-fast": generalPurposeFastModel(),
-    }
+    // Fast profile uses its own single-entry, no-fallback resolvers (pinned
+    // to the exact roster: scout/implementer-fast -> Luna, reviewer-fast ->
+    // Grok 4.6) instead of the standard chains, and registers NONE of
+    // implementer/reviewer/brainstorm/scribe/general-purpose-fast. The
+    // launch already failed above (`validateFastProfilePrerequisites`) if
+    // the fast roster's models aren't live, so these always resolve here.
+    const nativeAgentModels: Partial<Record<NativeAgentName, string | undefined>> =
+      launchProfileId === "fast"
+        ? {
+            scout: fastScoutModel(),
+            "implementer-fast": fastImplementerFastModel(),
+            "reviewer-fast": fastReviewerFastModel(),
+          }
+        : {
+            implementer: nativeSubagentModel(),
+            "implementer-fast": implementerFastModel(),
+            reviewer: reviewerModel(),
+            "reviewer-fast": reviewerFastModel(),
+            brainstorm: brainstormModel(),
+            scout: scoutModel(),
+            scribe: scribeModel(),
+            "general-purpose-fast": generalPurposeFastModel(),
+          }
     const nativeAvailability: NativeAgentAvailability = {
       scoutAvailable: nativeAgentModels.scout != null,
       implementerFastAvailable: nativeAgentModels["implementer-fast"] != null,
@@ -643,6 +690,12 @@ export const claude = defineCommand({
       // reassigned it, so the prose describes the lead this session actually
       // got rather than the one it asked for.
       budgetLead: isBudgetClaudeLead(chosenSlug),
+      // Hard roster RESTRICTION (not a catalog-availability signal) — see
+      // `NativeAgentAvailability.profile`'s doc. The fast branch of
+      // `buildOperatingDefaultsDirective` / `buildPeerAwarenessSnippet` /
+      // `buildPeerAwarenessSummary` ignores every other flag above and
+      // renders a short, self-contained fast-profile surface instead.
+      profile: launchProfileId,
     }
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
     // Resolve before any settings/runtime file can persist a self-command. The
@@ -679,8 +732,21 @@ export const claude = defineCommand({
         // entries, the persona .md routing strings, and the awareness
         // snippet — so a user-side `browser`/`search` MCP never silently
         // hijacks or drops one of ours.
-        const enabledGroups: Array<McpGroup> = ["peers", "search", "orchestrate"]
-        if (workerToolsEnabled()) enabledGroups.push("workers")
+        //
+        // `fastDescriptor.allowedGroups` (defined only for the fast profile)
+        // is a HARD deny applied to the base/catalog-gated groups only —
+        // `workers`/`orchestrate` are dropped for fast regardless of
+        // `workerToolsEnabled()`'s own verdict, per "no environment flag or
+        // catalog gate may re-enable workers or orchestrate in a fast
+        // session". The independently opted-in groups (`decide`/`browser`/
+        // `fleet`/`first-mate`) are appended AFTER the filter and stay under
+        // their own predicates regardless of profile, per plan section 6.
+        const fastDescriptor = profileDescriptor(launchProfileId)
+        const baseGroups: Array<McpGroup> = ["peers", "search", "orchestrate"]
+        if (workerToolsEnabled()) baseGroups.push("workers")
+        const enabledGroups: Array<McpGroup> = fastDescriptor.allowedGroups
+          ? baseGroups.filter((g) => fastDescriptor.allowedGroups!.has(g))
+          : baseGroups
         if (standInToolEnabled()) enabledGroups.push("decide")
         if (browserToolsEnabled()) enabledGroups.push("browser")
         if (fleetToolsEnabled()) enabledGroups.push("fleet")
@@ -688,14 +754,26 @@ export const claude = defineCommand({
         const { keys: groupKeys, skipped: skippedGroups } =
           await resolveGroupKeysFromMirror(enabledGroups)
 
+        // Fast profile: hard-restrict the emitted native roster + persona
+        // set + coordinator, and pin the three fast natives' reasoning
+        // effort (see `mcp-capabilities.ts`'s `FAST_*_EFFORT` constants).
+        // `fastDescriptor.personaAllowlist` is toolNameHttp-keyed (the MCP
+        // wire currency); `agentNamesForToolAllowlist` translates it to the
+        // agentName-keyed allowlist `writePeerMcpRuntimeFiles` consumes.
+        // Worker dispatcher subagents are ALSO hard-denied for fast — force
+        // `workerToolsAvailable: false` regardless of `workerToolsEnabled()`
+        // so no worker-* .md (and no injected worker/orchestration skill or
+        // guard, both gated on this same flag below) survives the profile
+        // restriction even if the catalog gate would otherwise pass.
+        const isFastProfile = launchProfileId === "fast"
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
           codexCli: backend === "cli",
           selfInvocation,
           geminiAvailable: geminiModelsAvailable,
           geminiModel: resolveGeminiReviewModel(),
           groupKeys,
-          workerToolsAvailable: workerToolsEnabled(),
-          browseAvailable: browseAgentEnabled(),
+          workerToolsAvailable: !isFastProfile && workerToolsEnabled(),
+          browseAvailable: !isFastProfile && browseAgentEnabled(),
           nativeSubagentModel: nativeAgentModels.implementer,
           reviewerModel: nativeAgentModels.reviewer,
           reviewerFastModel: nativeAgentModels["reviewer-fast"],
@@ -704,8 +782,45 @@ export const claude = defineCommand({
           scribeModel: nativeAgentModels.scribe,
           implementerFastModel: nativeAgentModels["implementer-fast"],
           generalPurposeFastModel: nativeAgentModels["general-purpose-fast"],
+          nativeRoster: fastDescriptor.nativeRoster,
+          personaAllowlist: fastDescriptor.personaAllowlist
+            ? agentNamesForToolAllowlist(fastDescriptor.personaAllowlist)
+            : undefined,
+          includeCoordinator: fastDescriptor.hasCoordinator,
+          ...(isFastProfile
+            ? {
+                scoutEffort: FAST_SCOUT_EFFORT,
+                implementerFastEffort: FAST_IMPLEMENTER_FAST_EFFORT,
+                reviewerFastEffort: FAST_REVIEWER_FAST_EFFORT,
+              }
+            : {}),
         })
-        state.peerMcpNonce = runtime.nonce
+        // Keyed launch registry entry for this session: the `/mcp` nonce
+        // (already minted by `writePeerMcpRuntimeFiles`) plus a SEPARATE
+        // `/v1/messages` identity-preflight secret, scoped to this launch's
+        // profile. Replaces the old `state.peerMcpNonce = runtime.nonce`
+        // scalar assignment — a bare scalar couldn't express "which
+        // profile authenticated this request", so a concurrent fast +
+        // standard launch (or a reconnect) had no way to keep their
+        // identities from crossing. See `src/lib/launch-registry.ts`.
+        const launchSecret = randomBytes(32).toString("hex")
+        const launchEntry = registerLaunch({
+          profileId: launchProfileId,
+          nonce: runtime.nonce,
+          secret: launchSecret,
+          allowedGroups: fastDescriptor.allowedGroups,
+          allowedPersonas: fastDescriptor.personaAllowlist,
+        })
+        // Delivered via `ANTHROPIC_CUSTOM_HEADERS` (an Anthropic SDK env var
+        // Claude Code already forwards on every `/v1/messages` request) so
+        // the identity preflight in `routes/messages/handler.ts` can bind
+        // this launch's profile to its main-loop traffic, not just `/mcp`.
+        // Merge rather than overwrite: `getClaudeCodeEnvVars` doesn't set
+        // this key today, but a future caller-supplied value must not lose
+        // our security header, and ours must not clobber theirs either.
+        envVars.ANTHROPIC_CUSTOM_HEADERS = envVars.ANTHROPIC_CUSTOM_HEADERS
+          ? `${envVars.ANTHROPIC_CUSTOM_HEADERS}\n${LAUNCH_SECRET_HEADER}: ${launchSecret}`
+          : `${LAUNCH_SECRET_HEADER}: ${launchSecret}`
         // Reach-back channel for the advisory-review hooks (hook V2): the
         // detached Stop reviewer and the UserPromptSubmit hook run as separate
         // processes with no in-proc state, so they call the proxy over loopback
@@ -715,6 +830,7 @@ export const claude = defineCommand({
         envVars.GH_ROUTER_HOOK_MCP_URL = serverUrl
         envVars.GH_ROUTER_HOOK_NONCE = runtime.nonce
         onShutdown = async (): Promise<void> => {
+          unregisterLaunch(launchEntry.launchId)
           await runtime.cleanup()
           await baseShutdown()
         }
@@ -796,11 +912,18 @@ export const claude = defineCommand({
         // The hooks scope themselves to the top-level session via the payload's
         // agent_type, so subagents/teammates are untouched.
         const sessionCwd = process.cwd()
-        if (workerToolsEnabled()) {
-          const skillsToWrite = INJECTED_SKILLS.filter(
+        // Fast profile hard-denies the worker/orchestrate surface (plan
+        // section 6: "no coordinator/workers/orchestrate/related skills or
+        // guards"): no injected worker/orchestration skill, no
+        // UserPromptSubmit worker steer, no worker PreToolUse guard,
+        // regardless of what `workerToolsEnabled()`'s catalog gate says.
+        const workerSkillsActive = workerToolsEnabled() && !isFastProfile
+        let skillsWritten = 0
+        let skillsToWrite: typeof INJECTED_SKILLS = []
+        if (workerSkillsActive) {
+          skillsToWrite = INJECTED_SKILLS.filter(
             (s) => !isFirstMateSkillName(s.name) || agentToolsEnabled(),
           )
-          let skillsWritten = 0
           for (const s of skillsToWrite) {
             const r = await writeInjectedSkill(s.name, s.md).catch(() => ({ written: false }))
             if (r.written) skillsWritten++
@@ -816,39 +939,46 @@ export const claude = defineCommand({
           } catch (err) {
             consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`)
           }
-          // Auto-approve github-router's own injected MCP servers so their tools
-          // run WITHOUT a permission prompt in every mode — including plan mode,
-          // where the research tools (search / peers / workers-explore / stand_in /
-          // orchestrate) are exactly what the model reaches for. MCP tools aren't
-          // subject to plan mode's file-edit/shell-write restriction, so a bare
-          // `mcp__<server>` allow rule (on the RESOLVED keys) auto-runs them there
-          // too. deny/ask and the user's own allow entries are preserved.
-          // Auto-approve github-router's own injected MCP servers PLUS the native
-          // read-only research tools (WebSearch/WebFetch) so they run WITHOUT a
-          // permission prompt in every mode — including plan mode, where that
-          // research surface is exactly what the model reaches for. MCP tools and
-          // read-only natives aren't subject to plan mode's file-edit/shell-write
-          // restriction, so an allow rule auto-runs them there too. deny/ask and
-          // the user's own allow entries are preserved.
-          try {
-            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            // Authoritative list of the servers we actually injected — on the
-            // mirror path that's `injected.serversAdded` (includes the `codex-cli`
-            // stdio server, not just the HTTP groups); on the collision fallback,
-            // reconstruct it from the resolved group keys + codex-cli.
-            const injectedServerKeys = injected.ok
-              ? injected.serversAdded
-              : [
-                  ...Object.values(groupKeys).filter((k): k is string => Boolean(k)),
-                  ...(backend === "cli" ? ["codex-cli"] : []),
-                ]
-            const res = await injectAllowRules(settingsPath, planModeAllowRules(injectedServerKeys))
-            if (res.added.length) {
-              consola.debug(`Auto-approved for plan mode: ${res.added.join(", ")}`)
-            }
-          } catch (err) {
-            consola.warn(`Could not auto-approve injected tools: ${String(err)}`)
+        }
+        // Auto-approve github-router's own injected MCP servers so their tools
+        // run WITHOUT a permission prompt in every mode — including plan mode,
+        // where the research tools (search / peers / workers-explore / stand_in /
+        // orchestrate) are exactly what the model reaches for. MCP tools aren't
+        // subject to plan mode's file-edit/shell-write restriction, so a bare
+        // `mcp__<server>` allow rule (on the RESOLVED keys) auto-runs them there
+        // too. deny/ask and the user's own allow entries are preserved.
+        // Auto-approve github-router's own injected MCP servers PLUS the native
+        // read-only research tools (WebSearch/WebFetch) so they run WITHOUT a
+        // permission prompt in every mode — including plan mode, where that
+        // research surface is exactly what the model reaches for. MCP tools and
+        // read-only natives aren't subject to plan mode's file-edit/shell-write
+        // restriction, so an allow rule auto-runs them there too. deny/ask and
+        // the user's own allow entries are preserved.
+        //
+        // HOISTED OUT of the `workerSkillsActive` block (plan section 6): this
+        // must run for EVERY profile, including fast, so the groups that ARE
+        // still registered there (peers/search) stay auto-approved even though
+        // the worker-only skills/hook/guard above and below are skipped.
+        try {
+          const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+          // Authoritative list of the servers we actually injected — on the
+          // mirror path that's `injected.serversAdded` (includes the `codex-cli`
+          // stdio server, not just the HTTP groups); on the collision fallback,
+          // reconstruct it from the resolved group keys + codex-cli.
+          const injectedServerKeys = injected.ok
+            ? injected.serversAdded
+            : [
+                ...Object.values(groupKeys).filter((k): k is string => Boolean(k)),
+                ...(backend === "cli" ? ["codex-cli"] : []),
+              ]
+          const res = await injectAllowRules(settingsPath, planModeAllowRules(injectedServerKeys))
+          if (res.added.length) {
+            consola.debug(`Auto-approved for plan mode: ${res.added.join(", ")}`)
           }
+        } catch (err) {
+          consola.warn(`Could not auto-approve injected tools: ${String(err)}`)
+        }
+        if (workerSkillsActive) {
           // Workers non-blocking guard: a PreToolUse hook scoped (matcher) to the
           // active worker tools that DENIES a raw `mcp__<workersKey>__<mode>` call
           // from the main agent (redirecting it to the `worker-<mode>` background

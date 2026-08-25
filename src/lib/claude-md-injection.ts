@@ -156,6 +156,17 @@ export interface NativeAgentAvailability {
    *  `/model` switch. Acceptable for prose that biases a choice; it would not
    *  be for anything that routes a request. */
   budgetLead?: boolean
+  /** `"fast"` selects the fast launch profile's roster-restricted prose: a
+   *  hard restriction (not a catalog-availability signal, unlike every
+   *  `*Available` flag above). When set, `buildNativeReachClauses` and
+   *  `buildOperatingDefaultsDirective` return a short, self-contained
+   *  rendering naming only `scout`/`implementer-fast`/`reviewer-fast` and
+   *  `gemini_critic` — it must never name `implementer`/`reviewer`/
+   *  `brainstorm`/`scribe`/`general-purpose-fast`, `peer-review-coordinator`,
+   *  `worker-*`/`orchestrate` tools or skills, or `stand_in`, since none of
+   *  those are registered in this profile regardless of catalog state.
+   *  Absent/`"standard"` is today's catalog-driven full roster. */
+  profile?: "standard" | "fast"
 }
 
 /** Oxford-comma join: "a", "a and b", "a, b, and c". */
@@ -183,6 +194,14 @@ function joinClauses(parts: ReadonlyArray<string>): string {
  *  there is no quality-for-cost trade being hidden by leading with the cheap
  *  tier; reserve `reviewer` for the higher-stakes assessment it is there for. */
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
+  if (opts.profile === "fast") {
+    return joinClauses([
+      "`scout` to find or understand something in the repo",
+      "`implementer-fast` for coding changes",
+      "`reviewer-fast` when something exists and you want it assessed, "
+        + "including reproducing and root-causing a failure",
+    ])
+  }
   const clauses: Array<string> = []
   const implementerFast = opts.implementerFastAvailable !== false
   const reviewerFast = opts.reviewerFastAvailable !== false
@@ -305,9 +324,59 @@ const OPERATING_DEFAULTS_TAIL =
  * generation and `buildPeerAwarenessSnippet`, so the three surfaces cannot
  * disagree about which agents exist.
  */
+/**
+ * Fast-profile-only operating-defaults body. Self-contained (does not share
+ * text with `OPERATING_DEFAULTS_TAIL`) because that tail names
+ * `codex_critic`/`codex_reviewer`/`gemini_reviewer`/`opus_critic`/
+ * `peer-review-coordinator` and `worker-*` agents, none of which the fast
+ * profile registers — reusing it and trying to string-surgery those names
+ * out would be far more fragile than a short, purpose-written paragraph.
+ * Keeps the same "why delegate" and "why adversarial review" reasoning the
+ * standard tail carries, scaled to the fast profile's actual roster.
+ */
+const FAST_OPERATING_DEFAULTS_TAIL =
+  "context free to reason and collaborate with the user. Delegation pays "
+  + "when the work is WIDE (many files or sources to sweep) or SLOW, and you "
+  + "need only the conclusion: the main thread is where you think with and "
+  + "respond to the user, and its context window is a finite shared "
+  + "resource. Do trivial, surgical, and last-mile work yourself.\n\n"
+  + "Adversarial review. `gemini_critic` (Gemini 3.7 Flash) is a "
+  + "fresh-context model, so what it adds is a blind spot that whoever "
+  + "produced the work cannot reach by thinking harder about it. It earns "
+  + "its keep on consequential design choices, recommendations, and "
+  + "hard-to-reverse decisions: the cases where plausible alternatives "
+  + "remain and the conclusion rests on judgment rather than on something "
+  + "you can verify directly. Always consult it when the change touches "
+  + "auth, user input, database queries, crypto, or serialization. It does "
+  + "NOT pay for read-only tracing, ordinary repository lookup, or a "
+  + "conclusion that a focused test, a direct reproduction, or unambiguous "
+  + "code evidence already settles. Give it the artifact and the "
+  + "constraints and not your rationale, since justification anchors the "
+  + "review and dulls it.\n\n"
+  + "Aim high. Default to radical simplicity and a relentless focus on the "
+  + "user's real experience: design for the person and the job to be done, "
+  + "not the demo. Work backwards from the outcome the user actually needs. "
+  + "Question every assumption and prefer what you can derive, reproduce, "
+  + "or test.\n\n"
+  + "Engineering excellence. Fix a bug by first reproducing it end to end, "
+  + "as close to how a real user hits it as you can, so you solve the real "
+  + "problem and not a symptom. A lint error, a failing test, or a flaky "
+  + "test is worth fixing the moment you see it, whoever introduced it."
+
 export function buildOperatingDefaultsDirective(
   opts: NativeAgentAvailability = {},
 ): string {
+  if (opts.profile === "fast") {
+    return (
+      "## Operating defaults (apply when the user has not specified otherwise; the "
+      + "user's explicit direction and the domain's own standards always override)\n\n"
+      + "Orchestrate. Delegate research, implementation, and review to the right "
+      + "subagent. Reach for "
+      + buildNativeReachClauses(opts)
+      + "; Task subagents run in parallel. That keeps your own "
+      + FAST_OPERATING_DEFAULTS_TAIL
+    )
+  }
   return (
     "## Operating defaults (apply when the user has not specified otherwise; the "
     + "user's explicit direction and the domain's own standards always override)\n\n"

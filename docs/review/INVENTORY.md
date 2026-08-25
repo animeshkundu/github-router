@@ -73,6 +73,7 @@ Description-line (routing) review in [`skills/README.md`](./skills/README.md).
 | scout (native) | gpt-5.6-luna → gemini-3.7-flash | read-only low-cost repository exploration | omitted unless a chain model has `tool_calls` and 1M context | [scout](./subagents/scout.md) |
 | scribe (native) | gpt-5.6-terra → frontier, else lead | repository-grounded documentation, full toolset | always emitted; preferred model only when it has `tool_calls` | [scribe](./subagents/scribe.md) |
 | implementer-fast (native) | gpt-5.6-terra → gemini-3.1-pro-preview | well-specified mechanical implementation, full toolset | omitted unless a chain model has `tool_calls` and 1M context | [implementer-fast](./subagents/implementer-fast.md) |
+| reviewer-fast (native) | gemini-3.7-flash only | lower-stakes cross-lab assessment, full toolset | omitted unless Gemini 3.7 Flash has `tool_calls` and 1M context | (no per-agent page yet) |
 | general-purpose-fast (native) | gpt-5.6-luna only | fastest measured, lowest-cost full-toolset catch-all | omitted unless Luna has `tool_calls` and 1M context | [general-purpose-fast](./subagents/general-purpose-fast.md) |
 | peer-review-coordinator | inherited | fans out to critics, aggregates | always | [peer-review-coordinator](./subagents/peer-review-coordinator.md) |
 | worker-explore/implement/review/plan/test/browse | inherited (dispatchers) | background non-blocking dispatch to the matching worker | worker / browse gate | [subagents/](./subagents/) |
@@ -165,6 +166,7 @@ These share one root class: a text surface (awareness snippet, root CLAUDE.md, o
 - **Descriptions naming removed / non-surfaced tools produce `-32601`** — MCP. browser `type` routes to removed `browser_fill`; `codex_implementer` is documented as a peers HTTP tool but is stdio-only (404); `web`/`implement` error strings still say the old names. Detail: [FINDINGS S6](./mcp/FINDINGS.md).
 - **`peer-mcp-design.md` model rows refreshed** — the design anchor now records Opus 5 for opus_critic and stand_in, gpt-5.6-luna/high for explore, Opus 5/xhigh for plan, and the worker override ladder.
 - **worker-browse dispatcher/schema field mismatch (hard error)** — spans hooks/subagents and MCP. `dispatcherPrompt` passes `prompt`; the browse tool requires `task` and rejects unknown keys → hard `isError`. Detail: [FINDINGS S13](./mcp/FINDINGS.md), [subagents A3](./subagents/README.md).
+- **Fast profile: a fast launch profile will replace the whole native/MCP/persona surface on `-m fast`.** A Luna-led (`gpt-5.6-luna`) profile is designed to drop `implementer`/`reviewer`/`brainstorm`/`scribe`/`general-purpose-fast`/the coordinator/all six worker dispatchers and the `workers`/`orchestrate` MCP groups from that profile, keeping only `scout`/`implementer-fast`/`reviewer-fast` (each pinned to a model AND effort via new frontmatter) and the `gemini-critic` persona. The fast-profile-specific roster and effort pins are implemented; keep the audit rows profile-aware rather than assuming the standard roster applies to fast sessions. See [`default-models.md`](../default-models.md) "Fast launch profile".
 
 ### Suggestion — minimality / schema-honesty
 

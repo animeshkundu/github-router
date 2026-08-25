@@ -809,6 +809,180 @@ describe("buildPeerAgentDefinitions", () => {
     expect(agents["worker-implement"]!.tools).toEqual(["mcp__gh-router-workers__*"])
     expect(agents["worker-implement"]!.prompt).toContain("mcp__gh-router-workers__implement")
   })
+
+  describe("fast launch profile (nativeRoster / personaAllowlist / includeCoordinator / effort)", () => {
+    const FAST_ROSTER = ["scout", "implementer-fast", "reviewer-fast"]
+
+    function buildFastAgents(extra?: Partial<Parameters<typeof buildPeerAgentDefinitions>[0]>) {
+      return buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        nativeRoster: FAST_ROSTER,
+        personaAllowlist: ["gemini-critic"],
+        includeCoordinator: false,
+        scoutModel: "gpt-5.6-luna",
+        implementerFastModel: "gpt-5.6-luna",
+        reviewerFastModel: "grok-4.6",
+        scoutEffort: "high",
+        implementerFastEffort: "max",
+        reviewerFastEffort: "medium",
+        ...extra,
+      })
+    }
+
+    test("emits EXACTLY the fast roster: scout, implementer-fast, reviewer-fast, gemini-critic — no coordinator, no other natives", () => {
+      const agents = buildFastAgents()
+      expect(Object.keys(agents).sort()).toEqual([
+        "gemini-critic",
+        "implementer-fast",
+        "reviewer-fast",
+        "scout",
+      ])
+      expect(agents["peer-review-coordinator"]).toBeUndefined()
+      expect(agents["codex-critic"]).toBeUndefined()
+      expect(agents["codex-reviewer"]).toBeUndefined()
+      expect(agents["opus-critic"]).toBeUndefined()
+      expect(agents["gemini-reviewer"]).toBeUndefined()
+      expect(agents["implementer"]).toBeUndefined()
+      expect(agents["reviewer"]).toBeUndefined()
+      expect(agents["brainstorm"]).toBeUndefined()
+      expect(agents["scribe"]).toBeUndefined()
+      expect(agents["general-purpose-fast"]).toBeUndefined()
+    })
+
+    test("each fast native carries its pinned effort as frontmatter, and it round-trips through buildAgentMd", () => {
+      const agents = buildFastAgents()
+      expect(agents.scout!.effort).toBe("high")
+      expect(agents["implementer-fast"]!.effort).toBe("max")
+      expect(agents["reviewer-fast"]!.effort).toBe("medium")
+      // gemini-critic (a persona, not a native) never gets `effort:` frontmatter
+      // from this mechanism — personas don't carry PeerAgentDefinition.effort.
+      expect(agents["gemini-critic"]!.effort).toBeUndefined()
+
+      const md = buildAgentMd({
+        name: "implementer-fast",
+        description: agents["implementer-fast"]!.description,
+        prompt: agents["implementer-fast"]!.prompt,
+        model: agents["implementer-fast"]!.model,
+        effort: agents["implementer-fast"]!.effort,
+      })
+      expect(md).toContain('effort: "max"')
+    })
+
+    test("standard (unrestricted) calls are completely unaffected by the new opts", () => {
+      const agents = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+      })
+      // Full standard roster still present; no `effort` anywhere.
+      expect(agents["peer-review-coordinator"]).toBeDefined()
+      expect(agents.implementer).toBeDefined()
+      expect(agents.reviewer).toBeDefined()
+      expect(agents.brainstorm).toBeDefined()
+      expect(agents.scribe).toBeDefined()
+      for (const def of Object.values(agents)) {
+        expect(def.effort).toBeUndefined()
+      }
+    })
+
+    test("reviewer-fast on Grok describes the real 500K/372K window, not a false 1M or measured-speed claim, and drops implementer cross-reference when implementer is excluded", () => {
+      const agents = buildFastAgents()
+      const d = agents["reviewer-fast"]!.description
+      expect(d).toContain("500K total context, 372K max prompt")
+      expect(d).not.toContain("1M context")
+      expect(d).not.toContain("typically faster")
+      expect(d).not.toContain("OpenAI-backed implementer")
+      expect(d).not.toContain("escalate higher-stakes review to reviewer")
+      // [1m] must never decorate Grok's frontmatter model id (500K < 1M).
+      expect(agents["reviewer-fast"]!.model).toBe("grok-4.6")
+    })
+
+    test("implementer-fast on Luna does not reference the absent `implementer` escalation path", () => {
+      const agents = buildFastAgents()
+      const d = agents["implementer-fast"]!.description
+      expect(d).toContain("gpt-5.6-luna")
+      expect(d).not.toContain("use implementer instead")
+      // [1m] decoration depends on the live catalog (withOneMSuffix), which
+      // this suite does not seed by default — covered by the dedicated
+      // "carry [1m] iff catalog advertises >=1M" test elsewhere in this file.
+      // Seed it here too so this test also pins the fast-profile Luna case.
+      const saved = state.models
+      try {
+        state.models = {
+          object: "list",
+          data: [{
+            id: "gpt-5.6-luna",
+            name: "gpt-5.6-luna",
+            object: "model",
+            vendor: "openai",
+            version: "1",
+            preview: false,
+            model_picker_enabled: true,
+            capabilities: {
+              family: "gpt",
+              object: "model_capabilities",
+              tokenizer: "o200k_base",
+              type: "chat",
+              supports: { tool_calls: true },
+              limits: { max_context_window_tokens: 1_050_000 },
+            },
+            supported_endpoints: ["/responses"],
+          }] as never,
+        }
+        const withCatalog = buildFastAgents()
+        expect(withCatalog["implementer-fast"]!.model).toBe("gpt-5.6-luna[1m]")
+      } finally {
+        state.models = saved
+      }
+    })
+
+    test("nativeRoster hard-excludes an agent even when its model DOES resolve", () => {
+      const agents = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: false,
+        groupKeys: { peers: "peers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        nativeRoster: ["scout"],
+        // implementerFastModel resolves fine, but is NOT in the roster.
+        implementerFastModel: "gpt-5.6-terra",
+        scoutModel: "gpt-5.6-luna",
+      })
+      expect(agents.scout).toBeDefined()
+      expect(agents["implementer-fast"]).toBeUndefined()
+    })
+
+    test("personaAllowlist restricts personasFor's output even when codexCli would otherwise add write personas", () => {
+      const agents = buildPeerAgentDefinitions({
+        codexCli: true,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        personaAllowlist: ["gemini-critic"],
+        includeCoordinator: false,
+        // Also empty the native roster so this test isolates the persona
+        // allowlist: without it, implementer/reviewer/brainstorm/scribe would
+        // still appear (they're unconditional natives, independent of
+        // personaAllowlist).
+        nativeRoster: [],
+      })
+      expect(Object.keys(agents)).toEqual(["gemini-critic"])
+    })
+
+    test("every fast-profile generated agent name matches the permanent sweep allowlist (drift guard)", () => {
+      const agents = buildFastAgents()
+      for (const name of Object.keys(agents)) {
+        expect(PEER_AGENT_MD_FILENAME.test(`peer-123-${"a".repeat(8)}-${name}.md`)).toBe(true)
+      }
+    })
+  })
 })
 
 describe("resolveCodexCliBackend", () => {

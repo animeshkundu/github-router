@@ -1028,3 +1028,69 @@ test("budgetLead does not name reviewer-fast when it was dropped", () => {
   expect(dropped).toContain("`reviewer`")
   expect(dropped).not.toContain("cheaper and faster review tier")
 })
+
+// Fast launch profile: a HARD roster restriction, not a catalog-availability
+// signal — `profile: "fast"` must override every other flag rather than
+// merge with it, and the rendered prose must never name an agent, MCP tool,
+// or skill this profile does not register.
+const FAST_PROFILE_FORBIDDEN_NAMES = [
+  "`implementer`",
+  "`reviewer`",
+  "`brainstorm`",
+  "`scribe`",
+  "`general-purpose-fast`",
+  "peer-review-coordinator",
+  "worker-explore",
+  "worker-implement",
+  "worker-review",
+  "worker-plan",
+  "worker-test",
+  "worker-browse",
+  "codex_critic",
+  "codex_reviewer",
+  "opus_critic",
+  "gemini_reviewer",
+  "stand_in",
+  "mcp__workers__",
+  "mcp__orchestrate__",
+  "gh-orchestrate",
+  "gh-floor-keeper",
+  "gh-first-mate",
+] as const
+
+test("profile:'fast' names exactly the fast roster and never a removed native/tool/skill (drift guard)", () => {
+  const directive = buildOperatingDefaultsDirective({
+    profile: "fast",
+    // Every other flag set to look like a maximal standard launch — proves
+    // the fast branch overrides rather than merges.
+    scoutAvailable: true,
+    implementerFastAvailable: true,
+    reviewerFastAvailable: true,
+    generalPurposeFastAvailable: true,
+    budgetLead: true,
+  })
+  expect(directive).toContain("`scout`")
+  expect(directive).toContain("`implementer-fast`")
+  expect(directive).toContain("`reviewer-fast`")
+  for (const forbidden of FAST_PROFILE_FORBIDDEN_NAMES) {
+    expect(directive).not.toContain(forbidden)
+  }
+})
+
+test("profile:'fast' takes precedence: the SAME opts without the profile flag render the full standard surface", () => {
+  const standard = buildOperatingDefaultsDirective({
+    scoutAvailable: true,
+    implementerFastAvailable: true,
+    reviewerFastAvailable: true,
+    generalPurposeFastAvailable: true,
+  })
+  expect(standard).toContain("`implementer`")
+  expect(standard).toContain("worker-*")
+  expect(standard).toContain("peer critics")
+})
+
+test("profile:'standard' (explicit) is byte-identical to omitting profile", () => {
+  const implicit = buildOperatingDefaultsDirective({ budgetLead: true })
+  const explicit = buildOperatingDefaultsDirective({ budgetLead: true, profile: "standard" })
+  expect(explicit).toBe(implicit)
+})

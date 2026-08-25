@@ -311,6 +311,31 @@ function anthropicMessageToNeutral(msg: AnyRecord): Array<NeutralMessage> {
             name: typeof b.name === "string" ? b.name : "",
             arguments: b.input ?? {},
           })
+        } else if (b.type === "server_tool_use" && b.name === "advisor") {
+          // ADVISOR (src/services/advisor/advisor.ts — the literal "advisor"
+          // here is `ADVISOR_CLIENT_TOOL_NAME`, duplicated rather than
+          // imported to avoid a module cycle: advisor.ts already imports
+          // from this directory for the fast-Luna-profile shim continuation)
+          // embeds `server_tool_use`/`advisor_tool_result` blocks directly in
+          // a replayed assistant turn. Neither shim endpoint understands
+          // these Anthropic-native block types, so they were previously
+          // silently dropped here — a Luna-lead session that consulted the
+          // advisor earlier in the SAME conversation would lose that turn's
+          // substance entirely on the next request's replay. Translate to
+          // visible neutral text instead, so the model (and a human reading
+          // the transcript) still sees that a consultation happened.
+          parts.push({ type: "text", text: "[Consulted advisor]" })
+        } else if (b.type === "advisor_tool_result") {
+          const resultContent = b.content
+          const text =
+            resultContent
+            && typeof resultContent === "object"
+            && typeof (resultContent as AnyRecord).text === "string"
+              ? ((resultContent as AnyRecord).text as string)
+              : ""
+          if (text.length > 0) {
+            parts.push({ type: "text", text: `[Advisor response]\n${text}` })
+          }
         }
         // thinking / redacted_thinking blocks are dropped.
       }

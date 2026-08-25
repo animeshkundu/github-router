@@ -95,10 +95,7 @@ import {
 import { state } from "~/lib/state"
 import { resolveModel } from "~/lib/utils"
 import { callPersona, extractResponsesText } from "~/routes/mcp/handler"
-import {
-  ADVISOR_DEFAULT_EFFORT,
-  ADVISOR_DEFAULT_MODEL,
-} from "~/services/advisor/advisor"
+import { ADVISOR_DEFAULT_MODEL } from "~/services/advisor/advisor"
 import {
   createResponses,
   type ResponsesApiResponse,
@@ -1686,6 +1683,18 @@ const ADVISOR_PARAMS = Type.Object({
   }),
 })
 
+/**
+ * Fixed reasoning effort for the WORKER'S own `advisor` tool call (distinct
+ * from the server-side ADVISOR mechanism's `ADVISOR_DEFAULT_EFFORT` in
+ * `src/services/advisor/advisor.ts`, which now follows the Claude Code
+ * effort picker and defaults to `high`). This tool has no picker to follow —
+ * it is a single fixed-effort consultation a worker triggers explicitly, not
+ * a per-request value derived from client input — so it keeps its own
+ * historical constant rather than sharing one that started varying for an
+ * unrelated reason.
+ */
+const WORKER_ADVISOR_EFFORT = "xhigh"
+
 /** Advisor transcript budget — leaves headroom in the advisor's
  *  context window after the system prompt + concern + reasoning
  *  overhead. Truncate-from-front so the most recent turn (where the
@@ -1844,7 +1853,7 @@ function advisorTool(
               },
             ],
             stream: false,
-            reasoning: { effort: ADVISOR_DEFAULT_EFFORT },
+            reasoning: { effort: WORKER_ADVISOR_EFFORT },
           } satisfies ResponsesPayload, { workload: "reusable-prefix" })
         const response = (await createResponses(
           payload,

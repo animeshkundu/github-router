@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto"
 import path from "node:path"
 
 import consola from "consola"
@@ -8,6 +7,7 @@ import {
   applyClaudeCachePolicy,
   applyResponsesCachePolicy,
 } from "~/lib/prompt-cache"
+import { findLaunchByNonce, type LaunchRegistryEntry } from "~/lib/launch-registry"
 import { MCP_WORKSPACE_HEADER } from "~/lib/mcp-workspace-header"
 import { loadPeerImages } from "~/lib/peer-attachments"
 import { state } from "~/lib/state"
@@ -206,41 +206,31 @@ function isLoopbackHost(host: string | undefined | null): boolean {
   return hostname === "127.0.0.1" || hostname === "localhost"
 }
 
-/**
- * Constant-time bearer compare. Random per-launch nonces aren't really
- * timing-attackable in practice, but this costs nothing.
- */
-function nonceMatches(provided: string, expected: string): boolean {
-  if (provided.length !== expected.length) return false
-  const a = Buffer.from(provided)
-  const b = Buffer.from(expected)
-  try {
-    return timingSafeEqual(a, b)
-  } catch {
-    return false
-  }
-}
-
-function checkAuth(c: Context): { ok: true } | { ok: false; status: 401 | 403; reason: string } {
+function checkAuth(
+  c: Context,
+): { ok: true; launch: LaunchRegistryEntry } | { ok: false; status: 401 | 403; reason: string } {
   // Host validation defeats DNS-rebinding attacks. An attacker who tricks
   // the browser into resolving evil.com → 127.0.0.1 still sends
   // Host: evil.com, which we reject here.
   if (!isLoopbackHost(c.req.header("host"))) {
     return { ok: false, status: 403, reason: "non-loopback Host header rejected" }
   }
-  // Per-launch nonce. State is set by the `claude` subcommand after
-  // setupAndServe. When unset (proxy started standalone, e.g. via
-  // `github-router start`), `/mcp` rejects all requests.
-  const expected = state.peerMcpNonce
-  if (!expected) {
+  // Keyed per-launch registry (see `~/lib/launch-registry` /
+  // `~/lib/state`'s `LaunchRegistryEntry`), populated by the `claude`
+  // subcommand (or `serve`) after `setupAndServe` and before spawning the
+  // client. When empty (proxy started standalone, e.g. via `github-router
+  // start`), `/mcp` rejects all requests — same "not enabled" posture the
+  // old scalar `peerMcpNonce` had when unset.
+  if (state.launchRegistry.size === 0) {
     return { ok: false, status: 401, reason: "/mcp not enabled in this proxy session" }
   }
   const auth = c.req.header("authorization") ?? ""
   const m = /^Bearer\s+(.+)$/i.exec(auth)
-  if (!m || !nonceMatches(m[1], expected)) {
+  const launch = m ? findLaunchByNonce(m[1]) : undefined
+  if (!launch) {
     return { ok: false, status: 401, reason: "missing or invalid Authorization bearer" }
   }
-  return { ok: true }
+  return { ok: true, launch }
 }
 
 // `standInToolEnabled`, `workerToolsEnabled`, and `browserToolsEnabled`
@@ -305,12 +295,21 @@ function activePersonas(): Array<PersonaSpec> {
   })
 }
 
-function toolEntries(scope: McpScope): Array<ToolEntry> {
+function toolEntries(scope: McpScope, launch: LaunchRegistryEntry): Array<ToolEntry> {
   // Personas are definitionally the `peers` group; include them only on
-  // the `peers` scoped endpoint and the unscoped union.
+  // the `peers` scoped endpoint and the unscoped union, AND only when this
+  // launch's profile allows the `peers` group at all — `allowedGroups`
+  // undefined means unrestricted (today's standard-profile behavior); a
+  // concrete Set is a hard allow-list (e.g. the fast profile's
+  // `{peers, search}`). Personas are additionally filtered by
+  // `allowedPersonas` (toolNameHttp-keyed) below, e.g. the fast profile
+  // narrows `peers` itself down to just `gemini_critic`.
+  const peersGroupAllowed = !launch.allowedGroups || launch.allowedGroups.has("peers")
   const personaEntries: Array<ToolEntry> =
-    scope === "all" || scope === "peers"
-      ? activePersonas().map((p) => ({
+    peersGroupAllowed && (scope === "all" || scope === "peers")
+      ? activePersonas()
+          .filter((p) => !launch.allowedPersonas || launch.allowedPersonas.has(p.toolNameHttp))
+          .map((p) => ({
           name: p.toolNameHttp,
           description: p.description,
           inputSchema: {
@@ -357,15 +356,16 @@ function toolEntries(scope: McpScope): Array<ToolEntry> {
         }))
       : []
   // Append non-persona utility tools, filtered first by the requested
-  // scope (`t.group`) then by the per-tool capability gate. Per-tool
-  // `capability` tag drives the runtime gate (see `workerToolsEnabled()`
-  // / `standInToolEnabled()` / `browserToolsEnabled()`). They share the
-  // same `tools/list` surface but have their own input schemas (no
-  // prompt/context/effort) and skip the per-persona validation gates in
-  // handleToolsCall.
+  // scope (`t.group`) then by this launch's group allow-list then by the
+  // per-tool capability gate. Per-tool `capability` tag drives the runtime
+  // gate (see `workerToolsEnabled()` / `standInToolEnabled()` /
+  // `browserToolsEnabled()`). They share the same `tools/list` surface but
+  // have their own input schemas (no prompt/context/effort) and skip the
+  // per-persona validation gates in handleToolsCall.
   const nonPersonaEntries: Array<ToolEntry> = NON_PERSONA_MCP_TOOLS.filter(
     (t) => {
       if (scope !== "all" && t.group !== scope) return false
+      if (launch.allowedGroups && !launch.allowedGroups.has(t.group)) return false
       if (t.capability === "worker") return workerToolsEnabled()
       if (t.capability === "browse_agent") return browseAgentEnabled()
       if (t.capability === "stand_in") return standInToolEnabled()
@@ -998,6 +998,7 @@ export function applySessionWorkspace(
 async function handleToolsCall(
   body: JsonRpcRequest,
   scope: McpScope,
+  launch: LaunchRegistryEntry,
   sessionWorkspace?: string,
 ): Promise<object> {
   const params = body.params ?? {}
@@ -1033,6 +1034,30 @@ async function handleToolsCall(
   // runs BEFORE acquireInFlightSlot — no slot leak on reject.
   const toolGroup: McpGroup = persona ? "peers" : nonPersonaTool!.group
   if (scope !== "all" && toolGroup !== scope) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+
+  // Launch-profile reject: this launch's registered profile (e.g. the fast
+  // profile) may hard-restrict which MCP groups and which persona tool
+  // names it may ever call, independent of the URL scope hit above (a
+  // restricted launch is denied even via the unscoped "all" union — the
+  // restriction is bound to the caller's identity, not to which path it
+  // used). `undefined` means unrestricted (today's standard-profile
+  // behavior). Mirrors the `toolEntries()` list-time filter exactly, and
+  // runs BEFORE acquireInFlightSlot for the same no-slot-leak-on-reject
+  // reason as the scope reject above.
+  if (launch.allowedGroups && !launch.allowedGroups.has(toolGroup)) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (persona && launch.allowedPersonas && !launch.allowedPersonas.has(persona.toolNameHttp)) {
     return rpcError(
       body.id,
       RPC_METHOD_NOT_FOUND,
@@ -1422,6 +1447,7 @@ async function handleRpc(
   _c: Context,
   body: JsonRpcRequest,
   scope: McpScope,
+  launch: LaunchRegistryEntry,
   sessionWorkspace?: string,
 ): Promise<{ status: number; body: object | null }> {
   // Reject non-object envelopes (null, arrays, primitives) BEFORE we
@@ -1485,14 +1511,14 @@ async function handleRpc(
       if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
-        body: rpcResult(body.id, { tools: toolEntries(scope) }),
+        body: rpcResult(body.id, { tools: toolEntries(scope, launch) }),
       }
 
     case "tools/call":
       if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
-        body: await handleToolsCall(body, scope, sessionWorkspace),
+        body: await handleToolsCall(body, scope, launch, sessionWorkspace),
       }
 
     // --- Phase D: MCP method stubs with full handshake coherence ---
@@ -1589,6 +1615,7 @@ export async function handleMcpPost(
       auth.status,
     )
   }
+  const { launch } = auth
 
   // Validate the path scope AFTER auth so an unauthenticated probe of
   // `/mcp/<group>` cannot distinguish a valid group (auth failure) from an
@@ -1657,7 +1684,7 @@ export async function handleMcpPost(
     && body.method === "tools/call"
     && acceptsEventStream(c.req.header("accept"))
   ) {
-    return handleToolsCallSSE(body, scope, sessionWorkspace)
+    return handleToolsCallSSE(body, scope, launch, sessionWorkspace)
   }
 
   // JSON-path pre-flight predictedTooLong cap. SSE clients (above)
@@ -1682,7 +1709,7 @@ export async function handleMcpPost(
   }
 
   try {
-    const { status, body: respBody } = await handleRpc(c, body, scope, sessionWorkspace)
+    const { status, body: respBody } = await handleRpc(c, body, scope, launch, sessionWorkspace)
     if (respBody === null) return c.body(null, status as 202)
     return c.json(respBody, status as 200)
   } catch (err) {
@@ -1757,13 +1784,14 @@ const SSE_HEARTBEAT_INTERVAL_MS = 5000
 async function handleToolsCallSSE(
   body: JsonRpcRequest,
   scope: McpScope,
+  launch: LaunchRegistryEntry,
   sessionWorkspace?: string,
 ): Promise<Response> {
   const encoder = new TextEncoder()
   // Kick off the actual tool call as a Promise. handleToolsCall handles
   // all gates, slot accounting, abort registration, telemetry — we just
   // wrap its eventual result in an SSE envelope.
-  const callPromise = handleToolsCall(body, scope, sessionWorkspace)
+  const callPromise = handleToolsCall(body, scope, launch, sessionWorkspace)
   // Heartbeat interval is hoisted out of `start()` so `cancel()` can
   // clear it synchronously on consumer disconnect — otherwise a 5-second
   // tick fires into a closed controller after every cancel, and the

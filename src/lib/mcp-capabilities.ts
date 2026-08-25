@@ -352,6 +352,78 @@ export function generalPurposeFastModel(): string | undefined {
   )
 }
 
+/*
+ * Fast-launch-profile ("-m fast") native model resolvers.
+ *
+ * These are DELIBERATELY separate from the standard resolvers above (never
+ * folded into a shared chain): the fast profile is a hard, single-entry,
+ * no-fallback assignment per plan section 5 — `scout` and `implementer-fast`
+ * both pin to Luna, `reviewer-fast` pins to Grok — and must not silently
+ * drift if the standard resolvers' chains are retuned. A caller opting into
+ * the fast profile calls these instead of the standard resolver for the same
+ * agent name; nothing here changes standard-profile behavior.
+ */
+
+/** Fast profile's `scout` and `implementer-fast` model. Both agents pin to
+ *  the SAME id (the fast profile's lead model) but are still independent
+ *  agents with independent context windows — see the plan's "each native
+ *  subagent starts with its own context window" note. */
+export const FAST_SCOUT_MODEL = "gpt-5.6-luna"
+export const FAST_IMPLEMENTER_FAST_MODEL = "gpt-5.6-luna"
+/** Fast profile's `reviewer-fast` model. Grok 4.6 advertises 500K total
+ *  context / 372K max prompt — well under the 1M floor the OTHER fast
+ *  natives require, so this resolver checks `max_prompt_tokens` against a
+ *  conservative floor instead of `minContextTokens` (which would always fail
+ *  and silently drop the agent). Never gains a `[1m]` decoration:
+ *  `withOneMSuffix` keys off `max_context_window_tokens`, and Grok's
+ *  500K stays below the 1M threshold on its own. */
+export const FAST_REVIEWER_FAST_MODEL = "grok-4.6"
+
+/** Minimum advertised `max_prompt_tokens` the fast profile's `reviewer-fast`
+ *  model must carry. Deliberately far below Grok 4.6's live prompt window
+ *  (372K) — this is a presence/floor check for the agent's model-resolution
+ *  gate, not a claim about how much of that window is safely usable; the
+ *  conservative client-side compaction contract is computed separately (see
+ *  `computeConservativeCompactionTrigger` in `./grok-context`). */
+export const FAST_REVIEWER_MIN_PROMPT_TOKENS = 200_000
+
+/** Fixed per-agent effort pins for the exact fast-profile native roster. */
+export const FAST_SCOUT_EFFORT = "high"
+export const FAST_IMPLEMENTER_FAST_EFFORT = "max"
+export const FAST_REVIEWER_FAST_EFFORT = "medium"
+
+export function fastScoutModel(): string | undefined {
+  return firstPresentInCatalog(
+    [FAST_SCOUT_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+}
+
+export function fastImplementerFastModel(): string | undefined {
+  return firstPresentInCatalog(
+    [FAST_IMPLEMENTER_FAST_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+}
+
+/** Unlike the other `firstPresentInCatalog`-based resolvers, this checks
+ *  `max_prompt_tokens` rather than `max_context_window_tokens` — Grok 4.6's
+ *  total context (500K) is below the 1M floor every other fast native
+ *  requires, so gating on total context would always fail closed and drop
+ *  the agent. `max_prompt_tokens` is the number Copilot's live catalog
+ *  advertises for "how much prompt this model actually accepts", which is
+ *  the number that matters for a reviewer receiving a pasted artifact. */
+export function fastReviewerFastModel(): string | undefined {
+  const models = state.models?.data
+  if (!models) return undefined
+  const found = models.find((m) => m.id === FAST_REVIEWER_FAST_MODEL)
+  if (!found) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  const maxPrompt = found.capabilities?.limits?.max_prompt_tokens ?? 0
+  if (maxPrompt < FAST_REVIEWER_MIN_PROMPT_TOKENS) return undefined
+  return FAST_REVIEWER_FAST_MODEL
+}
+
 /**
  * Gate for the worker tools (`explore`, `review`, `implement`).
  *

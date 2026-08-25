@@ -6,6 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { mcpRoutes } from "../src/routes/mcp/route"
+import { registerLaunch, unregisterLaunch } from "../src/lib/launch-registry"
 import {
   __getInFlightForTests,
   __resetInFlightForTests,
@@ -3179,5 +3180,108 @@ describe("/mcp peer prompt-window guard", () => {
     })
     // resolveModel maps dashed claude-opus-4-6 → dotted claude-opus-4.6.
     expect((captured.lastBody as { model: string }).model).toBe("claude-opus-4.6")
+  })
+})
+
+// Launch-profile scoping: a launch registered with a narrower
+// `allowedGroups`/`allowedPersonas` (e.g. the fast profile's
+// `{peers, search}` / `{gemini_critic}`) must be denied every tool outside
+// that allow-list, in BOTH `tools/list` and `tools/call`, on EVERY scope
+// including the unscoped "all" union — the restriction is bound to the
+// caller's identity (its nonce), not to which URL path it happened to hit.
+// `undefined` allowedGroups/allowedPersonas (the standard launch registered
+// via `state.peerMcpNonce` in the outer `beforeEach`) must stay completely
+// unaffected.
+describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
+  const FAST_NONCE = "f".repeat(64)
+  let fastLaunchId: string
+
+  beforeEach(() => {
+    fastLaunchId = registerLaunch({
+      profileId: "fast",
+      nonce: FAST_NONCE,
+      secret: "fast-launch-secret",
+      allowedGroups: new Set(["peers", "search"]),
+      allowedPersonas: new Set(["gemini_critic"]),
+    }).launchId
+  })
+
+  afterEach(() => {
+    unregisterLaunch(fastLaunchId)
+  })
+
+  test("tools/list on the unscoped union only returns gemini_critic among personas, plus search tools — no codex/opus personas, no workers/orchestrate tools", async () => {
+    const { status, json } = await rpc(
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      { auth: `Bearer ${FAST_NONCE}` },
+    )
+    expect(status).toBe(200)
+    const tools = (json.result as { tools: Array<{ name: string }> }).tools
+    const names = tools.map((t) => t.name)
+    expect(names).toContain("gemini_critic")
+    expect(names).toContain("code")
+    expect(names).toContain("web")
+    for (const forbidden of [
+      "codex_critic",
+      "codex_reviewer",
+      "opus_critic",
+      "gemini_reviewer",
+      "explore",
+      "implement",
+      "review",
+      "plan",
+      "test",
+      "decompose",
+      "run_workflow",
+    ]) {
+      expect(names).not.toContain(forbidden)
+    }
+  })
+
+  test("tools/call rejects a persona outside allowedPersonas with -32601, even on the unscoped union", async () => {
+    const { json } = await rpc(
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "codex_critic", arguments: { prompt: "hi" } },
+      },
+      { auth: `Bearer ${FAST_NONCE}` },
+    )
+    expect((json.error as { code: number }).code).toBe(-32601)
+  })
+
+  test("tools/call rejects a tool outside allowedGroups with -32601, even when the URL scope matches the tool's own group", async () => {
+    const { json } = await scopedRpc(
+      "workers",
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "explore", arguments: { workspace: "/tmp", prompt: "hi" } },
+      },
+      { auth: `Bearer ${FAST_NONCE}` },
+    )
+    expect((json.error as { code: number }).code).toBe(-32601)
+  })
+
+  test("tools/list on the scoped /mcp/workers endpoint returns an empty tool list for a launch whose allowedGroups excludes workers", async () => {
+    const { status, json } = await scopedRpc(
+      "workers",
+      { jsonrpc: "2.0", id: 4, method: "tools/list" },
+      { auth: `Bearer ${FAST_NONCE}` },
+    )
+    expect(status).toBe(200)
+    const tools = (json.result as { tools: Array<{ name: string }> }).tools
+    expect(tools).toEqual([])
+  })
+
+  test("the standard (unrestricted) launch nonce is completely unaffected — full persona list still returned", async () => {
+    const { json } = await rpc({ jsonrpc: "2.0", id: 5, method: "tools/list" })
+    const tools = (json.result as { tools: Array<{ name: string }> }).tools
+    const names = tools.map((t) => t.name)
+    expect(names).toContain("codex_critic")
+    expect(names).toContain("gemini_critic")
+    expect(names).toContain("opus_critic")
   })
 })

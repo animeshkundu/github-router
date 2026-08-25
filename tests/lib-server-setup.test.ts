@@ -3,7 +3,7 @@ import type { ServerHandler } from "srvx"
 
 import { PATHS } from "../src/lib/paths"
 import {
-  BUDGET_LEAD_MODEL,
+  FAST_LEAD_MODEL,
   BUDGET_SMALL_FAST_SLUG,
   isBudgetClaudeLead,
   resolveLeadSlugArg,
@@ -764,40 +764,44 @@ describe("budget-mode lead and small/fast tier", () => {
     }
   }
 
-  test("`-m fast` resolves to the budget lead", () => {
+  test("`-m fast` resolves to the fast (Luna) lead", () => {
     withCatalog([], () => {
-      expect(resolveLeadSlugArg("fast")).toBe(BUDGET_LEAD_MODEL)
-      expect(resolveLeadSlugArg("FAST")).toBe(BUDGET_LEAD_MODEL)
+      expect(resolveLeadSlugArg("fast")).toBe(FAST_LEAD_MODEL)
+      expect(resolveLeadSlugArg("FAST")).toBe(FAST_LEAD_MODEL)
     })
   })
 
-  test("`-m fast` carries [1m] when the catalog says sonnet-5 serves 1M", () => {
-    // The gap this pins: sonnet-5 ships the same shape opus-5 does — a single
-    // slug advertising 1M, no `-1m` sibling — but the decoration used to be
-    // opus-only, so a budget lead was budgeted locally at 200K and auto-compacted
-    // at roughly a fifth of the window Copilot was willing to serve.
+  test("`-m fast` carries [1m] when the catalog says gpt-5.6-luna serves 1M", () => {
+    // gpt-5.6-luna ships a single slug advertising 1M, no `-1m` sibling — the
+    // fast lead gets local 1M accounting exactly like every other branch.
     withoutOneMOptOut(() => {
-      withCatalog([...LIVE_SHAPED_CATALOG], () => {
-        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5[1m]")
-      })
+      withCatalog(
+        [...LIVE_SHAPED_CATALOG, ["gpt-5.6-luna", 1_000_000]],
+        () => {
+          expect(resolveLeadSlugArg("fast")).toBe("gpt-5.6-luna[1m]")
+        },
+      )
     })
   })
 
-  test("`-m fast` and the explicit sonnet slug agree, so both give the same session", () => {
+  test("`-m fast` and the explicit Luna slug agree, so both give the same session", () => {
     withoutOneMOptOut(() => {
-      withCatalog([...LIVE_SHAPED_CATALOG], () => {
-        // Identical STRING, not merely identical budget classification: the
-        // context budget is part of what "the same session" means, so a
-        // decoration applied to one branch and not the other would reintroduce
-        // the divergence the `-m fast` alias exists to avoid.
-        expect(resolveLeadSlugArg("fast")).toBe(
-          resolveLeadSlugArg("claude-sonnet-5"),
-        )
-        expect(isBudgetClaudeLead(resolveLeadSlugArg("fast"))).toBe(true)
-        expect(isBudgetClaudeLead("claude-sonnet-5")).toBe(true)
-        // The bracket must not confuse the budget-lead predicate.
-        expect(isBudgetClaudeLead("claude-sonnet-5[1m]")).toBe(true)
-      })
+      withCatalog(
+        [...LIVE_SHAPED_CATALOG, ["gpt-5.6-luna", 1_000_000]],
+        () => {
+          // Identical STRING, not merely identical resolution: the context
+          // budget is part of what "the same session" means.
+          expect(resolveLeadSlugArg("fast")).toBe(
+            resolveLeadSlugArg("gpt-5.6-luna"),
+          )
+          // gpt-5.6-luna is NOT a Claude model, so the fast profile is NOT a
+          // "budget Claude lead" — that predicate/mechanism is unrelated to
+          // the fast profile (see `resolveLeadSlugArg`'s doc).
+          expect(isBudgetClaudeLead(resolveLeadSlugArg("fast"))).toBe(false)
+          expect(isBudgetClaudeLead("gpt-5.6-luna")).toBe(false)
+          expect(isBudgetClaudeLead("gpt-5.6-luna[1m]")).toBe(false)
+        },
+      )
     })
   })
 
@@ -838,12 +842,12 @@ describe("budget-mode lead and small/fast tier", () => {
     })
   })
 
-  test("a 200K sonnet catalog leaves the budget lead bare", () => {
+  test("a 200K sonnet catalog leaves a pinned sonnet slug bare", () => {
     // Cap-awareness in the direction that matters: on a tier where sonnet-5 is
     // not 1M, claiming it would make Claude Code over-account and compact late.
+    // (Not about `-m fast` — that's the Luna profile now, tested above.)
     withoutOneMOptOut(() => {
       withCatalog([["claude-sonnet-5", 200_000]], () => {
-        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5")
         expect(resolveLeadSlugArg("claude-sonnet-5")).toBe("claude-sonnet-5")
       })
     })
@@ -854,7 +858,7 @@ describe("budget-mode lead and small/fast tier", () => {
       const saved = state.models
       state.models = undefined
       try {
-        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5")
+        expect(resolveLeadSlugArg("fast")).toBe(FAST_LEAD_MODEL)
         expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
       } finally {
         state.models = saved
@@ -882,6 +886,24 @@ describe("budget-mode lead and small/fast tier", () => {
           )
           expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5[1m]")
           expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBe("claude-opus-5")
+        })
+      })
+    })
+  })
+
+  test("fast Luna aliases declare their live effort/thinking capabilities", () => {
+    withoutOneMOptOut(() => {
+      withCatalog([["gpt-5.6-luna", 1_050_000]], () => {
+        withoutUserOverrides(() => {
+          const vars = getClaudeCodeEnvVars(
+            "http://127.0.0.1:8787",
+            "gh-router-luna-driver-max[1m]",
+            "fast",
+          )
+          const expected =
+            "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
+          expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES).toBe(expected)
+          expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES).toBe(expected)
         })
       })
     })
@@ -947,8 +969,8 @@ describe("budget-mode lead and small/fast tier", () => {
     const prior = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
     process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
     try {
-      withCatalog([...LIVE_SHAPED_CATALOG], () => {
-        expect(resolveLeadSlugArg("fast")).toBe("claude-sonnet-5")
+      withCatalog([...LIVE_SHAPED_CATALOG, ["gpt-5.6-luna", 1_000_000]], () => {
+        expect(resolveLeadSlugArg("fast")).toBe("gpt-5.6-luna")
         expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
         expect(resolveLeadSlugArg("claude-sonnet-4-6")).toBe(
           "claude-sonnet-4-6",

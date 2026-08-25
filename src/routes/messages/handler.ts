@@ -7,11 +7,24 @@ import {
   classifyMessagesRoute,
   handleNonClaudeChat,
   handleNonClaudeResponses,
+  makeShimContinueTurn,
+  parseAnthropicRequest,
+  streamParsedRequestViaShim,
+  type ShimEndpoint,
 } from "~/lib/anthropic-translate"
 import { HTTPError } from "~/lib/error"
+import {
+  canonicalizeAliasModel,
+  resolveEffortWithAliasDefault,
+  resolveModelAlias,
+} from "~/lib/launch-profile"
+import {
+  identityPreflightErrorResponse,
+  runMessagesIdentityPreflight,
+} from "~/lib/messages-identity-preflight"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { EFFORT_ORDER, UNKNOWN_EFFORT_ANCHOR, bucketEffort, clampEffort } from "~/lib/reasoning-effort"
+import { EFFORT_ORDER, UNKNOWN_EFFORT_ANCHOR, bucketEffort, clampEffort, type Effort } from "~/lib/reasoning-effort"
 import { logRequest, logRequestFields, recordBodySize } from "~/lib/request-log"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
@@ -35,6 +48,7 @@ import {
   buildAdvisorStream,
   injectAdvisorTool,
   isAdvisorRequested,
+  isFastProfileLead,
   resolveAdvisorEffort,
   resolveAdvisorModel,
 } from "~/services/advisor/advisor"
@@ -237,6 +251,18 @@ async function processWebSearch(rawBody: string): Promise<string> {
 
 export async function handleCompletion(c: Context) {
   const startTime = Date.now()
+
+  // `/v1/messages` identity preflight. Runs before ANY body consumer
+  // (`c.req.text()` below is the first one) — this only reads a header.
+  // See `runMessagesIdentityPreflight`'s doc for the bound-vs-unbound-BYO
+  // distinction and why a failed preflight answers 403, never 401 (the
+  // no-401 invariant — Claude Code's reactive refresh path fires on any
+  // 401 and would try the synthetic refresh token, breaking the session).
+  const identity = runMessagesIdentityPreflight(c)
+  if (!identity.ok) {
+    return identityPreflightErrorResponse(c, identity.reason)
+  }
+
   await checkRateLimit(state)
 
   const rawBody = await c.req.text()
@@ -447,18 +473,105 @@ export async function handleCompletion(c: Context) {
   // id can never be diverted to either shim (fail-closed to Claude).
   const messagesRoute = classifyMessagesRoute(modelId, selectedModel, originalModel)
   if (messagesRoute !== "claude-passthrough") {
-    // ADVISOR is a Claude-only feature: the server-side advisor translate-loop
-    // (buildAdvisorStream) exists only on the native /v1/messages path, not on
-    // either shim. When a request carrying the advisor beta/tool routes to a
-    // non-Claude model — whether picked via `-m <model>` or switched at runtime
-    // via the /model picker — gracefully DEGRADE instead of 400ing every
-    // request (which would break `github-router claude -m gpt-5.5` entirely,
-    // since the claude launcher auto-enables the advisor beta). Strip the
-    // injected `__anthropic_advisor` tool (which would otherwise reach the
-    // model with no server-side handler) and ignore the advisor beta, then
-    // forward to the shim so the request succeeds. Advisor is simply
-    // unavailable on non-Claude models. The Claude passthrough path (below) is
-    // unchanged — the advisor loop still runs there.
+    // ADVISOR is Claude-only in the GENERAL case: the server-side advisor
+    // translate-loop (buildAdvisorStream) exists only on the native
+    // /v1/messages path. The ONE exception is the fast Luna-lead profile,
+    // whose advisor (Gemini 3.7 Flash, via `resolveAdvisorModel`) runs
+    // through THIS SAME shim's translation + SSE-synthesis machinery
+    // (`streamParsedRequestViaShim` for the initial turn, a
+    // `makeShimContinueTurn`-built continuation for every turn after) —
+    // see plan section 8 "Enable Gemini 3.7 Flash Advisor on the Luna
+    // translation path". Every OTHER non-Claude lead still gracefully
+    // degrades below exactly as before. Advisor only ever runs on a
+    // STREAMING request (mirrors the Claude-passthrough branch, which gates
+    // buildAdvisorStream on `isStreaming` too — a non-streaming request
+    // never gets the advisor loop on ANY lead).
+    const endpoint: ShimEndpoint = messagesRoute === "chat-shim" ? "chat" : "responses"
+    let parsedBase: AnyRecord | undefined
+    try {
+      parsedBase = JSON.parse(resolvedBody) as AnyRecord
+    } catch {
+      // Malformed body — fall through to the plain shim handlers below,
+      // which re-parse and surface their own 400.
+    }
+    const wantsStream = parsedBase?.stream === true
+
+    if (
+      advisorEnabled
+      && wantsStream
+      && identity.launch?.profileId === "fast"
+      && isFastProfileLead(modelId)
+    ) {
+      const initialConversation = Array.isArray(parsedBase!.messages)
+        ? (parsedBase!.messages as Array<AnyRecord>)
+        : []
+      const parsedInitial = parseAnthropicRequest(parsedBase!, modelId!, selectedModel)
+      const fastAdvisorAborter = new AbortController()
+      const firstResponse = await streamParsedRequestViaShim(
+        parsedInitial,
+        endpoint,
+        {
+          modelId: modelId!,
+          model: selectedModel,
+          routePath: c.req.path,
+          onCancel: () => fastAdvisorAborter.abort(),
+        },
+        fastAdvisorAborter.signal,
+      )
+
+      logRequest(
+        {
+          method: "POST",
+          path: c.req.path,
+          model: originalModel,
+          resolvedModel: modelId,
+          status: 200,
+          streaming: true,
+        },
+        selectedModel,
+        startTime,
+      )
+
+      const advisorChoice = resolveAdvisorModel(modelId, true)
+      return new Response(
+        buildAdvisorStream({
+          firstResponse,
+          initialConversation,
+          baseBody: parsedBase!,
+          // Unused when `continueTurn` is supplied (the shim builds its own
+          // request headers from the catalog entry); kept non-undefined for
+          // type simplicity/back-compat with the default-`continueTurn` path.
+          requestHeaders: {},
+          advisorModel: advisorChoice.model,
+          advisorEscalated: advisorChoice.escalated || advisorChoice.fastProfile,
+          advisorEffort: resolveAdvisorEffort(rawBody, advisorChoice.model),
+          externalAborter: fastAdvisorAborter,
+          continueTurn: makeShimContinueTurn(endpoint, {
+            modelId: modelId!,
+            model: selectedModel,
+          }),
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "transfer-encoding": "chunked",
+            connection: "keep-alive",
+          },
+        },
+      )
+    }
+
+    // ADVISOR is unavailable on every OTHER non-Claude model — whether picked
+    // via `-m <model>` or switched at runtime via the /model picker —
+    // gracefully DEGRADE instead of 400ing every request (which would break
+    // `github-router claude -m gpt-5.5` entirely, since the claude launcher
+    // auto-enables the advisor beta). Strip the injected `__anthropic_advisor`
+    // tool (which would otherwise reach the model with no server-side
+    // handler) and ignore the advisor beta, then forward to the shim so the
+    // request succeeds. The Claude passthrough path (below) is unchanged —
+    // the advisor loop still runs there.
     // Strip the internal advisor tool UNCONDITIONALLY on every shim path
     // (defense-in-depth): the reserved `__anthropic_advisor` / `advisor_*` tool
     // is a proxy-internal contract with no server-side handler off the Claude
@@ -800,9 +913,58 @@ function resolveModelInBody(rawBody: string): {
     typeof parsed.model === "string" ? parsed.model : undefined
 
   let modified = false
+
+  // Luna driver/Sonnet/Haiku alias canonicalization (fast launch profile).
+  // MUST run before `resolveModel(originalModel)` below — `resolveModel`
+  // has no knowledge of these router-owned alias ids
+  // (`gh-router-luna-sonnet-xhigh` / `gh-router-luna-haiku-high`; the real
+  // driver id `gpt-5.6-luna` is also in the alias table so its own
+  // absent-effort default applies uniformly). Safe unconditionally: these
+  // are synthetic ids that only ever appear here because the fast
+  // profile's env seeding put them in `ANTHROPIC_DEFAULT_SONNET_MODEL` /
+  // `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_MODEL` — no real Copilot
+  // catalog id collides with them.
+  //
+  // Effort precedence (explicit `output_config.effort` > a client thinking
+  // budget > the alias's own absent-effort default) is applied by only
+  // ever injecting the alias default when NEITHER an explicit effort NOR a
+  // thinking budget is present; when a thinking budget IS present, the
+  // existing `translateThinking` bucketing below (unaffected by this
+  // block) already owns deriving `output_config.effort` from it, and
+  // client-supplied `output_config.effort` already always wins there too.
   if (originalModel) {
-    const resolved = resolveModel(originalModel)
-    if (resolved !== originalModel) {
+    const alias = resolveModelAlias(originalModel)
+    if (alias) {
+      const outputConfig =
+        parsed.output_config && typeof parsed.output_config === "object"
+          ? (parsed.output_config as AnyRecord)
+          : undefined
+      const hasExplicitEffort = typeof outputConfig?.effort === "string"
+      const thinking =
+        parsed.thinking && typeof parsed.thinking === "object"
+          ? (parsed.thinking as AnyRecord)
+          : undefined
+      const hasThinkingBudget =
+        thinking?.type === "enabled" && thinking.budget_tokens !== undefined
+      const effort = resolveEffortWithAliasDefault({
+        explicitEffort: hasExplicitEffort ? (outputConfig!.effort as Effort) : undefined,
+        thinkingBucketedEffort: hasThinkingBudget ? bucketEffort(thinking!.budget_tokens) : undefined,
+        aliasId: originalModel,
+      })
+      if (effort && !hasExplicitEffort && !hasThinkingBudget) {
+        parsed.output_config = { ...(outputConfig ?? {}), effort }
+      }
+      parsed.model = canonicalizeAliasModel(originalModel)
+      modified = true
+    }
+  }
+
+  const resolvedOriginalModel =
+    typeof parsed.model === "string" ? parsed.model : originalModel
+
+  if (resolvedOriginalModel) {
+    const resolved = resolveModel(resolvedOriginalModel)
+    if (resolved !== resolvedOriginalModel) {
       parsed.model = resolved
       modified = true
     }
