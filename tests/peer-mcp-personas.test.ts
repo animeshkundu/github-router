@@ -1134,63 +1134,32 @@ describe("fastProfile rendering (buildPeerAwarenessSnippet / buildPeerAwarenessS
     profile: "fast",
   } as const
 
-  test("snippet names only scout/implementer-fast/reviewer-fast and gemini_critic, never the removed surface", () => {
+  test("snippet names only the final fast roles, Advisor, Oracle, search, and opt-in browser", () => {
     const snippet = buildPeerAwarenessSnippet(FAST_OPTS)
-    expect(snippet).toContain("`scout`")
-    expect(snippet).toContain("`implementer-fast`")
-    expect(snippet).toContain("`reviewer-fast`")
-    expect(snippet).toContain("gemini_critic")
-    for (const removed of [
-      "codex_critic",
-      "codex_reviewer",
-      "opus_critic",
-      "gemini_reviewer",
-      "peer-review-coordinator",
-      "worker-explore",
-      "worker-implement",
-      "worker-review",
-      "worker-plan",
-      "worker-test",
-      "worker-browse",
-      "stand_in",
-      "`implementer`",
-      "`reviewer`",
-      "`brainstorm`",
-      "`scribe`",
-      "`general-purpose-fast`",
-      "mcp__workers__",
-      "mcp__orchestrate__",
-      "mcp__browser__",
-      "mcp__fleet__",
-      "mcp__decide__",
-    ]) {
-      expect(snippet).not.toContain(removed)
+    for (const present of ["`scout`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
+      expect(snippet).toContain(present)
     }
+    for (const removed of [
+      "gemini_critic", "codex_critic", "codex_reviewer", "opus_critic",
+      "gemini_reviewer", "peer-review-coordinator", "worker-explore",
+      "worker-implement", "worker-review", "worker-plan", "worker-test",
+      "worker-browse", "stand_in", "`implementer-fast`", "`reviewer-fast`",
+      "`brainstorm`", "`scribe`", "`general-purpose-fast`", "mcp__workers__",
+      "mcp__orchestrate__", "mcp__fleet__", "mcp__decide__",
+    ]) expect(snippet).not.toContain(removed)
   })
 
-  test("summary names only the fast roster and gemini_critic, never the removed surface", () => {
+  test("summary names only the final fast surface", () => {
     const summary = buildPeerAwarenessSummary(FAST_OPTS)
-    expect(summary).toContain("`scout`")
-    expect(summary).toContain("`implementer-fast`")
-    expect(summary).toContain("`reviewer-fast`")
-    expect(summary).toContain("gemini_critic")
-    for (const removed of [
-      "peer-review-coordinator",
-      "worker-*",
-      "stand_in",
-      "`implementer`",
-      "`reviewer`",
-      "`brainstorm`",
-      "`scribe`",
-      "`general-purpose-fast`",
-      "mcp__workers__",
-      "mcp__orchestrate__",
-      "mcp__browser__",
-      "mcp__fleet__",
-      "mcp__decide__",
-    ]) {
-      expect(summary).not.toContain(removed)
+    for (const present of ["`scout`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
+      expect(summary).toContain(present)
     }
+    for (const removed of [
+      "gemini_critic", "peer-review-coordinator", "worker-*", "stand_in",
+      "`implementer-fast`", "`reviewer-fast`", "`brainstorm`", "`scribe`",
+      "`general-purpose-fast`", "mcp__workers__", "mcp__orchestrate__",
+      "mcp__fleet__", "mcp__decide__",
+    ]) expect(summary).not.toContain(removed)
   })
 
   test("fastProfile takes precedence over every other flag passed alongside it", () => {

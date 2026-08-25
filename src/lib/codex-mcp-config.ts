@@ -7,7 +7,7 @@ import consola from "consola"
 import { type SelfInvocation } from "./hook-launcher/self-invocation"
 import { buildCodexProviderConfigFlags } from "./launch"
 import { buildWorkspaceHeaderHelperCommand } from "./mcp-workspace-header"
-import { withOneMSuffix } from "./one-m-context"
+import { oneMContextDisabled, withOneMSuffix } from "./one-m-context"
 import { PATHS, writeRuntimeFileSecure } from "./paths"
 import {
   buildAgentPrompt,
@@ -18,6 +18,10 @@ import {
   type McpGroup,
 } from "./peer-mcp-personas"
 import { type Effort as SubagentEffort } from "./reasoning-effort"
+import {
+  LUNA_IMPLEMENTER_ALIAS_ID,
+  LUNA_SCOUT_ALIAS_ID,
+} from "./launch-profile"
 import {
   activeDispatchModes,
   dispatcherAgentName,
@@ -155,13 +159,18 @@ interface BuildOpts {
    *  for fan-out coordination to make sense (e.g. the fast profile, which
    *  registers only `gemini-critic`) should pass `false`. */
   includeCoordinator?: boolean
-  /** Fixed `effort:` frontmatter for `scout`/`implementer-fast`/
-   *  `reviewer-fast` respectively. Absent → no `effort:` frontmatter emitted
-   *  (today's behavior — the agent follows the Claude Code session's
-   *  reasoning-effort picker, per "no per-agent effort knob" for the
-   *  standard roster). Used by the fast profile, which pins each agent's
-   *  effort rather than following the picker. */
+  /** Fast-profile role assignments. When present, the explicit fast branch
+   *  emits the exact `scout`/`implementer`/`reviewer`/`planner` roster instead
+   *  of reusing standard role bodies. Standard callers omit these fields. */
+  fastProfile?: boolean
+  plannerModel?: string
+  /** Fixed `effort:` frontmatter overrides. Absent keeps standard picker-driven
+   *  behavior. */
   scoutEffort?: SubagentEffort
+  implementerEffort?: SubagentEffort
+  reviewerEffort?: SubagentEffort
+  plannerEffort?: SubagentEffort
+  /** Compatibility fields for the original fast-profile implementation. */
   implementerFastEffort?: SubagentEffort
   reviewerFastEffort?: SubagentEffort
 }
@@ -428,6 +437,7 @@ export const BUILTIN_SUBAGENT_DEFINITIONS: PeerAgentDefinitions = {
  */
 export const ALL_NATIVE_AGENT_NAMES = [
   "implementer",
+  "planner",
   "reviewer",
   "reviewer-fast",
   "brainstorm",
@@ -518,6 +528,93 @@ function readOnlyToolAllowlist(searchKey: string): Array<string> {
   ]
 }
 
+function decorateGuaranteedOneM(id: string): string {
+  if (oneMContextDisabled() || /\[1m\]$/i.test(id)) return id
+  return `${id}[1m]`
+}
+
+/** Build the literal `-m fast` native roster. This is intentionally separate
+ * from the standard definitions: the names overlap, but their role bodies,
+ * fixed model assignments, and efforts are profile contracts. */
+function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
+  const scoutModel = nonEmptyModel(opts.scoutModel)
+  const implementerModel = nonEmptyModel(opts.nativeSubagentModel)
+  const reviewerModel = nonEmptyModel(opts.reviewerModel)
+  const plannerModel = nonEmptyModel(opts.plannerModel)
+  if (!scoutModel || !implementerModel || !reviewerModel || !plannerModel) {
+    throw new Error("fast profile requires resolved scout, implementer, reviewer, and planner models")
+  }
+
+  const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
+  const peersKey = peersKeyOf(opts.groupKeys)
+  const searchMcp: { mcpServers?: Record<string, HttpMcpEntry> } = opts.serverUrl
+    ? { mcpServers: { [searchKey]: httpEntryFor(opts.serverUrl, "search", opts.nonce, opts.workspaceHeaderCmd) } }
+    : {}
+  const peersMcp: { mcpServers?: Record<string, HttpMcpEntry> } = opts.serverUrl && opts.groupKeys.peers
+    ? { mcpServers: { [peersKey]: httpEntryFor(opts.serverUrl, "peers", opts.nonce, opts.workspaceHeaderCmd) } }
+    : {}
+  const oracleTool = opts.groupKeys.peers ? `mcp__${peersKey}__oracle` : undefined
+  const readOnlyTools = readOnlyToolAllowlist(searchKey)
+  const consultTools = oracleTool ? [...readOnlyTools, oracleTool] : readOnlyTools
+
+  const reviewerPrompt =
+    "You are the fast profile's repository-aware reviewer. Verify what is actually true by reading the code and running the relevant build, tests, or end-to-end reproduction. Find root causes rather than symptoms. Do not modify production code. Report severity-ranked findings with `file:line` evidence and a clear go/no-go. Use Oracle only as a last resort after your own investigation and Advisor have not resolved one precise question. "
+    + fileToolSteer("builds and reproductions")
+    + " Do not spawn further agents."
+
+  const out: PeerAgentDefinitions = {
+    scout: {
+      description: `Read-only exploration subagent running ${scoutModel}. Use for broad repository discovery before the lead drafts a plan; return conclusions with file:line evidence, not file dumps.`,
+      prompt:
+        "Investigate the repository read-only. Cast a wide net, then return a concise evidence packet for the lead: conclusions, load-bearing `file:line` citations, commands checked, and explicit gaps. Do not plan, edit, or spawn agents. "
+        + readOnlyToolSteer(),
+      tools: readOnlyTools,
+      model: decorateGuaranteedOneM(LUNA_SCOUT_ALIAS_ID),
+      effort: opts.scoutEffort ?? "high",
+      ...searchMcp,
+    },
+    implementer: {
+      description: `Implementation subagent running ${implementerModel}. Use for well-specified mechanical changes after the plan is approved; implement and verify end to end in its own context.`,
+      prompt:
+        "Implement the approved, well-specified change surgically. Match surrounding style, minimize unrelated churn, use dedicated file tools, and run the relevant build/tests. Do not redesign the plan or spawn more agents. Report changes, verification, and unresolved risk. "
+        + fileToolSteer("builds"),
+      model: decorateGuaranteedOneM(LUNA_IMPLEMENTER_ALIAS_ID),
+      effort: opts.implementerEffort ?? "max",
+    },
+    reviewer: {
+      description: `Repository-aware reviewer running ${reviewerModel} at medium effort. Use after implementation or for failures that need reproduction, runtime checks, or repository context.`,
+      prompt: reviewerPrompt,
+      model: reviewerModel,
+      effort: opts.reviewerEffort ?? "medium",
+      ...peersMcp,
+    },
+    planner: {
+      description: `Plan consultant and approver running ${plannerModel}. Invoke only after Luna has done the repository legwork and drafted a plan; pass a handcrafted evidence packet and the complete draft. The lead must not implement until this agent returns APPROVE.`,
+      prompt:
+        "You are the fast profile's final plan consultant and approver, not a first-pass planner. The caller must provide the user goal, acceptance criteria, repository/domain constraints, Luna's `file:line` and command/test evidence, the complete draft plan, settled decisions, and one focused review question. Selectively verify disputed citations or narrow evidence gaps with read/search tools, but do not repeat broad discovery, edit files, or execute the plan. Return exactly one leading verdict: `APPROVE`, `REVISE`, or `NEED_MORE_CONTEXT`. APPROVE only when the plan is safe, ordered, complete, and verifiable. REVISE must give concrete corrections. NEED_MORE_CONTEXT must name the exact evidence Luna should collect. Use Oracle only as a last resort for one precise unresolved question after your own review and Advisor are insufficient. Do not spawn further agents. "
+        + readOnlyToolSteer(),
+      tools: consultTools,
+      model: decorateGuaranteedOneM(plannerModel),
+      effort: opts.plannerEffort ?? "high",
+      mcpServers: {
+        ...(searchMcp.mcpServers ?? {}),
+        ...(peersMcp.mcpServers ?? {}),
+      },
+    },
+  }
+  const roster = opts.nativeRoster == null
+    ? undefined
+    : opts.nativeRoster instanceof Set
+      ? opts.nativeRoster
+      : new Set(opts.nativeRoster)
+  if (roster) {
+    for (const name of Object.keys(out)) {
+      if (!roster.has(name)) delete out[name]
+    }
+  }
+  return out
+}
+
 /**
  * Build the JSON payload for `claude --agents <path>`.
  *
@@ -530,13 +627,17 @@ function readOnlyToolAllowlist(searchKey: string): Array<string> {
 export function buildPeerAgentDefinitions(
   opts: BuildOpts,
 ): PeerAgentDefinitions {
+  if (opts.fastProfile) return buildFastProfileAgentDefinitions(opts)
+
   const out: PeerAgentDefinitions = {}
-  const personas = personasFor({
-    codexCli: opts.codexCli,
-    geminiAvailable: opts.geminiAvailable,
-    geminiModel: opts.geminiModel,
-    agentAllowlist: opts.personaAllowlist,
-  })
+  const personas = opts.fastProfile
+    ? []
+    : personasFor({
+        codexCli: opts.codexCli,
+        geminiAvailable: opts.geminiAvailable,
+        geminiModel: opts.geminiModel,
+        agentAllowlist: opts.personaAllowlist,
+      })
   const peersKey = peersKeyOf(opts.groupKeys)
   // Inline the `peers` HTTP server into each peer subagent's frontmatter so it
   // connects directly on spawn — Agent-tool subagents don't reliably inherit
@@ -858,6 +959,11 @@ interface WriteOpts {
   scoutEffort?: SubagentEffort
   implementerFastEffort?: SubagentEffort
   reviewerFastEffort?: SubagentEffort
+  fastProfile?: boolean
+  plannerModel?: string
+  implementerEffort?: SubagentEffort
+  reviewerEffort?: SubagentEffort
+  plannerEffort?: SubagentEffort
   /** Extra subagent definitions to register alongside the peer/worker agents
    *  (written as `.md` files so they appear in the Task `subagent_type` enum).
    *  Used by `serve` to inject Claude Code's built-in subagents (Explore/Plan/
@@ -1394,6 +1500,11 @@ export async function writePeerMcpRuntimeFiles(
     scoutEffort: opts.scoutEffort,
     implementerFastEffort: opts.implementerFastEffort,
     reviewerFastEffort: opts.reviewerFastEffort,
+    fastProfile: opts.fastProfile,
+    plannerModel: opts.plannerModel,
+    implementerEffort: opts.implementerEffort,
+    reviewerEffort: opts.reviewerEffort,
+    plannerEffort: opts.plannerEffort,
     nonce,
     codexHome,
     serverUrl,
@@ -1429,12 +1540,14 @@ export async function writePeerMcpRuntimeFiles(
     fileSuffix,
   })
 
-  const personas = personasFor({
-    codexCli: opts.codexCli,
-    geminiAvailable: opts.geminiAvailable,
-    geminiModel: opts.geminiModel,
-    agentAllowlist: opts.personaAllowlist,
-  })
+  const personas = opts.fastProfile
+    ? []
+    : personasFor({
+        codexCli: opts.codexCli,
+        geminiAvailable: opts.geminiAvailable,
+        geminiModel: opts.geminiModel,
+        agentAllowlist: opts.personaAllowlist,
+      })
 
   const cleanup = async (): Promise<void> => {
     await Promise.allSettled([

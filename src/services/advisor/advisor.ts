@@ -115,7 +115,8 @@ export const ADVISOR_MAX_TURNS = 16
  *  applied uniformly across every advisor target (Sol, the Opus escalation,
  *  and the fast-profile Gemini advisor below all read this same constant). */
 export const ADVISOR_DEFAULT_MODEL = "gpt-5.6-sol"
-export const ADVISOR_DEFAULT_EFFORT = "high"
+export const ADVISOR_DEFAULT_EFFORT = "xhigh"
+const ADVISOR_MIN_EFFORT: Effort = "high"
 
 /** The Anthropic frontier model the advisor escalates to when the LEAD is a
  *  lighter Claude tier (sonnet, haiku).
@@ -408,8 +409,9 @@ export function resolveAdvisorModel(
 export function resolveAdvisorEffort(
   rawRequestBody: string | undefined,
   advisorModel: string,
+  fastProfile = false,
 ): string {
-  let requested: Effort = ADVISOR_DEFAULT_EFFORT
+  let requested: Effort = fastProfile ? "high" : ADVISOR_DEFAULT_EFFORT
   if (rawRequestBody) {
     try {
       const body = JSON.parse(rawRequestBody) as AnyRecord
@@ -438,6 +440,11 @@ export function resolveAdvisorEffort(
       // this body to get here, so this is belt-and-braces rather than a path we
       // expect to take.
     }
+  }
+
+  if (fastProfile) requested = "high"
+  else if (EFFORT_ORDER.indexOf(requested) < EFFORT_ORDER.indexOf(ADVISOR_MIN_EFFORT)) {
+    requested = ADVISOR_MIN_EFFORT
   }
 
   const supported = state.models?.data?.find(

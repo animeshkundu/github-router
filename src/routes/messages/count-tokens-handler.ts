@@ -9,6 +9,11 @@ import { state } from "~/lib/state"
 import { countTokens } from "~/services/copilot/create-messages"
 import { parseJsonOrDiagnose } from "~/lib/diagnose-response"
 import { clampOutputConfigEffortInPlace } from "./handler"
+import { preprocessFastRequest } from "~/lib/fast-request-preprocess"
+import {
+  identityPreflightErrorResponse,
+  runMessagesIdentityPreflight,
+} from "~/lib/messages-identity-preflight"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyRecord = Record<string, any>
@@ -68,12 +73,26 @@ function stripWebSearchFromBody(rawBody: string): string {
  */
 export async function handleCountTokens(c: Context) {
   const startTime = Date.now()
+  const identity = runMessagesIdentityPreflight(c)
+  if (!identity.ok) {
+    return identityPreflightErrorResponse(c, identity.reason, c.req.path)
+  }
   const rawBody = await c.req.text()
+  const fastPreprocess = preprocessFastRequest(rawBody, identity.launch)
+  if (fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
+    const message = fastPreprocess.rejectedAlias
+      ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m fast launch.`
+      : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m fast model set.`
+    return c.json(
+      { type: "error", error: { type: "invalid_request_error", message } },
+      400,
+    )
+  }
   // Inbound advisor-history sanitization (mirrors handler.ts) — count
   // tokens uses the same Copilot validator, so a malformed
   // server_tool_use block in the conversation history would 400 here
   // too. Scoped narrowly to advisor pairs.
-  const sanitizedBody = sanitizeAnthropicBody(rawBody)
+  const sanitizedBody = sanitizeAnthropicBody(fastPreprocess.body)
   const strippedBody = stripWebSearchFromBody(sanitizedBody)
 
   // Phase G fail-fast: same rationale as handler.ts. count_tokens uses

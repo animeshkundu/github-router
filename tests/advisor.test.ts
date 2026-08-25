@@ -86,8 +86,8 @@ describe("ADVISOR defaults (Phase I)", () => {
   test("default model is gpt-5.6-sol (cross-lab)", () => {
     expect(ADVISOR_DEFAULT_MODEL).toBe("gpt-5.6-sol")
   })
-  test("default effort is high (no floor, user-approved default)", () => {
-    expect(ADVISOR_DEFAULT_EFFORT).toBe("high")
+  test("standard default effort remains xhigh", () => {
+    expect(ADVISOR_DEFAULT_EFFORT).toBe("xhigh")
   })
 })
 
@@ -398,9 +398,9 @@ describe("ADVISOR streaming integration (Phase I)", () => {
           reasoning?: { effort?: string }
           stream?: boolean
         }
-        // Verify the advisor call uses gpt-5.6-sol + high (new default, no floor) + non-streaming
+        // Standard Advisor keeps the historical Sol/xhigh request.
         expect(parsedBody.model).toBe("gpt-5.6-sol")
-        expect(parsedBody.reasoning?.effort).toBe("high")
+        expect(parsedBody.reasoning?.effort).toBe("xhigh")
         expect(parsedBody.stream).toBe(false)
         advisorResponsesCallCount++
         return new Response(

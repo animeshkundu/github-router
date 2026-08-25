@@ -640,9 +640,9 @@ export function buildPeerAwarenessSnippet(opts: {
     return [
       "## Peer review and advisor",
       "",
-      `This is the fast launch profile: a deliberately lean roster. Cross-lab peer review under \`mcp__${fastPeersKey}__*\` is limited to \`gemini_critic\` (Gemini 3.7 Flash) for fresh-context adversarial judgment. Claude Code's built-in \`advisor\` tool catches approach drift and confabulation.`,
+      `This is the fast launch profile. \`mcp__${fastPeersKey}__oracle\` is exact Opus 5 (1M/high), a stateless last-resort consultant after the primary Luna path, Advisor, and reviewer/planner remain stuck. Advisor is the transcript-aware brainstorming, sounding-board, fresh-look, uncertainty, and stuck path.`,
       "",
-      `\`mcp__${fastSearchKey}__code\` is the one-stop code search (semantic-first via ColBERT, falling back to lexical BM25F) and \`mcp__${fastSearchKey}__web\` surfaces citable web sources. Native subagents (Task), each in its own context: \`scout\` (find or understand something in the repo, cheap), \`implementer-fast\` (well-specified, mechanical coding changes), and \`reviewer-fast\` (repo-aware assessment, including reproducing and root-causing a failure). This is the complete roster for this profile.`,
+      `\`mcp__${fastSearchKey}__code\` is semantic-first code search and \`mcp__${fastSearchKey}__web\` surfaces citable sources. Native Task roster: \`scout\` (broad discovery), \`implementer\` (mechanical implementation), \`reviewer\` (repo-aware verification/reproduction), and \`planner\` (Sol plan consultant/approver after Luna's draft). Before implementation obtain planner approval; before declaring done run relevant tests and ask reviewer to verify.${opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` is the opt-in browser surface.` : ""}`,
     ].join("\n")
   }
   const peersKey = key("peers")
@@ -758,6 +758,7 @@ export type NativeAgentName =
   | "implementer-fast"
   | "reviewer"
   | "reviewer-fast"
+  | "planner"
   | "brainstorm"
   | "scout"
   | "scribe"
@@ -807,10 +808,8 @@ export function buildPeerAwarenessSummary(opts: {
     return [
       "## Injected capabilities (summary)",
       "",
-      "Fast launch profile — a deliberately lean roster. Native subagents (Task), each in its own context: `scout`, `implementer-fast`, `reviewer-fast`. This is the complete roster for this profile.",
-      `Cross-lab review under \`mcp__${key("peers")}__*\` is limited to \`gemini_critic\` (Gemini 3.7 Flash). \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
-      "",
-      "Each tool's own description carries when to use it and when not.",
+      "Fast launch profile. Task roster: `scout`, `implementer`, `reviewer`, `planner`. Luna investigates and drafts; `planner` must approve before implementation. Before declaring done, run relevant tests and ask `reviewer` to verify.",
+      `Advisor is the transcript-aware brainstorming/sounding-board/fresh-look path. \`mcp__${key("peers")}__oracle\` is exact Opus 5 (1M/high), stateless and last resort. \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""}`,
     ].join("\n")
   }
   const renderNative = (name: NativeAgentName): string => {

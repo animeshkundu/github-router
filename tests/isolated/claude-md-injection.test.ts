@@ -1034,8 +1034,8 @@ test("budgetLead does not name reviewer-fast when it was dropped", () => {
 // merge with it, and the rendered prose must never name an agent, MCP tool,
 // or skill this profile does not register.
 const FAST_PROFILE_FORBIDDEN_NAMES = [
-  "`implementer`",
-  "`reviewer`",
+  "`implementer-fast`",
+  "`reviewer-fast`",
   "`brainstorm`",
   "`scribe`",
   "`general-purpose-fast`",
@@ -1070,10 +1070,24 @@ test("profile:'fast' names exactly the fast roster and never a removed native/to
     budgetLead: true,
   })
   expect(directive).toContain("`scout`")
-  expect(directive).toContain("`implementer-fast`")
-  expect(directive).toContain("`reviewer-fast`")
+  expect(directive).toContain("`implementer`")
+  expect(directive).toContain("`reviewer`")
+  expect(directive).toContain("`planner`")
+  expect(directive).toContain("Advisor")
+  expect(directive).toContain("`oracle`")
   for (const forbidden of FAST_PROFILE_FORBIDDEN_NAMES) {
     expect(directive).not.toContain(forbidden)
+  }
+})
+
+test("profile:'fast' with unavailable runtime does not advertise absent agents or Oracle", () => {
+  const directive = buildOperatingDefaultsDirective({
+    profile: "fast",
+    fastRuntimeAvailable: false,
+  })
+  expect(directive).toContain("runtime wiring is unavailable")
+  for (const absent of ["`planner`", "`reviewer`", "`oracle`", "`scout`", "`implementer`"]) {
+    expect(directive).not.toContain(absent)
   }
 })
 

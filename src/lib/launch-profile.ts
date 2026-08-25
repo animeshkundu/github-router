@@ -10,8 +10,8 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  * group (`peers`/`search`/`workers`/`orchestrate`, plus the independently
  * opted-in `browser`/`fleet`/`first-mate`/`decide` groups under their own
  * predicates). `"fast"` is the deliberately lean `-m fast` profile: a
- * `gpt-5.6-luna` lead, exactly three native agents, one peer persona, and
- * only the `peers`/`search` MCP groups.
+ * `gpt-5.6-luna` lead, exactly four native agents, the fast-only Oracle,
+ * and only the `peers`/`search` plus independently opted-in `browser` MCP groups.
  *
  * Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
  * from the resolved lead model id — so `-m gpt-5.6-luna` (a direct pin of
@@ -52,20 +52,17 @@ export const STANDARD_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
- * The `-m fast` roster, per the fast-launch-profile design: exactly three
- * native agents (`scout`, `implementer-fast`, `reviewer-fast`), one peer
- * persona (`gemini_critic`), no coordinator, and only the `peers`/`search`
- * scoped MCP groups — `workers`/`orchestrate` are hard denies for this
- * profile (see `docs/default-models.md` "fast launch profile" once landed).
- * Independently opted-in groups (`browser`/`fleet`/`first-mate`) and the
- * catalog-gated `decide` group are NOT narrowed here — they stay under
- * their own predicates regardless of profile.
+ * The `-m fast` roster: exactly four native agents (`scout`, `implementer`,
+ * `reviewer`, `planner`), the fast-only `oracle` peer tool, no coordinator,
+ * and only `peers`/`search` plus the ordinary opt-in `browser` group.
+ * `workers`/`orchestrate`/`decide`/`fleet`/`first-mate` are hard denies even
+ * when their independent standard-profile gates pass.
  */
 export const FAST_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "fast",
-  nativeRoster: new Set(["scout", "implementer-fast", "reviewer-fast"]),
-  personaAllowlist: new Set(["gemini_critic"]),
-  allowedGroups: new Set(["peers", "search"]),
+  nativeRoster: new Set(["scout", "implementer", "reviewer", "planner"]),
+  personaAllowlist: new Set(["oracle"]),
+  allowedGroups: new Set(["peers", "search", "browser"]),
   hasCoordinator: false,
 })
 
@@ -100,6 +97,12 @@ export function resolveLaunchProfile(modelArg: string | undefined): LaunchProfil
  * reaches Copilot.
  */
 export const LUNA_DRIVER_ALIAS_ID = "gh-router-luna-driver-max"
+
+/** Fast native-agent alias ids preserve role-specific effort provenance until
+ *  the authenticated request boundary. They both canonicalize to Luna, but the
+ *  scout is fixed high while the implementer is fixed max. */
+export const LUNA_SCOUT_ALIAS_ID = "gh-router-luna-scout-high"
+export const LUNA_IMPLEMENTER_ALIAS_ID = "gh-router-luna-implementer-max"
 
 export const LUNA_SONNET_ALIAS_ID = "gh-router-luna-sonnet-xhigh"
 
@@ -140,6 +143,14 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   [
     LUNA_DRIVER_ALIAS_ID,
     { aliasId: LUNA_DRIVER_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "max" },
+  ],
+  [
+    LUNA_SCOUT_ALIAS_ID,
+    { aliasId: LUNA_SCOUT_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "high" },
+  ],
+  [
+    LUNA_IMPLEMENTER_ALIAS_ID,
+    { aliasId: LUNA_IMPLEMENTER_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "max" },
   ],
   [
     LUNA_SONNET_ALIAS_ID,
@@ -234,6 +245,19 @@ function supportsEffort(model: Model | undefined, effort: Effort): boolean {
   return Array.isArray(list) && list.includes(effort)
 }
 
+function supportsEndpoint(model: Model | undefined, paths: ReadonlySet<string>): boolean {
+  const endpoints = model?.supported_endpoints
+  return Array.isArray(endpoints) && endpoints.some((endpoint) => paths.has(endpoint))
+}
+
+const RESPONSES_ENDPOINTS = new Set(["/responses", "/v1/responses"])
+const MESSAGES_ENDPOINTS = new Set(["/messages", "/v1/messages"])
+
+function hasUsablePromptMetadata(model: Model | undefined): boolean {
+  const prompt = model?.capabilities?.limits?.max_prompt_tokens
+  return typeof prompt === "number" && Number.isFinite(prompt) && prompt > 0
+}
+
 /**
  * Validate the live Copilot catalog carries every model the fast profile's
  * EXACT roster depends on, with the specific capabilities each assignment
@@ -243,13 +267,11 @@ function supportsEffort(model: Model | undefined, effort: Effort): boolean {
  * than silently substituting or dropping an agent.
  *
  * Checks, per the fast-launch-profile design:
- *   - `gpt-5.6-luna` (the lead/driver): tool_calls + >=1M context.
- *   - `grok-4.6` (reviewer-fast): tool_calls + `medium` in its effort
- *     ladder + a usable `max_prompt_tokens` (so the derived safe-review
- *     window guard has something to size against).
- *   - `gemini-3.7-flash` (gemini_critic + Advisor): tool_calls + >=1M
- *     context + `high` in its effort ladder + a supported chat-completions
- *     endpoint (bare or `/v1`-prefixed) in `supported_endpoints`.
+ *   - Luna lead/scout/implementer: tool calls, >=1M, high+max, Responses.
+ *   - Sol planner: tool calls, >=1M, high, Responses.
+ *   - Grok reviewer: tool calls, medium, Responses, usable prompt metadata.
+ *   - Gemini Advisor: >=1M, high, chat-completions.
+ *   - Opus Oracle: exact Opus 5, >=1M, adaptive/high, Messages, prompt metadata.
  *
  * Pure over the passed-in catalog snapshot so it's unit-testable without
  * `state` — callers pass `state.models` at call time.
@@ -267,6 +289,28 @@ export function validateFastProfilePrerequisites(
     if (!hasContextAtLeast(luna, FAST_REQUIRED_CONTEXT_TOKENS)) {
       missing.push(`${LUNA_REAL_MODEL_ID}: advertised context window is below 1M`)
     }
+    if (!supportsEffort(luna, "high") || !supportsEffort(luna, "max")) {
+      missing.push(`${LUNA_REAL_MODEL_ID}: does not advertise both "high" and "max" reasoning effort`)
+    }
+    if (!supportsEndpoint(luna, RESPONSES_ENDPOINTS)) {
+      missing.push(`${LUNA_REAL_MODEL_ID}: does not advertise a supported Responses endpoint`)
+    }
+  }
+
+  const sol = findModel(catalog, "gpt-5.6-sol")
+  if (!sol) {
+    missing.push("gpt-5.6-sol: absent from the live catalog")
+  } else {
+    if (!hasToolCalls(sol)) missing.push("gpt-5.6-sol: does not advertise tool_calls")
+    if (!hasContextAtLeast(sol, FAST_REQUIRED_CONTEXT_TOKENS)) {
+      missing.push("gpt-5.6-sol: advertised context window is below 1M")
+    }
+    if (!supportsEffort(sol, "high")) {
+      missing.push("gpt-5.6-sol: does not advertise a \"high\" reasoning effort")
+    }
+    if (!supportsEndpoint(sol, RESPONSES_ENDPOINTS)) {
+      missing.push("gpt-5.6-sol: does not advertise a supported Responses endpoint")
+    }
   }
 
   const grok = findModel(catalog, "grok-4.6")
@@ -277,9 +321,11 @@ export function validateFastProfilePrerequisites(
     if (!supportsEffort(grok, "medium")) {
       missing.push("grok-4.6: does not advertise a \"medium\" reasoning effort")
     }
-    const maxPromptTokens = grok.capabilities?.limits?.max_prompt_tokens
-    if (typeof maxPromptTokens !== "number" || !(maxPromptTokens > 0)) {
+    if (!hasUsablePromptMetadata(grok)) {
       missing.push("grok-4.6: no usable max_prompt_tokens metadata")
+    }
+    if (!supportsEndpoint(grok, RESPONSES_ENDPOINTS)) {
+      missing.push("grok-4.6: does not advertise a supported Responses endpoint")
     }
   }
 
@@ -287,7 +333,6 @@ export function validateFastProfilePrerequisites(
   if (!gemini) {
     missing.push("gemini-3.7-flash: absent from the live catalog")
   } else {
-    if (!hasToolCalls(gemini)) missing.push("gemini-3.7-flash: does not advertise tool_calls")
     if (!hasContextAtLeast(gemini, FAST_REQUIRED_CONTEXT_TOKENS)) {
       missing.push("gemini-3.7-flash: advertised context window is below 1M")
     }
@@ -302,6 +347,27 @@ export function validateFastProfilePrerequisites(
       missing.push(
         "gemini-3.7-flash: does not advertise a supported chat-completions endpoint",
       )
+    }
+  }
+
+  const opus = findModel(catalog, "claude-opus-5")
+  if (!opus) {
+    missing.push("claude-opus-5: absent from the live catalog")
+  } else {
+    if (!hasContextAtLeast(opus, FAST_REQUIRED_CONTEXT_TOKENS)) {
+      missing.push("claude-opus-5: advertised context window is below 1M")
+    }
+    if (!supportsEffort(opus, "high")) {
+      missing.push("claude-opus-5: does not advertise a \"high\" reasoning effort")
+    }
+    if (opus.capabilities?.supports?.adaptive_thinking !== true) {
+      missing.push("claude-opus-5: does not advertise adaptive_thinking")
+    }
+    if (!hasUsablePromptMetadata(opus)) {
+      missing.push("claude-opus-5: no usable max_prompt_tokens metadata")
+    }
+    if (!supportsEndpoint(opus, MESSAGES_ENDPOINTS)) {
+      missing.push("claude-opus-5: does not advertise a supported Messages endpoint")
     }
   }
 

@@ -355,42 +355,29 @@ export function generalPurposeFastModel(): string | undefined {
 /*
  * Fast-launch-profile ("-m fast") native model resolvers.
  *
- * These are DELIBERATELY separate from the standard resolvers above (never
- * folded into a shared chain): the fast profile is a hard, single-entry,
- * no-fallback assignment per plan section 5 — `scout` and `implementer-fast`
- * both pin to Luna, `reviewer-fast` pins to Grok — and must not silently
- * drift if the standard resolvers' chains are retuned. A caller opting into
- * the fast profile calls these instead of the standard resolver for the same
- * agent name; nothing here changes standard-profile behavior.
+ * These are deliberately separate from the standard resolvers above. The fast
+ * profile is a hard, single-entry, no-fallback assignment: `scout` and
+ * `implementer` pin to Luna, `reviewer` pins to Grok, and `planner` pins to
+ * Sol. Retuning a standard resolver must never move a fast role silently.
  */
 
-/** Fast profile's `scout` and `implementer-fast` model. Both agents pin to
- *  the SAME id (the fast profile's lead model) but are still independent
- *  agents with independent context windows — see the plan's "each native
- *  subagent starts with its own context window" note. */
 export const FAST_SCOUT_MODEL = "gpt-5.6-luna"
-export const FAST_IMPLEMENTER_FAST_MODEL = "gpt-5.6-luna"
-/** Fast profile's `reviewer-fast` model. Grok 4.6 advertises 500K total
- *  context / 372K max prompt — well under the 1M floor the OTHER fast
- *  natives require, so this resolver checks `max_prompt_tokens` against a
- *  conservative floor instead of `minContextTokens` (which would always fail
- *  and silently drop the agent). Never gains a `[1m]` decoration:
- *  `withOneMSuffix` keys off `max_context_window_tokens`, and Grok's
- *  500K stays below the 1M threshold on its own. */
-export const FAST_REVIEWER_FAST_MODEL = "grok-4.6"
+export const FAST_IMPLEMENTER_MODEL = "gpt-5.6-luna"
+/** Grok 4.6 advertises 500K total context / 372K max prompt, so it remains bare
+ *  and is gated by max_prompt_tokens rather than the 1M floor. */
+export const FAST_REVIEWER_MODEL = "grok-4.6"
+export const FAST_PLANNER_MODEL = "gpt-5.6-sol"
+export const FAST_ORACLE_MODEL = "claude-opus-5"
 
-/** Minimum advertised `max_prompt_tokens` the fast profile's `reviewer-fast`
- *  model must carry. Deliberately far below Grok 4.6's live prompt window
- *  (372K) — this is a presence/floor check for the agent's model-resolution
- *  gate, not a claim about how much of that window is safely usable; the
- *  conservative client-side compaction contract is computed separately (see
- *  `computeConservativeCompactionTrigger` in `./grok-context`). */
+/** Presence floor, not the client compaction trigger. */
 export const FAST_REVIEWER_MIN_PROMPT_TOKENS = 200_000
 
-/** Fixed per-agent effort pins for the exact fast-profile native roster. */
+/** Fixed effort pins for the fast profile. */
 export const FAST_SCOUT_EFFORT = "high"
-export const FAST_IMPLEMENTER_FAST_EFFORT = "max"
-export const FAST_REVIEWER_FAST_EFFORT = "medium"
+export const FAST_IMPLEMENTER_EFFORT = "max"
+export const FAST_REVIEWER_EFFORT = "medium"
+export const FAST_PLANNER_EFFORT = "high"
+export const FAST_ORACLE_EFFORT = "high"
 
 export function fastScoutModel(): string | undefined {
   return firstPresentInCatalog(
@@ -399,30 +386,64 @@ export function fastScoutModel(): string | undefined {
   )
 }
 
-export function fastImplementerFastModel(): string | undefined {
+export function fastImplementerModel(): string | undefined {
   return firstPresentInCatalog(
-    [FAST_IMPLEMENTER_FAST_MODEL],
+    [FAST_IMPLEMENTER_MODEL],
     { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
   )
 }
 
-/** Unlike the other `firstPresentInCatalog`-based resolvers, this checks
- *  `max_prompt_tokens` rather than `max_context_window_tokens` — Grok 4.6's
- *  total context (500K) is below the 1M floor every other fast native
- *  requires, so gating on total context would always fail closed and drop
- *  the agent. `max_prompt_tokens` is the number Copilot's live catalog
- *  advertises for "how much prompt this model actually accepts", which is
- *  the number that matters for a reviewer receiving a pasted artifact. */
-export function fastReviewerFastModel(): string | undefined {
+export function fastPlannerModel(): string | undefined {
+  const id = firstPresentInCatalog(
+    [FAST_PLANNER_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+  if (!id) return undefined
+  const found = state.models?.data.find((m) => m.id === id)
+  const efforts = found?.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_PLANNER_EFFORT)) return undefined
+  if (pickEndpoint(found!) !== "responses") return undefined
+  return id
+}
+
+/** Gate Grok on the prompt limit that actually constrains pasted review input. */
+export function fastReviewerModel(): string | undefined {
   const models = state.models?.data
   if (!models) return undefined
-  const found = models.find((m) => m.id === FAST_REVIEWER_FAST_MODEL)
+  const found = models.find((m) => m.id === FAST_REVIEWER_MODEL)
   if (!found) return undefined
   if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_REVIEWER_EFFORT)) return undefined
   const maxPrompt = found.capabilities?.limits?.max_prompt_tokens ?? 0
   if (maxPrompt < FAST_REVIEWER_MIN_PROMPT_TOKENS) return undefined
-  return FAST_REVIEWER_FAST_MODEL
+  if (pickEndpoint(found) !== "responses") return undefined
+  return FAST_REVIEWER_MODEL
 }
+
+/** Exact Opus 5 only: the fast Oracle never inherits standard opus_critic's
+ *  older-family fallback. */
+export function fastOracleModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === FAST_ORACLE_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < ONE_M_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) <= 0) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_ORACLE_EFFORT)) return undefined
+  if (found.capabilities?.supports?.adaptive_thinking !== true) return undefined
+  const endpoints = found.supported_endpoints ?? []
+  if (!endpoints.some((endpoint) => endpoint === "/messages" || endpoint === "/v1/messages")) return undefined
+  return FAST_ORACLE_MODEL
+}
+
+// Compatibility aliases for tests and callers on the first fast-profile commit.
+// New fast wiring uses the role names above.
+export const FAST_IMPLEMENTER_FAST_MODEL = FAST_IMPLEMENTER_MODEL
+export const FAST_REVIEWER_FAST_MODEL = FAST_REVIEWER_MODEL
+export const FAST_IMPLEMENTER_FAST_EFFORT = FAST_IMPLEMENTER_EFFORT
+export const FAST_REVIEWER_FAST_EFFORT = FAST_REVIEWER_EFFORT
+export const fastImplementerFastModel = fastImplementerModel
+export const fastReviewerFastModel = fastReviewerModel
 
 /**
  * Gate for the worker tools (`explore`, `review`, `implement`).

@@ -48,6 +48,7 @@ import {
   browserPowerToolsEnabled,
   browserToolsEnabled,
   fleetToolsEnabled,
+  fastOracleModel,
   geminiAvailable,
   resolveGeminiReviewModel,
   standInToolEnabled,
@@ -295,7 +296,49 @@ function activePersonas(): Array<PersonaSpec> {
   })
 }
 
+function oracleToolEntry(): ToolEntry {
+  return {
+    name: "oracle",
+    description:
+      "Fast-profile last-resort guidance from exact Opus 5 (1M context) at high effort. Stateless and tool-less: pass complete context plus one precise query only after the primary Luna path, Advisor, and the relevant reviewer/planner path remain stuck. It can advise or request missing information; it cannot inspect the repo, execute, merge, or authorize actions.",
+    inputSchema: {
+      type: "object",
+      required: ["query", "context"],
+      additionalProperties: false,
+      properties: {
+        query: { type: "string", description: "One precise unresolved question." },
+        context: { type: "string", description: "Complete evidence and constraints needed to answer cold-start." },
+      },
+    },
+  }
+}
+
 function toolEntries(scope: McpScope, launch: LaunchRegistryEntry): Array<ToolEntry> {
+  if (launch.profileId === "fast") {
+    const entries: Array<ToolEntry> = []
+    if (
+      (scope === "all" || scope === "peers")
+      && launch.allowedGroups?.has("peers")
+      && launch.allowedPersonas?.has("oracle")
+      && fastOracleModel()
+    ) {
+      entries.push(oracleToolEntry())
+    }
+    for (const tool of NON_PERSONA_MCP_TOOLS) {
+      if (scope !== "all" && tool.group !== scope) continue
+      if (!launch.allowedGroups?.has(tool.group)) continue
+      if (tool.group === "search") {
+        entries.push({ name: tool.toolNameHttp, description: tool.description, inputSchema: tool.inputSchema })
+        continue
+      }
+      if (tool.group !== "browser" || !browserToolsEnabled()) continue
+      if (tool.capability === "browser_compound" && !browserCompoundToolsEnabled()) continue
+      if (tool.capability === "browser_power" && !browserPowerToolsEnabled()) continue
+      entries.push({ name: tool.toolNameHttp, description: tool.description, inputSchema: tool.inputSchema })
+    }
+    return entries
+  }
+
   // Personas are definitionally the `peers` group; include them only on
   // the `peers` scoped endpoint and the unscoped union, AND only when this
   // launch's profile allows the `peers` group at all — `allowedGroups`
@@ -1007,6 +1050,81 @@ async function handleToolsCall(
 
   if (!name) {
     return rpcError(body.id, RPC_INVALID_PARAMS, "tools/call missing name")
+  }
+
+  if (launch.profileId === "fast" && name === "oracle") {
+    if (
+      (scope !== "all" && scope !== "peers")
+      || !launch.allowedGroups?.has("peers")
+      || !launch.allowedPersonas?.has("oracle")
+      || !fastOracleModel()
+    ) {
+      return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
+    }
+    const query = typeof args.query === "string" ? args.query.trim() : ""
+    const context = typeof args.context === "string" ? args.context.trim() : ""
+    if (!query || !context) {
+      return rpcError(body.id, RPC_INVALID_PARAMS, "tools/call: oracle requires non-empty arguments.query and arguments.context")
+    }
+    const MAX_ORACLE_INPUT_BYTES = 256 * 1024
+    const oracleInput = `Query:\n${query}\n\nContext:\n${context}`
+    const inputBytes = Buffer.byteLength(oracleInput, "utf8")
+    if (inputBytes > MAX_ORACLE_INPUT_BYTES) {
+      return rpcResult(body.id, toolError(`pre-flight rejected: oracle input is ${inputBytes} bytes, over the ${MAX_ORACLE_INPUT_BYTES}-byte cap; narrow the context without silently truncating it`))
+    }
+    const oraclePersona: PersonaSpec = {
+      agentName: "oracle",
+      toolNameHttp: "oracle",
+      model: "claude-opus-5",
+      endpoint: "/v1/messages",
+      description: "Fast-profile Oracle",
+      baseInstructions:
+        "You are Oracle, a stateless last-resort consultant. You have no tools or repository access. Answer only from the supplied context. Give focused guidance or ask for the exact missing information. Never claim to execute, approve, merge, or authorize an action.",
+      agentPrompt: "",
+      writeCapable: false,
+      requiresHttp: true,
+      allowedEfforts: ["high"],
+      defaultEffort: "high",
+    }
+    const overflow = await predictedWindowOverflow(oraclePersona, oracleInput, undefined)
+    if (overflow) return rpcResult(body.id, toolError(overflow))
+    const release = acquireInFlightSlot()
+    if (!release) {
+      return rpcResult(body.id, toolError(`Peer MCP queue full (${MAX_INFLIGHT_TOOLS_CALL} in-flight). Retry shortly.`))
+    }
+    const startedAt = Date.now()
+    const abortKey = body.id !== undefined && body.id !== null ? body.id : undefined
+    const aborter = new AbortController()
+    const inflightEntry: InflightEntry = { aborter, release }
+    if (abortKey !== undefined) inflightAborts.set(abortKey, inflightEntry)
+    try {
+      const text = await dispatchModelCall({
+        model: "claude-opus-5",
+        endpoint: "/v1/messages",
+        instructions: oraclePersona.baseInstructions,
+        userText: oracleInput,
+        effort: "high",
+        signal: aborter.signal,
+      })
+      logTelemetry({ name: "oracle", model: "claude-opus-5", durationMs: Date.now() - startedAt, result: "ok" })
+      return rpcResult(body.id, { content: [{ type: "text", text }] })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logTelemetry({ name: "oracle", model: "claude-opus-5", durationMs: Date.now() - startedAt, result: "exception", errorMessage: message })
+      return rpcResult(body.id, toolError(`oracle failed: ${message}`))
+    } finally {
+      if (abortKey !== undefined && inflightAborts.get(abortKey) === inflightEntry) {
+        inflightAborts.delete(abortKey)
+      }
+      release()
+    }
+  }
+
+  // A fast profile exposes only Oracle from peers. Reject every standard
+  // persona before lookup/slot acquisition so a hard-coded tool name cannot
+  // bypass tools/list (including through the unscoped union).
+  if (launch.profileId === "fast" && PERSONAS_READ.some((p) => p.toolNameHttp === name)) {
+    return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
   }
 
   // Routing: try personas first; fall through to non-persona utility

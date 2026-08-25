@@ -14,17 +14,12 @@ import {
 } from "~/lib/anthropic-translate"
 import { HTTPError } from "~/lib/error"
 import {
-  canonicalizeAliasModel,
-  resolveEffortWithAliasDefault,
-  resolveModelAlias,
-} from "~/lib/launch-profile"
-import {
   identityPreflightErrorResponse,
   runMessagesIdentityPreflight,
 } from "~/lib/messages-identity-preflight"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
-import { EFFORT_ORDER, UNKNOWN_EFFORT_ANCHOR, bucketEffort, clampEffort, type Effort } from "~/lib/reasoning-effort"
+import { EFFORT_ORDER, UNKNOWN_EFFORT_ANCHOR, bucketEffort, clampEffort } from "~/lib/reasoning-effort"
 import { logRequest, logRequestFields, recordBodySize } from "~/lib/request-log"
 import { MAX_RESPONSE_BODY_BYTES, readResponseBodyCapped } from "~/lib/response-cap"
 import { sanitizeAnthropicBody } from "~/lib/sanitize-anthropic-body"
@@ -39,6 +34,7 @@ import {
   type ThinkingHistoryRepair,
 } from "~/lib/thinking-history-repair"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
+import { preprocessFastRequest } from "~/lib/fast-request-preprocess"
 import {
   buildWebSearchContext,
   injectAnthropicWebSearchContext,
@@ -371,7 +367,18 @@ export async function handleCompletion(c: Context) {
   const incomingBeta = c.req.header("anthropic-beta")
   const advisorEnabled = isAdvisorRequested(incomingBeta)
 
-  let finalBody = await processWebSearch(rawBody)
+  const fastPreprocess = preprocessFastRequest(rawBody, identity.launch)
+  if (fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
+    const message = fastPreprocess.rejectedAlias
+      ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m fast launch.`
+      : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m fast model set.`
+    return c.json(
+      { type: "error", error: { type: "invalid_request_error", message } },
+      400,
+    )
+  }
+
+  let finalBody = await processWebSearch(fastPreprocess.body)
   // Inbound advisor-history sanitization: rewrite malformed
   // server_tool_use ids in Claude Code's replayed conversation history
   // (left over from before the round-5 fix or any non-spec-compliant
@@ -544,7 +551,7 @@ export async function handleCompletion(c: Context) {
           requestHeaders: {},
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated || advisorChoice.fastProfile,
-          advisorEffort: resolveAdvisorEffort(rawBody, advisorChoice.model),
+          advisorEffort: resolveAdvisorEffort(rawBody, advisorChoice.model, true),
           externalAborter: fastAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {
             modelId: modelId!,
@@ -914,50 +921,9 @@ function resolveModelInBody(rawBody: string): {
 
   let modified = false
 
-  // Luna driver/Sonnet/Haiku alias canonicalization (fast launch profile).
-  // MUST run before `resolveModel(originalModel)` below — `resolveModel`
-  // has no knowledge of these router-owned alias ids
-  // (`gh-router-luna-sonnet-xhigh` / `gh-router-luna-haiku-high`; the real
-  // driver id `gpt-5.6-luna` is also in the alias table so its own
-  // absent-effort default applies uniformly). Safe unconditionally: these
-  // are synthetic ids that only ever appear here because the fast
-  // profile's env seeding put them in `ANTHROPIC_DEFAULT_SONNET_MODEL` /
-  // `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_MODEL` — no real Copilot
-  // catalog id collides with them.
-  //
-  // Effort precedence (explicit `output_config.effort` > a client thinking
-  // budget > the alias's own absent-effort default) is applied by only
-  // ever injecting the alias default when NEITHER an explicit effort NOR a
-  // thinking budget is present; when a thinking budget IS present, the
-  // existing `translateThinking` bucketing below (unaffected by this
-  // block) already owns deriving `output_config.effort` from it, and
-  // client-supplied `output_config.effort` already always wins there too.
-  if (originalModel) {
-    const alias = resolveModelAlias(originalModel)
-    if (alias) {
-      const outputConfig =
-        parsed.output_config && typeof parsed.output_config === "object"
-          ? (parsed.output_config as AnyRecord)
-          : undefined
-      const hasExplicitEffort = typeof outputConfig?.effort === "string"
-      const thinking =
-        parsed.thinking && typeof parsed.thinking === "object"
-          ? (parsed.thinking as AnyRecord)
-          : undefined
-      const hasThinkingBudget =
-        thinking?.type === "enabled" && thinking.budget_tokens !== undefined
-      const effort = resolveEffortWithAliasDefault({
-        explicitEffort: hasExplicitEffort ? (outputConfig!.effort as Effort) : undefined,
-        thinkingBucketedEffort: hasThinkingBudget ? bucketEffort(thinking!.budget_tokens) : undefined,
-        aliasId: originalModel,
-      })
-      if (effort && !hasExplicitEffort && !hasThinkingBudget) {
-        parsed.output_config = { ...(outputConfig ?? {}), effort }
-      }
-      parsed.model = canonicalizeAliasModel(originalModel)
-      modified = true
-    }
-  }
+  // Fast-profile aliases and fixed efforts are handled before this helper by
+  // `preprocessFastRequest`, which has the authenticated launch identity. This
+  // generic resolver deliberately has no private-alias semantics.
 
   const resolvedOriginalModel =
     typeof parsed.model === "string" ? parsed.model : originalModel

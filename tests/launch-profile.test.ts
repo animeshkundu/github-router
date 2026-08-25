@@ -57,9 +57,18 @@ const model = (id: string, opts: {
 const fullCatalog = {
   object: "list" as const,
   data: [
-    model("gpt-5.6-luna", { context: 1_050_000, efforts: ["high", "xhigh", "max"] }),
-    model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["medium"] }),
+    model("gpt-5.6-luna", { context: 1_050_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
+    model("gpt-5.6-sol", { context: 1_050_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
+    model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["medium"], endpoints: ["/responses"] }),
     model("gemini-3.7-flash", { context: 1_000_000, efforts: ["high"], endpoints: ["/chat/completions"] }),
+    {
+      ...model("claude-opus-5", { context: 1_000_000, prompt: 872_000, efforts: ["high", "max"], endpoints: ["/v1/messages"] }),
+      capabilities: {
+        ...model("claude-opus-5").capabilities,
+        limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 },
+        supports: { tool_calls: true, reasoning_effort: ["high", "max"], adaptive_thinking: true },
+      },
+    },
   ],
 }
 
@@ -115,7 +124,7 @@ describe("fast startup prerequisites", () => {
   test("reports every missing or invalid prerequisite and rollback command", () => {
     const result = validateFastProfilePrerequisites({ object: "list", data: [] } as never)
     expect(result.ok).toBe(false)
-    expect(result.missing).toHaveLength(3)
+    expect(result.missing).toHaveLength(5)
     const message = formatFastPrerequisiteFailure(result.missing)
     expect(message).toContain("gpt-5.6-luna")
     expect(message).toContain("grok-4.6")

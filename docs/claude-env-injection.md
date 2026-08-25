@@ -69,11 +69,9 @@ models still run via explicit selection (`github-router claude -m <id>`), routed
 by the `/v1/messages` translation shim. Full mechanism and non-regression argument
 in [`anthropic-translation-shim.md`](anthropic-translation-shim.md).
 
-**Fast profile.** The four seeded ids above
-(`gpt-5.5`/`gpt-5.3-codex`/`gemini-3.5-flash` plus the dynamic Gemini-review row)
-are planned to be replaced with exactly `gpt-5.6-sol`/`gpt-5.6-luna`/
-`gemini-3.7-flash`/`grok-4.6`, as part of a Luna-led `-m fast` launch profile. This
-mechanism section (the cache-read-vs-fetch asymmetry, the presence guard, the
-version-coupling caveat) is unaffected by that row-list change — only the
-`NATIVE_NON_CLAUDE_MODELS` contents in `src/lib/server-setup.ts` move. See the
-"Fast launch profile" section of [`default-models.md`](default-models.md).
+**Fast profile.** The seeded gateway rows are now exactly `gpt-5.6-sol`,
+`gpt-5.6-luna`, `gemini-3.7-flash`, and `grok-4.6`, gated on the live catalog.
+The cache-read-vs-fetch asymmetry, presence guard, and version-coupling caveat are
+unchanged. The literal raw `-m fast` profile additionally seeds private Luna
+role aliases for fixed effort; those aliases are accepted only on an
+authenticated fast request and never reach Copilot. See [`default-models.md`](default-models.md).

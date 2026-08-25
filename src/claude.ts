@@ -113,11 +113,14 @@ import {
   standInToolEnabled,
   workerToolsEnabled,
   fastScoutModel,
-  fastImplementerFastModel,
-  fastReviewerFastModel,
+  fastImplementerModel,
+  fastReviewerModel,
+  fastPlannerModel,
+  fastOracleModel,
   FAST_SCOUT_EFFORT,
-  FAST_IMPLEMENTER_FAST_EFFORT,
-  FAST_REVIEWER_FAST_EFFORT,
+  FAST_IMPLEMENTER_EFFORT,
+  FAST_REVIEWER_EFFORT,
+  FAST_PLANNER_EFFORT,
 } from "./lib/mcp-capabilities"
 import {
   getClaudeCodeEnvVars,
@@ -658,6 +661,7 @@ export const claude = defineCommand({
     // off (then only the operating-defaults directive is injected).
     let peerAwarenessSnippet: string | undefined
     let peerAwarenessSummary: string | undefined
+    let fastRuntimeWired = launchProfileId !== "fast"
     // Resolved ONCE per launch and reused by the `.md` generation, the
     // awareness snippet, and the operating-defaults directive, so the three
     // surfaces cannot disagree about which conditionally-emitted natives exist.
@@ -665,17 +669,18 @@ export const claude = defineCommand({
     // and a prompt naming a dropped agent sends the lead at something absent
     // from the Task `subagent_type` enum.
     // Fast profile uses its own single-entry, no-fallback resolvers (pinned
-    // to the exact roster: scout/implementer-fast -> Luna, reviewer-fast ->
-    // Grok 4.6) instead of the standard chains, and registers NONE of
-    // implementer/reviewer/brainstorm/scribe/general-purpose-fast. The
+    // to the exact roster: scout/implementer -> Luna, reviewer -> Grok 4.6,
+    // planner -> Sol) instead of the standard chains, and registers none of
+    // the standard-only brainstorm/scribe/*-fast/catch-all roles. The
     // launch already failed above (`validateFastProfilePrerequisites`) if
     // the fast roster's models aren't live, so these always resolve here.
     const nativeAgentModels: Partial<Record<NativeAgentName, string | undefined>> =
       launchProfileId === "fast"
         ? {
             scout: fastScoutModel(),
-            "implementer-fast": fastImplementerFastModel(),
-            "reviewer-fast": fastReviewerFastModel(),
+            implementer: fastImplementerModel(),
+            reviewer: fastReviewerModel(),
+            planner: fastPlannerModel(),
           }
         : {
             implementer: nativeSubagentModel(),
@@ -718,10 +723,18 @@ export const claude = defineCommand({
       try {
         const requestedCli =
           ((args as Record<string, unknown>)["codex-cli"] as boolean | undefined) ?? false
-        const backend = resolveCodexCliBackend({
-          requested: requestedCli,
-          codexInfo: requestedCli ? getCodexVersion() : null,
-        })
+        const isFastProfile = launchProfileId === "fast"
+        if (isFastProfile && requestedCli) {
+          process.stderr.write(
+            "Fast profile uses its fixed HTTP MCP surface; ignoring --codex-cli.\n",
+          )
+        }
+        const backend = isFastProfile
+          ? "http"
+          : resolveCodexCliBackend({
+              requested: requestedCli,
+              codexInfo: requestedCli ? getCodexVersion() : null,
+            })
         const geminiModelsAvailable = geminiAvailable()
         if (!geminiModelsAvailable) {
           consola.info(
@@ -753,10 +766,12 @@ export const claude = defineCommand({
         const enabledGroups: Array<McpGroup> = fastDescriptor.allowedGroups
           ? baseGroups.filter((g) => fastDescriptor.allowedGroups!.has(g))
           : baseGroups
-        if (standInToolEnabled()) enabledGroups.push("decide")
-        if (browserToolsEnabled()) enabledGroups.push("browser")
-        if (fleetToolsEnabled()) enabledGroups.push("fleet")
-        if (agentToolsEnabled()) enabledGroups.push("first-mate")
+        if (!isFastProfile && standInToolEnabled()) enabledGroups.push("decide")
+        if (browserToolsEnabled() && (!fastDescriptor.allowedGroups || fastDescriptor.allowedGroups.has("browser"))) {
+          enabledGroups.push("browser")
+        }
+        if (!isFastProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
+        if (!isFastProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
         const { keys: groupKeys, skipped: skippedGroups } =
           await resolveGroupKeysFromMirror(enabledGroups)
 
@@ -771,7 +786,9 @@ export const claude = defineCommand({
         // so no worker-* .md (and no injected worker/orchestration skill or
         // guard, both gated on this same flag below) survives the profile
         // restriction even if the catalog gate would otherwise pass.
-        const isFastProfile = launchProfileId === "fast"
+        if (isFastProfile && fastOracleModel() == null) {
+          throw new Error("fast profile prerequisite drift: exact claude-opus-5 Oracle no longer resolves")
+        }
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
           codexCli: backend === "cli",
           selfInvocation,
@@ -789,18 +806,24 @@ export const claude = defineCommand({
           implementerFastModel: nativeAgentModels["implementer-fast"],
           generalPurposeFastModel: nativeAgentModels["general-purpose-fast"],
           nativeRoster: fastDescriptor.nativeRoster,
-          personaAllowlist: fastDescriptor.personaAllowlist
-            ? agentNamesForToolAllowlist(fastDescriptor.personaAllowlist)
-            : undefined,
+          personaAllowlist: isFastProfile
+            ? undefined
+            : fastDescriptor.personaAllowlist
+              ? agentNamesForToolAllowlist(fastDescriptor.personaAllowlist)
+              : undefined,
           includeCoordinator: fastDescriptor.hasCoordinator,
           ...(isFastProfile
             ? {
+                fastProfile: true,
+                plannerModel: nativeAgentModels.planner,
                 scoutEffort: FAST_SCOUT_EFFORT,
-                implementerFastEffort: FAST_IMPLEMENTER_FAST_EFFORT,
-                reviewerFastEffort: FAST_REVIEWER_FAST_EFFORT,
+                implementerEffort: FAST_IMPLEMENTER_EFFORT,
+                reviewerEffort: FAST_REVIEWER_EFFORT,
+                plannerEffort: FAST_PLANNER_EFFORT,
               }
             : {}),
         })
+        fastRuntimeWired = true
         // Keyed launch registry entry for this session: the `/mcp` nonce
         // (already minted by `writePeerMcpRuntimeFiles`) plus a SEPARATE
         // `/v1/messages` identity-preflight secret, scoped to this launch's
@@ -1127,7 +1150,7 @@ export const claude = defineCommand({
           // file (AIORDIE_TOKEN is stripped from the child env, and argv leaks to
           // ps), then register a PostToolUse(ExitPlanMode) hook so the finalized
           // plan opens in the panel without the model calling artifact_open.
-          try {
+          if (!isFastProfile) try {
             await writeArtifactCredsToMirror(shouldUseInsecureTls(process.env.AIORDIE_BASE_URL ?? ""))
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const cmd = buildArtifactOpenHookCommand(selfInvocation)
@@ -1141,7 +1164,7 @@ export const claude = defineCommand({
         // from artifact auto-open. It is default-on when the hook MCP runtime is
         // wired, top-level-only at runtime, and never blocks ExitPlanMode; material
         // findings are written to the shared findings store for the next prompt.
-        if (hookMcpRuntimeFromEnv(envVars) && planReviewEnabled()) {
+        if (!isFastProfile && hookMcpRuntimeFromEnv(envVars) && planReviewEnabled()) {
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const command = buildPlanReviewHookCommand(selfInvocation)
@@ -1155,7 +1178,7 @@ export const claude = defineCommand({
         // never runs an UNTRUSTED repo's scripts). `--trust-gate` records consent
         // for this repo; GH_ROUTER_ENABLE_STOP_GATE force-enables. The hook also
         // re-checks trust at runtime and scopes to the top-level session.
-        if ((args as Record<string, unknown>)["trust-gate"] === true) {
+        if (!isFastProfile && (args as Record<string, unknown>)["trust-gate"] === true) {
           try {
             const root = await trustRepo(sessionCwd)
             process.stderr.write(
@@ -1165,7 +1188,7 @@ export const claude = defineCommand({
             consola.warn(`Could not record gate trust: ${String(err)}`)
           }
         }
-        const gateDisabled = stopGateDisabled(args as Record<string, unknown>)
+        const gateDisabled = isFastProfile || stopGateDisabled(args as Record<string, unknown>)
         const forceEnabled = parseBoolEnv(process.env.GH_ROUTER_ENABLE_STOP_GATE) === true
         const includeTests = parseBoolEnv(process.env.GH_ROUTER_STOP_GATE_RUN_TESTS) === true
         const gateRoot = await repoRoot(sessionCwd).catch(() => sessionCwd)
@@ -1438,7 +1461,10 @@ export const claude = defineCommand({
     )
     try {
       await prependOperatingDefaultsToMirroredClaudeMd(
-        buildOperatingDefaultsDirective(nativeAvailability),
+        buildOperatingDefaultsDirective({
+          ...nativeAvailability,
+          fastRuntimeAvailable: fastRuntimeWired,
+        }),
       )
     } catch (err) {
       consola.warn(

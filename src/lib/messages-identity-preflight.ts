@@ -62,13 +62,17 @@ export function runMessagesIdentityPreflight(c: Context): MessagesIdentityPrefli
  * Anthropic-shaped rejection for a failed identity preflight. 403, never
  * 401 — see the no-401 invariant note on `runMessagesIdentityPreflight`.
  */
-export function identityPreflightErrorResponse(c: Context, reason: string): Response {
+export function identityPreflightErrorResponse(
+  c: Context,
+  reason: string,
+  path = "/v1/messages",
+): Response {
   return c.json(
     {
       type: "error",
       error: {
         type: "permission_error",
-        message: `/v1/messages identity preflight rejected: ${reason}`,
+        message: `${path} identity preflight rejected: ${reason}`,
       },
     },
     403,

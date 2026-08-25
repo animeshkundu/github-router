@@ -316,43 +316,31 @@ describe("resolveAdvisorEffort — precedence", () => {
   })
 })
 
-describe("resolveAdvisorEffort — no floor (removed per the user-approved change)", () => {
-  // The advisor now follows the picker all the way down as well as up — the
-  // historical `high` floor is gone. The only remaining adjustment is the
-  // CEILING clamp against the resolved advisor's own live ladder, so a value
-  // the picker chose that the advisor doesn't support still lands on the
-  // nearest one it does (see the "clamping" describe block below for that).
+describe("resolveAdvisorEffort — standard floor and fast fixed effort", () => {
   for (const [picked, expected] of [
-    // ADVISOR_ESCALATION_MODEL's stubbed ladder (OPUS_EFFORTS) has no "none",
-    // so a "none" pick clamps to the nearest supported tier, "low" — this is
-    // the CLAMP, not a floor, and the same clamp a picked "low"/"medium"
-    // would receive if the ladder omitted it too.
-    ["none", "low"],
-    ["low", "low"],
-    ["medium", "medium"],
+    ["none", "high"],
+    ["low", "high"],
+    ["medium", "high"],
     ["high", "high"],
     ["xhigh", "xhigh"],
     ["max", "max"],
   ] as const) {
-    test(`picker ${picked} resolves to ${expected}`, () => {
+    test(`standard picker ${picked} resolves to ${expected}`, () => {
       const body = JSON.stringify({ output_config: { effort: picked } })
       expect(resolveAdvisorEffort(body, ADVISOR_ESCALATION_MODEL)).toBe(expected)
     })
   }
 
-  test("a low thinking budget is honored, not floored", () => {
-    const body = JSON.stringify({
-      thinking: { type: "enabled", budget_tokens: 500 },
-    })
-    expect(resolveAdvisorEffort(body, ADVISOR_ESCALATION_MODEL)).toBe("low")
+  test("standard low thinking budget is floored high", () => {
+    const body = JSON.stringify({ thinking: { type: "enabled", budget_tokens: 500 } })
+    expect(resolveAdvisorEffort(body, ADVISOR_ESCALATION_MODEL)).toBe("high")
   })
 
-  test("a `none` pick is honored verbatim when the advisor's ladder supports it", () => {
-    // ADVISOR_DEFAULT_MODEL's stubbed ladder (SOL_EFFORTS) DOES include
-    // "none", so nothing clamps it away — this is the case the historical
-    // floor used to override, and no longer does.
-    const body = JSON.stringify({ output_config: { effort: "none" } })
-    expect(resolveAdvisorEffort(body, ADVISOR_DEFAULT_MODEL)).toBe("none")
+  test("fast Advisor is fixed high regardless of picker", () => {
+    for (const picked of ["none", "low", "medium", "high", "xhigh", "max"]) {
+      const body = JSON.stringify({ output_config: { effort: picked } })
+      expect(resolveAdvisorEffort(body, ADVISOR_FAST_PROFILE_MODEL, true)).toBe("high")
+    }
   })
 })
 
@@ -366,13 +354,11 @@ describe("resolveAdvisorEffort — clamping against the ADVISOR's ladder", () =>
   })
 
   test("a ceiling clamp lands on the nearest supported tier, direction-agnostic", () => {
-    // No floor exists anymore, so this is a PURE clamp test: `tiny-model`'s
-    // ladder omits "none" (the picked value) entirely, and the nearest
-    // supported tier by EFFORT_ORDER distance is "low" (dist 1) over
-    // "medium" (dist 2) — never a floor-then-clamp two-step.
+    // The standard high floor applies before clamping. A tiny model that tops
+    // out at medium therefore receives medium, the nearest supported ceiling.
     setCatalog(model("tiny-model", "openai", ["low", "medium"]))
     const body = JSON.stringify({ output_config: { effort: "none" } })
-    expect(resolveAdvisorEffort(body, "tiny-model")).toBe("low")
+    expect(resolveAdvisorEffort(body, "tiny-model")).toBe("medium")
   })
 
   test("an absent allowlist forwards unclamped", () => {

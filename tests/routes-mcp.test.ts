@@ -3185,7 +3185,7 @@ describe("/mcp peer prompt-window guard", () => {
 
 // Launch-profile scoping: a launch registered with a narrower
 // `allowedGroups`/`allowedPersonas` (e.g. the fast profile's
-// `{peers, search}` / `{gemini_critic}`) must be denied every tool outside
+// `{peers, search, browser}` / `{oracle}`) must be denied every tool outside
 // that allow-list, in BOTH `tools/list` and `tools/call`, on EVERY scope
 // including the unscoped "all" union — the restriction is bound to the
 // caller's identity (its nonce), not to which URL path it happened to hit.
@@ -3201,8 +3201,8 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       profileId: "fast",
       nonce: FAST_NONCE,
       secret: "fast-launch-secret",
-      allowedGroups: new Set(["peers", "search"]),
-      allowedPersonas: new Set(["gemini_critic"]),
+      allowedGroups: new Set(["peers", "search", "browser"]),
+      allowedPersonas: new Set(["oracle"]),
     }).launchId
   })
 
@@ -3210,31 +3210,46 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
     unregisterLaunch(fastLaunchId)
   })
 
-  test("tools/list on the unscoped union only returns gemini_critic among personas, plus search tools — no codex/opus personas, no workers/orchestrate tools", async () => {
-    const { status, json } = await rpc(
-      { jsonrpc: "2.0", id: 1, method: "tools/list" },
-      { auth: `Bearer ${FAST_NONCE}` },
-    )
-    expect(status).toBe(200)
-    const tools = (json.result as { tools: Array<{ name: string }> }).tools
-    const names = tools.map((t) => t.name)
-    expect(names).toContain("gemini_critic")
-    expect(names).toContain("code")
-    expect(names).toContain("web")
-    for (const forbidden of [
-      "codex_critic",
-      "codex_reviewer",
-      "opus_critic",
-      "gemini_reviewer",
-      "explore",
-      "implement",
-      "review",
-      "plan",
-      "test",
-      "decompose",
-      "run_workflow",
-    ]) {
-      expect(names).not.toContain(forbidden)
+  test("tools/list on the unscoped union returns Oracle plus search, with standard peers/workers/orchestration hidden", async () => {
+    const saved = state.models
+    try {
+      state.models = {
+        object: "list",
+        data: [{
+          id: "claude-opus-5",
+          name: "claude-opus-5",
+          object: "model",
+          vendor: "anthropic",
+          version: "1",
+          preview: false,
+          model_picker_enabled: true,
+          supported_endpoints: ["/v1/messages"],
+          capabilities: {
+            family: "claude-opus-5",
+            object: "model_capabilities",
+            tokenizer: "claude",
+            type: "chat",
+            limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 },
+            supports: { adaptive_thinking: true, reasoning_effort: ["high"] },
+          },
+        }] as never,
+      }
+      const { status, json } = await rpc(
+        { jsonrpc: "2.0", id: 1, method: "tools/list" },
+        { auth: `Bearer ${FAST_NONCE}` },
+      )
+      expect(status).toBe(200)
+      const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+      expect(names).toContain("oracle")
+      expect(names).toContain("code")
+      expect(names).toContain("web")
+      for (const forbidden of [
+        "gemini_critic", "codex_critic", "codex_reviewer", "opus_critic",
+        "gemini_reviewer", "explore", "implement", "review", "plan", "test",
+        "decompose", "run_workflow",
+      ]) expect(names).not.toContain(forbidden)
+    } finally {
+      state.models = saved
     }
   })
 

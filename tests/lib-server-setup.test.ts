@@ -728,6 +728,11 @@ describe("budget-mode lead and small/fast tier", () => {
       "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
       "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
       "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES",
+      "ANTHROPIC_CUSTOM_MODEL_OPTION",
+      "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME",
+      "ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES",
     ] as const
     const prior = keys.map((k) => [k, process.env[k]] as const)
     for (const k of keys) delete process.env[k]

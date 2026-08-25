@@ -244,11 +244,14 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // is selected; stubbed here so the static import graph resolves for
   // every other test in this file too).
   fastScoutModel: mock(() => "gpt-5.6-luna"),
-  fastImplementerFastModel: mock(() => "gpt-5.6-luna"),
-  fastReviewerFastModel: mock(() => "grok-4.6"),
+  fastImplementerModel: mock(() => "gpt-5.6-luna"),
+  fastReviewerModel: mock(() => "grok-4.6"),
+  fastPlannerModel: mock(() => "gpt-5.6-sol"),
+  fastOracleModel: mock(() => "claude-opus-5"),
   FAST_SCOUT_EFFORT: "high",
-  FAST_IMPLEMENTER_FAST_EFFORT: "max",
-  FAST_REVIEWER_FAST_EFFORT: "medium",
+  FAST_IMPLEMENTER_EFFORT: "max",
+  FAST_REVIEWER_EFFORT: "medium",
+  FAST_PLANNER_EFFORT: "high",
   // stand-in.ts (pulled in transitively via handler.ts) imports this;
   // stub it so the module mock doesn't break that import.
   resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),
@@ -607,11 +610,23 @@ describe("claude command", () => {
       data: [
         {
           id: "gpt-5.6-luna",
-          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["max"] } },
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gpt-5.6-sol",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "claude-opus-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/v1/messages"],
         },
         {
           id: "grok-4.6",
           capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+          supported_endpoints: ["/responses"],
         },
         {
           id: "gemini-3.7-flash",
@@ -641,11 +656,23 @@ describe("claude command", () => {
       data: [
         {
           id: "gpt-5.6-luna",
-          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["max"] } },
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gpt-5.6-sol",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "claude-opus-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/v1/messages"],
         },
         {
           id: "grok-4.6",
           capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+          supported_endpoints: ["/responses"],
         },
         {
           id: "gemini-3.7-flash",
@@ -1067,11 +1094,23 @@ describe("claude command", () => {
         data: [
           {
             id: "gpt-5.6-luna",
-            capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["max"] } },
+            capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "gpt-5.6-sol",
+            capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "claude-opus-5",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/v1/messages"],
           },
           {
             id: "grok-4.6",
             capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+            supported_endpoints: ["/responses"],
           },
           {
             id: "gemini-3.7-flash",
@@ -1099,27 +1138,23 @@ describe("claude command", () => {
       expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
       const [, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
       // Hard roster/persona/coordinator restriction per FAST_PROFILE.
-      expect(opts.nativeRoster).toEqual(new Set(["scout", "implementer-fast", "reviewer-fast"]))
-      // personaAllowlist is translated from FAST_PROFILE's toolNameHttp-keyed
-      // set ("gemini_critic") to the agentName-keyed set personasFor consumes.
-      expect(opts.personaAllowlist).toEqual(new Set(["gemini-critic"]))
+      expect(opts.nativeRoster).toEqual(new Set(["scout", "implementer", "reviewer", "planner"]))
+      expect(opts.personaAllowlist).toBeUndefined()
       expect(opts.includeCoordinator).toBe(false)
-      // Worker dispatchers/browse hard-denied regardless of their own gates.
+      expect(opts.fastProfile).toBe(true)
       expect(opts.workerToolsAvailable).toBe(false)
       expect(opts.browseAvailable).toBe(false)
-      // Fast-only single-entry resolvers, not the standard chains.
       expect(opts.scoutModel).toBe("gpt-5.6-luna")
-      expect(opts.implementerFastModel).toBe("gpt-5.6-luna")
-      expect(opts.reviewerFastModel).toBe("grok-4.6")
-      expect(opts.nativeSubagentModel).toBeUndefined()
-      expect(opts.reviewerModel).toBeUndefined()
+      expect(opts.nativeSubagentModel).toBe("gpt-5.6-luna")
+      expect(opts.reviewerModel).toBe("grok-4.6")
+      expect(opts.plannerModel).toBe("gpt-5.6-sol")
       expect(opts.brainstormModel).toBeUndefined()
       expect(opts.scribeModel).toBeUndefined()
       expect(opts.generalPurposeFastModel).toBeUndefined()
-      // Pinned reasoning effort for the three fast natives.
       expect(opts.scoutEffort).toBe("high")
-      expect(opts.implementerFastEffort).toBe("max")
-      expect(opts.reviewerFastEffort).toBe("medium")
+      expect(opts.implementerEffort).toBe("max")
+      expect(opts.reviewerEffort).toBe("medium")
+      expect(opts.plannerEffort).toBe("high")
     })
 
     test("a fatal fast-profile prerequisite failure is visible on stderr", async () => {

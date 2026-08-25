@@ -160,13 +160,16 @@ export interface NativeAgentAvailability {
    *  hard restriction (not a catalog-availability signal, unlike every
    *  `*Available` flag above). When set, `buildNativeReachClauses` and
    *  `buildOperatingDefaultsDirective` return a short, self-contained
-   *  rendering naming only `scout`/`implementer-fast`/`reviewer-fast` and
-   *  `gemini_critic` — it must never name `implementer`/`reviewer`/
+   *  rendering naming only `scout`/`implementer`/`reviewer`/`planner`,
+   *  Advisor, and Oracle — it must never name the standard-only `*-fast`/
    *  `brainstorm`/`scribe`/`general-purpose-fast`, `peer-review-coordinator`,
    *  `worker-*`/`orchestrate` tools or skills, or `stand_in`, since none of
    *  those are registered in this profile regardless of catalog state.
    *  Absent/`"standard"` is today's catalog-driven full roster. */
   profile?: "standard" | "fast"
+  /** False when a fast launch disabled or failed its MCP/native runtime wiring.
+   *  The fallback directive must not advertise agents/tools that do not exist. */
+  fastRuntimeAvailable?: boolean
 }
 
 /** Oxford-comma join: "a", "a and b", "a, b, and c". */
@@ -197,9 +200,9 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
   if (opts.profile === "fast") {
     return joinClauses([
       "`scout` to find or understand something in the repo",
-      "`implementer-fast` for coding changes",
-      "`reviewer-fast` when something exists and you want it assessed, "
-        + "including reproducing and root-causing a failure",
+      "`implementer` for approved mechanical coding changes",
+      "`reviewer` for repository-aware verification, reproduction, and root-causing",
+      "`planner` as the Sol plan consultant and approver after Luna has drafted with evidence",
     ])
   }
   const clauses: Array<string> = []
@@ -335,38 +338,24 @@ const OPERATING_DEFAULTS_TAIL =
  * standard tail carries, scaled to the fast profile's actual roster.
  */
 const FAST_OPERATING_DEFAULTS_TAIL =
-  "context free to reason and collaborate with the user. Delegation pays "
-  + "when the work is WIDE (many files or sources to sweep) or SLOW, and you "
-  + "need only the conclusion: the main thread is where you think with and "
-  + "respond to the user, and its context window is a finite shared "
-  + "resource. Do trivial, surgical, and last-mile work yourself.\n\n"
-  + "Adversarial review. `gemini_critic` (Gemini 3.7 Flash) is a "
-  + "fresh-context model, so what it adds is a blind spot that whoever "
-  + "produced the work cannot reach by thinking harder about it. It earns "
-  + "its keep on consequential design choices, recommendations, and "
-  + "hard-to-reverse decisions: the cases where plausible alternatives "
-  + "remain and the conclusion rests on judgment rather than on something "
-  + "you can verify directly. Always consult it when the change touches "
-  + "auth, user input, database queries, crypto, or serialization. It does "
-  + "NOT pay for read-only tracing, ordinary repository lookup, or a "
-  + "conclusion that a focused test, a direct reproduction, or unambiguous "
-  + "code evidence already settles. Give it the artifact and the "
-  + "constraints and not your rationale, since justification anchors the "
-  + "review and dulls it.\n\n"
-  + "Aim high. Default to radical simplicity and a relentless focus on the "
-  + "user's real experience: design for the person and the job to be done, "
-  + "not the demo. Work backwards from the outcome the user actually needs. "
-  + "Question every assumption and prefer what you can derive, reproduce, "
-  + "or test.\n\n"
-  + "Engineering excellence. Fix a bug by first reproducing it end to end, "
-  + "as close to how a real user hits it as you can, so you solve the real "
-  + "problem and not a symptom. A lint error, a failing test, or a flaky "
-  + "test is worth fixing the moment you see it, whoever introduced it."
+  "context free to reason and collaborate with the user. Delegate only when work is wide or slow; do trivial and surgical work directly. "
+  + "Luna investigates and drafts. The lead must give `planner` a handcrafted evidence packet and must not implement until `planner` returns `APPROVE`. "
+  + "Advisor is the transcript-aware brainstorming, sounding-board, fresh-look, uncertainty, and stuck path. "
+  + "`oracle` is exact Opus 5 (1M/high), stateless and last resort after the normal paths remain stuck. "
+  + "Before declaring work done, run the relevant build/tests and ask `reviewer` for repository-aware verification. "
+  + "Verify claims, report uncertainty, and stop named teammates when finished."
 
 export function buildOperatingDefaultsDirective(
   opts: NativeAgentAvailability = {},
 ): string {
   if (opts.profile === "fast") {
+    if (opts.fastRuntimeAvailable === false) {
+      return (
+        "## Operating defaults (apply when the user has not specified otherwise; the "
+        + "user's explicit direction and the domain's own standards always override)\n\n"
+        + "Fast profile runtime wiring is unavailable, so no injected Task roster, search, or Oracle is available. Work directly, use only tools actually listed in this session, verify with the repository's relevant build/tests before declaring done, report uncertainty, and do not invent unavailable capabilities."
+      )
+    }
     return (
       "## Operating defaults (apply when the user has not specified otherwise; the "
       + "user's explicit direction and the domain's own standards always override)\n\n"
