@@ -7,8 +7,16 @@ import {
   classifyMessagesRoute,
   handleNonClaudeChat,
   handleNonClaudeResponses,
+  makeShimContinueTurn,
+  parseAnthropicRequest,
+  streamParsedRequestViaShim,
+  type ShimEndpoint,
 } from "~/lib/anthropic-translate"
 import { HTTPError } from "~/lib/error"
+import {
+  identityPreflightErrorResponse,
+  runMessagesIdentityPreflight,
+} from "~/lib/messages-identity-preflight"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { EFFORT_ORDER, UNKNOWN_EFFORT_ANCHOR, bucketEffort, clampEffort } from "~/lib/reasoning-effort"
@@ -26,6 +34,7 @@ import {
   type ThinkingHistoryRepair,
 } from "~/lib/thinking-history-repair"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
+import { preprocessFastRequest } from "~/lib/fast-request-preprocess"
 import {
   buildWebSearchContext,
   injectAnthropicWebSearchContext,
@@ -35,6 +44,7 @@ import {
   buildAdvisorStream,
   injectAdvisorTool,
   isAdvisorRequested,
+  isFastProfileLead,
   resolveAdvisorEffort,
   resolveAdvisorModel,
 } from "~/services/advisor/advisor"
@@ -237,6 +247,18 @@ async function processWebSearch(rawBody: string): Promise<string> {
 
 export async function handleCompletion(c: Context) {
   const startTime = Date.now()
+
+  // `/v1/messages` identity preflight. Runs before ANY body consumer
+  // (`c.req.text()` below is the first one) — this only reads a header.
+  // See `runMessagesIdentityPreflight`'s doc for the bound-vs-unbound-BYO
+  // distinction and why a failed preflight answers 403, never 401 (the
+  // no-401 invariant — Claude Code's reactive refresh path fires on any
+  // 401 and would try the synthetic refresh token, breaking the session).
+  const identity = runMessagesIdentityPreflight(c)
+  if (!identity.ok) {
+    return identityPreflightErrorResponse(c, identity.reason)
+  }
+
   await checkRateLimit(state)
 
   const rawBody = await c.req.text()
@@ -345,7 +367,18 @@ export async function handleCompletion(c: Context) {
   const incomingBeta = c.req.header("anthropic-beta")
   const advisorEnabled = isAdvisorRequested(incomingBeta)
 
-  let finalBody = await processWebSearch(rawBody)
+  const fastPreprocess = preprocessFastRequest(rawBody, identity.launch)
+  if (fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
+    const message = fastPreprocess.rejectedAlias
+      ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m fast launch.`
+      : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m fast model set.`
+    return c.json(
+      { type: "error", error: { type: "invalid_request_error", message } },
+      400,
+    )
+  }
+
+  let finalBody = await processWebSearch(fastPreprocess.body)
   // Inbound advisor-history sanitization: rewrite malformed
   // server_tool_use ids in Claude Code's replayed conversation history
   // (left over from before the round-5 fix or any non-spec-compliant
@@ -447,18 +480,105 @@ export async function handleCompletion(c: Context) {
   // id can never be diverted to either shim (fail-closed to Claude).
   const messagesRoute = classifyMessagesRoute(modelId, selectedModel, originalModel)
   if (messagesRoute !== "claude-passthrough") {
-    // ADVISOR is a Claude-only feature: the server-side advisor translate-loop
-    // (buildAdvisorStream) exists only on the native /v1/messages path, not on
-    // either shim. When a request carrying the advisor beta/tool routes to a
-    // non-Claude model — whether picked via `-m <model>` or switched at runtime
-    // via the /model picker — gracefully DEGRADE instead of 400ing every
-    // request (which would break `github-router claude -m gpt-5.5` entirely,
-    // since the claude launcher auto-enables the advisor beta). Strip the
-    // injected `__anthropic_advisor` tool (which would otherwise reach the
-    // model with no server-side handler) and ignore the advisor beta, then
-    // forward to the shim so the request succeeds. Advisor is simply
-    // unavailable on non-Claude models. The Claude passthrough path (below) is
-    // unchanged — the advisor loop still runs there.
+    // ADVISOR is Claude-only in the GENERAL case: the server-side advisor
+    // translate-loop (buildAdvisorStream) exists only on the native
+    // /v1/messages path. The ONE exception is the fast Luna-lead profile,
+    // whose advisor (Gemini 3.7 Flash, via `resolveAdvisorModel`) runs
+    // through THIS SAME shim's translation + SSE-synthesis machinery
+    // (`streamParsedRequestViaShim` for the initial turn, a
+    // `makeShimContinueTurn`-built continuation for every turn after) —
+    // see plan section 8 "Enable Gemini 3.7 Flash Advisor on the Luna
+    // translation path". Every OTHER non-Claude lead still gracefully
+    // degrades below exactly as before. Advisor only ever runs on a
+    // STREAMING request (mirrors the Claude-passthrough branch, which gates
+    // buildAdvisorStream on `isStreaming` too — a non-streaming request
+    // never gets the advisor loop on ANY lead).
+    const endpoint: ShimEndpoint = messagesRoute === "chat-shim" ? "chat" : "responses"
+    let parsedBase: AnyRecord | undefined
+    try {
+      parsedBase = JSON.parse(resolvedBody) as AnyRecord
+    } catch {
+      // Malformed body — fall through to the plain shim handlers below,
+      // which re-parse and surface their own 400.
+    }
+    const wantsStream = parsedBase?.stream === true
+
+    if (
+      advisorEnabled
+      && wantsStream
+      && identity.launch?.profileId === "fast"
+      && isFastProfileLead(modelId)
+    ) {
+      const initialConversation = Array.isArray(parsedBase!.messages)
+        ? (parsedBase!.messages as Array<AnyRecord>)
+        : []
+      const parsedInitial = parseAnthropicRequest(parsedBase!, modelId!, selectedModel)
+      const fastAdvisorAborter = new AbortController()
+      const firstResponse = await streamParsedRequestViaShim(
+        parsedInitial,
+        endpoint,
+        {
+          modelId: modelId!,
+          model: selectedModel,
+          routePath: c.req.path,
+          onCancel: () => fastAdvisorAborter.abort(),
+        },
+        fastAdvisorAborter.signal,
+      )
+
+      logRequest(
+        {
+          method: "POST",
+          path: c.req.path,
+          model: originalModel,
+          resolvedModel: modelId,
+          status: 200,
+          streaming: true,
+        },
+        selectedModel,
+        startTime,
+      )
+
+      const advisorChoice = resolveAdvisorModel(modelId, true)
+      return new Response(
+        buildAdvisorStream({
+          firstResponse,
+          initialConversation,
+          baseBody: parsedBase!,
+          // Unused when `continueTurn` is supplied (the shim builds its own
+          // request headers from the catalog entry); kept non-undefined for
+          // type simplicity/back-compat with the default-`continueTurn` path.
+          requestHeaders: {},
+          advisorModel: advisorChoice.model,
+          advisorEscalated: advisorChoice.escalated || advisorChoice.fastProfile,
+          advisorEffort: resolveAdvisorEffort(rawBody, advisorChoice.model, true),
+          externalAborter: fastAdvisorAborter,
+          continueTurn: makeShimContinueTurn(endpoint, {
+            modelId: modelId!,
+            model: selectedModel,
+          }),
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "transfer-encoding": "chunked",
+            connection: "keep-alive",
+          },
+        },
+      )
+    }
+
+    // ADVISOR is unavailable on every OTHER non-Claude model — whether picked
+    // via `-m <model>` or switched at runtime via the /model picker —
+    // gracefully DEGRADE instead of 400ing every request (which would break
+    // `github-router claude -m gpt-5.5` entirely, since the claude launcher
+    // auto-enables the advisor beta). Strip the injected `__anthropic_advisor`
+    // tool (which would otherwise reach the model with no server-side
+    // handler) and ignore the advisor beta, then forward to the shim so the
+    // request succeeds. The Claude passthrough path (below) is unchanged —
+    // the advisor loop still runs there.
     // Strip the internal advisor tool UNCONDITIONALLY on every shim path
     // (defense-in-depth): the reserved `__anthropic_advisor` / `advisor_*` tool
     // is a proxy-internal contract with no server-side handler off the Claude
@@ -800,9 +920,17 @@ function resolveModelInBody(rawBody: string): {
     typeof parsed.model === "string" ? parsed.model : undefined
 
   let modified = false
-  if (originalModel) {
-    const resolved = resolveModel(originalModel)
-    if (resolved !== originalModel) {
+
+  // Fast-profile aliases and fixed efforts are handled before this helper by
+  // `preprocessFastRequest`, which has the authenticated launch identity. This
+  // generic resolver deliberately has no private-alias semantics.
+
+  const resolvedOriginalModel =
+    typeof parsed.model === "string" ? parsed.model : originalModel
+
+  if (resolvedOriginalModel) {
+    const resolved = resolveModel(resolvedOriginalModel)
+    if (resolved !== resolvedOriginalModel) {
       parsed.model = resolved
       modified = true
     }

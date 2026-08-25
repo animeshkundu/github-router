@@ -985,6 +985,80 @@ describe("anthropic-translate request mapping", () => {
   })
 })
 
+// Plan section 8 item 8: a replayed advisor consultation (Anthropic's
+// `server_tool_use{advisor}` / `advisor_tool_result` blocks) must not be
+// silently dropped from a non-Claude lead's request history — translate to
+// visible neutral text instead.
+describe("anthropic-translate request mapping — replayed advisor history", () => {
+  test("server_tool_use{advisor} + advisor_tool_result become visible text, not dropped", () => {
+    const { parsed } = build({
+      messages: [
+        { role: "user", content: "please build the feature" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Let me consult the advisor first." },
+            {
+              type: "server_tool_use",
+              id: "srvtoolu_abc123",
+              name: "advisor",
+              input: {},
+            },
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_abc123",
+              content: {
+                type: "advisor_result",
+                text: "Consider edge case X before implementing.",
+              },
+            },
+            { type: "text", text: "Now I will proceed." },
+          ],
+        },
+      ],
+    })
+
+    const assistantMsg = parsed.messages.find((m) => m.role === "assistant")
+    expect(assistantMsg).toBeDefined()
+    const content = assistantMsg!.content as Array<Record<string, unknown>>
+    const texts = content
+      .filter((c) => c.type === "text")
+      .map((c) => c.text as string)
+
+    // Neither Anthropic-native block silently vanishes: one text part stands
+    // in for the consultation itself, another carries the advisor's reply.
+    expect(texts.some((t) => t.includes("Consulted advisor"))).toBe(true)
+    expect(
+      texts.some((t) => t.includes("Consider edge case X before implementing.")),
+    ).toBe(true)
+    // The original surrounding text is untouched and in wire order.
+    expect(texts[0]).toBe("Let me consult the advisor first.")
+    expect(texts.at(-1)).toBe("Now I will proceed.")
+    // No raw tool_use is synthesized for the advisor call — it's text, not a
+    // tool the shim'd model would be expected to itself invoke.
+    expect(content.some((c) => c.type === "toolCall")).toBe(false)
+  })
+
+  test("an advisor_tool_result with no text content contributes nothing (never a blank block)", () => {
+    const { parsed } = build({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "advisor_tool_result",
+              tool_use_id: "srvtoolu_x",
+              content: { type: "advisor_result" },
+            },
+          ],
+        },
+      ],
+    })
+    const assistantMsg = parsed.messages.find((m) => m.role === "assistant")
+    expect(assistantMsg!.content).toEqual([])
+  })
+})
+
 // Fixture-fidelity coverage: `gpt-5.3-codex` rides the SAME `/responses` shim as
 // `gpt-5.5` (the rest of this suite pins gpt-5.5). Explicitly assert the
 // document→input_file and the sub-16 max_output_tokens clamp on the codex id so

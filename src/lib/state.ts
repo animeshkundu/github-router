@@ -1,6 +1,52 @@
 import { randomBytes, randomUUID } from "node:crypto"
 
 import type { ModelsResponse } from "~/services/copilot/get-models"
+import type { LaunchProfileId } from "./launch-profile"
+
+/**
+ * One authenticated `github-router claude` (or `serve`) launch's identity
+ * and capability scope, keyed by `launchId` in `state.launchRegistry`.
+ *
+ * Replaces the earlier scalar `state.peerMcpNonce` assumption — a single
+ * process-global nonce cannot express "which profile is this caller", so
+ * a concurrent fast + standard launch (or a reconnect) had no way to keep
+ * their identities from being interchangeable. Each entry carries BOTH
+ * credentials a launch presents on the wire:
+ *
+ *   - `nonce`  — the `/mcp` bearer (Streamable HTTP `Authorization` header).
+ *   - `secret` — the `/v1/messages` identity-preflight bearer, deliberately
+ *     a SEPARATE credential from `nonce` so leaking one surface's token
+ *     (say, via a client log) does not also authenticate the other.
+ *
+ * `allowedGroups` / `allowedPersonas` are the narrowing declaration for
+ * scoped MCP surfaces: `undefined` means UNRESTRICTED (the standard/BYO
+ * launch shape today), and a concrete `ReadonlySet` is the fast profile's
+ * hard allow-list. This module only stores and looks up the declaration;
+ * enforcing it against `tools/list` / `tools/call` is the MCP route
+ * handler's job.
+ */
+export interface LaunchRegistryEntry {
+  /** Opaque per-launch id. Primary key into `state.launchRegistry`. */
+  launchId: string
+  /** `/mcp` Streamable HTTP bearer for this launch. */
+  nonce: string
+  /** `/v1/messages` identity-preflight bearer for this launch. */
+  secret: string
+  /** Which launch profile authenticated this entry. */
+  profileId: LaunchProfileId
+  /** Scoped MCP group allow-list. `undefined` = unrestricted. */
+  allowedGroups?: ReadonlySet<string>
+  /** Persona (peers-group) tool-name allow-list. `undefined` = unrestricted. */
+  allowedPersonas?: ReadonlySet<string>
+  createdAt: number
+}
+
+/**
+ * Registry key backing the `state.peerMcpNonce` back-compat accessor
+ * below. Not a real launch id (no `registerLaunch` caller ever produces
+ * this string), so it can never collide with a genuine per-launch UUID.
+ */
+const DEFAULT_LAUNCH_ID = "__default__"
 
 export interface State {
   githubToken?: string
@@ -143,13 +189,32 @@ export interface State {
   machineId: string
 
   /**
-   * Per-launch nonce for the loopback `/mcp` endpoint. Set by the
-   * `claude` subcommand after `setupAndServe` and before spawning
-   * Claude Code; the spawned MCP client reads it from the
-   * `--mcp-config` tempfile and presents it as `Authorization: Bearer`.
-   * When unset, `/mcp` rejects all requests — closes the
-   * loopback-no-auth gap (DNS rebinding, malicious browser-ext
-   * native messaging, sibling-process probe).
+   * Keyed per-launch registry for the loopback `/mcp` endpoint AND the
+   * `/v1/messages` identity preflight. Set by the `claude` subcommand
+   * (via `registerLaunch` in `./launch-registry`) after `setupAndServe`
+   * and before spawning Claude Code; removed by the launch's own
+   * cleanup. When empty, `/mcp` rejects all requests — closes the
+   * loopback-no-auth gap (DNS rebinding, malicious browser-ext native
+   * messaging, sibling-process probe) exactly as the old scalar nonce
+   * did when unset.
+   *
+   * Multiple entries coexist for concurrent fast/standard launches (or a
+   * launch plus a reconnect); each is looked up by its OWN nonce/secret,
+   * so two launches' authenticated identities never cross.
+   */
+  launchRegistry: Map<string, LaunchRegistryEntry>
+
+  /**
+   * @deprecated Back-compat accessor over the registry's DEFAULT_LAUNCH_ID
+   * entry (profileId "standard", unrestricted `allowedGroups`/
+   * `allowedPersonas`) — defined below via `Object.defineProperty`, not a
+   * real stored field. Reading returns that entry's nonce; writing creates
+   * or updates it (or deletes it on `undefined`). Exists so single-launch
+   * call sites and tests that already do `state.peerMcpNonce = NONCE`
+   * keep working unmodified while `checkAuth` and the identity preflight
+   * consult the real keyed registry underneath. New code should call
+   * `registerLaunch` / `findLaunchByNonce` / `findLaunchBySecret` from
+   * `./launch-registry` directly instead of reading/writing this field.
    */
   peerMcpNonce?: string
 
@@ -175,4 +240,39 @@ export const state: State = {
   humanlikeForce: "auto",
   sessionId: randomUUID(),
   machineId: randomBytes(32).toString("hex"),
+  launchRegistry: new Map(),
 }
+
+// `peerMcpNonce` is not a plain data field — it's a live view onto
+// `state.launchRegistry.get(DEFAULT_LAUNCH_ID)`. Defined via
+// `Object.defineProperty` (rather than a class) so `state` stays the
+// plain object literal every existing importer already destructures /
+// mutates directly.
+Object.defineProperty(state, "peerMcpNonce", {
+  enumerable: true,
+  configurable: true,
+  get(): string | undefined {
+    return state.launchRegistry.get(DEFAULT_LAUNCH_ID)?.nonce
+  },
+  set(value: string | undefined) {
+    if (value === undefined) {
+      state.launchRegistry.delete(DEFAULT_LAUNCH_ID)
+      return
+    }
+    const existing = state.launchRegistry.get(DEFAULT_LAUNCH_ID)
+    state.launchRegistry.set(DEFAULT_LAUNCH_ID, {
+      launchId: DEFAULT_LAUNCH_ID,
+      nonce: value,
+      // A caller that only ever touches `peerMcpNonce` exposes MCP only and has
+      // no Messages identity secret.
+      // Never reuse the MCP bearer across surfaces: an empty secret cannot match
+      // any non-empty custom header, while registered Claude launches always use
+      // `registerLaunch` with independently generated credentials.
+      secret: existing?.secret ?? "",
+      profileId: existing?.profileId ?? "standard",
+      allowedGroups: existing?.allowedGroups,
+      allowedPersonas: existing?.allowedPersonas,
+      createdAt: existing?.createdAt ?? Date.now(),
+    })
+  },
+})

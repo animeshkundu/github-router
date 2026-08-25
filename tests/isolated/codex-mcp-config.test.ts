@@ -809,6 +809,103 @@ describe("buildPeerAgentDefinitions", () => {
     expect(agents["worker-implement"]!.tools).toEqual(["mcp__gh-router-workers__*"])
     expect(agents["worker-implement"]!.prompt).toContain("mcp__gh-router-workers__implement")
   })
+
+  describe("fast launch profile", () => {
+    const FAST_ROSTER = ["scout", "implementer", "reviewer", "planner"]
+
+    function buildFastAgents(extra?: Partial<Parameters<typeof buildPeerAgentDefinitions>[0]>) {
+      return buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        fastProfile: true,
+        serverUrl: URL,
+        nativeRoster: FAST_ROSTER,
+        includeCoordinator: false,
+        scoutModel: "gpt-5.6-luna",
+        nativeSubagentModel: "gpt-5.6-luna",
+        reviewerModel: "grok-4.6",
+        plannerModel: "gpt-5.6-sol",
+        scoutEffort: "high",
+        implementerEffort: "max",
+        reviewerEffort: "medium",
+        plannerEffort: "high",
+        ...extra,
+      })
+    }
+
+    test("emits exactly scout, implementer, reviewer, planner", () => {
+      const agents = buildFastAgents()
+      expect(Object.keys(agents).sort()).toEqual(["implementer", "planner", "reviewer", "scout"])
+      for (const absent of [
+        "peer-review-coordinator", "codex-critic", "gemini-critic", "opus-critic",
+        "implementer-fast", "reviewer-fast", "brainstorm", "scribe", "general-purpose-fast",
+      ]) expect(agents[absent]).toBeUndefined()
+    })
+
+    test("pins fast role models, effort and planner approval contract", () => {
+      const agents = buildFastAgents()
+      expect(agents.scout!.model).toBe("gh-router-luna-scout-high[1m]")
+      expect(agents.implementer!.model).toBe("gh-router-luna-implementer-max[1m]")
+      expect(agents.reviewer!.model).toBe("grok-4.6")
+      expect(agents.planner!.model).toBe("gpt-5.6-sol[1m]")
+      expect(agents.scout!.effort).toBe("high")
+      expect(agents.implementer!.effort).toBe("max")
+      expect(agents.reviewer!.effort).toBe("medium")
+      expect(agents.planner!.effort).toBe("high")
+      expect(agents.planner!.prompt).toContain("`APPROVE`, `REVISE`, or `NEED_MORE_CONTEXT`")
+      expect(agents.planner!.description).toContain("must not implement until")
+      expect(agents.planner!.tools).toContain("mcp__peers__oracle")
+      expect(agents.planner!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything(), search: expect.anything() }))
+      expect(agents.reviewer!.tools).toBeUndefined()
+    })
+
+    test("effort round-trips through markdown frontmatter", () => {
+      const agents = buildFastAgents()
+      const md = buildAgentMd({
+        name: "planner",
+        description: agents.planner!.description,
+        prompt: agents.planner!.prompt,
+        model: agents.planner!.model,
+        effort: agents.planner!.effort,
+        tools: agents.planner!.tools,
+      })
+      expect(md).toContain('effort: "high"')
+      expect(md).toContain("name: planner")
+      expect(md).toContain("mcp__peers__oracle")
+    })
+
+    test("standard unrestricted calls remain picker-driven and unchanged", () => {
+      const agents = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+      })
+      expect(agents["peer-review-coordinator"]).toBeDefined()
+      expect(agents.implementer).toBeDefined()
+      expect(agents.reviewer).toBeDefined()
+      expect(agents.brainstorm).toBeDefined()
+      expect(agents.scribe).toBeDefined()
+      expect(agents.planner).toBeUndefined()
+      for (const def of Object.values(agents)) expect(def.effort).toBeUndefined()
+    })
+
+    test("nativeRoster remains a hard filter on the fast definitions", () => {
+      const agents = buildFastAgents({ nativeRoster: ["scout"] })
+      expect(Object.keys(agents)).toEqual(["scout"])
+    })
+
+    test("every fast agent name matches the permanent sweep allowlist", () => {
+      const agents = buildFastAgents()
+      for (const name of Object.keys(agents)) {
+        expect(PEER_AGENT_MD_FILENAME.test(`peer-123-${"a".repeat(8)}-${name}.md`)).toBe(true)
+      }
+    })
+  })
 })
 
 describe("resolveCodexCliBackend", () => {

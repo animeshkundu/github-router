@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 
 import {
+  agentNamesForToolAllowlist,
   buildAgentPrompt,
   buildPeerAwarenessSnippet,
   buildPeerAwarenessSummary,
@@ -271,7 +272,63 @@ describe("personasFor", () => {
     expect(gemini.every((p) => p.description.includes("gemini-3.7-flash"))).toBe(true)
     expect(gemini.every((p) => !p.description.includes("gemini-3.1-pro-preview"))).toBe(true)
   })
+
+  test("agentAllowlist restricts the roster to exactly the named personas (fast profile)", () => {
+    const list = personasFor({
+      codexCli: true, // codexCli=true would normally add codex-implementer
+      geminiAvailable: true,
+      agentAllowlist: ["gemini-critic"],
+    })
+    expect(list.map((p) => p.agentName)).toEqual(["gemini-critic"])
+  })
+
+  test("agentAllowlist naming a persona absent from the catalog still drops it (allowlist is additive-restrictive, not a force-include)", () => {
+    const list = personasFor({
+      codexCli: false,
+      geminiAvailable: false, // gemini-critic requires the catalog regardless
+      agentAllowlist: ["gemini-critic", "codex-critic"],
+    })
+    expect(list.map((p) => p.agentName)).toEqual(["codex-critic"])
+  })
+
+  test("agentAllowlist accepts a Set as well as an array", () => {
+    const list = personasFor({
+      codexCli: false,
+      geminiAvailable: true,
+      agentAllowlist: new Set(["gemini-critic"]),
+    })
+    expect(list.map((p) => p.agentName)).toEqual(["gemini-critic"])
+  })
+
+  test("undefined agentAllowlist is unrestricted (backward compatible)", () => {
+    const withAllowlist = personasFor({ codexCli: false, geminiAvailable: true })
+    const withoutOptIn = personasFor({ codexCli: false, geminiAvailable: true, agentAllowlist: undefined })
+    expect(withAllowlist).toEqual(withoutOptIn)
+  })
 })
+
+describe("agentNamesForToolAllowlist", () => {
+  test("translates toolNameHttp values (e.g. from a launch profile) into agentName values", () => {
+    const names = agentNamesForToolAllowlist(["gemini_critic"])
+    expect(names).toEqual(new Set(["gemini-critic"]))
+  })
+
+  test("accepts a Set input and ignores unknown tool names", () => {
+    const names = agentNamesForToolAllowlist(new Set(["gemini_critic", "codex_critic", "not_a_real_tool"]))
+    expect(names).toEqual(new Set(["gemini-critic", "codex-critic"]))
+  })
+
+  test("round-trips into personasFor's agentAllowlist", () => {
+    const toolAllowlist = new Set(["gemini_critic"])
+    const list = personasFor({
+      codexCli: false,
+      geminiAvailable: true,
+      agentAllowlist: agentNamesForToolAllowlist(toolAllowlist),
+    })
+    expect(list.map((p) => p.agentName)).toEqual(["gemini-critic"])
+  })
+})
+
 
 describe("buildAgentPrompt — HTTP mode", () => {
   test("codex-critic prompt routes to mcp__peers__codex_critic", () => {
@@ -1058,4 +1115,61 @@ test("the cost/speed preamble appears only when figures actually rendered", () =
   // The roster itself must still be present; only the promise goes away.
   expect(bare).toContain("`implementer`")
   expect(bare).toContain("`general-purpose-fast`")
+})
+
+describe("fastProfile rendering (buildPeerAwarenessSnippet / buildPeerAwarenessSummary)", () => {
+  // fastProfile:true is a HARD restriction — every other *Available flag on
+  // this call must be irrelevant, so pass a maximal-looking set of the other
+  // flags to prove the fast branch overrides rather than merges with them.
+  const FAST_OPTS = {
+    codexCli: true,
+    geminiAvailable: true,
+    workerToolsAvailable: true,
+    standInAvailable: true,
+    browseAvailable: true,
+    compoundBrowseAvailable: true,
+    powerBrowseAvailable: true,
+    fleetAvailable: true,
+    agentToolsAvailable: true,
+    profile: "fast",
+  } as const
+
+  test("snippet names only the final fast roles, Advisor, Oracle, search, and opt-in browser", () => {
+    const snippet = buildPeerAwarenessSnippet(FAST_OPTS)
+    for (const present of ["`scout`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
+      expect(snippet).toContain(present)
+    }
+    for (const removed of [
+      "gemini_critic", "codex_critic", "codex_reviewer", "opus_critic",
+      "gemini_reviewer", "peer-review-coordinator", "worker-explore",
+      "worker-implement", "worker-review", "worker-plan", "worker-test",
+      "worker-browse", "stand_in", "`implementer-fast`", "`reviewer-fast`",
+      "`brainstorm`", "`scribe`", "`general-purpose-fast`", "mcp__workers__",
+      "mcp__orchestrate__", "mcp__fleet__", "mcp__decide__",
+    ]) expect(snippet).not.toContain(removed)
+  })
+
+  test("summary names only the final fast surface", () => {
+    const summary = buildPeerAwarenessSummary(FAST_OPTS)
+    for (const present of ["`scout`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
+      expect(summary).toContain(present)
+    }
+    for (const removed of [
+      "gemini_critic", "peer-review-coordinator", "worker-*", "stand_in",
+      "`implementer-fast`", "`reviewer-fast`", "`brainstorm`", "`scribe`",
+      "`general-purpose-fast`", "mcp__workers__", "mcp__orchestrate__",
+      "mcp__fleet__", "mcp__decide__",
+    ]) expect(summary).not.toContain(removed)
+  })
+
+  test("fastProfile takes precedence over every other flag passed alongside it", () => {
+    // Same FAST_OPTS as above already sets every other *Available flag to
+    // true; the assertions above proving the removed surface is absent ARE
+    // the precedence proof. This test additionally confirms the non-fast
+    // rendering (fastProfile omitted) with the SAME other flags produces the
+    // opposite: the full surface present.
+    const standard = buildPeerAwarenessSnippet({ ...FAST_OPTS, profile: "standard" })
+    expect(standard).toContain("codex_critic")
+    expect(standard).toContain("peer-review-coordinator")
+  })
 })

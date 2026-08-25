@@ -43,7 +43,7 @@ export function catalogAdvertises1M(id: string): boolean {
  * and the accounting must agree in every case, so we match the quirk instead of
  * fixing it on one side only. An empty string is falsy in both.
  */
-function oneMContextDisabled(): boolean {
+export function oneMContextDisabled(): boolean {
   return (process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT ?? "") !== ""
 }
 

@@ -352,6 +352,99 @@ export function generalPurposeFastModel(): string | undefined {
   )
 }
 
+/*
+ * Fast-launch-profile ("-m fast") native model resolvers.
+ *
+ * These are deliberately separate from the standard resolvers above. The fast
+ * profile is a hard, single-entry, no-fallback assignment: `scout` and
+ * `implementer` pin to Luna, `reviewer` pins to Grok, and `planner` pins to
+ * Sol. Retuning a standard resolver must never move a fast role silently.
+ */
+
+export const FAST_SCOUT_MODEL = "gpt-5.6-luna"
+export const FAST_IMPLEMENTER_MODEL = "gpt-5.6-luna"
+/** Grok 4.6 advertises 500K total context / 372K max prompt, so it remains bare
+ *  and is gated by max_prompt_tokens rather than the 1M floor. */
+export const FAST_REVIEWER_MODEL = "grok-4.6"
+export const FAST_PLANNER_MODEL = "gpt-5.6-sol"
+export const FAST_ORACLE_MODEL = "claude-opus-5"
+
+/** Presence floor, not the client compaction trigger. */
+export const FAST_REVIEWER_MIN_PROMPT_TOKENS = 200_000
+
+/** Fixed effort pins for the fast profile. */
+export const FAST_SCOUT_EFFORT = "high"
+export const FAST_IMPLEMENTER_EFFORT = "max"
+export const FAST_REVIEWER_EFFORT = "medium"
+export const FAST_PLANNER_EFFORT = "high"
+export const FAST_ORACLE_EFFORT = "high"
+
+export function fastScoutModel(): string | undefined {
+  return firstPresentInCatalog(
+    [FAST_SCOUT_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+}
+
+export function fastImplementerModel(): string | undefined {
+  return firstPresentInCatalog(
+    [FAST_IMPLEMENTER_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+}
+
+export function fastPlannerModel(): string | undefined {
+  const id = firstPresentInCatalog(
+    [FAST_PLANNER_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+  if (!id) return undefined
+  const found = state.models?.data.find((m) => m.id === id)
+  const efforts = found?.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_PLANNER_EFFORT)) return undefined
+  if (pickEndpoint(found!) !== "responses") return undefined
+  return id
+}
+
+/** Gate Grok on the prompt limit that actually constrains pasted review input. */
+export function fastReviewerModel(): string | undefined {
+  const models = state.models?.data
+  if (!models) return undefined
+  const found = models.find((m) => m.id === FAST_REVIEWER_MODEL)
+  if (!found) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_REVIEWER_EFFORT)) return undefined
+  const maxPrompt = found.capabilities?.limits?.max_prompt_tokens ?? 0
+  if (maxPrompt < FAST_REVIEWER_MIN_PROMPT_TOKENS) return undefined
+  if (pickEndpoint(found) !== "responses") return undefined
+  return FAST_REVIEWER_MODEL
+}
+
+/** Exact Opus 5 only: the fast Oracle never inherits standard opus_critic's
+ *  older-family fallback. */
+export function fastOracleModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === FAST_ORACLE_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < ONE_M_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) <= 0) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_ORACLE_EFFORT)) return undefined
+  if (found.capabilities?.supports?.adaptive_thinking !== true) return undefined
+  const endpoints = found.supported_endpoints ?? []
+  if (!endpoints.some((endpoint) => endpoint === "/messages" || endpoint === "/v1/messages")) return undefined
+  return FAST_ORACLE_MODEL
+}
+
+// Compatibility aliases for tests and callers on the first fast-profile commit.
+// New fast wiring uses the role names above.
+export const FAST_IMPLEMENTER_FAST_MODEL = FAST_IMPLEMENTER_MODEL
+export const FAST_REVIEWER_FAST_MODEL = FAST_REVIEWER_MODEL
+export const FAST_IMPLEMENTER_FAST_EFFORT = FAST_IMPLEMENTER_EFFORT
+export const FAST_REVIEWER_FAST_EFFORT = FAST_REVIEWER_EFFORT
+export const fastImplementerFastModel = fastImplementerModel
+export const fastReviewerFastModel = fastReviewerModel
+
 /**
  * Gate for the worker tools (`explore`, `review`, `implement`).
  *

@@ -32,6 +32,7 @@ import {
   parseAnthropicRequest,
   parsedToResponsesPayload,
 } from "./anthropic-request"
+import type { ParsedAnthropicRequest } from "./anthropic-request"
 import { parsedToChatPayload } from "./chat-request"
 import {
   chatResponseToAnthropicMessage,
@@ -46,6 +47,8 @@ type AnyRecord = Record<string, unknown>
 
 export { classifyMessagesRoute, isClaudeModel } from "./classifier"
 export type { MessagesRoute } from "./classifier"
+export { parseAnthropicRequest } from "./anthropic-request"
+export type { ParsedAnthropicRequest } from "./anthropic-request"
 
 /** Shared options for both non-Claude shim entry points. */
 export interface NonClaudeShimOptions {
@@ -77,6 +80,113 @@ function isAsyncIterable(x: unknown): x is AsyncIterable<{ data?: string }> {
   )
 }
 
+/** Which Copilot endpoint a shim turn dispatches on. */
+export type ShimEndpoint = "responses" | "chat"
+
+/** Per-turn options for the shared shim core (below). */
+export interface ShimTurnOptions {
+  modelId: string
+  model?: Model
+  /**
+   * Diagnostic label for `anthropicSseStreamFromEvents`'s stall/error log
+   * lines. The initial-request handlers pass the real `c.req.path`; the
+   * advisor continuation (context-free, no `Context`) omits it and gets a
+   * fixed descriptive label instead.
+   */
+  routePath?: string
+  /**
+   * Invoked when the RETURNED stream's consumer cancels (mirrors
+   * `anthropicSseStreamFromEvents`'s own `onCancel`). Omit when the caller
+   * already owns/aborts the signal through some other path (the advisor
+   * translate-loop's injected continuation: its outer `aborter.abort()` is
+   * driven by `buildAdvisorStream`'s OWN `cancel()`, not by this stream's).
+   */
+  onCancel?: () => void
+}
+
+/**
+ * Context-free, caller-abortable core of the non-Claude shim's STREAMING
+ * path for one already-parsed Anthropic request.
+ *
+ * "Context-free": no Hono `Context` dependency, unlike
+ * `handleNonClaudeResponses`/`handleNonClaudeChat` below (which need one to
+ * build their JSON error responses and read `c.req.path` for logging).
+ * "Caller-abortable": takes the caller's OWN `AbortSignal` rather than
+ * constructing an internal `AbortController` — this function never creates
+ * one — and forwards an optional `onCancel` so a caller that DOES own a
+ * controller (the two handlers below, for the initial request) can still
+ * tear it down when the stream it returns is cancelled.
+ *
+ * Shared by:
+ *   - `handleNonClaudeResponses` / `handleNonClaudeChat` (this module), for
+ *     the initial request — each already knows its own endpoint statically
+ *     (they are dispatched by `classifyMessagesRoute`), so this function
+ *     takes `endpoint` as an explicit argument rather than re-deriving it
+ *     from the catalog (which would also mean re-parsing/re-picking work the
+ *     caller already did).
+ *   - `makeShimContinueTurn` (below), which `buildAdvisorStream`
+ *     (`src/services/advisor/advisor.ts`) injects as its `continueTurn` for
+ *     the fast Luna-lead profile, so an advisor continuation on a non-Claude
+ *     lead runs through the SAME translation + SSE-synthesis machinery as
+ *     the initial turn instead of a parallel, divergent implementation.
+ */
+export async function streamParsedRequestViaShim(
+  parsed: ParsedAnthropicRequest,
+  endpoint: ShimEndpoint,
+  opts: ShimTurnOptions,
+  signal: AbortSignal,
+): Promise<Response> {
+  const routePath = opts.routePath ?? "/v1/messages (advisor lead shim)"
+  if (endpoint === "chat") {
+    const payload = parsedToChatPayload(parsed)
+    const result = await createChatCompletions(payload, opts.model?.requestHeaders, signal, true)
+    if (!isAsyncIterable(result)) {
+      throw new Error(
+        "Upstream /chat/completions did not return an SSE stream (stream: true expected)",
+      )
+    }
+    const events = synthAnthropicFromChat(result, { modelId: opts.modelId })
+    const stream = anthropicSseStreamFromEvents(events, {
+      routePath,
+      onCancel: opts.onCancel,
+      inactivityTimeoutMs: UPSTREAM_INACTIVITY_TIMEOUT_MS,
+    })
+    return new Response(stream, { status: 200, headers: STREAM_HEADERS })
+  }
+
+  const payload = parsedToResponsesPayload(parsed)
+  const result = await createResponses(payload, opts.model?.requestHeaders, signal, true)
+  if (!isAsyncIterable(result)) {
+    throw new Error("Upstream /responses did not return an SSE stream (stream: true expected)")
+  }
+  const events = synthAnthropicFromResponses(result, { modelId: opts.modelId })
+  const stream = anthropicSseStreamFromEvents(events, {
+    routePath,
+    onCancel: opts.onCancel,
+    inactivityTimeoutMs: UPSTREAM_INACTIVITY_TIMEOUT_MS,
+  })
+  return new Response(stream, { status: 200, headers: STREAM_HEADERS })
+}
+
+/**
+ * Build an injectable `continueTurn(body, signal)` for `buildAdvisorStream`
+ * (`src/services/advisor/advisor.ts`) that routes a continuation turn
+ * through THIS module's non-Claude shim instead of Claude passthrough — used
+ * for the fast Luna-lead profile's advisor translate-loop. No `onCancel` is
+ * threaded through: the advisor loop's own `aborter` (shared with `signal`
+ * here) already tears down on consumer cancel via `buildAdvisorStream`'s
+ * `cancel()`, so this stream needs no independent teardown hook.
+ */
+export function makeShimContinueTurn(
+  endpoint: ShimEndpoint,
+  opts: { modelId: string; model?: Model },
+): (body: AnyRecord, signal: AbortSignal) => Promise<Response> {
+  return (body, signal) => {
+    const parsed = parseAnthropicRequest(body, opts.modelId, opts.model)
+    return streamParsedRequestViaShim(parsed, endpoint, opts, signal)
+  }
+}
+
 /**
  * Handle a `/v1/messages` request targeting a non-Claude `/responses` model.
  * Returns a streaming or non-streaming Anthropic-format Response. Upstream
@@ -103,7 +213,6 @@ export async function handleNonClaudeResponses(
   }
 
   const parsed = parseAnthropicRequest(body, opts.modelId, opts.model)
-  const payload = parsedToResponsesPayload(parsed)
 
   const debugEnabled = consola.level >= 4
   if (debugEnabled) {
@@ -118,18 +227,17 @@ export async function handleNonClaudeResponses(
     // upstream fetch. Do NOT use c.req.raw.signal (Bun aborts it after body
     // consumption — see CLAUDE.md "Bun request-signal quirk").
     const aborter = new AbortController()
-    // retryTransient: true — pre-first-byte transient retry. The SSE body is
-    // iterated by the synthesizer below, not inside createResponses, so a
-    // re-issue cannot duplicate already-streamed output.
-    const result = await createResponses(
-      payload,
-      opts.model?.requestHeaders,
+    const stream = await streamParsedRequestViaShim(
+      parsed,
+      "responses",
+      {
+        modelId: opts.modelId,
+        model: opts.model,
+        routePath,
+        onCancel: () => aborter.abort(),
+      },
       aborter.signal,
-      true,
     )
-    if (!isAsyncIterable(result)) {
-      throw new Error("Upstream /responses did not return an SSE stream (stream: true expected)")
-    }
 
     logRequest(
       {
@@ -144,13 +252,7 @@ export async function handleNonClaudeResponses(
       opts.startTime,
     )
 
-    const events = synthAnthropicFromResponses(result, { modelId: opts.modelId })
-    const stream = anthropicSseStreamFromEvents(events, {
-      routePath,
-      onCancel: () => aborter.abort(),
-      inactivityTimeoutMs: UPSTREAM_INACTIVITY_TIMEOUT_MS,
-    })
-    return new Response(stream, { status: 200, headers: STREAM_HEADERS })
+    return stream
   }
 
   // Non-streaming. The upstream fetch is NOT consumer-abortable here and
@@ -161,6 +263,7 @@ export async function handleNonClaudeResponses(
   // c.req.text(); see CLAUDE.md "Bun request-signal quirk"), and a bare
   // AbortController would never fire (no cancel hook for a buffered response),
   // so we pass no signal rather than an inert one that implies cancellation.
+  const payload = parsedToResponsesPayload(parsed)
   const result = await createResponses(
     payload,
     opts.model?.requestHeaders,
@@ -221,7 +324,6 @@ export async function handleNonClaudeChat(
   }
 
   const parsed = parseAnthropicRequest(body, opts.modelId, opts.model)
-  const payload = parsedToChatPayload(parsed)
 
   const debugEnabled = consola.level >= 4
   if (debugEnabled) {
@@ -234,21 +336,19 @@ export async function handleNonClaudeChat(
   if (parsed.stream) {
     // Caller-controlled aborter so consumer-cancel tears down the upstream
     // fetch. Do NOT use c.req.raw.signal (Bun aborts it after body consumption
-    // — see CLAUDE.md "Bun request-signal quirk"). retryTransient: true — the
-    // SSE body is iterated by the synthesizer below, not inside
-    // createChatCompletions, so a pre-first-byte re-issue can't duplicate output.
+    // — see CLAUDE.md "Bun request-signal quirk").
     const aborter = new AbortController()
-    const result = await createChatCompletions(
-      payload,
-      opts.model?.requestHeaders,
+    const stream = await streamParsedRequestViaShim(
+      parsed,
+      "chat",
+      {
+        modelId: opts.modelId,
+        model: opts.model,
+        routePath,
+        onCancel: () => aborter.abort(),
+      },
       aborter.signal,
-      true,
     )
-    if (!isAsyncIterable(result)) {
-      throw new Error(
-        "Upstream /chat/completions did not return an SSE stream (stream: true expected)",
-      )
-    }
 
     logRequest(
       {
@@ -263,18 +363,13 @@ export async function handleNonClaudeChat(
       opts.startTime,
     )
 
-    const events = synthAnthropicFromChat(result, { modelId: opts.modelId })
-    const stream = anthropicSseStreamFromEvents(events, {
-      routePath,
-      onCancel: () => aborter.abort(),
-      inactivityTimeoutMs: UPSTREAM_INACTIVITY_TIMEOUT_MS,
-    })
-    return new Response(stream, { status: 200, headers: STREAM_HEADERS })
+    return stream
   }
 
   // Non-streaming: not consumer-abortable (see the Responses twin above and
   // CLAUDE.md "Bun request-signal quirk"); the upstream fetch completes
   // regardless. Pass no signal rather than an inert AbortController.
+  const payload = parsedToChatPayload(parsed)
   const result = await createChatCompletions(
     payload,
     opts.model?.requestHeaders,

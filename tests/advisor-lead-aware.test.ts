@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 
 import { state } from "../src/lib/state"
 import {
-  BUDGET_LEAD_MODEL,
+  FAST_LEAD_MODEL,
   isBudgetClaudeLead,
   resolveLeadSlugArg,
 } from "../src/lib/port"
@@ -10,7 +10,11 @@ import {
   ADVISOR_DEFAULT_EFFORT,
   ADVISOR_DEFAULT_MODEL,
   ADVISOR_ESCALATION_MODEL,
+  ADVISOR_FAST_PROFILE_MODEL,
+  FAST_PROFILE_LEAD_MODEL,
+  advisorTransport,
   advisorUsesResponses,
+  isFastProfileLead,
   resolveAdvisorEffort,
   resolveAdvisorModel,
 } from "../src/services/advisor/advisor"
@@ -36,6 +40,8 @@ let savedEnv: string | undefined
  *  so the assertions below never depend on what upstream ships today. */
 const OPUS_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 const SOL_EFFORTS = ["none", "low", "medium", "high", "xhigh"]
+/** Gemini 3.7 Flash's advertised ladder per the plan: "low..high", no xhigh/max/none. */
+const GEMINI_EFFORTS = ["low", "medium", "high"]
 
 function model(
   id: string,
@@ -90,6 +96,10 @@ function fullCatalog() {
     ]),
     model("claude-haiku-4.5", "anthropic", OPUS_EFFORTS),
     model(ADVISOR_DEFAULT_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
+    model(FAST_PROFILE_LEAD_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
+    model(ADVISOR_FAST_PROFILE_MODEL, "google", GEMINI_EFFORTS, {}, [
+      "/chat/completions",
+    ]),
   )
 }
 
@@ -120,6 +130,7 @@ describe("resolveAdvisorModel — opus lead must not move", () => {
       expect(resolveAdvisorModel(lead)).toEqual({
         model: ADVISOR_DEFAULT_MODEL,
         escalated: false,
+        fastProfile: false,
       })
     })
   }
@@ -128,6 +139,7 @@ describe("resolveAdvisorModel — opus lead must not move", () => {
     expect(resolveAdvisorModel(undefined)).toEqual({
       model: ADVISOR_DEFAULT_MODEL,
       escalated: false,
+      fastProfile: false,
     })
   })
 })
@@ -143,6 +155,7 @@ describe("resolveAdvisorModel — budget lead escalates", () => {
       expect(resolveAdvisorModel(lead)).toEqual({
         model: ADVISOR_ESCALATION_MODEL,
         escalated: true,
+        fastProfile: false,
       })
     })
   }
@@ -155,6 +168,7 @@ describe("resolveAdvisorModel — budget lead escalates", () => {
     expect(resolveAdvisorModel("claude-sonnet-5")).toEqual({
       model: ADVISOR_DEFAULT_MODEL,
       escalated: false,
+      fastProfile: false,
     })
   })
 
@@ -170,6 +184,7 @@ describe("resolveAdvisorModel — operator pin", () => {
     expect(resolveAdvisorModel("claude-sonnet-5")).toEqual({
       model: "gemini-3.1-pro-preview",
       escalated: false,
+      fastProfile: false,
     })
   })
 
@@ -187,6 +202,7 @@ describe("resolveAdvisorModel — operator pin", () => {
     expect(resolveAdvisorModel("claude-opus-5")).toEqual({
       model: ADVISOR_ESCALATION_MODEL,
       escalated: false,
+      fastProfile: false,
     })
   })
 
@@ -195,6 +211,77 @@ describe("resolveAdvisorModel — operator pin", () => {
     expect(resolveAdvisorModel("claude-opus-5").model).toBe(
       ADVISOR_DEFAULT_MODEL,
     )
+  })
+})
+
+describe("resolveAdvisorModel — fast Luna profile", () => {
+  for (const lead of [
+    FAST_PROFILE_LEAD_MODEL,
+    `${FAST_PROFILE_LEAD_MODEL}[1m]`,
+    `openai/${FAST_PROFILE_LEAD_MODEL}`,
+  ]) {
+    test(`${lead} picks the fast-profile Gemini advisor`, () => {
+      expect(resolveAdvisorModel(lead, true)).toEqual({
+        model: ADVISOR_FAST_PROFILE_MODEL,
+        escalated: false,
+        fastProfile: true,
+      })
+    })
+  }
+
+  test("falls back to the cross-lab default when the catalog has no Gemini 3.7 Flash", () => {
+    setCatalog(
+      model(FAST_PROFILE_LEAD_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
+      model(ADVISOR_DEFAULT_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
+    )
+    expect(resolveAdvisorModel(FAST_PROFILE_LEAD_MODEL, true)).toEqual({
+      model: ADVISOR_DEFAULT_MODEL,
+      escalated: false,
+      fastProfile: false,
+    })
+  })
+
+  test("the operator pin still wins over the fast profile", () => {
+    process.env.GH_ROUTER_ADVISOR_MODEL = ADVISOR_ESCALATION_MODEL
+    expect(resolveAdvisorModel(FAST_PROFILE_LEAD_MODEL, true)).toEqual({
+      model: ADVISOR_ESCALATION_MODEL,
+      escalated: false,
+      fastProfile: false,
+    })
+  })
+
+  test("a standard (non-Luna) lead never reads as fast profile", () => {
+    expect(resolveAdvisorModel("claude-opus-5").fastProfile).toBe(false)
+    expect(resolveAdvisorModel("claude-sonnet-5").fastProfile).toBe(false)
+    expect(resolveAdvisorModel("gpt-5.6-sol").fastProfile).toBe(false)
+  })
+})
+
+describe("isFastProfileLead", () => {
+  test("matches the bare id, the [1m] decoration, and a vendor-namespaced form", () => {
+    expect(isFastProfileLead(FAST_PROFILE_LEAD_MODEL)).toBe(true)
+    expect(isFastProfileLead(`${FAST_PROFILE_LEAD_MODEL}[1m]`)).toBe(true)
+    expect(isFastProfileLead(`openai/${FAST_PROFILE_LEAD_MODEL}`)).toBe(true)
+  })
+
+  test("does not match a different lead, or an absent one", () => {
+    expect(isFastProfileLead("gpt-5.6-sol")).toBe(false)
+    expect(isFastProfileLead("claude-opus-5")).toBe(false)
+    expect(isFastProfileLead(undefined)).toBe(false)
+  })
+})
+
+describe("advisorTransport", () => {
+  test("a Claude advisor model always uses messages, even though opus-5 also advertises chat", () => {
+    expect(advisorTransport(ADVISOR_ESCALATION_MODEL)).toBe("messages")
+  })
+
+  test("a /responses-only advisor model uses responses", () => {
+    expect(advisorTransport(ADVISOR_DEFAULT_MODEL)).toBe("responses")
+  })
+
+  test("a /chat/completions-only advisor model uses chat", () => {
+    expect(advisorTransport(ADVISOR_FAST_PROFILE_MODEL)).toBe("chat")
   })
 })
 
@@ -229,10 +316,7 @@ describe("resolveAdvisorEffort — precedence", () => {
   })
 })
 
-describe("resolveAdvisorEffort — the floor", () => {
-  // The advisor follows the picker, but not to the bottom of the ladder: a
-  // `none`/`low` advisor cannot do the job the consultation exists for, and it
-  // fires only a handful of times per session so it is not the budget line.
+describe("resolveAdvisorEffort — standard floor and fast fixed effort", () => {
   for (const [picked, expected] of [
     ["none", "high"],
     ["low", "high"],
@@ -241,22 +325,22 @@ describe("resolveAdvisorEffort — the floor", () => {
     ["xhigh", "xhigh"],
     ["max", "max"],
   ] as const) {
-    test(`picker ${picked} resolves to ${expected}`, () => {
+    test(`standard picker ${picked} resolves to ${expected}`, () => {
       const body = JSON.stringify({ output_config: { effort: picked } })
       expect(resolveAdvisorEffort(body, ADVISOR_ESCALATION_MODEL)).toBe(expected)
     })
   }
 
-  test("a low thinking budget is floored too", () => {
-    const body = JSON.stringify({
-      thinking: { type: "enabled", budget_tokens: 500 },
-    })
+  test("standard low thinking budget is floored high", () => {
+    const body = JSON.stringify({ thinking: { type: "enabled", budget_tokens: 500 } })
     expect(resolveAdvisorEffort(body, ADVISOR_ESCALATION_MODEL)).toBe("high")
   })
 
-  test("applies on the opus lead's cross-lab advisor as well", () => {
-    const body = JSON.stringify({ output_config: { effort: "none" } })
-    expect(resolveAdvisorEffort(body, ADVISOR_DEFAULT_MODEL)).toBe("high")
+  test("fast Advisor is fixed high regardless of picker", () => {
+    for (const picked of ["none", "low", "medium", "high", "xhigh", "max"]) {
+      const body = JSON.stringify({ output_config: { effort: picked } })
+      expect(resolveAdvisorEffort(body, ADVISOR_FAST_PROFILE_MODEL, true)).toBe("high")
+    }
   })
 })
 
@@ -269,9 +353,9 @@ describe("resolveAdvisorEffort — clamping against the ADVISOR's ladder", () =>
     expect(resolveAdvisorEffort(body, ADVISOR_ESCALATION_MODEL)).toBe("max")
   })
 
-  test("the clamp runs AFTER the floor, so a low ceiling still wins", () => {
-    // Ordering assertion. A model topping out below the floor must receive
-    // something it accepts; a floor applied last would forward `high` and 400.
+  test("a ceiling clamp lands on the nearest supported tier, direction-agnostic", () => {
+    // The standard high floor applies before clamping. A tiny model that tops
+    // out at medium therefore receives medium, the nearest supported ceiling.
     setCatalog(model("tiny-model", "openai", ["low", "medium"]))
     const body = JSON.stringify({ output_config: { effort: "none" } })
     expect(resolveAdvisorEffort(body, "tiny-model")).toBe("medium")
@@ -306,7 +390,11 @@ describe("review regressions", () => {
     // every assertion here stayed green. Assert BOTH halves.
     process.env.GH_ROUTER_ADVISOR_MODEL = "openai/gpt-5.6-sol"
     const choice = resolveAdvisorModel("claude-sonnet-5")
-    expect(choice).toEqual({ model: ADVISOR_DEFAULT_MODEL, escalated: false })
+    expect(choice).toEqual({
+      model: ADVISOR_DEFAULT_MODEL,
+      escalated: false,
+      fastProfile: false,
+    })
     expect(advisorUsesResponses(choice.model)).toBe(true)
   })
 
@@ -344,19 +432,19 @@ describe("review regressions", () => {
   test("`-m` normalization: blank and padded arguments", () => {
     // codex_reviewer: `-m ""` used to return "" verbatim as a model id, and
     // `-m " fast "` missed the alias.
-    expect(resolveLeadSlugArg("  fast  ")).toBe(BUDGET_LEAD_MODEL)
-    expect(resolveLeadSlugArg("FAST")).toBe(BUDGET_LEAD_MODEL)
+    expect(resolveLeadSlugArg("  fast  ")).toBe(FAST_LEAD_MODEL)
+    expect(resolveLeadSlugArg("FAST")).toBe(FAST_LEAD_MODEL)
     expect(resolveLeadSlugArg("")).not.toBe("")
     expect(resolveLeadSlugArg("   ")).not.toBe("   ")
     expect(resolveLeadSlugArg("  claude-opus-5  ")).toBe("claude-opus-5")
   })
 
   test("isBudgetClaudeLead's contract: it takes a resolved slug, not a raw -m arg", () => {
-    // gemini_reviewer flagged that `isBudgetClaudeLead("fast")` is false. That is
-    // correct and intended — "fast" is not a Claude slug. The contract is that
-    // callers resolve first, which is what every call site does. Pinned here so
-    // the contract is a test rather than only a comment.
+    // "fast" itself is not a Claude slug, so it's false either way. Resolving
+    // it now yields `gpt-5.6-luna` (the fast Luna profile, not a Sonnet
+    // budget lead), which is ALSO not a Claude model — isBudgetClaudeLead
+    // stays Claude-family-only and is unrelated to the fast profile.
     expect(isBudgetClaudeLead("fast")).toBe(false)
-    expect(isBudgetClaudeLead(resolveLeadSlugArg("fast"))).toBe(true)
+    expect(isBudgetClaudeLead(resolveLeadSlugArg("fast"))).toBe(false)
   })
 })

@@ -424,6 +424,27 @@ honestly rather than papered over:
 
 ## Phase 3: native model selection (gateway cache-seed)
 
+> **Fast profile.** The four picker rows this section
+> describes today are planned to be REPLACED with exactly `gpt-5.6-sol` /
+> `gpt-5.6-luna` / `gemini-3.7-flash` / `grok-4.6` (dropping `gpt-5.5`,
+> `gpt-5.3-codex`, `gemini-3.5-flash`, and the dynamic Gemini-review append), as
+> part of a Luna-led `-m fast` launch profile. This change applies to BOTH
+> standard and fast Claude launches (it does not alter either surface's active
+> default lead). See the "Fast launch profile" → "Replaced gateway picker rows"
+> section of [`default-models.md`](default-models.md) for the full design, and
+> [`claude-env-injection.md`](claude-env-injection.md) for the discovery-gate
+> mechanics this section's cache-seed relies on (those are unchanged by the row
+> replacement).
+>
+> The same fast profile also makes the ADVISOR-degrades-on-non-Claude rule below
+> gain one exception: on a fast-profile launch, Advisor routes to Gemini 3.7 Flash
+> through a newly extracted streaming shim entry point instead of degrading. See
+> "Gemini 3.7 Flash Advisor on the Luna translation path" in
+> [`default-models.md`](default-models.md) for the endpoint-selection, tool-use-id,
+> and cancellation-contract details — this is a separate, later-landing workstream
+> from the row replacement above, kept in its own commit for an isolated bisect
+> range.
+
 Phase 3 (`src/lib/server-setup.ts`) makes the five target models selectable in
 Claude Code's `/model` picker WITHOUT a network round-trip and without touching
 the Claude tier defaults.

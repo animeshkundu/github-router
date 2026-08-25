@@ -7,12 +7,15 @@ import { createBodyTooLargeError, limitRequestBody } from "srvx/body-limit"
 
 import { PATHS, ensurePaths } from "./paths"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
+import { agentToolsEnabled } from "./mcp-capabilities"
 import {
-  agentToolsEnabled,
-  REVIEW_FAST_DEFAULT_MODEL,
-  resolveGeminiReviewModel,
-} from "./mcp-capabilities"
-import { withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
+  LUNA_DRIVER_ALIAS_ID,
+  LUNA_HAIKU_ALIAS_ID,
+  LUNA_REAL_MODEL_ID,
+  LUNA_SONNET_ALIAS_ID,
+  type LaunchProfileId,
+} from "./launch-profile"
+import { catalogAdvertises1M, oneMContextDisabled, withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
 import {
   BUDGET_SMALL_FAST_CATALOG_ID,
   BUDGET_SMALL_FAST_SLUG,
@@ -673,12 +676,18 @@ export function parseSharedArgs(args: Record<string, unknown>): {
 
 /**
  * Non-Claude models we surface as first-class, selectable rows in Claude
- * Code's model picker (Phase 3 of native-non-claude-models). The main
- * agent loop runs on them through the `/v1/messages` translation shim
- * (`src/lib/anthropic-translate/*`, branched in `routes/messages/handler.ts`)
- * that forwards non-Claude targets to Copilot `/responses` (gpt) or
- * `/chat/completions` (gemini). The Gemini review row prefers
- * `gemini-3.1-pro-preview` and degrades to `gemini-3.7-flash`.
+ * Code's model picker (Phase 3 of native-non-claude-models, later
+ * modernized to exactly these four live models by the fast-launch-profile
+ * change). The main agent loop runs on them through the `/v1/messages`
+ * translation shim (`src/lib/anthropic-translate/*`, branched in
+ * `routes/messages/handler.ts`) that forwards non-Claude targets to
+ * Copilot `/responses` (gpt) or `/chat/completions` (gemini/grok).
+ *
+ * This list is EXACT and STATIC — no dynamic Gemini-review append (the
+ * earlier `gemini-3.1-pro-preview`-preferred / `gemini-3.7-flash`-fallback
+ * row is retired: `gemini-3.7-flash` is now a first-class row on its own,
+ * always at this fixed id). A model missing from the catalog is simply
+ * omitted, never substituted — see `nativeSelectableModelsInCatalog`.
  *
  * Display labels only: the gateway-model cache schema Claude Code reads is
  * `{id, display_name?}` per model — there is NO per-model context-window
@@ -691,28 +700,39 @@ const NATIVE_NON_CLAUDE_MODELS: ReadonlyArray<{
   displayName: string
 }> = [
   { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" },
-  { id: "gpt-5.5", displayName: "GPT-5.5" },
-  { id: "gpt-5.3-codex", displayName: "GPT-5.3 Codex" },
-  { id: "gemini-3.5-flash", displayName: "Gemini 3.5 Flash" },
+  { id: "gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
+  { id: "gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
+  { id: "grok-4.6", displayName: "Grok 4.6" },
 ]
 
 /**
+ * `grok-4.6` never carries `[1m]` — its live-catalog window is 500K total
+ * (372K max prompt), genuinely below the 1M accounting threshold, and this
+ * project deliberately does NOT inject a global
+ * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override for it (see
+ * `docs/default-models.md` "fast launch profile" once landed): Claude Code
+ * permits arbitrary bare non-Claude ids and runtime `/model` switches, so a
+ * Grok-specific process-global window override would incorrectly follow the
+ * session onto every other model after a switch. Grok is simply left bare,
+ * which is also its true accounting rather than an over- or under-estimate
+ * disguised as one.
+ */
+const NEVER_1M_MODEL_IDS = new Set(["grok-4.6"])
+
+/**
  * The subset of `NATIVE_NON_CLAUDE_MODELS` actually present in the live
- * Copilot catalog. License tiers differ (gpt-5.5 needs
- * pro_plus/business/enterprise/max; gemini-3.5-flash is absent on
- * edu/individual_trial), so a model missing from the catalog is silently
- * dropped — the caller then neither enables discovery nor writes a cache
- * for it, and lesser tiers see the unchanged picker. Pure (reads
- * `state.models`), so it is unit-testable without side effects.
+ * Copilot catalog. License tiers differ, so a model missing from the
+ * catalog is silently dropped — the caller then neither enables discovery
+ * nor writes a cache for it, and lesser tiers see the unchanged picker.
+ * Pure (reads `state.models`), so it is unit-testable without side effects.
  *
  * The projected id carries a `[1m]` suffix when the catalog advertises a
- * >=1M window for it, because Claude Code budgets a gateway-discovered row
- * at its 200K default otherwise — `gpt-5.6-sol` (1,050,000) would compact at
- * roughly a fifth of its real window. `withOneMSuffix` is catalog-gated, so
- * `gpt-5.3-codex` (400K) stays bare and keeps the conservative accounting;
- * over-budgeting it would trade premature compaction for a hard overflow.
- * The lookup below still keys off the BARE id — the decoration is applied
- * only to the value handed to Claude Code.
+ * >=1M window for it AND the id isn't in `NEVER_1M_MODEL_IDS`, because
+ * Claude Code budgets a gateway-discovered row at its 200K default
+ * otherwise. `withOneMSuffix` is catalog-gated on top of that, so a model
+ * whose advertised window shrinks below 1M stays bare regardless. The
+ * lookup below still keys off the BARE id — the decoration is applied only
+ * to the value handed to Claude Code.
  */
 export function nativeSelectableModelsInCatalog(): Array<{
   id: string
@@ -722,17 +742,8 @@ export function nativeSelectableModelsInCatalog(): Array<{
   if (!catalog || catalog.length === 0) return []
   const present = new Set(catalog.map((m) => m.id))
   const models = NATIVE_NON_CLAUDE_MODELS.filter((m) => present.has(m.id))
-  const geminiReviewModel = resolveGeminiReviewModel()
-  if (geminiReviewModel) {
-    models.push({
-      id: geminiReviewModel,
-      displayName: geminiReviewModel === REVIEW_FAST_DEFAULT_MODEL
-        ? "Gemini 3.7 Flash"
-        : "Gemini 3.1 Pro (preview)",
-    })
-  }
   return models.map((m) => ({
-    id: withOneMSuffix(m.id),
+    id: NEVER_1M_MODEL_IDS.has(m.id) ? m.id : withOneMSuffix(m.id),
     display_name: m.displayName,
   }))
 }
@@ -868,9 +879,23 @@ export function clearGatewayModelCache(
  * MUST NOT return 401 on the Anthropic-shape boundary even when
  * upstream Copilot returns 401. See `src/routes/messages/handler.ts`.
  */
+/**
+ * Decorate a Luna-alias id with `[1m]` based on the REAL `gpt-5.6-luna`
+ * catalog entry's advertised window, never on the alias string itself
+ * (which is never a catalog entry — `catalogAdvertises1M`/`resolveModel`
+ * would find nothing and silently leave it bare). Shared by every
+ * fast-profile tier-row seed below so they can't disagree about whether
+ * Luna currently backs 1M.
+ */
+function oneMSuffixForAlias(aliasId: string): string {
+  if (oneMContextDisabled()) return aliasId
+  return catalogAdvertises1M(LUNA_REAL_MODEL_ID) ? `${aliasId}[1m]` : aliasId
+}
+
 export function getClaudeCodeEnvVars(
   serverUrl: string,
   model?: string,
+  launchProfileId: LaunchProfileId = "standard",
 ): Record<string, string> {
   const vars: Record<string, string> = {
     // Route to the proxy
@@ -970,14 +995,27 @@ export function getClaudeCodeEnvVars(
   // who have custom Copilot mappings — symmetric with the
   // ANTHROPIC_SMALL_FAST_MODEL pass-through documented in launch.ts's
   // STRIPPED_PARENT_ENV_KEYS comment.
+  const isFastProfile = launchProfileId === "fast"
   const smallFastModel =
-    isBudgetClaudeLead(model)
-    && (state.models?.data?.some((m) => m.id === BUDGET_SMALL_FAST_CATALOG_ID)
-      ?? false)
-      ? BUDGET_SMALL_FAST_SLUG
-      : "claude-sonnet-5"
+    isFastProfile
+      ? LUNA_HAIKU_ALIAS_ID
+      : isBudgetClaudeLead(model)
+        && (state.models?.data?.some((m) => m.id === BUDGET_SMALL_FAST_CATALOG_ID)
+          ?? false)
+        ? BUDGET_SMALL_FAST_SLUG
+        : "claude-sonnet-5"
   if (process.env.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
-    vars.ANTHROPIC_SMALL_FAST_MODEL = smallFastModel
+    // The fast profile's small/fast tier is the Haiku Luna alias, decorated
+    // with `[1m]` off the REAL `gpt-5.6-luna` catalog entry's advertised
+    // window — `withOneMSuffixForLead`/`withOneMSuffix` can't be used
+    // directly here because they resolve/exact-match the id itself, and
+    // the alias id is never a catalog entry. `canonicalizeAliasModel`
+    // strips the alias for the outbound Copilot call; this decoration is
+    // purely Claude Code's LOCAL context-accounting signal.
+    vars.ANTHROPIC_SMALL_FAST_MODEL =
+      isFastProfile
+        ? oneMSuffixForAlias(smallFastModel)
+        : smallFastModel
   }
 
   // Tier-default knobs read by Claude Code's /model picker (cc-backup
@@ -1034,16 +1072,68 @@ export function getClaudeCodeEnvVars(
     vars[modelKey] = withOneMSuffixForLead(bareSlug)
     if (process.env[nameKey] === undefined) vars[nameKey] = bareSlug
   }
-  seedTierRow(
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
-    "claude-sonnet-5",
-  )
-  seedTierRow(
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
-    smallFastModel,
-  )
+  // Fast profile: the Sonnet/Haiku tier rows are the router-owned Luna
+  // aliases, decorated off the REAL Luna catalog entry's window (see the
+  // `ANTHROPIC_SMALL_FAST_MODEL` comment above for why `withOneMSuffixForLead`
+  // doesn't apply directly to an alias id). The bare NAME seed stays a
+  // human-readable label, never the raw alias string, so the picker never
+  // renders `gh-router-luna-sonnet-xhigh` to the user.
+  const seedFastAliasTierRow = (
+    modelKey: string,
+    nameKey: string,
+    aliasId: string,
+    displayName: string,
+  ): void => {
+    if (process.env[modelKey] !== undefined) return
+    vars[modelKey] = oneMSuffixForAlias(aliasId)
+    if (process.env[nameKey] === undefined) vars[nameKey] = displayName
+  }
+  if (isFastProfile) {
+    seedFastAliasTierRow(
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+      LUNA_SONNET_ALIAS_ID,
+      "GPT-5.6 Luna (xhigh)",
+    )
+    seedFastAliasTierRow(
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+      LUNA_HAIKU_ALIAS_ID,
+      "GPT-5.6 Luna (high)",
+    )
+    // Claude Code cannot infer capabilities from the router-owned alias ids.
+    // Declare only what the live Luna catalog entry actually advertises; the
+    // fast startup prerequisite already fails closed unless high/xhigh/max and
+    // tool use are available on the real model.
+    const fastAliasCapabilities =
+      "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
+    if (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES === undefined) {
+      vars.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = fastAliasCapabilities
+    }
+    if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES === undefined) {
+      vars.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES = fastAliasCapabilities
+    }
+    if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION === undefined) {
+      vars.ANTHROPIC_CUSTOM_MODEL_OPTION = oneMSuffixForAlias(LUNA_DRIVER_ALIAS_ID)
+      if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
+        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-5.6 Luna (max)"
+      }
+      if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES === undefined) {
+        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES = fastAliasCapabilities
+      }
+    }
+  } else {
+    seedTierRow(
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+      "claude-sonnet-5",
+    )
+    seedTierRow(
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+      smallFastModel,
+    )
+  }
   seedTierRow(
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",

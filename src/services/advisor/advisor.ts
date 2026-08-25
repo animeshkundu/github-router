@@ -48,6 +48,7 @@
 import consola from "consola"
 import { events } from "fetch-event-stream"
 
+import { isClaudeModel } from "~/lib/anthropic-translate/classifier"
 import { HTTPError } from "~/lib/error"
 import { isBudgetClaudeLead } from "~/lib/port"
 import {
@@ -71,6 +72,11 @@ import {
 import { getTokenizerFromModel, loadEncoder } from "~/lib/tokenizer"
 import { resolveModel } from "~/lib/utils"
 import { withTransientRetry } from "~/lib/upstream-retry"
+import {
+  createChatCompletions,
+  type ChatCompletionResponse,
+  type ChatCompletionsPayload,
+} from "~/services/copilot/create-chat-completions"
 import { createMessages } from "~/services/copilot/create-messages"
 import {
   createResponses,
@@ -99,13 +105,18 @@ export const ADVISOR_MAX_TURNS = 16
 
 /** Default advisor model + reasoning effort. Per gemini-critic + user
  *  direction: hardcode to a cross-lab model (gpt-5.6-sol — Copilot's
- *  /responses-only flagship) at xhigh effort. The cross-lab choice
- *  gives a true "second set of eyes" instead of the main model
- *  reviewing itself; xhigh effort buys the deep-dive reasoning that
- *  matches Anthropic's own ADVISOR (which uses a stronger reviewer
- *  model — Opus 4.6/Sonnet 4.6 typically). */
+ *  /responses-only flagship). The cross-lab choice gives a true "second set
+ *  of eyes" instead of the main model reviewing itself.
+ *
+ *  Effort default is `high`, not the historical `xhigh`: `resolveAdvisorEffort`
+ *  no longer floors the picked effort (see that function), so `high` is both
+ *  the default AND the lowest the advisor will ever think at when the picker
+ *  expresses no preference — a deliberate, user-approved cost/depth trade
+ *  applied uniformly across every advisor target (Sol, the Opus escalation,
+ *  and the fast-profile Gemini advisor below all read this same constant). */
 export const ADVISOR_DEFAULT_MODEL = "gpt-5.6-sol"
 export const ADVISOR_DEFAULT_EFFORT = "xhigh"
+const ADVISOR_MIN_EFFORT: Effort = "high"
 
 /** The Anthropic frontier model the advisor escalates to when the LEAD is a
  *  lighter Claude tier (sonnet, haiku).
@@ -124,16 +135,44 @@ export const ADVISOR_DEFAULT_EFFORT = "xhigh"
  *  keeps a cross-lab advisor one env var away for anyone who wants it back. */
 export const ADVISOR_ESCALATION_MODEL = "claude-opus-5"
 
-/** Floor for the advisor's reasoning effort.
+/** The lead model name for the fast Luna profile (plan: "Fast launch profile
+ *  and gateway model defaults", section 1). When the request's lead resolves
+ *  to this model, `resolveAdvisorModel` picks `ADVISOR_FAST_PROFILE_MODEL`
+ *  instead of the cross-lab default.
  *
- *  The advisor follows the Claude Code effort picker (see `resolveAdvisorEffort`)
- *  so dialing the picker down makes it cheaper, but it does NOT follow it all the
- *  way to the bottom of `EFFORT_ORDER`. The advisor fires a handful of times per
- *  session (`ADVISOR_MAX_TURNS`, typically 1-3), so it is not the budget line —
- *  the lead's own turns are — while an advisor reasoning at `none`/`low` cannot
- *  do the job the consultation exists for. The picker therefore governs the
- *  `high..max` range. */
-const ADVISOR_MIN_EFFORT: Effort = "high"
+ *  Model-shape check only. Callers must also pass the authenticated launch
+ *  profile to `resolveAdvisorModel`; a direct Luna pick in a standard session
+ *  must not gain the fast-profile Advisor path. */
+export const FAST_PROFILE_LEAD_MODEL = "gpt-5.6-luna"
+
+/** The Advisor model for the fast Luna profile. Gemini 3.7 Flash is a
+ *  different lab from BOTH the Luna lead (OpenAI) and the fast profile's
+ *  `gemini-critic` persona shares this same model — see
+ *  `docs/default-models.md` "Fast launch profile" for the roster this
+ *  belongs to. Kept distinct from `ADVISOR_DEFAULT_MODEL` so the two never
+ *  have to agree; `resolveAdvisorModel` picks between them purely on lead
+ *  identity, never model availability heuristics beyond a live-catalog
+ *  presence check (mirrors `shouldEscalateAdvisor`'s pattern). */
+export const ADVISOR_FAST_PROFILE_MODEL = "gemini-3.7-flash"
+
+/**
+ * True when `leadModel` names the fast-profile Luna lead (bare, or with the
+ * `[1m]` context decoration `withOneMSuffixForLead` applies to it).
+ */
+export function isFastProfileLead(leadModel: string | undefined): boolean {
+  if (!leadModel) return false
+  const bare = leadModel.replace(/\[1m\]$/, "").trim()
+  const lastSegment = bare.slice(bare.lastIndexOf("/") + 1)
+  return bare === FAST_PROFILE_LEAD_MODEL || lastSegment === FAST_PROFILE_LEAD_MODEL
+}
+
+/** True when the live catalog actually carries `ADVISOR_FAST_PROFILE_MODEL`.
+ *  Mirrors `shouldEscalateAdvisor`'s catalog probe: never advertise a model
+ *  the account cannot reach, and fall back to the cross-lab default instead
+ *  of a hard failure when it's absent. */
+function fastProfileAdvisorAvailable(): boolean {
+  return state.models?.data?.some((m) => m.id === ADVISOR_FAST_PROFILE_MODEL) ?? false
+}
 
 /** Output cap for the Anthropic-branch advisor call when the catalog carries no
  *  limits for the resolved model. The value the branch used unconditionally
@@ -181,6 +220,40 @@ export function advisorUsesResponses(resolvedAdvisorModel: string): boolean {
   return /^(gpt-|o\d|.*codex)/i.test(bare)
 }
 
+/** Which Copilot transport `runAdvisor` dispatches an advisor call on.
+ *  Generalizes the historical two-way `useResponses` branch (added when
+ *  `gpt-5.6-sol` was the only advisor candidate) to three, now that
+ *  `resolveAdvisorModel` can also pick a `/chat/completions`-only model
+ *  (`gemini-3.7-flash`, the fast Luna profile's advisor). */
+export type AdvisorTransport = "responses" | "chat" | "messages"
+
+/**
+ * Decide `advisorTransport` for a resolved advisor model id.
+ *
+ * Order matters: Claude identity is checked FIRST and wins even though
+ * `claude-opus-5` also advertises `/chat/completions` in the live catalog —
+ * the historical branch never sent Claude to chat, and this preserves that
+ * byte-for-byte (reuses the SAME classifier `classifyMessagesRoute` uses for
+ * the main `/v1/messages` shim fork, so the two surfaces cannot disagree
+ * about what counts as a Claude model). Responses is checked next
+ * (`advisorUsesResponses`, unchanged — catalog-first, name-regex fallback,
+ * still exported and directly tested on its own). Anything else defaults to
+ * chat, mirroring `pickEndpoint`'s "omits supported_endpoints => chat-eligible"
+ * convention — the same convention `classifyMessagesRoute` relies on for a
+ * lead model, applied here to the advisor's OWN model instead.
+ */
+export function advisorTransport(resolvedAdvisorModel: string): AdvisorTransport {
+  const bare = resolvedAdvisorModel.slice(
+    resolvedAdvisorModel.lastIndexOf("/") + 1,
+  )
+  const entry = state.models?.data?.find(
+    (m) => m.id === resolvedAdvisorModel || m.id === bare,
+  )
+  if (isClaudeModel(resolvedAdvisorModel, entry)) return "messages"
+  if (advisorUsesResponses(resolvedAdvisorModel)) return "responses"
+  return "chat"
+}
+
 /** True when the model advertises a usable reasoning-effort ladder. */
 function advertisedEffortLadder(
   resolvedAdvisorModel: string,
@@ -218,14 +291,25 @@ function shouldEscalateAdvisor(leadModel: string): boolean {
 
 export interface AdvisorModelChoice {
   model: string
-  /** True ONLY for the automatic lead-based escalation.
+  /** True ONLY for the automatic lead-based escalation to
+   *  `ADVISOR_ESCALATION_MODEL` (a lighter Claude lead reaching for the
+   *  Anthropic frontier).
    *
    *  An operator pin via `GH_ROUTER_ADVISOR_MODEL` is not an escalation even
    *  when it names `ADVISOR_ESCALATION_MODEL` itself. `runAdvisor` keys the
-   *  "your caller is running a lighter model" clause on this flag rather than on
-   *  the resolved model id, so pinning opus on an opus lead cannot inject a
-   *  sentence that is false. */
+   *  "your caller is running a lighter model" clause on this flag OR on
+   *  `fastProfile` rather than on the resolved model id, so pinning opus on an
+   *  opus lead cannot inject a sentence that is false. */
   escalated: boolean
+  /** True ONLY for the automatic fast-Luna-profile selection of
+   *  `ADVISOR_FAST_PROFILE_MODEL`. Distinct from `escalated` — different
+   *  trigger (a non-Claude lead, not a lighter Claude tier), different target
+   *  model, different transport — but the SAME "the requester is lighter/
+   *  faster than you" framing applies to the advisor's system prompt, which is
+   *  why callers OR the two flags together rather than replacing one with the
+   *  other. See `FAST_PROFILE_LEAD_MODEL`'s doc comment for the temporary
+   *  nature of the underlying signal. */
+  fastProfile: boolean
 }
 
 /**
@@ -239,10 +323,16 @@ export interface AdvisorModelChoice {
  * Precedence:
  *   1. `GH_ROUTER_ADVISOR_MODEL` (trimmed) — the operator pin, checked first so
  *      it works on every lead.
- *   2. A lighter Claude lead with the escalation model in the catalog.
- *   3. `ADVISOR_DEFAULT_MODEL`.
+ *   2. An authenticated fast launch whose current lead is Luna, with
+ *      `ADVISOR_FAST_PROFILE_MODEL` present in the live catalog.
+ *   3. A lighter Claude lead with the escalation model in the catalog.
+ *   4. `ADVISOR_DEFAULT_MODEL`.
  *
- * Step 3 returns the LITERAL constant rather than walking the OpenAI frontier
+ * Steps 2 and 3 are mutually exclusive lead families (non-Claude Luna vs. a
+ * lighter Claude tier) so their relative order does not matter functionally;
+ * fast-profile is checked first only because it is the more specific match.
+ *
+ * Step 4 returns the LITERAL constant rather than walking the OpenAI frontier
  * chain. An Opus lead must resolve to exactly what it resolves to today, and a
  * frontier walk could yield `gpt-5.5` on a catalog missing `gpt-5.6-sol` —
  * a silent change to the one path that is required not to move.
@@ -274,13 +364,19 @@ function normalizeAdvisorPin(pinned: string): string {
 
 export function resolveAdvisorModel(
   leadModel: string | undefined,
+  fastProfile = false,
 ): AdvisorModelChoice {
   const pinned = process.env.GH_ROUTER_ADVISOR_MODEL?.trim()
-  if (pinned) return { model: normalizeAdvisorPin(pinned), escalated: false }
-  if (leadModel && shouldEscalateAdvisor(leadModel)) {
-    return { model: ADVISOR_ESCALATION_MODEL, escalated: true }
+  if (pinned) {
+    return { model: normalizeAdvisorPin(pinned), escalated: false, fastProfile: false }
   }
-  return { model: ADVISOR_DEFAULT_MODEL, escalated: false }
+  if (fastProfile && leadModel && isFastProfileLead(leadModel) && fastProfileAdvisorAvailable()) {
+    return { model: ADVISOR_FAST_PROFILE_MODEL, escalated: false, fastProfile: true }
+  }
+  if (leadModel && shouldEscalateAdvisor(leadModel)) {
+    return { model: ADVISOR_ESCALATION_MODEL, escalated: true, fastProfile: false }
+  }
+  return { model: ADVISOR_DEFAULT_MODEL, escalated: false, fastProfile: false }
 }
 
 /**
@@ -302,16 +398,20 @@ export function resolveAdvisorModel(
  *   3. `ADVISOR_DEFAULT_EFFORT` — a request expressing no preference behaves
  *      exactly as it did before the picker was honored at all.
  *
- * Then floor, THEN clamp. The order is load-bearing: a model whose ceiling sits
- * below `ADVISOR_MIN_EFFORT` must still receive a value it accepts, so the clamp
- * is allowed to pull back under the floor. Flipping the two would forward an
- * effort upstream rejects.
+ * There is deliberately NO floor anymore (removed per the user-approved
+ * "default high, no floor" change): the advisor follows the picker all the way
+ * down as well as up, so an explicit `none`/`low` pick is honored rather than
+ * clamped up to a minimum. The only remaining adjustment is the CEILING clamp
+ * against the resolved advisor's own live `reasoning_effort` allowlist — a
+ * model whose ladder tops out below the requested tier still needs to receive
+ * something it accepts.
  */
 export function resolveAdvisorEffort(
   rawRequestBody: string | undefined,
   advisorModel: string,
+  fastProfile = false,
 ): string {
-  let requested: Effort = ADVISOR_DEFAULT_EFFORT
+  let requested: Effort = fastProfile ? "high" : ADVISOR_DEFAULT_EFFORT
   if (rawRequestBody) {
     try {
       const body = JSON.parse(rawRequestBody) as AnyRecord
@@ -342,19 +442,20 @@ export function resolveAdvisorEffort(
     }
   }
 
-  const floored =
-    EFFORT_ORDER.indexOf(requested) < EFFORT_ORDER.indexOf(ADVISOR_MIN_EFFORT)
-      ? ADVISOR_MIN_EFFORT
-      : requested
+  if (fastProfile) requested = "high"
+  else if (EFFORT_ORDER.indexOf(requested) < EFFORT_ORDER.indexOf(ADVISOR_MIN_EFFORT)) {
+    requested = ADVISOR_MIN_EFFORT
+  }
 
   const supported = state.models?.data?.find(
     (m) => m.id === resolveModel(advisorModel),
   )?.capabilities?.supports?.reasoning_effort
   // Absent OR empty allowlist means "accepts anything" — the same reading
   // `clampOutputConfigEffortInPlace` takes. Only a non-empty list clamps.
-  if (!Array.isArray(supported) || supported.length === 0) return floored
-  return clampEffort(floored, supported)
+  if (!Array.isArray(supported) || supported.length === 0) return requested
+  return clampEffort(requested, supported)
 }
+
 
 /** ADVISOR_TOOL_INSTRUCTIONS verbatim from cc-backup
  *  src/utils/advisor.ts — describes when the model should invoke
@@ -747,15 +848,12 @@ async function runAdvisor(
     measure,
   )
 
-  // Route by model family. gpt-5.x / o-series / codex go through
-  // /v1/responses with reasoning.effort. claude-* stays on /v1/messages.
-  // Quick heuristic: if the model id starts with "gpt-" or contains
-  // "codex" or starts with "o", use /responses. Otherwise /v1/messages.
-  // (Could be tightened with a state.models lookup, but the fast-path
-  // text match is correct for every model in Copilot's catalog today.)
-  const useResponses = advisorUsesResponses(resolvedAdvisorModel)
+  // Route by model family/catalog endpoint — see `advisorTransport` for the
+  // three-way (`responses` / `chat` / `messages`) decision and its ordering
+  // rationale.
+  const transport = advisorTransport(resolvedAdvisorModel)
 
-  if (useResponses) {
+  if (transport === "responses") {
     const payload = applyResponsesCachePolicy({
       model: resolvedAdvisorModel,
       instructions: advisorSystem,
@@ -798,6 +896,43 @@ async function runAdvisor(
     if (!text) {
       throw new Error(
         `Advisor model ${resolvedAdvisorModel} returned empty assistant output`,
+      )
+    }
+    return text
+  }
+
+  // chat branch: /chat/completions with the conversation as a single user
+  // message. Reachable now that `resolveAdvisorModel` can pick a
+  // chat-only advisor (`gemini-3.7-flash`, the fast Luna profile). No
+  // request-shaping helper is extracted from `dispatchModelCall` here:
+  // the advisor's payload (one system + one user message, no tools, no
+  // caching hints) is simple enough that reuse would cost more in
+  // indirection than it saves, and the two genuinely shared concerns —
+  // effort clamping and error/empty-output handling — are already
+  // factored into `advertisedEffortLadder` and this function's own
+  // per-branch checks.
+  if (transport === "chat") {
+    const ladder = advertisedEffortLadder(resolvedAdvisorModel)
+    const chatPayload: ChatCompletionsPayload = {
+      model: resolvedAdvisorModel,
+      messages: [
+        { role: "system", content: advisorSystem },
+        { role: "user", content: conversationText },
+      ],
+      stream: false,
+      // Only sent when the advisor's live ladder actually advertises one —
+      // same "don't forward an unverifiable knob" rule the Claude branch
+      // below applies to `output_config.effort`.
+      ...(ladder ? { reasoning_effort: advisorEffort } : {}),
+    }
+    const response = (await withTransientRetry(
+      () => createChatCompletions(chatPayload, undefined, signal),
+      { signal, label: resolvedAdvisorModel },
+    )) as ChatCompletionResponse
+    const text = response.choices?.[0]?.message?.content
+    if (typeof text !== "string" || text.length === 0) {
+      throw new Error(
+        `Advisor model ${resolvedAdvisorModel} returned empty response`,
       )
     }
     return text
@@ -893,28 +1028,56 @@ interface ToolUseTracker {
 /**
  * Derive a spec-compliant `srvtoolu_*` id for a client-facing
  * `server_tool_use` (and matching `advisor_tool_result.tool_use_id`)
- * from the upstream model's `toolu_*` id.
+ * from the upstream model's tool-call id.
  *
- * Anthropic spec: `^srvtoolu_[a-zA-Z0-9_]+$`. If the upstream id
- * suffix contains chars outside that charset (e.g., a hyphenated id
- * from a non-Anthropic provider, or a corrupt id), fall back to a
- * synthesized stable id keyed by the SSE block index. Defensive
- * against edge cases that would otherwise emit a malformed block —
- * spec violation in either direction is a 400.
+ * TOTAL — never throws. Two paths:
+ *
+ *   1. A real Anthropic `toolu_*` id whose suffix is already in the
+ *      `^[a-zA-Z0-9_]+$` charset: `srvtoolu_<suffix>`, byte-for-byte
+ *      identical to the historical (Claude-lead) behavior.
+ *   2. Anything else — a Responses `call_*` id (the fast Luna profile's
+ *      lead, once its `tool_use{__anthropic_advisor}` block is synthesized
+ *      by the anthropic-translate shim from a Copilot `/responses` tool
+ *      call), a hyphenated or otherwise non-conforming id, an empty string,
+ *      unicode, or a corrupt id — sanitize to the Anthropic charset and
+ *      prefix with `fallbackIndex` (the caller's per-block synthetic stream
+ *      index, unique within one `buildAdvisorStream` run) so two different
+ *      raw ids that happen to sanitize to the same string can never
+ *      collide. `fallbackIndex` is REQUIRED for this path's uniqueness
+ *      guarantee — callers must pass a value that is unique per call within
+ *      one advisor stream (every call site does: `myIndex` from the
+ *      turn processor's monotonic `nextSyntheticIndex`).
+ *
+ * This function ONLY has to produce a valid, deterministic, collision-free
+ * LABEL — the original raw id is preserved separately for Copilot replay
+ * (`CapturedBlock.advisorReplay.id`), never reconstructed from the derived
+ * client id. That is what makes totality safe: there is no bijective-decode
+ * requirement on this function itself, only on the (id, clientId) pairing a
+ * caller keeps alongside it.
+ *
+ * Historically this threw "advisor tool_use id is not round-trippable" for
+ * any non-`toolu_` shape. That was correct for a Claude-only advisor lead —
+ * Copilot's native `/v1/messages` never emits anything else — but became a
+ * live defect once the advisor loop could run on a non-Claude (Luna) lead
+ * shimmed through `/responses`: `responses-egress.ts` forwards a Responses
+ * `call_*` id VERBATIM as the synthesized `tool_use.id` (see
+ * `makeToolUseId` — it only synthesizes a `toolu_*` id when the upstream id
+ * is EMPTY), so the advisor's `tool_use{__anthropic_advisor}` block on that
+ * lead legitimately carries a `call_*` id and the throw fired on every
+ * single advisor call.
  */
 export function toClientServerToolUseId(
   id: string,
-  _fallbackIndex: number,
+  fallbackIndex: number,
 ): string {
-  if (!id.startsWith("toolu_")) {
-    throw new Error("advisor tool_use id is not round-trippable")
+  if (id.startsWith("toolu_")) {
+    const suffix = id.slice("toolu_".length)
+    if (/^[a-zA-Z0-9_]+$/.test(suffix)) return `srvtoolu_${suffix}`
   }
-  const suffix = id.slice("toolu_".length)
-  if (!/^[a-zA-Z0-9_]+$/.test(suffix)) {
-    throw new Error("advisor tool_use id is not round-trippable")
-  }
-  return `srvtoolu_${suffix}`
+  const sanitized = id.replace(/[^a-zA-Z0-9_]/g, "_")
+  return `srvtoolu_gen${fallbackIndex}${sanitized.length > 0 ? `_${sanitized}` : ""}`
 }
+
 
 /**
  * A captured assistant content block from the upstream Copilot stream,
@@ -963,6 +1126,68 @@ function sseEvent(type: string, data: AnyRecord): string {
 }
 
 /**
+ * The default `continueTurn` for `buildAdvisorStream`: native Claude
+ * passthrough (`createMessages`) plus signed-thinking-history repair-and-retry.
+ * Extracted verbatim from the loop body so the behavior is byte-identical to
+ * before `continueTurn` became injectable, and so a non-Claude
+ * `continueTurn` (the fast Luna profile's shim-backed one) can omit this
+ * Claude-only repair path entirely rather than inherit dead code that would
+ * never fire for it.
+ */
+async function defaultContinueTurn(
+  body: AnyRecord,
+  signal: AbortSignal,
+  requestHeaders: Record<string, string>,
+): Promise<Response> {
+  const continuationBody = JSON.stringify(body)
+  // retryTransient: true (passed to createMessages below): pre-first-byte
+  // retry on a 429/5xx/network blip. The continuation Response body is not
+  // read until processOneTurn streams it, so re-issuing here cannot
+  // duplicate already-streamed output. Matches the first-call retry in
+  // routes/messages/handler.ts so the advisor turn no longer dies to a lone
+  // "fetch failed".
+  //
+  // The first call in routes/messages/handler.ts is also wrapped in the
+  // signed-thinking repair; this continuation was not, so a rejected
+  // history here died as an advisor stream error with no recovery. One
+  // repair attempt is enough: unlike the first call, a continuation
+  // replays a history the first call already got past, so converging
+  // across several corrupt turns is not a case that arises here.
+  let continuationSend = continuationBody
+  const knownRepair = repairKnownThinkingHistory(continuationSend)
+  if (knownRepair) continuationSend = knownRepair.body
+  try {
+    return await createMessages(continuationSend, requestHeaders, signal, true)
+  } catch (continuationError) {
+    if (!(continuationError instanceof HTTPError)) throw continuationError
+    const errorBody = await continuationError.response
+      .clone()
+      .text()
+      .catch(() => "")
+    const outcome = repairRejectedThinkingHistory(continuationSend, errorBody)
+    if (!outcome.ok) {
+      consola.warn(
+        `Advisor continuation thinking-history repair declined: ${formatThinkingRepairDecline(outcome.decline)}`,
+      )
+      throw continuationError
+    }
+    consola.warn(
+      `Advisor continuation: retrying without rejected thinking blocks: message=${outcome.repair.messageIndex} removed_blocks=${outcome.repair.removedBlocks}`,
+    )
+    const response = await createMessages(
+      outcome.repair.body,
+      requestHeaders,
+      signal,
+      true,
+    )
+    // Memoize only after upstream accepted it, so the main path can
+    // pre-emptively apply the same repair without paying another 400.
+    rememberThinkingHistoryRepair(outcome.repair.fingerprint)
+    return response
+  }
+}
+
+/**
  * The streaming translate-loop. Returns a ReadableStream<Uint8Array>
  * suitable to wrap with Hono's c.body() / new Response().
  *
@@ -988,10 +1213,33 @@ export function buildAdvisorStream(opts: {
    *  clause in `runAdvisor`; never the model or transport choice. */
   advisorEscalated?: boolean
   externalAborter?: AbortController
+  /**
+   * Injectable continuation dispatcher for every turn AFTER the first.
+   * Defaults to `defaultContinueTurn` — the historical native `createMessages`
+   * call plus its signed-thinking repair-and-retry, byte-identical to this
+   * module's behavior before this parameter existed.
+   *
+   * A non-Claude lead (the fast Luna profile) passes a shim-backed
+   * continuation instead: `makeShimContinueTurn` in
+   * `src/lib/anthropic-translate/index.ts` builds one that routes through the
+   * SAME translation + Anthropic-SSE-synthesis machinery as the initial
+   * request, so `processOneTurn` below — message-start dedup, synthetic index
+   * re-assignment, abort propagation, all of it — drives both lead families
+   * without a parallel, divergent continuation implementation. Claude's
+   * signed-thinking repair is intentionally NOT part of the injected
+   * contract: it is a Claude-only wire concept (the shim drops assistant
+   * `thinking` blocks entirely), so a shim-backed `continueTurn` has nothing
+   * to repair and simply omits that step.
+   */
+  continueTurn?: (body: AnyRecord, signal: AbortSignal) => Promise<Response>
 }): ReadableStream<Uint8Array> {
   const advisorModel = opts.advisorModel ?? ADVISOR_DEFAULT_MODEL
   const advisorEffort = opts.advisorEffort ?? ADVISOR_DEFAULT_EFFORT
   const advisorEscalated = opts.advisorEscalated ?? false
+  const continueTurn =
+    opts.continueTurn
+    ?? ((body: AnyRecord, signal: AbortSignal) =>
+      defaultContinueTurn(body, signal, opts.requestHeaders))
 
   // Use the caller-supplied AbortController when provided, otherwise
   // create a local one. When the handler creates a shared controller
@@ -1507,65 +1755,17 @@ export function buildAdvisorStream(opts: {
           // Make the next Copilot call to continue the model's response
           // post-advisor. Reuse baseBody fields (max_tokens, system,
           // tools, etc.) but with the extended conversation and
-          // stream:true.
+          // stream:true. Dispatched through the injectable `continueTurn`
+          // (default: Claude passthrough + signed-thinking repair via
+          // `defaultContinueTurn`; the fast Luna profile injects a
+          // shim-backed one — see `buildAdvisorStream`'s option doc).
           if (aborter.signal.aborted) return
-          const continuationBody = JSON.stringify({
-            ...opts.baseBody,
-            messages: conversation,
-            stream: true,
-          })
-          // retryTransient: true: pre-first-byte retry on a 429/5xx/network
-          // blip. The continuation Response body is not read until processOneTurn
-          // streams it, so re-issuing here cannot duplicate already-streamed
-          // output. Matches the first-call retry in routes/messages/handler.ts so
-          // the advisor turn no longer dies to a lone "fetch failed".
-          //
-          // The first call in routes/messages/handler.ts is also wrapped in the
-          // signed-thinking repair; this continuation was not, so a rejected
-          // history here died as an advisor stream error with no recovery. One
-          // repair attempt is enough: unlike the first call, a continuation
-          // replays a history the first call already got past, so converging
-          // across several corrupt turns is not a case that arises here.
-          let continuationSend = continuationBody
-          const knownRepair = repairKnownThinkingHistory(continuationSend)
-          if (knownRepair) continuationSend = knownRepair.body
-          try {
-            response = await createMessages(
-              continuationSend,
-              opts.requestHeaders,
-              aborter.signal,
-              true,
-            )
-          } catch (continuationError) {
-            if (!(continuationError instanceof HTTPError)) throw continuationError
-            const errorBody = await continuationError.response
-              .clone()
-              .text()
-              .catch(() => "")
-            const outcome = repairRejectedThinkingHistory(
-              continuationSend,
-              errorBody,
-            )
-            if (!outcome.ok) {
-              consola.warn(
-                `Advisor continuation thinking-history repair declined: ${formatThinkingRepairDecline(outcome.decline)}`,
-              )
-              throw continuationError
-            }
-            consola.warn(
-              `Advisor continuation: retrying without rejected thinking blocks: message=${outcome.repair.messageIndex} removed_blocks=${outcome.repair.removedBlocks}`,
-            )
-            response = await createMessages(
-              outcome.repair.body,
-              opts.requestHeaders,
-              aborter.signal,
-              true,
-            )
-            // Memoize only after upstream accepted it, so the main path can
-            // pre-emptively apply the same repair without paying another 400.
-            rememberThinkingHistoryRepair(outcome.repair.fingerprint)
-          }
+          response = await continueTurn(
+            { ...opts.baseBody, messages: conversation, stream: true },
+            aborter.signal,
+          )
         }
+
 
         // Loop exhausted. Synthesize final message_stop + an error text
         // block so the client doesn't hang.

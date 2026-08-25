@@ -86,7 +86,7 @@ describe("ADVISOR defaults (Phase I)", () => {
   test("default model is gpt-5.6-sol (cross-lab)", () => {
     expect(ADVISOR_DEFAULT_MODEL).toBe("gpt-5.6-sol")
   })
-  test("default effort is xhigh (deepest reasoning bucket)", () => {
+  test("standard default effort remains xhigh", () => {
     expect(ADVISOR_DEFAULT_EFFORT).toBe("xhigh")
   })
 })
@@ -398,7 +398,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
           reasoning?: { effort?: string }
           stream?: boolean
         }
-        // Verify the advisor call uses gpt-5.6-sol + xhigh + non-streaming
+        // Standard Advisor keeps the historical Sol/xhigh request.
         expect(parsedBody.model).toBe("gpt-5.6-sol")
         expect(parsedBody.reasoning?.effort).toBe("xhigh")
         expect(parsedBody.stream).toBe(false)
@@ -514,7 +514,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     expect(text).toContain('"stop_reason":"end_turn"')
     expect(text).toContain('"output_tokens":15')
 
-    // Verify the advisor model was called once via /responses with xhigh
+    // Verify the advisor model was called once via /responses with high
     expect(advisorResponsesCallCount).toBe(1)
     // Verify Copilot was called twice via /v1/messages (main + continuation)
     expect(copilotMessagesCallCount).toBe(2)
@@ -1424,7 +1424,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
   })
 })
 
-describe("toClientServerToolUseId charset hardening (round-5 codex critic)", () => {
+describe("toClientServerToolUseId charset hardening (round-5 codex critic; now total)", () => {
   test("normal toolu_ id → srvtoolu_ id with prefix swap", () => {
     expect(toClientServerToolUseId("toolu_abc123XYZ", 0)).toBe(
       "srvtoolu_abc123XYZ",
@@ -1437,34 +1437,57 @@ describe("toClientServerToolUseId charset hardening (round-5 codex critic)", () 
     )
   })
 
-  test("non-toolu_ prefix is rejected because it cannot round-trip", () => {
-    expect(() => toClientServerToolUseId("call_oai_xyz", 9)).toThrow(
-      "not round-trippable",
-    )
+  // The following used to THROW "not round-trippable" for any non-`toolu_`
+  // shape. That was correct for a Claude-only advisor lead, but became a live
+  // defect once the advisor loop could run on a non-Claude lead shimmed
+  // through /responses: `responses-egress.ts` forwards a Responses `call_*`
+  // id VERBATIM as the synthesized `tool_use.id`, so the advisor's own
+  // tool_use block legitimately carries one — and the throw fired on EVERY
+  // advisor call on that lead. The function is now TOTAL: every case below
+  // returns a valid `srvtoolu_*` id instead of throwing.
+
+  test("a Responses call_* id is sanitized and indexed rather than rejected", () => {
+    const out = toClientServerToolUseId("call_oai_xyz", 9)
+    expect(out).toMatch(/^srvtoolu_[a-zA-Z0-9_]+$/)
+    expect(out).toBe("srvtoolu_gen9_call_oai_xyz")
   })
 
-  test("malformed id with hyphens is rejected", () => {
-    expect(() => toClientServerToolUseId("toolu_abc-123", 7)).toThrow(
-      "not round-trippable",
-    )
+  test("a hyphenated id is sanitized (hyphens → underscores)", () => {
+    const out = toClientServerToolUseId("toolu_abc-123", 7)
+    expect(out).toMatch(/^srvtoolu_[a-zA-Z0-9_]+$/)
+    expect(out).toBe("srvtoolu_gen7_toolu_abc_123")
   })
 
-  test("non-ascii id is rejected", () => {
-    expect(() => toClientServerToolUseId("toolu_abcé", 11)).toThrow(
-      "not round-trippable",
-    )
+  test("a non-ascii id is sanitized (non-charset chars → underscores)", () => {
+    const out = toClientServerToolUseId("toolu_abcé", 11)
+    expect(out).toMatch(/^srvtoolu_[a-zA-Z0-9_]+$/)
+    expect(out).toBe("srvtoolu_gen11_toolu_abc_")
   })
 
-  test("empty suffix after toolu_ stripping is rejected", () => {
-    expect(() => toClientServerToolUseId("toolu_", 13)).toThrow(
-      "not round-trippable",
-    )
+  test("a bare `toolu_` (empty suffix) is sanitized, not rejected", () => {
+    const out = toClientServerToolUseId("toolu_", 13)
+    expect(out).toMatch(/^srvtoolu_[a-zA-Z0-9_]+$/)
+    expect(out).toBe("srvtoolu_gen13_toolu_")
+  })
+
+  test("an empty id still produces a valid, non-colliding id", () => {
+    expect(toClientServerToolUseId("", 3)).toBe("srvtoolu_gen3")
+  })
+
+  test("collision-safety: two ids that sanitize identically never collide across indices", () => {
+    const a = toClientServerToolUseId("call_a/b", 0)
+    const b = toClientServerToolUseId("call_a_b", 1)
+    expect(a).not.toBe(b)
   })
 
   test("accepted output always matches Anthropic spec /^srvtoolu_[a-zA-Z0-9_]+$/", () => {
     const inputs = [
       "toolu_normal_id_42",
       "toolu_ABC_123",
+      "call_oai_xyz",
+      "",
+      "toolu_",
+      "weird/id-with.chars",
     ]
     for (let i = 0; i < inputs.length; i++) {
       const out = toClientServerToolUseId(inputs[i]!, i)

@@ -92,9 +92,17 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  */
 const DEFAULT_OPUS_FAMILY = "5"
 
-/** The lead `-m fast` selects. Anthropic-published dashed slug that is also the
- *  Copilot catalog id verbatim, so `resolveModel` matches it exactly. */
-export const BUDGET_LEAD_MODEL = "claude-sonnet-5"
+/**
+ * The lead `-m fast` selects. `gpt-5.6-luna` — a distinct Luna-driven
+ * profile (see `./launch-profile`), NOT a Claude Sonnet budget lead. This
+ * REPLACES the earlier `-m fast` → `claude-sonnet-5` mapping: `fast` now
+ * names a deliberately lean Luna surface (three native agents, one peer
+ * persona, `peers`/`search` MCP groups only), not "budget Sonnet with the
+ * full standard surface". `resolveLaunchProfile` in `./launch-profile`
+ * keys off the same raw `-m` argument this constant is selected by, so the
+ * two can never disagree about which launches count as "fast".
+ */
+export const FAST_LEAD_MODEL = "gpt-5.6-luna"
 
 /** Small/fast tier for a budget lead, in the two forms this codebase needs.
  *
@@ -111,28 +119,29 @@ export const BUDGET_SMALL_FAST_CATALOG_ID = "claude-haiku-4.5"
 /**
  * Resolve the `-m` argument to the lead slug to launch with.
  *
- *   - `fast`      → `BUDGET_LEAD_MODEL` (budget mode)
+ *   - `fast`      → `FAST_LEAD_MODEL` (the fast Luna profile — see
+ *                   `./launch-profile`, NOT the retired Sonnet budget lead)
  *   - `N.M`       → the best variant of that Opus family, via `pickClaudeDefault`
  *   - a full slug → unchanged, including Copilot slugs a power user pins
  *   - absent      → the ordinary default
  *
  * Every branch is `[1m]`-decorated against the live catalog, by
  * `pickClaudeDefault` on the two Opus-family branches and by
- * `withOneMSuffixForLead` on the other two. Pinning a MODEL is not a request to
- * give up four fifths of its context window, which is what leaving the other
- * two bare amounted to: `claude-sonnet-5` advertises a 1M window, so `-m fast`
- * and `-m claude-sonnet-5` were both budgeted locally at Claude Code's 200K
- * default and auto-compacted at roughly a fifth of the real window. The
- * decoration is catalog-gated per model, so a genuinely 200K model
- * (`claude-haiku-4.5`) still comes back bare.
+ * `withOneMSuffixForLead` on the other two. `gpt-5.6-luna` advertises a 1M
+ * window, so `-m fast` gets local 1M accounting exactly like every other
+ * branch here; the decoration is catalog-gated per model, so a genuinely
+ * 200K model (`claude-haiku-4.5`) still comes back bare.
  *
- * `fast` resolves to an ordinary slug rather than setting a mode flag, because
- * budget mode is keyed off the RESOLVED lead everywhere it matters (the advisor
- * escalation, the delegation prose, the small/fast tier). `-m fast` and
- * `-m claude-sonnet-5` must therefore produce identical sessions, which a flag
- * only one of the two set would break. The shared decoration is part of that
- * identity: decorating one branch and not the other would reintroduce the
- * divergence through the context budget instead of through a flag.
+ * `fast` resolves to an ordinary slug rather than setting a mode flag —
+ * `resolveLaunchProfile` (`./launch-profile`) is keyed off the SAME raw
+ * argument this function receives, so the two can never disagree about
+ * which launches are "fast". `isBudgetClaudeLead` (below) stays
+ * Claude-family-only and is UNRELATED to the fast profile: `gpt-5.6-luna`
+ * is not a Claude model, so `isBudgetClaudeLead(resolveLeadSlugArg("fast"))`
+ * is false — the old Sonnet "budget lead" surfaces (advisor escalation,
+ * delegation prose, small/fast Haiku tier) simply don't engage for `-m
+ * fast` any more; the fast profile has its own separate roster/tier
+ * mechanism instead.
  *
  * Callers must keep treating any explicit `-m` as explicit: the
  * `DEFAULT_CLAUDE_MODEL_FALLBACKS` walk applies to the implicit-default path
@@ -145,7 +154,7 @@ export function resolveLeadSlugArg(modelArg: string | undefined): string {
   const arg = modelArg?.trim()
   if (!arg) return pickClaudeDefault()
   if (arg.toLowerCase() === "fast") {
-    return withOneMSuffixForLead(BUDGET_LEAD_MODEL)
+    return withOneMSuffixForLead(FAST_LEAD_MODEL)
   }
   const opusFamilyShorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
   if (opusFamilyShorthand) return pickClaudeDefault(opusFamilyShorthand)

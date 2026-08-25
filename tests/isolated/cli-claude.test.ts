@@ -34,6 +34,7 @@ const exitMock = mock((code: number) => {
   throw new ExitError(code)
 })
 const processOnMock = mock()
+const stderrWriteMock = mock()
 let isTTY = true
 // Mutable env that the mocked `process` exposes. Tests can write to this
 // to drive env-conditional code paths (e.g. GH_ROUTER_PEER_AWARENESS opt-out).
@@ -50,7 +51,7 @@ mock.module("node:process", () => ({
     // it, silently dropping --append-system-prompt / the skill + hook wiring.
     cwd: () => "/repo",
     stdout: { get isTTY() { return isTTY } },
-    stderr: { write: mock() },
+    stderr: { write: stderrWriteMock },
   },
 }))
 
@@ -134,7 +135,7 @@ mock.module("~/lib/port", () => ({
   // These are real reimplementations rather than stubs: the tests below assert
   // on which lead `-m` resolves to, and a stub that always returned false would
   // make the budget-mode assertions vacuously pass.
-  BUDGET_LEAD_MODEL: "claude-sonnet-5",
+  FAST_LEAD_MODEL: "gpt-5.6-luna",
   BUDGET_SMALL_FAST_SLUG: "claude-haiku-4-5",
   BUDGET_SMALL_FAST_CATALOG_ID: "claude-haiku-4.5",
   isBudgetClaudeLead: (slug?: string) =>
@@ -147,7 +148,7 @@ mock.module("~/lib/port", () => ({
       pickClaudeDefaultCalls.push(undefined)
       return pickClaudeDefaultImpl(undefined)
     }
-    if (arg.toLowerCase() === "fast") return leadOneMDecorateImpl("claude-sonnet-5")
+    if (arg.toLowerCase() === "fast") return leadOneMDecorateImpl("gpt-5.6-luna")
     const shorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
     if (shorthand) {
       pickClaudeDefaultCalls.push(shorthand)
@@ -239,6 +240,18 @@ mock.module("~/lib/mcp-capabilities", () => ({
   scoutModel: mock(() => "gpt-5.6-luna"),
   implementerFastModel: mock(() => "gpt-5.6-terra"),
   generalPurposeFastModel: mock(() => "gpt-5.6-luna"),
+  // Fast-launch-profile resolvers/constants (only exercised when `-m fast`
+  // is selected; stubbed here so the static import graph resolves for
+  // every other test in this file too).
+  fastScoutModel: mock(() => "gpt-5.6-luna"),
+  fastImplementerModel: mock(() => "gpt-5.6-luna"),
+  fastReviewerModel: mock(() => "grok-4.6"),
+  fastPlannerModel: mock(() => "gpt-5.6-sol"),
+  fastOracleModel: mock(() => "claude-opus-5"),
+  FAST_SCOUT_EFFORT: "high",
+  FAST_IMPLEMENTER_EFFORT: "max",
+  FAST_REVIEWER_EFFORT: "medium",
+  FAST_PLANNER_EFFORT: "high",
   // stand-in.ts (pulled in transitively via handler.ts) imports this;
   // stub it so the module mock doesn't break that import.
   resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),
@@ -374,6 +387,7 @@ beforeEach(() => {
     throw new ExitError(code)
   })
   processOnMock.mockReset()
+  stderrWriteMock.mockReset()
   isTTY = true
 
   setupAndServeMock.mockReset()
@@ -567,6 +581,7 @@ describe("claude command", () => {
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
       "claude-opus-5",
+      "standard",
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:12345")
@@ -583,47 +598,107 @@ describe("claude command", () => {
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
       "claude-sonnet-4-20250514",
+      "standard",
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-20250514")
   })
 
-  test("`-m fast` selects the budget lead end to end", async () => {
+  test("`-m fast` selects the Luna lead end to end", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.6-luna",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gpt-5.6-sol",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "claude-opus-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/v1/messages"],
+        },
+        {
+          id: "grok-4.6",
+          capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gemini-3.7-flash",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/v1/chat/completions"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
     const run = getRunFn()
 
     await run({ args: { model: "fast" } })
 
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      "claude-sonnet-5",
+      "gh-router-luna-driver-max",
+      "fast",
     )
     const [, , options] = spawnMock.mock.calls[0]
-    expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-5")
+    expect(options.env.ANTHROPIC_MODEL).toBe("gh-router-luna-driver-max")
   })
 
   test("`-m fast` carries the [1m] bracket all the way into ANTHROPIC_MODEL", async () => {
-    // The end-to-end shape of the gap a live session surfaced: the catalog
-    // advertises a 1M window for sonnet-5, but ANTHROPIC_MODEL arrived bare, so
-    // Claude Code budgeted the session at its 200K default. Asserting on the
-    // spawned child's env rather than only on the resolver is the point — the
-    // resolver was one of three places the bracket had to survive.
+    // Assert on the spawned child's env rather than only on the resolver: Luna's
+    // live 1M capability must survive the launcher boundary.
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.6-luna",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gpt-5.6-sol",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "claude-opus-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/v1/messages"],
+        },
+        {
+          id: "grok-4.6",
+          capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gemini-3.7-flash",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/v1/chat/completions"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
     leadOneMDecorateImpl = (slug) =>
-      slug === "claude-sonnet-5" ? "claude-sonnet-5[1m]" : slug
+      slug === "gpt-5.6-luna" ? "gpt-5.6-luna[1m]" : slug
     const run = getRunFn()
 
     await run({ args: { model: "fast" } })
 
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      "claude-sonnet-5[1m]",
+      "gh-router-luna-driver-max[1m]",
+      "fast",
     )
     const [, , options] = spawnMock.mock.calls[0]
-    expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-5[1m]")
+    expect(options.env.ANTHROPIC_MODEL).toBe("gh-router-luna-driver-max[1m]")
   })
 
   test("an explicitly pinned full slug carries [1m] too", async () => {
-    // `-m fast` and `-m claude-sonnet-5` must produce identical sessions, and
-    // the context budget is part of that identity.
+    // An explicitly pinned Sonnet slug remains on the standard profile and still
+    // receives catalog-gated 1M accounting independently of `-m fast`.
     leadOneMDecorateImpl = (slug) =>
       slug === "claude-sonnet-5" ? "claude-sonnet-5[1m]" : slug
     const run = getRunFn()
@@ -684,6 +759,7 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-5[1m]",
+        "standard",
       )
     } finally {
       state.models = undefined
@@ -708,6 +784,7 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-5",
+        "standard",
       )
     } finally {
       state.models = undefined
@@ -730,6 +807,7 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-4-8",
+        "standard",
       )
     } finally {
       state.models = undefined
@@ -756,6 +834,7 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-4-8[1m]",
+        "standard",
       )
       // The re-derivation must ask for the FALLBACK's family, not re-ask for
       // the default one — that is the whole mechanism under test.
@@ -784,6 +863,7 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-5",
+        "standard",
       )
     } finally {
       state.models = undefined
@@ -806,6 +886,7 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-4.7",
+        "standard",
       )
     } finally {
       state.models = undefined
@@ -835,6 +916,7 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-4-7[1m]",
+        "standard",
       )
     } finally {
       state.models = undefined
@@ -862,6 +944,7 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-4-8[1m]",
+        "standard",
       )
       const [, , options] = spawnMock.mock.calls[0]
       expect(options.env.ANTHROPIC_MODEL).toBe("claude-opus-4-8[1m]")
@@ -887,6 +970,7 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-4-6[1m]",
+        "standard",
       )
     } finally {
       state.models = undefined
@@ -910,6 +994,7 @@ describe("claude command", () => {
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
         "claude-opus-4.7-1m-internal",
+        "standard",
       )
     } finally {
       state.models = undefined
@@ -926,6 +1011,7 @@ describe("claude command", () => {
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
       "garbage-slug",
+      "standard",
     )
   })
 
@@ -997,6 +1083,104 @@ describe("claude command", () => {
       expect(args).not.toContain("--mcp-config")
       expect(args).not.toContain("--agents")
       expect(args).not.toContain("--strict-mcp-config")
+    })
+
+    test("`-m fast` hard-restricts groups/roster/personas/coordinator/effort, even when workerToolsEnabled() would otherwise pass", async () => {
+      // Prerequisite catalog: gpt-5.6-luna / grok-4.6 / gemini-3.7-flash, all
+      // satisfying validateFastProfilePrerequisites (see the earlier "-m fast
+      // selects the Luna lead" tests for the exact shape needed).
+      state.models = {
+        object: "list",
+        data: [
+          {
+            id: "gpt-5.6-luna",
+            capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "gpt-5.6-sol",
+            capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "claude-opus-5",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/v1/messages"],
+          },
+          {
+            id: "grok-4.6",
+            capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "gemini-3.7-flash",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/v1/chat/completions"],
+          },
+        ] as unknown as NonNullable<typeof state.models>["data"],
+      }
+      // Prove the hard deny: even though the catalog gate for workers passes,
+      // `workers`/`orchestrate` must still be excluded for the fast profile
+      // (plan: "no environment flag or catalog gate may re-enable workers or
+      // orchestrate in a fast session").
+      workerToolsEnabledMock.mockReturnValue(true)
+      resolveGroupKeysFromMirrorMock.mockResolvedValue({
+        keys: { peers: "peers", search: "search" },
+        skipped: [],
+      })
+
+      const run = getRunFn()
+      await run({ args: { model: "fast" } })
+
+      const [enabledGroups] = resolveGroupKeysFromMirrorMock.mock.calls[0]
+      expect(enabledGroups).toEqual(["peers", "search"])
+
+      expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
+      const [, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
+      // Hard roster/persona/coordinator restriction per FAST_PROFILE.
+      expect(opts.nativeRoster).toEqual(new Set(["scout", "implementer", "reviewer", "planner"]))
+      expect(opts.personaAllowlist).toBeUndefined()
+      expect(opts.includeCoordinator).toBe(false)
+      expect(opts.fastProfile).toBe(true)
+      expect(opts.workerToolsAvailable).toBe(false)
+      expect(opts.browseAvailable).toBe(false)
+      expect(opts.scoutModel).toBe("gpt-5.6-luna")
+      expect(opts.nativeSubagentModel).toBe("gpt-5.6-luna")
+      expect(opts.reviewerModel).toBe("grok-4.6")
+      expect(opts.plannerModel).toBe("gpt-5.6-sol")
+      expect(opts.brainstormModel).toBeUndefined()
+      expect(opts.scribeModel).toBeUndefined()
+      expect(opts.generalPurposeFastModel).toBeUndefined()
+      expect(opts.scoutEffort).toBe("high")
+      expect(opts.implementerEffort).toBe("max")
+      expect(opts.reviewerEffort).toBe("medium")
+      expect(opts.plannerEffort).toBe("high")
+    })
+
+    test("a fatal fast-profile prerequisite failure is visible on stderr", async () => {
+      state.models = { object: "list", data: [] }
+      const run = getRunFn()
+
+      await expect(run({ args: { model: "fast" } })).rejects.toThrow(ExitError)
+
+      expect(stderrWriteMock).toHaveBeenCalledTimes(1)
+      const message = String(stderrWriteMock.mock.calls[0][0])
+      expect(message).toContain("github-router claude -m fast requires")
+      expect(message).toContain("gemini-3.7-flash")
+      expect(message).toContain("github-router claude")
+    })
+
+    test("standard (non-fast) launch passes no roster/persona/coordinator/effort restriction", async () => {
+      const run = getRunFn()
+      await run({ args: {} })
+
+      const [, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
+      expect(opts.nativeRoster).toBeUndefined()
+      expect(opts.personaAllowlist).toBeUndefined()
+      expect(opts.includeCoordinator).toBe(true)
+      expect(opts.scoutEffort).toBeUndefined()
+      expect(opts.implementerFastEffort).toBeUndefined()
+      expect(opts.reviewerFastEffort).toBeUndefined()
     })
 
     test("user-side `peers` collision → our peers server registers as gh-router-peers (capability preserved, no drop)", async () => {

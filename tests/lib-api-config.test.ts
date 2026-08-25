@@ -22,6 +22,7 @@ const baseState: State = {
   humanlikeForce: "auto",
   sessionId: "test-session-id",
   machineId: "test-machine-id",
+  launchRegistry: new Map(),
 }
 
 test("copilotBaseUrl uses copilotApiUrl from token response when set", () => {

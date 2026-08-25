@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto"
 import path from "node:path"
 
 import consola from "consola"
@@ -8,6 +7,7 @@ import {
   applyClaudeCachePolicy,
   applyResponsesCachePolicy,
 } from "~/lib/prompt-cache"
+import { findLaunchByNonce, type LaunchRegistryEntry } from "~/lib/launch-registry"
 import { MCP_WORKSPACE_HEADER } from "~/lib/mcp-workspace-header"
 import { loadPeerImages } from "~/lib/peer-attachments"
 import { state } from "~/lib/state"
@@ -48,6 +48,7 @@ import {
   browserPowerToolsEnabled,
   browserToolsEnabled,
   fleetToolsEnabled,
+  fastOracleModel,
   geminiAvailable,
   resolveGeminiReviewModel,
   standInToolEnabled,
@@ -206,41 +207,31 @@ function isLoopbackHost(host: string | undefined | null): boolean {
   return hostname === "127.0.0.1" || hostname === "localhost"
 }
 
-/**
- * Constant-time bearer compare. Random per-launch nonces aren't really
- * timing-attackable in practice, but this costs nothing.
- */
-function nonceMatches(provided: string, expected: string): boolean {
-  if (provided.length !== expected.length) return false
-  const a = Buffer.from(provided)
-  const b = Buffer.from(expected)
-  try {
-    return timingSafeEqual(a, b)
-  } catch {
-    return false
-  }
-}
-
-function checkAuth(c: Context): { ok: true } | { ok: false; status: 401 | 403; reason: string } {
+function checkAuth(
+  c: Context,
+): { ok: true; launch: LaunchRegistryEntry } | { ok: false; status: 401 | 403; reason: string } {
   // Host validation defeats DNS-rebinding attacks. An attacker who tricks
   // the browser into resolving evil.com → 127.0.0.1 still sends
   // Host: evil.com, which we reject here.
   if (!isLoopbackHost(c.req.header("host"))) {
     return { ok: false, status: 403, reason: "non-loopback Host header rejected" }
   }
-  // Per-launch nonce. State is set by the `claude` subcommand after
-  // setupAndServe. When unset (proxy started standalone, e.g. via
-  // `github-router start`), `/mcp` rejects all requests.
-  const expected = state.peerMcpNonce
-  if (!expected) {
+  // Keyed per-launch registry (see `~/lib/launch-registry` /
+  // `~/lib/state`'s `LaunchRegistryEntry`), populated by the `claude`
+  // subcommand (or `serve`) after `setupAndServe` and before spawning the
+  // client. When empty (proxy started standalone, e.g. via `github-router
+  // start`), `/mcp` rejects all requests — same "not enabled" posture the
+  // old scalar `peerMcpNonce` had when unset.
+  if (state.launchRegistry.size === 0) {
     return { ok: false, status: 401, reason: "/mcp not enabled in this proxy session" }
   }
   const auth = c.req.header("authorization") ?? ""
   const m = /^Bearer\s+(.+)$/i.exec(auth)
-  if (!m || !nonceMatches(m[1], expected)) {
+  const launch = m ? findLaunchByNonce(m[1]) : undefined
+  if (!launch) {
     return { ok: false, status: 401, reason: "missing or invalid Authorization bearer" }
   }
-  return { ok: true }
+  return { ok: true, launch }
 }
 
 // `standInToolEnabled`, `workerToolsEnabled`, and `browserToolsEnabled`
@@ -305,12 +296,63 @@ function activePersonas(): Array<PersonaSpec> {
   })
 }
 
-function toolEntries(scope: McpScope): Array<ToolEntry> {
+function oracleToolEntry(): ToolEntry {
+  return {
+    name: "oracle",
+    description:
+      "Fast-profile last-resort guidance from exact Opus 5 (1M context) at high effort. Stateless and tool-less: pass complete context plus one precise query only after the primary Luna path, Advisor, and the relevant reviewer/planner path remain stuck. It can advise or request missing information; it cannot inspect the repo, execute, merge, or authorize actions.",
+    inputSchema: {
+      type: "object",
+      required: ["query", "context"],
+      additionalProperties: false,
+      properties: {
+        query: { type: "string", description: "One precise unresolved question." },
+        context: { type: "string", description: "Complete evidence and constraints needed to answer cold-start." },
+      },
+    },
+  }
+}
+
+function toolEntries(scope: McpScope, launch: LaunchRegistryEntry): Array<ToolEntry> {
+  if (launch.profileId === "fast") {
+    const entries: Array<ToolEntry> = []
+    if (
+      (scope === "all" || scope === "peers")
+      && launch.allowedGroups?.has("peers")
+      && launch.allowedPersonas?.has("oracle")
+      && fastOracleModel()
+    ) {
+      entries.push(oracleToolEntry())
+    }
+    for (const tool of NON_PERSONA_MCP_TOOLS) {
+      if (scope !== "all" && tool.group !== scope) continue
+      if (!launch.allowedGroups?.has(tool.group)) continue
+      if (tool.group === "search") {
+        entries.push({ name: tool.toolNameHttp, description: tool.description, inputSchema: tool.inputSchema })
+        continue
+      }
+      if (tool.group !== "browser" || !browserToolsEnabled()) continue
+      if (tool.capability === "browser_compound" && !browserCompoundToolsEnabled()) continue
+      if (tool.capability === "browser_power" && !browserPowerToolsEnabled()) continue
+      entries.push({ name: tool.toolNameHttp, description: tool.description, inputSchema: tool.inputSchema })
+    }
+    return entries
+  }
+
   // Personas are definitionally the `peers` group; include them only on
-  // the `peers` scoped endpoint and the unscoped union.
+  // the `peers` scoped endpoint and the unscoped union, AND only when this
+  // launch's profile allows the `peers` group at all — `allowedGroups`
+  // undefined means unrestricted (today's standard-profile behavior); a
+  // concrete Set is a hard allow-list (e.g. the fast profile's
+  // `{peers, search}`). Personas are additionally filtered by
+  // `allowedPersonas` (toolNameHttp-keyed) below, e.g. the fast profile
+  // narrows `peers` itself down to just `gemini_critic`.
+  const peersGroupAllowed = !launch.allowedGroups || launch.allowedGroups.has("peers")
   const personaEntries: Array<ToolEntry> =
-    scope === "all" || scope === "peers"
-      ? activePersonas().map((p) => ({
+    peersGroupAllowed && (scope === "all" || scope === "peers")
+      ? activePersonas()
+          .filter((p) => !launch.allowedPersonas || launch.allowedPersonas.has(p.toolNameHttp))
+          .map((p) => ({
           name: p.toolNameHttp,
           description: p.description,
           inputSchema: {
@@ -357,15 +399,16 @@ function toolEntries(scope: McpScope): Array<ToolEntry> {
         }))
       : []
   // Append non-persona utility tools, filtered first by the requested
-  // scope (`t.group`) then by the per-tool capability gate. Per-tool
-  // `capability` tag drives the runtime gate (see `workerToolsEnabled()`
-  // / `standInToolEnabled()` / `browserToolsEnabled()`). They share the
-  // same `tools/list` surface but have their own input schemas (no
-  // prompt/context/effort) and skip the per-persona validation gates in
-  // handleToolsCall.
+  // scope (`t.group`) then by this launch's group allow-list then by the
+  // per-tool capability gate. Per-tool `capability` tag drives the runtime
+  // gate (see `workerToolsEnabled()` / `standInToolEnabled()` /
+  // `browserToolsEnabled()`). They share the same `tools/list` surface but
+  // have their own input schemas (no prompt/context/effort) and skip the
+  // per-persona validation gates in handleToolsCall.
   const nonPersonaEntries: Array<ToolEntry> = NON_PERSONA_MCP_TOOLS.filter(
     (t) => {
       if (scope !== "all" && t.group !== scope) return false
+      if (launch.allowedGroups && !launch.allowedGroups.has(t.group)) return false
       if (t.capability === "worker") return workerToolsEnabled()
       if (t.capability === "browse_agent") return browseAgentEnabled()
       if (t.capability === "stand_in") return standInToolEnabled()
@@ -998,6 +1041,7 @@ export function applySessionWorkspace(
 async function handleToolsCall(
   body: JsonRpcRequest,
   scope: McpScope,
+  launch: LaunchRegistryEntry,
   sessionWorkspace?: string,
 ): Promise<object> {
   const params = body.params ?? {}
@@ -1006,6 +1050,81 @@ async function handleToolsCall(
 
   if (!name) {
     return rpcError(body.id, RPC_INVALID_PARAMS, "tools/call missing name")
+  }
+
+  if (launch.profileId === "fast" && name === "oracle") {
+    if (
+      (scope !== "all" && scope !== "peers")
+      || !launch.allowedGroups?.has("peers")
+      || !launch.allowedPersonas?.has("oracle")
+      || !fastOracleModel()
+    ) {
+      return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
+    }
+    const query = typeof args.query === "string" ? args.query.trim() : ""
+    const context = typeof args.context === "string" ? args.context.trim() : ""
+    if (!query || !context) {
+      return rpcError(body.id, RPC_INVALID_PARAMS, "tools/call: oracle requires non-empty arguments.query and arguments.context")
+    }
+    const MAX_ORACLE_INPUT_BYTES = 256 * 1024
+    const oracleInput = `Query:\n${query}\n\nContext:\n${context}`
+    const inputBytes = Buffer.byteLength(oracleInput, "utf8")
+    if (inputBytes > MAX_ORACLE_INPUT_BYTES) {
+      return rpcResult(body.id, toolError(`pre-flight rejected: oracle input is ${inputBytes} bytes, over the ${MAX_ORACLE_INPUT_BYTES}-byte cap; narrow the context without silently truncating it`))
+    }
+    const oraclePersona: PersonaSpec = {
+      agentName: "oracle",
+      toolNameHttp: "oracle",
+      model: "claude-opus-5",
+      endpoint: "/v1/messages",
+      description: "Fast-profile Oracle",
+      baseInstructions:
+        "You are Oracle, a stateless last-resort consultant. You have no tools or repository access. Answer only from the supplied context. Give focused guidance or ask for the exact missing information. Never claim to execute, approve, merge, or authorize an action.",
+      agentPrompt: "",
+      writeCapable: false,
+      requiresHttp: true,
+      allowedEfforts: ["high"],
+      defaultEffort: "high",
+    }
+    const overflow = await predictedWindowOverflow(oraclePersona, oracleInput, undefined)
+    if (overflow) return rpcResult(body.id, toolError(overflow))
+    const release = acquireInFlightSlot()
+    if (!release) {
+      return rpcResult(body.id, toolError(`Peer MCP queue full (${MAX_INFLIGHT_TOOLS_CALL} in-flight). Retry shortly.`))
+    }
+    const startedAt = Date.now()
+    const abortKey = body.id !== undefined && body.id !== null ? body.id : undefined
+    const aborter = new AbortController()
+    const inflightEntry: InflightEntry = { aborter, release }
+    if (abortKey !== undefined) inflightAborts.set(abortKey, inflightEntry)
+    try {
+      const text = await dispatchModelCall({
+        model: "claude-opus-5",
+        endpoint: "/v1/messages",
+        instructions: oraclePersona.baseInstructions,
+        userText: oracleInput,
+        effort: "high",
+        signal: aborter.signal,
+      })
+      logTelemetry({ name: "oracle", model: "claude-opus-5", durationMs: Date.now() - startedAt, result: "ok" })
+      return rpcResult(body.id, { content: [{ type: "text", text }] })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logTelemetry({ name: "oracle", model: "claude-opus-5", durationMs: Date.now() - startedAt, result: "exception", errorMessage: message })
+      return rpcResult(body.id, toolError(`oracle failed: ${message}`))
+    } finally {
+      if (abortKey !== undefined && inflightAborts.get(abortKey) === inflightEntry) {
+        inflightAborts.delete(abortKey)
+      }
+      release()
+    }
+  }
+
+  // A fast profile exposes only Oracle from peers. Reject every standard
+  // persona before lookup/slot acquisition so a hard-coded tool name cannot
+  // bypass tools/list (including through the unscoped union).
+  if (launch.profileId === "fast" && PERSONAS_READ.some((p) => p.toolNameHttp === name)) {
+    return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
   }
 
   // Routing: try personas first; fall through to non-persona utility
@@ -1033,6 +1152,30 @@ async function handleToolsCall(
   // runs BEFORE acquireInFlightSlot — no slot leak on reject.
   const toolGroup: McpGroup = persona ? "peers" : nonPersonaTool!.group
   if (scope !== "all" && toolGroup !== scope) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+
+  // Launch-profile reject: this launch's registered profile (e.g. the fast
+  // profile) may hard-restrict which MCP groups and which persona tool
+  // names it may ever call, independent of the URL scope hit above (a
+  // restricted launch is denied even via the unscoped "all" union — the
+  // restriction is bound to the caller's identity, not to which path it
+  // used). `undefined` means unrestricted (today's standard-profile
+  // behavior). Mirrors the `toolEntries()` list-time filter exactly, and
+  // runs BEFORE acquireInFlightSlot for the same no-slot-leak-on-reject
+  // reason as the scope reject above.
+  if (launch.allowedGroups && !launch.allowedGroups.has(toolGroup)) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (persona && launch.allowedPersonas && !launch.allowedPersonas.has(persona.toolNameHttp)) {
     return rpcError(
       body.id,
       RPC_METHOD_NOT_FOUND,
@@ -1422,6 +1565,7 @@ async function handleRpc(
   _c: Context,
   body: JsonRpcRequest,
   scope: McpScope,
+  launch: LaunchRegistryEntry,
   sessionWorkspace?: string,
 ): Promise<{ status: number; body: object | null }> {
   // Reject non-object envelopes (null, arrays, primitives) BEFORE we
@@ -1485,14 +1629,14 @@ async function handleRpc(
       if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
-        body: rpcResult(body.id, { tools: toolEntries(scope) }),
+        body: rpcResult(body.id, { tools: toolEntries(scope, launch) }),
       }
 
     case "tools/call":
       if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
-        body: await handleToolsCall(body, scope, sessionWorkspace),
+        body: await handleToolsCall(body, scope, launch, sessionWorkspace),
       }
 
     // --- Phase D: MCP method stubs with full handshake coherence ---
@@ -1589,6 +1733,7 @@ export async function handleMcpPost(
       auth.status,
     )
   }
+  const { launch } = auth
 
   // Validate the path scope AFTER auth so an unauthenticated probe of
   // `/mcp/<group>` cannot distinguish a valid group (auth failure) from an
@@ -1657,7 +1802,7 @@ export async function handleMcpPost(
     && body.method === "tools/call"
     && acceptsEventStream(c.req.header("accept"))
   ) {
-    return handleToolsCallSSE(body, scope, sessionWorkspace)
+    return handleToolsCallSSE(body, scope, launch, sessionWorkspace)
   }
 
   // JSON-path pre-flight predictedTooLong cap. SSE clients (above)
@@ -1682,7 +1827,7 @@ export async function handleMcpPost(
   }
 
   try {
-    const { status, body: respBody } = await handleRpc(c, body, scope, sessionWorkspace)
+    const { status, body: respBody } = await handleRpc(c, body, scope, launch, sessionWorkspace)
     if (respBody === null) return c.body(null, status as 202)
     return c.json(respBody, status as 200)
   } catch (err) {
@@ -1757,13 +1902,14 @@ const SSE_HEARTBEAT_INTERVAL_MS = 5000
 async function handleToolsCallSSE(
   body: JsonRpcRequest,
   scope: McpScope,
+  launch: LaunchRegistryEntry,
   sessionWorkspace?: string,
 ): Promise<Response> {
   const encoder = new TextEncoder()
   // Kick off the actual tool call as a Promise. handleToolsCall handles
   // all gates, slot accounting, abort registration, telemetry — we just
   // wrap its eventual result in an SSE envelope.
-  const callPromise = handleToolsCall(body, scope, sessionWorkspace)
+  const callPromise = handleToolsCall(body, scope, launch, sessionWorkspace)
   // Heartbeat interval is hoisted out of `start()` so `cancel()` can
   // clear it synchronously on consumer disconnect — otherwise a 5-second
   // tick fires into a closed controller after every cancel, and the
