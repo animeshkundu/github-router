@@ -159,6 +159,9 @@ function stripWebSearchTool(body: AnyRecord): void {
  * without an advisor handler and on authenticated fast Task-subagent requests,
  * where Advisor is intentionally lead-only. Mirrors stripWebSearchTool's
  * tool_choice cleanup. Returns the original string when nothing was removed.
+ * End-to-end evidence for both stripped tool forms and the resulting 200 lives
+ * in probes `shim_advisor_degrade_gpt55` and
+ * `shim_advisor_degrade_gemini35flash`.
  */
 function stripAdvisorTool(rawBody: string): string {
   let body: AnyRecord

@@ -1326,9 +1326,10 @@ probe_vision_ceiling_recovery_gemini() {
 }
 
 probe_shim_advisor_degrade_gpt55() {
-  # ADVISOR is Claude-only. On the non-Claude Responses shim path, the proxy
-  # strips the advisor beta/header effect plus both the proxy-internal and native
-  # advisor tools, then proceeds without advisor rather than returning 400.
+  # ADVISOR is unavailable on ordinary non-Claude shim traffic and deliberately
+  # lead-only in authenticated fast traffic. Both paths use the same strip:
+  # remove the advisor beta/header effect plus both the proxy-internal and native
+  # advisor tools, then proceed without advisor rather than returning 400.
   do_request POST /v1/messages '{
     "model": "gpt-5.5",
     "max_tokens": 128,
@@ -1344,7 +1345,7 @@ probe_shim_advisor_degrade_gpt55() {
 }
 
 probe_shim_advisor_degrade_gemini35flash() {
-  # Same advisor graceful-degrade expectation on the chat shim path.
+  # Same advisor graceful-degrade/fast-subagent strip shape on the chat shim path.
   do_request POST /v1/messages '{
     "model": "gemini-3.5-flash",
     "max_tokens": 128,
