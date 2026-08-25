@@ -34,6 +34,7 @@ const exitMock = mock((code: number) => {
   throw new ExitError(code)
 })
 const processOnMock = mock()
+const stderrWriteMock = mock()
 let isTTY = true
 // Mutable env that the mocked `process` exposes. Tests can write to this
 // to drive env-conditional code paths (e.g. GH_ROUTER_PEER_AWARENESS opt-out).
@@ -50,7 +51,7 @@ mock.module("node:process", () => ({
     // it, silently dropping --append-system-prompt / the skill + hook wiring.
     cwd: () => "/repo",
     stdout: { get isTTY() { return isTTY } },
-    stderr: { write: mock() },
+    stderr: { write: stderrWriteMock },
   },
 }))
 
@@ -383,6 +384,7 @@ beforeEach(() => {
     throw new ExitError(code)
   })
   processOnMock.mockReset()
+  stderrWriteMock.mockReset()
   isTTY = true
 
   setupAndServeMock.mockReset()
@@ -1118,6 +1120,19 @@ describe("claude command", () => {
       expect(opts.scoutEffort).toBe("high")
       expect(opts.implementerFastEffort).toBe("max")
       expect(opts.reviewerFastEffort).toBe("medium")
+    })
+
+    test("a fatal fast-profile prerequisite failure is visible on stderr", async () => {
+      state.models = { object: "list", data: [] }
+      const run = getRunFn()
+
+      await expect(run({ args: { model: "fast" } })).rejects.toThrow(ExitError)
+
+      expect(stderrWriteMock).toHaveBeenCalledTimes(1)
+      const message = String(stderrWriteMock.mock.calls[0][0])
+      expect(message).toContain("github-router claude -m fast requires")
+      expect(message).toContain("gemini-3.7-flash")
+      expect(message).toContain("github-router claude")
     })
 
     test("standard (non-fast) launch passes no roster/persona/coordinator/effort restriction", async () => {

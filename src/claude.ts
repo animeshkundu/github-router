@@ -489,7 +489,13 @@ export const claude = defineCommand({
       // or dropping an agent.
       const prereqCheck = validateFastProfilePrerequisites(state.models)
       if (!prereqCheck.ok) {
-        consola.error(formatFastPrerequisiteFailure(prereqCheck.missing))
+        const message = formatFastPrerequisiteFailure(prereqCheck.missing)
+        consola.error(message)
+        // `enableFileLogging()` above replaces the terminal reporter, so a fatal
+        // launch error logged only through consola is written to error.log and
+        // the CLI appears to stop silently. Mirror the actionable error to the
+        // terminal before exiting.
+        process.stderr.write(`${message}\n`)
         process.exit(1)
       }
     }

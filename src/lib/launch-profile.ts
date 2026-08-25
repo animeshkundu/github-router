@@ -1,4 +1,5 @@
 import type { Effort } from "./reasoning-effort"
+import { pickEndpoint } from "~/services/copilot/endpoint"
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
 /**
@@ -247,8 +248,8 @@ function supportsEffort(model: Model | undefined, effort: Effort): boolean {
  *     ladder + a usable `max_prompt_tokens` (so the derived safe-review
  *     window guard has something to size against).
  *   - `gemini-3.7-flash` (gemini_critic + Advisor): tool_calls + >=1M
- *     context + `high` in its effort ladder + `/v1/chat/completions` in
- *     `supported_endpoints`.
+ *     context + `high` in its effort ladder + a supported chat-completions
+ *     endpoint (bare or `/v1`-prefixed) in `supported_endpoints`.
  *
  * Pure over the passed-in catalog snapshot so it's unit-testable without
  * `state` — callers pass `state.models` at call time.
@@ -293,8 +294,14 @@ export function validateFastProfilePrerequisites(
     if (!supportsEffort(gemini, "high")) {
       missing.push("gemini-3.7-flash: does not advertise a \"high\" reasoning effort")
     }
-    if (!gemini.supported_endpoints?.includes("/v1/chat/completions")) {
-      missing.push("gemini-3.7-flash: does not advertise /v1/chat/completions in supported_endpoints")
+    // Reuse the canonical catalog endpoint resolver. Copilot's live catalog
+    // uses bare `/chat/completions`, while fixtures and older snapshots may use
+    // `/v1/chat/completions`; an exact check against only one spelling made a
+    // fully-capable live catalog fail the whole launch.
+    if (pickEndpoint(gemini) !== "chat") {
+      missing.push(
+        "gemini-3.7-flash: does not advertise a supported chat-completions endpoint",
+      )
     }
   }
 

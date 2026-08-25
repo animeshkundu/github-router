@@ -59,7 +59,7 @@ const fullCatalog = {
   data: [
     model("gpt-5.6-luna", { context: 1_050_000, efforts: ["high", "xhigh", "max"] }),
     model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["medium"] }),
-    model("gemini-3.7-flash", { context: 1_000_000, efforts: ["high"], endpoints: ["/v1/chat/completions"] }),
+    model("gemini-3.7-flash", { context: 1_000_000, efforts: ["high"], endpoints: ["/chat/completions"] }),
   ],
 }
 
@@ -99,8 +99,17 @@ describe("Luna aliases", () => {
 })
 
 describe("fast startup prerequisites", () => {
-  test("accepts the complete live-shaped catalog", () => {
+  test("accepts both live bare and prefixed chat endpoint spellings", () => {
     expect(validateFastProfilePrerequisites(fullCatalog as never)).toEqual({ ok: true, missing: [] })
+    const prefixed = {
+      ...fullCatalog,
+      data: fullCatalog.data.map((entry) =>
+        entry.id === "gemini-3.7-flash"
+          ? { ...entry, supported_endpoints: ["/v1/chat/completions"] }
+          : entry,
+      ),
+    }
+    expect(validateFastProfilePrerequisites(prefixed as never)).toEqual({ ok: true, missing: [] })
   })
 
   test("reports every missing or invalid prerequisite and rollback command", () => {
