@@ -53,6 +53,8 @@ export interface ResponsesCachePolicyOptions {
 
 export interface ClaudeCachePolicyOptions {
   workload: CacheWorkload
+  /** Optional long-lived cache marker TTL; omitted keeps Copilot's default 5m TTL. */
+  ttl?: "1h"
 }
 
 /**
@@ -425,12 +427,18 @@ function claudeSystemPrefixBytes(body: AnyRecord): number {
   return claudeToolsPrefixBytes(body) + serializedBytes(body.system ?? "")
 }
 
-function markClaudeSystem(body: AnyRecord): boolean {
+function claudeCacheControl(ttl?: "1h"): { type: "ephemeral"; ttl?: "1h" } {
+  return ttl === "1h"
+    ? { type: "ephemeral", ttl: "1h" }
+    : { type: "ephemeral" }
+}
+
+function markClaudeSystem(body: AnyRecord, ttl?: "1h"): boolean {
   if (typeof body.system === "string" && body.system.length > 0) {
     body.system = [{
       type: "text",
       text: body.system,
-      cache_control: { type: "ephemeral" },
+      cache_control: claudeCacheControl(ttl),
     }]
     return true
   }
@@ -445,7 +453,7 @@ function markClaudeSystem(body: AnyRecord): boolean {
     ) {
       body.system[index] = {
         ...(block as AnyRecord),
-        cache_control: { type: "ephemeral" },
+        cache_control: claudeCacheControl(ttl),
       }
       return true
     }
@@ -453,7 +461,7 @@ function markClaudeSystem(body: AnyRecord): boolean {
   return false
 }
 
-function markClaudeTool(body: AnyRecord): boolean {
+function markClaudeTool(body: AnyRecord, ttl?: "1h"): boolean {
   if (!Array.isArray(body.tools)) return false
   for (let index = body.tools.length - 1; index >= 0; index--) {
     const tool = body.tools[index]
@@ -464,7 +472,7 @@ function markClaudeTool(body: AnyRecord): boolean {
     ) {
       body.tools[index] = {
         ...(tool as AnyRecord),
-        cache_control: { type: "ephemeral" },
+        cache_control: claudeCacheControl(ttl),
       }
       return true
     }
@@ -535,8 +543,8 @@ export function applyClaudeCachePolicy(
   if (!toolsEligible && !systemEligible) return rawBody
 
   let markers = 0
-  if (toolsEligible && markClaudeTool(body)) markers++
-  if (systemEligible && markClaudeSystem(body)) markers++
+  if (toolsEligible && markClaudeTool(body, opts.ttl)) markers++
+  if (systemEligible && markClaudeSystem(body, opts.ttl)) markers++
 
   if (markers === 0) return rawBody
   logCacheSignature({

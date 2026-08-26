@@ -17,6 +17,12 @@ import {
   computeCacheProbeExitDecision,
   computeCacheProbeRollup,
   computeCacheProbeVerdict,
+  computeTtlProbeVerdict,
+  buildTtlProbeResponsesPayload,
+  normalizeTtlProbeClaudeUsage,
+  normalizeTtlProbeResponsesUsage,
+  parseTtlProbeArm,
+  ttlProbeIdentityFingerprint,
   DEFAULT_SYSTEM_PREFIX_CHARS,
   EXACT_CACHE_PROBE_TARGETS,
   isCacheProbeResultEvent,
@@ -58,11 +64,15 @@ describe("selectCacheProbeTargets", () => {
       expect(target?.contextWindow).toBe(1_000_000)
     }
     expect(selection.missing).not.toContain("claude-opus-5")
+    expect(selection.missing).not.toContain("claude-sonnet-5")
+    expect(selection.missing).not.toContain("gemini-3.1-pro-preview")
   })
 
   test("reports missing exact targets honestly rather than substituting", () => {
     const selection = selectCacheProbeTargets([makeModel("claude-opus-5", 1_000_000)])
+    expect(selection.missing).toContain("claude-sonnet-5")
     expect(selection.missing).toContain("claude-haiku-4.5")
+    expect(selection.missing).toContain("gemini-3.1-pro-preview")
     expect(selection.missing).toContain("gpt-5.6-sol")
     expect(selection.missing).toContain("gpt-5.6-terra")
     expect(selection.missing).toContain("gpt-5.6-luna")
@@ -288,6 +298,141 @@ describe("computeCacheProbeVerdict", () => {
     // into a PASS by averaging against a strong first warm turn.
     expect(result.verdict).toBe("FAIL")
   })
+})
+
+describe("computeTtlProbeVerdict", () => {
+  const validArm = {
+    inputTokens: 26,
+    cacheReadInputTokens: 0,
+    cacheCreationInputTokens: 7_566,
+    cacheFieldsPresent: true,
+  }
+
+  test("returns REUSED_AT_DELAY for a valid warm read", () => {
+    expect(computeTtlProbeVerdict({
+      cold: validArm,
+      warm: { ...validArm, cacheCreationInputTokens: 44, cacheReadInputTokens: 7_566 },
+      configuredDelaySeconds: 360,
+      actualDelaySeconds: 361,
+      evidenceFloorSeconds: 360,
+    }).verdict).toBe("REUSED_AT_DELAY")
+  })
+
+  test("returns NOT_REUSED_AT_DELAY for a valid zero warm read", () => {
+    expect(computeTtlProbeVerdict({
+      cold: validArm,
+      warm: { ...validArm, cacheCreationInputTokens: 0 },
+      configuredDelaySeconds: 360,
+      actualDelaySeconds: 360,
+      evidenceFloorSeconds: 360,
+    }).verdict).toBe("NOT_REUSED_AT_DELAY")
+  })
+
+  test.each([
+    ["missing fields", { ...validArm, cacheFieldsPresent: false }, validArm, 360],
+    ["cold read", { ...validArm, cacheReadInputTokens: 1 }, validArm, 360],
+    ["cold write", { ...validArm, cacheCreationInputTokens: 0 }, validArm, 360],
+    ["short delay", validArm, validArm, 5],
+  ])("returns INCONCLUSIVE for %s", (_name, cold, warm, actualDelaySeconds) => {
+    expect(computeTtlProbeVerdict({
+      cold,
+      warm,
+      configuredDelaySeconds: 360,
+      actualDelaySeconds,
+      evidenceFloorSeconds: 360,
+    }).verdict).toBe("INCONCLUSIVE")
+  })
+
+  test("returns INCONCLUSIVE on malformed configured delay", () => {
+    expect(computeTtlProbeVerdict({
+      cold: validArm,
+      warm: validArm,
+      configuredDelaySeconds: Number.NaN,
+      actualDelaySeconds: 360,
+      evidenceFloorSeconds: 360,
+    }).verdict).toBe("INCONCLUSIVE")
+  })
+
+  test("returns INCONCLUSIVE on negative usage", () => {
+    expect(computeTtlProbeVerdict({
+      cold: { ...validArm, cacheReadInputTokens: -1 },
+      warm: validArm,
+      configuredDelaySeconds: 360,
+      actualDelaySeconds: 360,
+      evidenceFloorSeconds: 360,
+    }).verdict).toBe("INCONCLUSIVE")
+  })
+
+  test("does not compare control and TTL arms", () => {
+    expect(computeTtlProbeVerdict({
+      cold: validArm,
+      warm: { ...validArm, cacheReadInputTokens: 100 },
+      configuredDelaySeconds: 360,
+      actualDelaySeconds: 360,
+      evidenceFloorSeconds: 360,
+    }).verdict).toBe("REUSED_AT_DELAY")
+  })
+
+  test("returns INCONCLUSIVE on failed API calls", () => {
+    expect(computeTtlProbeVerdict({
+      failed: true,
+      configuredDelaySeconds: 360,
+      actualDelaySeconds: 360,
+      evidenceFloorSeconds: 360,
+    }).verdict).toBe("INCONCLUSIVE")
+  })
+
+  test("preserves the 26 + 7566 + 44 native Claude accounting fields", () => {
+    expect(normalizeTtlProbeClaudeUsage({
+      input_tokens: 26,
+      cache_read_input_tokens: 7_566,
+      cache_creation_input_tokens: 44,
+    })).toEqual({
+      inputTokens: 26,
+      cacheReadInputTokens: 7_566,
+      cacheCreationInputTokens: 44,
+      cacheFieldsPresent: true,
+    })
+  })
+
+  test("normalizes nested Responses cache fields with presence", () => {
+    expect(normalizeTtlProbeResponsesUsage({
+      input_tokens: 150,
+      input_tokens_details: { cached_tokens: 100, cache_write_tokens: 20 },
+    })).toMatchObject({
+      inputTokens: 150,
+      cacheReadInputTokens: 100,
+      cacheCreationInputTokens: 20,
+      cacheFieldsPresent: true,
+    })
+  })
+
+  test("rejects absent arm arguments and accepts only valid CLI arm forms", () => {
+    expect(parseTtlProbeArm([])).toBe("all")
+    expect(parseTtlProbeArm(["--arm", "claude"])).toBe("claude")
+    expect(() => parseTtlProbeArm(["positional"])).toThrow()
+    expect(() => parseTtlProbeArm(["--arm", "gpt", "--arm", "all"])).toThrow()
+  })
+
+  test("fingerprints distinct payload identities without exposing their contents", () => {
+    const a = buildTtlProbeResponsesPayload({ model: "gpt-5.5", salt: "control" })
+    const b = buildTtlProbeResponsesPayload({ model: "gpt-5.5", salt: "ttl", retention: "24h" })
+    expect(ttlProbeIdentityFingerprint(a)).not.toBe(ttlProbeIdentityFingerprint(b))
+    expect(ttlProbeIdentityFingerprint(a)).toMatch(/^[0-9a-f]{16}$/)
+  })
+
+  test("returns INCONCLUSIVE when usage fields are absent", () => {
+    expect(normalizeTtlProbeResponsesUsage({ input_tokens: 26 }).cacheFieldsPresent).toBe(false)
+  })
+
+  test("builds independent retention payloads", () => {
+    const control = buildTtlProbeResponsesPayload({ model: "gpt-5.5", salt: "control" })
+    const retained = buildTtlProbeResponsesPayload({ model: "gpt-5.5", salt: "ttl", retention: "24h" })
+    expect(control.prompt_cache_retention).toBeUndefined()
+    expect(retained.prompt_cache_retention).toBe("24h")
+    expect(control.instructions).not.toBe(retained.instructions)
+  })
+
 })
 
 describe("buildDeterministicSystemPrefix", () => {
