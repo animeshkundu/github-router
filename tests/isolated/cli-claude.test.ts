@@ -1155,6 +1155,14 @@ describe("claude command", () => {
       expect(opts.implementerEffort).toBe("max")
       expect(opts.reviewerEffort).toBe("medium")
       expect(opts.plannerEffort).toBe("high")
+
+      // Fast keeps proxy MCPs out of the persistent mirror. The lead gets the
+      // runtime config, while reviewer/planner/scout receive only their inline
+      // role-scoped servers; implementer therefore cannot inherit Oracle.
+      expect(injectPeerMcpIntoMirrorMock).not.toHaveBeenCalled()
+      const [, args] = spawnMock.mock.calls[0]
+      expect(args).toContain("--mcp-config")
+      expect(args).toContain("/tmp/peer-mcp-test.json")
     })
 
     test("a fatal fast-profile prerequisite failure is visible on stderr", async () => {

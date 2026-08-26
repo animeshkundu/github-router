@@ -568,7 +568,10 @@ export async function handleCompletion(c: Context) {
           requestHeaders: {},
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          advisorFastProfile: advisorChoice.fastProfile,
+          // Policy follows the authenticated launch identity, independently of
+          // model selection. An operator-pinned Advisor model must still act as
+          // a non-binding consultant for a fast lead.
+          advisorFastProfile: fastLeadAdvisor,
           advisorEffort: resolveAdvisorEffort(rawBody, advisorChoice.model, true),
           externalAborter: fastAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {

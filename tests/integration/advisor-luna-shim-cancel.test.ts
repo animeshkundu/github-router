@@ -45,6 +45,7 @@ import { ADVISOR_INTERNAL_TOOL_NAME } from "../../src/services/advisor/advisor"
 const realFetch: typeof globalThis.fetch =
   Bun.fetch as unknown as typeof globalThis.fetch
 let savedFetch: typeof globalThis.fetch | undefined
+let savedAdvisorModel: string | undefined
 let listener: ReturnType<typeof Bun.serve> | undefined
 let baseUrl = ""
 
@@ -107,17 +108,22 @@ function resetState() {
 beforeAll(() => {
   resetState()
   savedFetch = globalThis.fetch
+  savedAdvisorModel = process.env.GH_ROUTER_ADVISOR_MODEL
   listener = Bun.serve({ port: 0, fetch: server.fetch })
   baseUrl = `http://127.0.0.1:${listener.port}`
 })
 
 afterAll(() => {
   if (savedFetch) globalThis.fetch = savedFetch
+  if (savedAdvisorModel === undefined) delete process.env.GH_ROUTER_ADVISOR_MODEL
+  else process.env.GH_ROUTER_ADVISOR_MODEL = savedAdvisorModel
   if (listener) listener.stop(true)
 })
 
 afterEach(() => {
   if (savedFetch) globalThis.fetch = savedFetch
+  if (savedAdvisorModel === undefined) delete process.env.GH_ROUTER_ADVISOR_MODEL
+  else process.env.GH_ROUTER_ADVISOR_MODEL = savedAdvisorModel
 })
 
 /** Build a Responses-API SSE body (bare `data:` lines — `events()` from
@@ -157,6 +163,10 @@ function buildResponsesSse(
 test(
   "aliased Luna lead reaches Gemini Advisor and consumer cancel aborts it before continuation",
   async () => {
+    // Model choice and role policy are independent: pinning the same model
+    // must not make an authenticated fast lead receive the standard directive
+    // Advisor prompt.
+    process.env.GH_ROUTER_ADVISOR_MODEL = GEMINI_ADVISOR_MODEL
     let lunaResponsesCallCount = 0
     let advisorChatCallCount = 0
     let advisorSignalAborted = false
