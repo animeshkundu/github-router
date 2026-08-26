@@ -20,20 +20,25 @@ import {
 
 const originalFetch = globalThis.fetch
 const savedModels = state.models
+const savedCopilotToken = state.copilotToken
+const savedVsCodeVersion = state.vsCodeVersion
 const FAST_SECRET = "f".repeat(64)
 
 function catalogModel(id: string) {
+  const isClaude = id.startsWith("claude")
   return {
     id,
     name: id,
     object: "model",
-    vendor: id.startsWith("gemini") ? "google" : "openai",
+    vendor: isClaude ? "anthropic" : id.startsWith("gemini") ? "google" : "openai",
     version: "1",
     preview: false,
     model_picker_enabled: true,
-    supported_endpoints: id.startsWith("gemini")
-      ? ["/chat/completions"]
-      : ["/responses"],
+    supported_endpoints: isClaude
+      ? ["/v1/messages"]
+      : id.startsWith("gemini")
+        ? ["/chat/completions"]
+        : ["/responses"],
     capabilities: {
       family: id,
       object: "model",
@@ -104,6 +109,7 @@ beforeEach(() => {
       catalogModel("gpt-5.6-sol"),
       catalogModel("grok-4.6"),
       catalogModel("gemini-3.7-flash"),
+      catalogModel("claude-opus-5"),
     ] as never,
   }
 })
@@ -111,6 +117,8 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch
   state.models = savedModels
+  state.copilotToken = savedCopilotToken
+  state.vsCodeVersion = savedVsCodeVersion
   clearLaunchRegistry()
 })
 
@@ -196,6 +204,127 @@ describe("fast Advisor request policy", () => {
       expect(body).not.toContain("advisor_20260301")
       expect(body).not.toContain(FAST_ADVISOR_TOOL_INSTRUCTIONS)
     }
+  })
+
+  test("a fast launch keeps consultative Advisor policy on the Claude passthrough route", async () => {
+    let messagesCalls = 0
+    let advisorSystemPrompt = ""
+    let advisorEffort = ""
+    const anthropicSse = (events: Array<{ event: string; data: Record<string, unknown> }>) =>
+      new Response(
+        events
+          .map(({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+          .join(""),
+        { headers: { "content-type": "text/event-stream" } },
+      )
+
+    globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
+      const url = String(_url)
+      if (url.includes("/responses")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          instructions?: string
+          reasoning?: { effort?: string }
+        }
+        advisorSystemPrompt = body.instructions ?? ""
+        advisorEffort = body.reasoning?.effort ?? ""
+        return Promise.resolve(responsesObjectResponse())
+      }
+
+      messagesCalls++
+      if (messagesCalls === 1) {
+        return Promise.resolve(
+          anthropicSse([
+            {
+              event: "message_start",
+              data: { type: "message_start", message: { id: "m1" } },
+            },
+            {
+              event: "content_block_start",
+              data: {
+                type: "content_block_start",
+                index: 0,
+                content_block: {
+                  type: "tool_use",
+                  id: "toolu_advisor_fast_claude",
+                  name: ADVISOR_INTERNAL_TOOL_NAME,
+                  input: {},
+                },
+              },
+            },
+            {
+              event: "content_block_stop",
+              data: { type: "content_block_stop", index: 0 },
+            },
+            {
+              event: "message_delta",
+              data: {
+                type: "message_delta",
+                delta: { stop_reason: "tool_use", stop_sequence: null },
+                usage: { output_tokens: 1 },
+              },
+            },
+            { event: "message_stop", data: { type: "message_stop" } },
+          ]),
+        )
+      }
+      return Promise.resolve(
+        anthropicSse([
+          {
+            event: "message_start",
+            data: { type: "message_start", message: { id: "m2" } },
+          },
+          {
+            event: "content_block_start",
+            data: {
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "" },
+            },
+          },
+          {
+            event: "content_block_delta",
+            data: {
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "text_delta", text: "done" },
+            },
+          },
+          {
+            event: "content_block_stop",
+            data: { type: "content_block_stop", index: 0 },
+          },
+          {
+            event: "message_delta",
+            data: {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: { output_tokens: 1 },
+            },
+          },
+          { event: "message_stop", data: { type: "message_stop" } },
+        ]),
+      )
+    }) as unknown as typeof fetch
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+        [LAUNCH_SECRET_HEADER]: FAST_SECRET,
+      },
+      body: requestBody("claude-opus-5", true),
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain("advisor_tool_result")
+    expect(advisorSystemPrompt).toContain("non-binding consultant")
+    expect(advisorSystemPrompt).toContain("Do not approve, veto, dictate")
+    expect(advisorSystemPrompt).not.toContain(
+      "Give a directive recommendation and commit to the decision",
+    )
+    expect(advisorEffort).toBe("high")
+    expect(messagesCalls).toBe(2)
   })
 
   test("standard injection keeps the existing mandatory policy byte-for-byte", () => {

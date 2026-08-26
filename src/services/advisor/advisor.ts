@@ -297,18 +297,17 @@ export interface AdvisorModelChoice {
    *
    *  An operator pin via `GH_ROUTER_ADVISOR_MODEL` is not an escalation even
    *  when it names `ADVISOR_ESCALATION_MODEL` itself. `runAdvisor` keys the
-   *  "your caller is running a lighter model" clause on this flag OR on
-   *  `fastProfile` rather than on the resolved model id, so pinning opus on an
-   *  opus lead cannot inject a sentence that is false. */
+   *  "your caller is running a lighter model" clause on this flag rather than
+   *  on the resolved model id, so pinning opus on an opus lead cannot inject a
+   *  sentence that is false. */
   escalated: boolean
   /** True ONLY for the automatic fast-Luna-profile selection of
    *  `ADVISOR_FAST_PROFILE_MODEL`. Distinct from `escalated` — different
    *  trigger (a non-Claude lead, not a lighter Claude tier), different target
-   *  model, different transport — but the SAME "the requester is lighter/
-   *  faster than you" framing applies to the advisor's system prompt, which is
-   *  why callers OR the two flags together rather than replacing one with the
-   *  other. See `FAST_PROFILE_LEAD_MODEL`'s doc comment for the temporary
-   *  nature of the underlying signal. */
+   *  model, and different transport. The authenticated launch identity—not
+   *  this model-selection result—controls the fast consultative system prompt.
+   *  See `FAST_PROFILE_LEAD_MODEL`'s doc comment for the temporary nature of
+   *  the underlying signal. */
   fastProfile: boolean
 }
 

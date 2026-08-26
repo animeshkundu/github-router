@@ -829,7 +829,7 @@ export async function handleCompletion(c: Context) {
       // been through `translateThinking`, which clamps to the LEAD model's
       // allowlist; reading them would hand the advisor what the lead could do
       // instead of what the user picked.
-      const advisorChoice = resolveAdvisorModel(originalModel)
+      const advisorChoice = resolveAdvisorModel(originalModel, fastLeadAdvisor)
       return new Response(
         buildAdvisorStream({
           firstResponse: response,
@@ -838,7 +838,12 @@ export async function handleCompletion(c: Context) {
           requestHeaders,
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          advisorEffort: resolveAdvisorEffort(rawBody, advisorChoice.model),
+          advisorFastProfile: fastLeadAdvisor,
+          advisorEffort: resolveAdvisorEffort(
+            rawBody,
+            advisorChoice.model,
+            fastLeadAdvisor,
+          ),
           externalAborter: advisorAborter,
         }),
         {

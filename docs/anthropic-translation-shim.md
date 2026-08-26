@@ -438,9 +438,9 @@ honestly rather than papered over:
 >
 > The same fast profile also makes the ADVISOR-degrades-on-non-Claude rule below
 > gain one exception: on a fast-profile launch, the primary lead's optional,
-> non-binding Advisor routes to Gemini 3.7 Flash. Fast Task subagents have the
-> Advisor tool stripped and cannot enter the translate loop.
-> through a newly extracted streaming shim entry point instead of degrading. See
+> non-binding Advisor routes to Gemini 3.7 Flash through a newly extracted
+> streaming shim entry point instead of degrading. Fast Task subagents have the
+> Advisor tool stripped and cannot enter the translate loop. See
 > "Gemini 3.7 Flash Advisor on the Luna translation path" in
 > [`default-models.md`](default-models.md) for the endpoint-selection, tool-use-id,
 > and cancellation-contract details — this is a separate, later-landing workstream
