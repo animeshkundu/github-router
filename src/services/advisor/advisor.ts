@@ -297,18 +297,17 @@ export interface AdvisorModelChoice {
    *
    *  An operator pin via `GH_ROUTER_ADVISOR_MODEL` is not an escalation even
    *  when it names `ADVISOR_ESCALATION_MODEL` itself. `runAdvisor` keys the
-   *  "your caller is running a lighter model" clause on this flag OR on
-   *  `fastProfile` rather than on the resolved model id, so pinning opus on an
-   *  opus lead cannot inject a sentence that is false. */
+   *  "your caller is running a lighter model" clause on this flag rather than
+   *  on the resolved model id, so pinning opus on an opus lead cannot inject a
+   *  sentence that is false. */
   escalated: boolean
   /** True ONLY for the automatic fast-Luna-profile selection of
    *  `ADVISOR_FAST_PROFILE_MODEL`. Distinct from `escalated` — different
    *  trigger (a non-Claude lead, not a lighter Claude tier), different target
-   *  model, different transport — but the SAME "the requester is lighter/
-   *  faster than you" framing applies to the advisor's system prompt, which is
-   *  why callers OR the two flags together rather than replacing one with the
-   *  other. See `FAST_PROFILE_LEAD_MODEL`'s doc comment for the temporary
-   *  nature of the underlying signal. */
+   *  model, and different transport. The authenticated launch identity—not
+   *  this model-selection result—controls the fast consultative system prompt.
+   *  See `FAST_PROFILE_LEAD_MODEL`'s doc comment for the temporary nature of
+   *  the underlying signal. */
   fastProfile: boolean
 }
 
@@ -477,6 +476,19 @@ Give the advice serious weight. If you follow a step and it fails empirically, o
 
 If you've already retrieved data pointing one way and the advisor points another: don't silently switch. Surface the conflict in one more advisor call -- "I found X, you suggest Y, which constraint breaks the tie?" The advisor saw your evidence but may have underweighted it; a reconcile call is cheaper than committing to the wrong branch.`
 
+/** Fast-profile lead-only policy. Unlike the standard Claude Code instructions
+ * above, this makes consultation optional and leaves decision ownership with
+ * the Luna lead. Fast Task subagents never receive an advisor tool at all. */
+export const FAST_ADVISOR_TOOL_INSTRUCTIONS = `# Advisor Tool
+
+You have access to an optional, transcript-aware \`advisor\` tool. It takes no parameters and returns non-binding consultation. You remain responsible for every decision.
+
+Use advisor only when a focused, consequential uncertainty remains after direct investigation: conflicting evidence, a materially changed assumption, a genuinely non-converging approach, a hard-to-reverse trade-off, or an explicit request for a fresh perspective. State the precise uncertainty in your response immediately before calling it.
+
+Do not call advisor for routine progress, while waiting on a subagent, after ordinary tool output, for a fact that code or a command can verify, to obtain planner approval or reviewer verification, or as a ritual before implementation or completion.
+
+Treat the result as advice, not authority. Weigh it against the user's intent, verified repository evidence, planner output, and reviewer findings. You may consult again when materially new evidence creates a different question or directly conflicts with earlier advice.`
+
 const ADVISOR_OPT_OUT_ENV = "CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
 
 /**
@@ -514,7 +526,10 @@ export function isAdvisorRequested(rawBetaHeader: string | undefined): boolean {
  * client-shape `server_tool_use{name:"advisor"}` + `advisor_tool_result`
  * blocks the client expects.
  */
-export function injectAdvisorTool(rawBody: string): string {
+export function injectAdvisorTool(
+  rawBody: string,
+  instructions = ADVISOR_TOOL_INSTRUCTIONS,
+): string {
   // Fast path: skip the full parse + re-serialize when this body provably
   // needs neither an injection nor a strip.
   //
@@ -554,6 +569,8 @@ export function injectAdvisorTool(rawBody: string): string {
   // (`ADVISOR_INTERNAL_TOOL_NAME` is `__anthropic_advisor`, which does not start
   // with `advisor_`, so the two probes cannot alias.)
   if (
+    instructions === ADVISOR_TOOL_INSTRUCTIONS
+    &&
     rawBody.includes(`"name":"${ADVISOR_INTERNAL_TOOL_NAME}"`)
     && !rawBody.includes('"advisor_')
   ) {
@@ -577,16 +594,25 @@ export function injectAdvisorTool(rawBody: string): string {
   const alreadyInjected = tools.some(
     (t: AnyRecord) => t?.name === ADVISOR_INTERNAL_TOOL_NAME,
   )
-  if (alreadyInjected && !stripped) {
+  const needsDescriptionUpdate = alreadyInjected && tools.some(
+    (t: AnyRecord) =>
+      t?.name === ADVISOR_INTERNAL_TOOL_NAME
+      && t.description !== instructions,
+  )
+  if (alreadyInjected && !stripped && !needsDescriptionUpdate) {
     return rawBody // no-op: already injected and nothing to strip
   }
   parsed.tools = alreadyInjected
-    ? tools
+    ? tools.map((tool: AnyRecord) =>
+        tool?.name === ADVISOR_INTERNAL_TOOL_NAME
+          ? { ...tool, description: instructions }
+          : tool,
+      )
     : [
         ...tools,
         {
           name: ADVISOR_INTERNAL_TOOL_NAME,
-          description: ADVISOR_TOOL_INSTRUCTIONS,
+          description: instructions,
           input_schema: {
             type: "object",
             properties: {},
@@ -787,6 +813,7 @@ async function runAdvisor(
   advisorEffort: string,
   signal?: AbortSignal,
   advisorEscalated = false,
+  fastProfile = false,
 ): Promise<string> {
   if (signal?.aborted) {
     throw new Error("advisor call aborted before dispatch")
@@ -800,11 +827,19 @@ async function runAdvisor(
     + "is on the right track, say so explicitly. If they're stuck or off-track, "
     + "name the specific assumption or step to revisit. Aim for 2-5 paragraphs "
     + "of substantive guidance."
+    + (fastProfile
+      ? " You are a non-binding consultant to the primary lead. Analyze the "
+        + "focused uncertainty that prompted this call and provide a recommendation, "
+        + "its assumptions, material risks, credible alternatives, confidence, and "
+        + "any evidence gap that should be resolved. Do not approve, veto, dictate, "
+        + "or take ownership of the workflow; the lead will weigh your advice against "
+        + "the user's intent and verified evidence."
+      : "")
     // Only on the AUTOMATIC escalation, never on an operator pin that happens to
     // name the same model — see `AdvisorModelChoice.escalated`. The requesting
     // agent really is a lighter tier here, so it needs a decision rather than a
     // survey of options it is less equipped to choose between.
-    + (advisorEscalated
+    + (advisorEscalated && !fastProfile
       ? " The requesting agent is running a lighter, faster model than you. "
         + "Give a directive recommendation and commit to the decision rather "
         + "than laying out options for it to weigh."
@@ -1212,6 +1247,9 @@ export function buildAdvisorStream(opts: {
   /** From `resolveAdvisorModel(...).escalated`. Drives only the system-prompt
    *  clause in `runAdvisor`; never the model or transport choice. */
   advisorEscalated?: boolean
+  /** True only for the authenticated fast lead. Selects the non-binding
+   * consultative prompt without changing transport or loop behavior. */
+  advisorFastProfile?: boolean
   externalAborter?: AbortController
   /**
    * Injectable continuation dispatcher for every turn AFTER the first.
@@ -1236,6 +1274,7 @@ export function buildAdvisorStream(opts: {
   const advisorModel = opts.advisorModel ?? ADVISOR_DEFAULT_MODEL
   const advisorEffort = opts.advisorEffort ?? ADVISOR_DEFAULT_EFFORT
   const advisorEscalated = opts.advisorEscalated ?? false
+  const advisorFastProfile = opts.advisorFastProfile ?? false
   const continueTurn =
     opts.continueTurn
     ?? ((body: AnyRecord, signal: AbortSignal) =>
@@ -1681,6 +1720,7 @@ export function buildAdvisorStream(opts: {
                   advisorEffort,
                   aborter.signal,
                   advisorEscalated,
+                  advisorFastProfile,
                 )
               } catch (err) {
                 // If the failure was the consumer-cancel abort, let the

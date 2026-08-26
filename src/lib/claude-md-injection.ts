@@ -340,7 +340,7 @@ const OPERATING_DEFAULTS_TAIL =
 const FAST_OPERATING_DEFAULTS_TAIL =
   "context free to reason and collaborate with the user. Delegate only when work is wide or slow; do trivial and surgical work directly. "
   + "Luna investigates and drafts. The lead must give `planner` a handcrafted evidence packet and must not implement until `planner` returns `APPROVE`. "
-  + "Advisor is the transcript-aware brainstorming, sounding-board, fresh-look, uncertainty, and stuck path. "
+  + "Advisor is an optional, non-binding, lead-only transcript-aware sounding board for consequential unresolved uncertainty, conflicting evidence, or a genuinely stuck path; never use it for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. "
   + "`oracle` is exact Opus 5 (1M/high), stateless and last resort after the normal paths remain stuck. "
   + "Before declaring work done, run the relevant build/tests and ask `reviewer` for repository-aware verification. "
   + "Verify claims, report uncertainty, and stop named teammates when finished."

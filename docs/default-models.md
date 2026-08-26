@@ -62,7 +62,9 @@ Authenticated fast policy overrides request effort and thinking budgets for the 
 
 ### Advisor
 
-The user-facing role is Advisor. In fast Luna sessions it uses Gemini 3.7 Flash via chat completions at fixed high effort and sees the bounded recent transcript. It is suitable for brainstorming, a sounding board, a fresh look, uncertainty, or when stuck. Luna continuations reuse the translation shim and existing SSE lifecycle.
+The user-facing role is Advisor. In fast Luna sessions it is available only to the primary lead, uses Gemini 3.7 Flash via chat completions at fixed high effort by default, and sees the lead's bounded recent transcript. An operator model pin changes only the Advisor model, not this fast consultative policy. Fast Task subagents have all Advisor tool forms stripped; their narrower transcripts are not the session context Advisor exists to assess. Advisor is optional, non-binding consultation for consequential unresolved uncertainty, conflicting evidence, a genuinely non-converging approach, materially changed assumptions, or an explicit request for a fresh perspective. It is not used for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. The lead retains decision ownership and may consult again when materially new evidence creates a different question. Luna continuations reuse the translation shim and existing SSE lifecycle.
+
+Oracle remains separate and stateless. It is available to the lead, reviewer, and planner as a last resort for one focused unresolved question, and remains unavailable to scout and implementer. Fast launches keep the proxy MCP servers out of the shared mirrored config: the lead receives them through its launch-only MCP config, while reviewer/planner/scout receive only their role-scoped inline servers. This prevents the unrestricted implementer from inheriting Oracle through persistent MCP scope.
 
 Standard Advisor behavior is unchanged: Sol/xhigh (high floor) on the normal Opus path and Opus escalation for lighter Claude leads.
 

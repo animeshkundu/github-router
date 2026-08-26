@@ -864,7 +864,7 @@ export const claude = defineCommand({
           await baseShutdown()
         }
 
-        // Subagent MCP visibility: inject `gh-router-peers` (and the
+        // Standard-profile subagent MCP visibility: inject `gh-router-peers` (and the
         // `codex-cli` stdio entry when enabled) into the mirrored
         // `<CLAUDE_CONFIG_DIR>/.claude.json` so subagents — Agent-tool
         // subagents, forks, agent-teams subprocesses — discover the peer
@@ -878,41 +878,58 @@ export const claude = defineCommand({
         // at least the parent session retains the peer tools (subagents
         // remain blind in that case, by design — explicit branch, not
         // silent precedence).
-        const injected = await injectPeerMcpIntoMirror(serverUrl, {
-          codexCli: backend === "cli",
-          selfInvocation,
-          geminiAvailable: geminiModelsAvailable,
-          groupKeys,
-          nonce: runtime.nonce,
-        })
-
-        // Channel selection: prefer the mirror (subagent-visible) when
-        // injection succeeded. Only fall back to --mcp-config when
-        // injection refused due to a user-side collision. Pushing BOTH
-        // would register the same server name twice (mirror + CLI flag),
-        // which is ambiguous across Claude Code versions.
-        if (!injected.ok) {
+        // Fast is deliberately different: the parent receives peers/search
+        // through --mcp-config, while only reviewer/planner receive an inline
+        // peers entry and scout/planner receive inline search. Do NOT persist
+        // the proxy MCPs into the shared mirror for this profile: an
+        // implementer with omitted `tools:` inherits persistent-scope MCPs,
+        // which would otherwise expose Oracle despite the role contract.
+        let subagentVisibility: string
+        let injected: Awaited<ReturnType<typeof injectPeerMcpIntoMirror>> | undefined
+        if (isFastProfile) {
           extraArgs.push("--mcp-config", runtime.mcpConfigPath)
           if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
             extraArgs.push("--strict-mcp-config")
           }
-        } else if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
-          // User asked for strict-MCP-only but the mirror inject path
-          // can't enforce that (other user-scope MCPs already in the
-          // mirror's snapshot are visible). Warn so the flag's mismatch
-          // with the new behavior is obvious.
-          consola.warn(
-            "--codex-mcp-only has no effect when peer MCP is wired via the "
-              + "mirrored .claude.json (the user's existing user-scope MCPs in "
-              + "the snapshot are still visible). Pass --no-codex-mcp to skip "
-              + "peer-MCP wiring entirely.",
-          )
+          subagentVisibility =
+            "role-scoped (lead via --mcp-config; subagents via inline mcpServers)"
+        } else {
+          injected = await injectPeerMcpIntoMirror(serverUrl, {
+            codexCli: backend === "cli",
+            selfInvocation,
+            geminiAvailable: geminiModelsAvailable,
+            groupKeys,
+            nonce: runtime.nonce,
+          })
+
+          // Channel selection: prefer the mirror (subagent-visible) when
+          // injection succeeded. Only fall back to --mcp-config when
+          // injection refused due to a user-side collision. Pushing BOTH
+          // would register the same server name twice (mirror + CLI flag),
+          // which is ambiguous across Claude Code versions.
+          if (!injected.ok) {
+            extraArgs.push("--mcp-config", runtime.mcpConfigPath)
+            if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
+              extraArgs.push("--strict-mcp-config")
+            }
+          } else if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
+            // User asked for strict-MCP-only but the mirror inject path
+            // can't enforce that (other user-scope MCPs already in the
+            // mirror's snapshot are visible). Warn so the flag's mismatch
+            // with the new behavior is obvious.
+            consola.warn(
+              "--codex-mcp-only has no effect when peer MCP is wired via the "
+                + "mirrored .claude.json (the user's existing user-scope MCPs in "
+                + "the snapshot are still visible). Pass --no-codex-mcp to skip "
+                + "peer-MCP wiring entirely.",
+            )
+          }
+          subagentVisibility = injected.ok
+            ? `subagent-visible (mirrored mcpServers: [${injected.serversAdded.join(", ")}])`
+            : `subagent-INVISIBLE (collision on user-side mcpServers: [${injected.conflictingServers.join(", ")}]; parent-only via --mcp-config)`
         }
 
         const personaNames = runtime.personas.map((p) => p.agentName).join(", ")
-        const subagentVisibility = injected.ok
-          ? `subagent-visible (mirrored mcpServers: [${injected.serversAdded.join(", ")}])`
-          : `subagent-INVISIBLE (collision on user-side mcpServers: [${injected.conflictingServers.join(", ")}]; parent-only via --mcp-config)`
         const skippedNote =
           skippedGroups.length > 0
             ? ` WARNING: groups [${skippedGroups.join(", ")}] skipped — both the bare and \`gh-router-<group>\` keys collide with your own mcpServers; those tools are unavailable this session (rename the user-side server to re-enable).`
@@ -994,7 +1011,7 @@ export const claude = defineCommand({
           // mirror path that's `injected.serversAdded` (includes the `codex-cli`
           // stdio server, not just the HTTP groups); on the collision fallback,
           // reconstruct it from the resolved group keys + codex-cli.
-          const injectedServerKeys = injected.ok
+          const injectedServerKeys = injected?.ok
             ? injected.serversAdded
             : [
                 ...Object.values(groupKeys).filter((k): k is string => Boolean(k)),
@@ -1029,7 +1046,7 @@ export const claude = defineCommand({
           // raw `mcp__workers__*` escape hatch on demand (e.g. for guaranteed
           // structured-arg fidelity, or when a blocking call is acceptable) — so
           // the worker-* agents COMPLEMENT rather than hard-replace the raw tools.
-          if (!injected.ok) {
+          if (!injected?.ok) {
             consola.warn(
               "Workers non-blocking guard NOT registered: subagent MCP injection "
                 + "fell back to parent-only (--mcp-config), so worker-* dispatchers "

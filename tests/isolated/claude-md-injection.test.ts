@@ -1074,6 +1074,8 @@ test("profile:'fast' names exactly the fast roster and never a removed native/to
   expect(directive).toContain("`reviewer`")
   expect(directive).toContain("`planner`")
   expect(directive).toContain("Advisor")
+  expect(directive).toContain("lead-only")
+  expect(directive).toContain("never use it for routine progress")
   expect(directive).toContain("`oracle`")
   for (const forbidden of FAST_PROFILE_FORBIDDEN_NAMES) {
     expect(directive).not.toContain(forbidden)
