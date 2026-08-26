@@ -299,6 +299,42 @@ describe("Claude cache policy", () => {
     { name: "read", input_schema: { type: "object" } },
   ]
 
+  test("omitted TTL uses the default ephemeral marker on both breakpoints", () => {
+    const body = applyClaudeCachePolicy(
+      JSON.stringify({
+        model: "claude-opus-5",
+        system: stable,
+        tools: [{ name: "read", input_schema: { type: "object", description: "padding ".repeat(600) } }],
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      { workload: "reusable-prefix" },
+    )
+    const parsed = JSON.parse(body) as {
+      system: Array<Record<string, unknown>>
+      tools: Array<Record<string, unknown>>
+    }
+    expect(parsed.system[0]?.cache_control).toEqual({ type: "ephemeral" })
+    expect(parsed.tools[0]?.cache_control).toEqual({ type: "ephemeral" })
+  })
+
+  test("opted-in one-hour TTL reaches both breakpoints", () => {
+    const body = applyClaudeCachePolicy(
+      JSON.stringify({
+        model: "claude-opus-5",
+        system: stable,
+        tools: [{ name: "read", input_schema: { type: "object", description: "padding ".repeat(600) } }],
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      { workload: "reusable-prefix", ttl: "1h" },
+    )
+    const parsed = JSON.parse(body) as {
+      system: Array<Record<string, unknown>>
+      tools: Array<Record<string, unknown>>
+    }
+    expect(parsed.system[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+    expect(parsed.tools[0]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+  })
+
   test("small tools stay unmarked; only the stable system boundary is worth a marker", () => {
     // `tinyTools`, serialized, is nowhere near MIN_CACHEABLE_PREFIX_BYTES on its
     // own — marking it would spend one of the two marker slots on a breakpoint

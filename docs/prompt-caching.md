@@ -148,12 +148,12 @@ bun run probe:cache
 
 ### What it does
 
-For `claude-opus-5`, `claude-haiku-4.5`, every GPT-5.6 tier
-(`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`), `gemini-3.7-flash`, and
-the highest-context `grok-4.6*` catalog sibling (resolved from the LIVE
-Copilot catalog, never hardcoded — see `selectCacheProbeTargets` in
-`src/lib/cache-probe.ts`), sequentially (concurrency 1, no automatic
-retries):
+For `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4.5`, every GPT-5.6 tier
+(`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`), `gemini-3.7-flash`,
+`gemini-3.1-pro-preview`, and the highest-context `grok-4.6*` catalog sibling
+(resolved from the LIVE Copilot catalog, never hardcoded — see
+`selectCacheProbeTargets` in `src/lib/cache-probe.ts`), sequentially
+(concurrency 1, no automatic retries):
 
 - **Controlled trials** (default 3): spawn `bun run ./src/main.ts claude -m
   <model> ... -- --print --input-format stream-json --output-format
@@ -164,16 +164,16 @@ retries):
   terminal result carries the real per-turn totals. Turns are sent one at a time,
   after the prior result arrives. The first turn carries a fresh random salt
   prepended to a large deterministic system prompt, so separate trials cannot
-  share the full controlled prefix; tools and all MCP servers
-  are disabled so only the model call itself varies. Prefix size is
-  per-provider (`systemPrefixCharsFor`): 6,000 chars by default — comfortably
-  above this repo's own 4,096-byte `MIN_CACHEABLE_PREFIX_BYTES` local
-  guard (`src/lib/prompt-cache.ts`) and, for this deterministic natural-language
-  filler, measured above Anthropic's cacheable-prefix floor — and
-  40,000 chars for Gemini/Grok, whose implicit-cache floor measured higher
-  live (Gemini 3.7 Flash cached nothing at 6,000 chars but cached cleanly at
-  ~40,000). Haiku 4.5 also uses the larger prefix because its cacheable-prefix
-  floor is materially higher than current Opus models.
+  share the full controlled prefix; tools and all MCP servers are disabled so
+  only the model call itself varies. Prefix size is per-provider
+  (`systemPrefixCharsFor`): 6,000 chars by default — comfortably above this
+  repo's own 4,096-byte `MIN_CACHEABLE_PREFIX_BYTES` local guard
+  (`src/lib/prompt-cache.ts`) and, for this deterministic natural-language
+  filler, measured above Anthropic's cacheable-prefix floor — and 40,000 chars
+  for Gemini/Grok, whose implicit-cache floor measured higher live (Gemini 3.7
+  Flash cached nothing at 6,000 chars but cached cleanly at ~40,000). Haiku
+  4.5 also uses the larger prefix because its cacheable-prefix floor is
+  materially higher than current Opus models.
 - **One authentic trial per native-Claude target**: default toolset, default
   system prompt (no `--bare`/`--safe-mode`), salted first turn, prompt text
   instructs the model not to call tools (tools remain technically available,
@@ -185,9 +185,9 @@ retries):
   fixed two-turn trial cannot distinguish "the whole growing conversation is
   cached" from "only the static system prompt is cached" — live measurement
   found exactly the latter on a real 27k-token conversation (warm turns
-  reporting `cache_read≈2k` against `input≈27k`, i.e. a coverage ratio
-  around 7%, while `cache_read_input_tokens` stayed comfortably nonzero the
-  whole time). A bare positivity check would have PASSed that.
+  reporting `cache_read≈2k` against `input≈27k`, i.e. a coverage ratio around
+  7%, while `cache_read_input_tokens` stayed comfortably nonzero the whole
+  time). A bare positivity check would have PASSed that.
 
 ### Verdict
 
@@ -274,3 +274,47 @@ Pure parsing/verdict/catalog-selection logic (`parseCacheProbeAssistantUsage`,
 etc.) lives in `src/lib/cache-probe.ts` and is unit-tested in
 `tests/cache-probe.test.ts` with no live model call, no child process, and no
 network access.
+
+### Direct cache-TTL evidence harness (`scripts/probe-cache-ttl.ts`)
+
+The direct harness records independent observations only. It does not compare
+arms or draw a causal or economic conclusion about either retention setting.
+It uses separate salted prefixes for the control and TTL arms. The Claude arm
+requires exact `claude-opus-5`; the GPT arm requires exact `gpt-5.5`.
+
+```bash
+# Prints usage and exits 0 when the gate is absent.
+bun run probe:cache-ttl
+
+GH_ROUTER_RUN_CACHE_TTL_PROBE=1 \
+GH_ROUTER_CACHE_TTL_CLAUDE_DELAY_SEC=5 \
+GH_ROUTER_CACHE_TTL_GPT_DELAY_SEC=5 \
+GH_ROUTER_CACHE_TTL_TRIALS=2 \
+bun run probe:cache-ttl -- --arm all
+```
+
+`--arm` accepts `claude`, `gpt`, or `all` (the default). Each arm runs an
+independent cold-to-sleep-to-warm pair through the production client: Claude
+uses `createMessages` with omitted TTL versus `ttl: "1h"`; GPT uses
+`createResponses` with omitted retention versus `prompt_cache_retention: "24h"`.
+Usage is parsed according to endpoint format: Claude preserves disjoint
+`input_tokens`, `cache_read_input_tokens`, and `cache_creation_input_tokens`,
+while Responses normalizes inclusive totals and nested cache fields through
+`normalizeOpenAIUsage`. Missing or invalid fields remain inconclusive.
+
+Default delays are 360 seconds for Claude and 3600 seconds for GPT. Delays below
+the evidence floor are labelled exploratory. Results use only within-arm
+verdicts: `REUSED_AT_DELAY`, `NOT_REUSED_AT_DELAY`, or `INCONCLUSIVE`. A verdict
+requires valid cold and warm numeric fields, zero cold reads, a positive cold
+write, and an actual monotonic delay meeting the evidence floor. It does not
+establish that a retention option caused reuse or that it is economically
+beneficial.
+
+The schema-version-2 artifact contains commit SHA, router version,
+arm/model/endpoint/policy, configured and actual delays, numeric usage views,
+stable 16-hex identity fingerprints, verdicts, and the fixed comparison object
+`{"status":"not_evaluated","reason":"arms use distinct cache identities and no verified shared namespace"}`.
+It never stores prompts, bodies, salts, credentials, raw upstream responses, or
+local paths. Artifacts remain under the untracked `cache-probe` directory
+family (or `GH_ROUTER_CACHE_TTL_OUTPUT`). Neither long-lived option is wired
+by this change; production callers retain the existing policy.

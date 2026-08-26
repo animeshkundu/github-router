@@ -8,8 +8,11 @@
  * file performs I/O.
  */
 
-import { randomBytes } from "node:crypto"
+import { createHash, randomBytes } from "node:crypto"
 
+import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
+import type { OpenAIUsageLike } from "~/lib/prompt-cache"
+import type { ResponsesPayload } from "~/services/copilot/create-responses"
 import type { Model } from "~/services/copilot/get-models"
 
 // ---------------------------------------------------------------------------
@@ -19,11 +22,13 @@ import type { Model } from "~/services/copilot/get-models"
 /** Exact catalog ids the probe measures unconditionally. */
 export const EXACT_CACHE_PROBE_TARGETS: ReadonlyArray<string> = [
   "claude-opus-5",
+  "claude-sonnet-5",
   "claude-haiku-4.5",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
   "gemini-3.7-flash",
+  "gemini-3.1-pro-preview",
 ]
 
 /**
@@ -60,9 +65,9 @@ function contextWindowOf(model: Model): number | undefined {
 }
 
 /**
- * Resolves the seven probe targets against a live (or fixture) model
- * catalog. Exact-id match for the six fixed targets; a highest-advertised-
- * context walk over every `grok-4.6*` sibling for the seventh. Deterministic given a
+ * Resolves the nine probe targets against a live (or fixture) model
+ * catalog. Exact-id match for the eight fixed targets; a highest-advertised-
+ * context walk over every `grok-4.6*` sibling for the ninth. Deterministic given a
  * stable catalog: ties keep whichever candidate the catalog listed first.
  */
 export function selectCacheProbeTargets(
@@ -487,6 +492,160 @@ export function computeGrowingHistoryVerdict(
       + `${(passRatioThreshold * 100).toFixed(0)}% threshold`,
     coldTotalInputTokens,
     cacheCoverageRatio,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Direct TTL probe helpers
+// ---------------------------------------------------------------------------
+
+export type TtlProbeVerdict = "REUSED_AT_DELAY" | "NOT_REUSED_AT_DELAY" | "INCONCLUSIVE"
+
+export interface TtlProbeUsage {
+  inputTokens?: number
+  cacheReadInputTokens?: number
+  cacheCreationInputTokens?: number
+  cacheFieldsPresent?: boolean
+}
+
+export interface TtlProbeVerdictResult {
+  verdict: TtlProbeVerdict
+  reason: string
+}
+
+export type TtlProbeArm = "claude" | "gpt"
+
+export function parseTtlProbeArm(args: ReadonlyArray<string>): TtlProbeArm | "all" {
+  if (args.length === 0) return "all"
+  if (args.length !== 2 || args[0] !== "--arm") {
+    throw new Error("expected exactly --arm claude|gpt|all")
+  }
+  const arm = args[1]
+  if (arm !== "claude" && arm !== "gpt" && arm !== "all") {
+    throw new Error("--arm must be claude, gpt, or all")
+  }
+  return arm
+}
+
+function nonNegativeFinite(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+}
+
+/** Evaluate one cold→warm identity without comparing it with another arm. */
+export function computeTtlProbeVerdict(args: {
+  cold?: TtlProbeUsage
+  warm?: TtlProbeUsage
+  failed?: boolean
+  configuredDelaySeconds: number
+  actualDelaySeconds: number
+  evidenceFloorSeconds: number
+}): TtlProbeVerdictResult {
+  if (args.failed) {
+    return { verdict: "INCONCLUSIVE", reason: "one or more direct API calls failed" }
+  }
+  const valid = (sample: TtlProbeUsage | undefined): sample is TtlProbeUsage & {
+    inputTokens: number
+    cacheReadInputTokens: number
+    cacheCreationInputTokens: number
+  } => Boolean(
+    sample
+    && sample.cacheFieldsPresent === true
+    && nonNegativeFinite(sample.inputTokens)
+    && nonNegativeFinite(sample.cacheReadInputTokens)
+    && nonNegativeFinite(sample.cacheCreationInputTokens)
+  )
+  if (!valid(args.cold) || !valid(args.warm)) {
+    return { verdict: "INCONCLUSIVE", reason: "required numeric cache usage fields were missing or invalid" }
+  }
+  if (args.cold.cacheReadInputTokens > 0) {
+    return { verdict: "INCONCLUSIVE", reason: "cold request already reported a positive cache read" }
+  }
+  if (args.cold.cacheCreationInputTokens <= 0) {
+    return { verdict: "INCONCLUSIVE", reason: "cold request did not report a positive cache write" }
+  }
+  if (
+    !nonNegativeFinite(args.configuredDelaySeconds)
+    || !nonNegativeFinite(args.actualDelaySeconds)
+    || !nonNegativeFinite(args.evidenceFloorSeconds)
+    || args.actualDelaySeconds < args.evidenceFloorSeconds
+  ) {
+    return { verdict: "INCONCLUSIVE", reason: "measured delay was below the evidence floor" }
+  }
+  return args.warm.cacheReadInputTokens > 0
+    ? { verdict: "REUSED_AT_DELAY", reason: "warm request reported a positive cache read after the evidence-floor delay" }
+    : { verdict: "NOT_REUSED_AT_DELAY", reason: "warm request reported zero cache reads after the evidence-floor delay" }
+}
+
+/** Build a Responses payload with optional retention, without policy wiring. */
+export function buildTtlProbeResponsesPayload(args: {
+  model: string
+  salt: string
+  retention?: "24h"
+}): ResponsesPayload {
+  return {
+    model: args.model,
+    instructions: buildSaltedSystemPrefix(8_000, args.salt),
+    input: [{ role: "user", content: `cache-ttl-probe-${args.salt}` }],
+    max_output_tokens: 16,
+    stream: false,
+    ...(args.retention ? { prompt_cache_retention: args.retention } : {}),
+  }
+}
+
+export function ttlProbeIdentityFingerprint(payload: string | object): string {
+  const serialized = typeof payload === "string" ? payload : JSON.stringify(payload)
+  return createHash("sha256").update(serialized).digest("hex").slice(0, 16)
+}
+
+/** Responses/OpenAI usage: normalize inclusive totals while preserving presence. */
+export function normalizeTtlProbeResponsesUsage(usage: OpenAIUsageLike): TtlProbeUsage {
+  const raw = usage as Record<string, unknown>
+  const inputDetails = raw.input_tokens_details
+  const promptDetails = raw.prompt_tokens_details
+  const validNumber = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0
+  const validDetail = (value: unknown): value is Record<string, unknown> =>
+    !!value && typeof value === "object" && !Array.isArray(value)
+  const inputDetail = validDetail(inputDetails) ? inputDetails : undefined
+  const promptDetail = validDetail(promptDetails) ? promptDetails : undefined
+  const hasRead = validNumber(raw.cache_read_input_tokens)
+    || validNumber(inputDetail?.cached_tokens)
+    || validNumber(promptDetail?.cached_tokens)
+  const hasWrite = validNumber(raw.cache_write_tokens)
+    || validNumber(raw.cache_creation_input_tokens)
+    || validNumber(inputDetail?.cache_write_tokens)
+    || validNumber(inputDetail?.cache_creation_tokens)
+    || validNumber(promptDetail?.cache_write_tokens)
+    || validNumber(promptDetail?.cache_creation_tokens)
+  const normalized = normalizeOpenAIUsage(usage)
+  return {
+    inputTokens: normalized.totalInput,
+    cacheReadInputTokens: normalized.cacheRead,
+    cacheCreationInputTokens: normalized.cacheWrite,
+    cacheFieldsPresent: hasRead && hasWrite,
+  }
+}
+
+/** Anthropic Messages usage: preserve disjoint fields as reported. */
+export function normalizeTtlProbeClaudeUsage(value: unknown): TtlProbeUsage {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { cacheFieldsPresent: false }
+  }
+  const raw = value as Record<string, unknown>
+  const numeric = (field: string): number | undefined => {
+    const candidate = raw[field]
+    return typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0
+      ? candidate
+      : undefined
+  }
+  const inputTokens = numeric("input_tokens")
+  const cacheReadInputTokens = numeric("cache_read_input_tokens")
+  const cacheCreationInputTokens = numeric("cache_creation_input_tokens")
+  return {
+    inputTokens,
+    cacheReadInputTokens,
+    cacheCreationInputTokens,
+    cacheFieldsPresent: cacheReadInputTokens !== undefined && cacheCreationInputTokens !== undefined,
   }
 }
 
