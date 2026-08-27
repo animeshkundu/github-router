@@ -145,6 +145,8 @@ declare -a PROBE_REGISTRY=(
   "advisor_claude_adaptive_thinking|claude-emits|claude-opus-5 on /v1/messages accepts the escalated advisor body (stream:false + thinking:{type:'adaptive'} + output_config.effort) and returns 200"
   "advisor_claude_nonstreaming_cap|claude-emits|claude-opus-5 on /v1/messages accepts max_tokens at the advertised max_non_streaming_output_tokens (16000) when stream:false"
   "advisor_claude_streaming_cap_accepted|exploratory|claude-opus-5 on /v1/messages ACCEPTS max_tokens at the streaming ceiling (64000) even when stream:false — max_non_streaming_output_tokens is advertised but not enforced; the advisor stays inside it by choice, not necessity"
+  "fast_advisor_all_leads_policy|proxy-internal|authenticated fast Advisor route matrix: Luna/Sol/Grok Responses, Gemini Chat, Opus Messages; Gemini Advisor Chat/high and same-lead continuation on every row"
+  "fast_advisor_endpoint_gate|proxy-internal|automatic fast Advisor selects Gemini only when its live catalog row advertises Chat; missing/wrong endpoint falls back; explicit pin remains authoritative"
 
   # ===== Peer-MCP personas (Phase B6 of cap-codex-effort-add-opus-critic) =====
   # Two probe shapes:
@@ -616,6 +618,31 @@ probe_stream_with_tools() {
   assert_status 200 \
     && assert_body_contains "event: message_start" \
     && assert_body_contains "event: content_block_start"
+}
+
+# ===========================================================================
+# Fast Advisor local-policy probes
+# ===========================================================================
+
+probe_fast_advisor_all_leads_policy() {
+  # Launch identity is private and nonce-bound, so a raw live probe cannot
+  # construct it without scraping runtime files. Execute the deterministic
+  # authenticated route matrix instead: it drives the real Hono handler and
+  # asserts every upstream model/endpoint/body through a mocked Copilot edge.
+  if ! bun test "${PROJECT_ROOT}/tests/advisor-fast-profile-route-matrix.test.ts" >/dev/null 2>&1; then
+    echo "  ${C_RED}FAIL${C_RESET}: fast Advisor five-lead route matrix failed"
+    return 1
+  fi
+}
+
+probe_fast_advisor_endpoint_gate() {
+  # Resolver coverage pins the missing/wrong-Chat fallback and explicit-pin
+  # precedence. Keep separate from the full route matrix so a catalog-gate
+  # regression names its own failure class.
+  if ! bun test "${PROJECT_ROOT}/tests/advisor-lead-aware.test.ts" >/dev/null 2>&1; then
+    echo "  ${C_RED}FAIL${C_RESET}: fast Advisor endpoint-gate selection failed"
+    return 1
+  fi
 }
 
 # ===========================================================================

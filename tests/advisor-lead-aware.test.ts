@@ -11,10 +11,8 @@ import {
   ADVISOR_DEFAULT_MODEL,
   ADVISOR_ESCALATION_MODEL,
   ADVISOR_FAST_PROFILE_MODEL,
-  FAST_PROFILE_LEAD_MODEL,
   advisorTransport,
   advisorUsesResponses,
-  isFastProfileLead,
   resolveAdvisorEffort,
   resolveAdvisorModel,
 } from "../src/services/advisor/advisor"
@@ -96,7 +94,8 @@ function fullCatalog() {
     ]),
     model("claude-haiku-4.5", "anthropic", OPUS_EFFORTS),
     model(ADVISOR_DEFAULT_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
-    model(FAST_PROFILE_LEAD_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
+    model("gpt-5.6-luna", "openai", SOL_EFFORTS, {}, ["/responses"]),
+    model("grok-4.6", "xai", SOL_EFFORTS, {}, ["/responses"]),
     model(ADVISOR_FAST_PROFILE_MODEL, "google", GEMINI_EFFORTS, {}, [
       "/chat/completions",
     ]),
@@ -214,11 +213,15 @@ describe("resolveAdvisorModel — operator pin", () => {
   })
 })
 
-describe("resolveAdvisorModel — fast Luna profile", () => {
+describe("resolveAdvisorModel — authenticated fast profile", () => {
   for (const lead of [
-    FAST_PROFILE_LEAD_MODEL,
-    `${FAST_PROFILE_LEAD_MODEL}[1m]`,
-    `openai/${FAST_PROFILE_LEAD_MODEL}`,
+    "gpt-5.6-luna",
+    "gpt-5.6-luna[1m]",
+    "openai/gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "grok-4.6",
+    "gemini-3.7-flash",
+    "claude-opus-5",
   ]) {
     test(`${lead} picks the fast-profile Gemini advisor`, () => {
       expect(resolveAdvisorModel(lead, true)).toEqual({
@@ -229,47 +232,53 @@ describe("resolveAdvisorModel — fast Luna profile", () => {
     })
   }
 
-  test("falls back to the cross-lab default when the catalog has no Gemini 3.7 Flash", () => {
+  test("falls back when Gemini is absent", () => {
     setCatalog(
-      model(FAST_PROFILE_LEAD_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
+      model("gpt-5.6-sol", "openai", SOL_EFFORTS, {}, ["/responses"]),
       model(ADVISOR_DEFAULT_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
     )
-    expect(resolveAdvisorModel(FAST_PROFILE_LEAD_MODEL, true)).toEqual({
+    expect(resolveAdvisorModel("gpt-5.6-sol", true)).toEqual({
       model: ADVISOR_DEFAULT_MODEL,
       escalated: false,
       fastProfile: false,
     })
   })
 
-  test("the operator pin still wins over the fast profile", () => {
+  test("falls back when Gemini does not advertise Chat", () => {
+    setCatalog(
+      model("gpt-5.6-sol", "openai", SOL_EFFORTS, {}, ["/responses"]),
+      model(ADVISOR_DEFAULT_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
+      model(ADVISOR_FAST_PROFILE_MODEL, "google", GEMINI_EFFORTS, {}, [
+        "/responses",
+      ]),
+    )
+    expect(resolveAdvisorModel("gpt-5.6-sol", true)).toEqual({
+      model: ADVISOR_DEFAULT_MODEL,
+      escalated: false,
+      fastProfile: false,
+    })
+  })
+
+  test("the operator pin still wins even when its endpoint is outside fast policy", () => {
     process.env.GH_ROUTER_ADVISOR_MODEL = ADVISOR_ESCALATION_MODEL
-    expect(resolveAdvisorModel(FAST_PROFILE_LEAD_MODEL, true)).toEqual({
+    expect(resolveAdvisorModel("grok-4.6", true)).toEqual({
       model: ADVISOR_ESCALATION_MODEL,
       escalated: false,
       fastProfile: false,
     })
   })
 
-  test("a standard (non-Luna) lead never reads as fast profile", () => {
-    expect(resolveAdvisorModel("claude-opus-5").fastProfile).toBe(false)
-    expect(resolveAdvisorModel("claude-sonnet-5").fastProfile).toBe(false)
-    expect(resolveAdvisorModel("gpt-5.6-sol").fastProfile).toBe(false)
+  test("direct Luna stays standard without authenticated fast launch policy", () => {
+    expect(resolveAdvisorModel("gpt-5.6-luna")).toEqual({
+      model: ADVISOR_DEFAULT_MODEL,
+      escalated: false,
+      fastProfile: false,
+    })
   })
 })
 
-describe("isFastProfileLead", () => {
-  test("matches the bare id, the [1m] decoration, and a vendor-namespaced form", () => {
-    expect(isFastProfileLead(FAST_PROFILE_LEAD_MODEL)).toBe(true)
-    expect(isFastProfileLead(`${FAST_PROFILE_LEAD_MODEL}[1m]`)).toBe(true)
-    expect(isFastProfileLead(`openai/${FAST_PROFILE_LEAD_MODEL}`)).toBe(true)
-  })
-
-  test("does not match a different lead, or an absent one", () => {
-    expect(isFastProfileLead("gpt-5.6-sol")).toBe(false)
-    expect(isFastProfileLead("claude-opus-5")).toBe(false)
-    expect(isFastProfileLead(undefined)).toBe(false)
-  })
-})
+// The former `isFastProfileLead` predicate was intentionally removed: fast
+// Advisor eligibility belongs to authenticated launch identity, not one model.
 
 describe("advisorTransport", () => {
   test("a Claude advisor model always uses messages, even though opus-5 also advertises chat", () => {

@@ -140,7 +140,18 @@ describe("getClaudeCodeEnvVars", () => {
   }
 
   function withoutCompactionEnv<T>(fn: () => T): T {
-    const keys = ["CLAUDE_CODE_AUTO_COMPACT_WINDOW", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"]
+    // The test process itself may have been launched by `github-router claude`
+    // and therefore inherit tier/custom model envs. Clear them so every fixture
+    // is determined only by this call's model/profile/catalog, not by whichever
+    // model the developer happened to start this test session with.
+    const keys = [
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+      "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_CUSTOM_MODEL_OPTION",
+    ]
     const prior = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
     for (const key of keys) delete process.env[key]
     try {
@@ -164,7 +175,7 @@ describe("getClaudeCodeEnvVars", () => {
     const value = withCatalog(
       [
         catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
-        catalogModel("claude-opus-5", 1_000_000, 872_000),
+        catalogModel("claude-opus-5", 1_000_000, 936_000),
       ],
       () =>
         withoutCompactionEnv(
@@ -184,10 +195,9 @@ describe("getClaudeCodeEnvVars", () => {
   })
 
   /**
-   * The window must respect the TIGHTEST prompt ceiling reachable in the
-   * launch, not just the lead's — every seeded tier row becomes the active
-   * model id verbatim when picked from `/model`. On a fast launch the Opus 5
-   * tier row is still seeded, so its 872K ceiling is what binds.
+   * The window must respect the tightest COMPLETE derived window reachable in
+   * the launch, not just the lead's. Current live Opus 5 is 936K prompt, so
+   * Luna/Sol's 922K ceiling binds a normal fast launch at 816700.
    */
   test("derives the window from the tightest reachable prompt ceiling", () => {
     const lunaOnly = withCatalog(
@@ -208,7 +218,7 @@ describe("getClaudeCodeEnvVars", () => {
     const withOpusRow = withCatalog(
       [
         catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
-        catalogModel("claude-opus-5", 1_000_000, 872_000),
+        catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
       ],
       () =>
         withoutCompactionEnv(
@@ -220,18 +230,44 @@ describe("getClaudeCodeEnvVars", () => {
             ).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
         ),
     )
-    // floor(872_000 * 0.85) + 20_000 + 13_000 — Opus 5's tighter ceiling wins.
-    expect(withOpusRow).toBe("774200")
+    expect(withOpusRow).toBe("816700")
+  })
+
+  /**
+   * Regression for the old aggregation. It selected the smallest PROMPT and
+   * then used that row's output reserve, but output participates in the full
+   * expression. Crossed inputs make the lower complete result belong to the
+   * row with the larger prompt, so the old implementation returns 803000 and
+   * this test fails.
+   */
+  test("minimizes the complete per-candidate derived window", () => {
+    const value = withCatalog(
+      [
+        // 900K prompt + 20K client-capped output -> 798000
+        catalogModel("gpt-5.6-luna", 1_050_000, 900_000, 128_000),
+        // 905K prompt + 1K output -> 783250 (the true minimum)
+        catalogModel("claude-opus-5", 1_000_000, 905_000, 1_000),
+      ],
+      () =>
+        withoutCompactionEnv(
+          () =>
+            getClaudeCodeEnvVars(
+              "http://127.0.0.1:8787",
+              "gh-router-luna-driver-max",
+              "fast",
+            ).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    expect(value).toBe("783250")
   })
 
   /**
    * The standard profile is covered too: this is not a fast-only defect. The
-   * default Opus 5 lead advertises 1M total against an 872K prompt ceiling,
-   * which is the exact configuration that bricked a real session.
+   * current live Opus 5 lead advertises 1M total against a 936K prompt ceiling.
    */
   test("applies to the standard Opus 5 lead, not just the fast profile", () => {
     const value = withCatalog(
-      [catalogModel("claude-opus-5", 1_000_000, 872_000)],
+      [catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000)],
       () =>
         withoutCompactionEnv(
           () =>
@@ -239,7 +275,26 @@ describe("getClaudeCodeEnvVars", () => {
               .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
         ),
     )
-    expect(value).toBe("774200")
+    expect(value).toBe("828600")
+  })
+
+  test("includes gateway-discovered 1M models after a standard launch", () => {
+    const value = withCatalog(
+      [
+        // Standard Opus alone would derive 828600.
+        catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
+        // The gateway-discovered Luna row is selectable through `/model` and
+        // binds lower even though it has no dedicated ANTHROPIC_DEFAULT_* env.
+        catalogModel("gpt-5.6-luna", 1_050_000, 922_000, 128_000),
+      ],
+      () =>
+        withoutCompactionEnv(
+          () =>
+            getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5[1m]")
+              .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    expect(value).toBe("816700")
   })
 
   /**
@@ -310,7 +365,7 @@ describe("getClaudeCodeEnvVars", () => {
       const vars = withCatalog(
         [
           catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
-          catalogModel("claude-opus-5", 1_000_000, 872_000),
+          catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
         ],
         () =>
           withoutCompactionEnv(() =>

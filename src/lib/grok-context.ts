@@ -5,7 +5,7 @@
  *
  * The defect class this exists to close: Claude Code budgets against a total
  * window (1,000,000 via the `[1m]` bracket) while Copilot enforces
- * `max_prompt_tokens` (Luna 922K, Opus 5 872K, Grok 372K). Its own compaction
+ * `max_prompt_tokens` (Luna 922K, Opus 5 936K, Grok 372K). Its own compaction
  * threshold therefore lands ABOVE the ceiling, so a long session sends a
  * request the provider rejects before the client ever decides to compact.
  *
@@ -87,7 +87,7 @@ export function computeConservativeCompactionTrigger(
  *
  * Worked, against the live catalog at time of writing:
  *   Luna    922_000 prompt / 128_000 out -> trigger 783_700, window 816_700
- *   Opus 5  872_000 prompt / 128_000 out -> trigger 741_200, window 774_200
+ *   Opus 5  936_000 prompt /  64_000 out -> trigger 795_600, window 828_600
  *
  * Returns undefined when the catalog metadata is missing or nonsensical, so
  * the caller omits the variable entirely rather than exporting a guess. That

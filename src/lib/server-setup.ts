@@ -1257,7 +1257,7 @@ export function getClaudeCodeEnvVars(
   //
   // The defect it closes: Claude Code budgets against a TOTAL context window
   // (1,000,000, unlocked by the `[1m]` bracket) while Copilot enforces the
-  // smaller `max_prompt_tokens` (Luna 922K, Opus 5 872K). Its own compaction
+  // smaller `max_prompt_tokens` (Luna 922K, Opus 5 936K). Its own compaction
   // threshold — `window - min(maxOutput, 20_000) - 13_000` ~= 967K — therefore
   // sits ABOVE the ceiling, so a long session sends a request Copilot rejects
   // before the client ever decides to compact. Observed 2026-08-26: a
@@ -1317,9 +1317,10 @@ function catalogEntryForSeededModel(value: string): Model | undefined {
 }
 
 /**
- * Set `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the largest window that still keeps
- * the client's reactive compaction trigger at 85% of the TIGHTEST prompt
- * ceiling this launch can reach.
+ * Set `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the smallest complete derived
+ * window across every 1M-accounted model this launch can reach. Each candidate
+ * puts the client's reactive trigger at 85% of that model's prompt ceiling;
+ * the minimum is therefore safe after any `/model` switch.
  *
  * Only `[1m]`-decorated candidates participate. An undecorated row already
  * budgets at the client's conservative 200K default, which is below every
@@ -1332,31 +1333,43 @@ function catalogEntryForSeededModel(value: string): Model | undefined {
 function applyAutoCompactWindow(vars: Record<string, string>): void {
   if (process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW !== undefined) return
 
-  let tightestPrompt: number | undefined
-  let outputForTightest: number | undefined
+  let tightestWindow: number | undefined
+  const consider = (value: string | undefined): void => {
+    // Undecorated ids keep the client's 200K default; see the doc comment.
+    if (!value || !/\[1m\]/i.test(value)) return
+    const limits = catalogEntryForSeededModel(value)?.capabilities?.limits
+    // Minimize the COMPLETE derived expression per candidate. Selecting the
+    // smallest prompt first and then carrying only that row's output limit is
+    // subtly wrong: output reserve participates in the result, so crossed
+    // prompt/output order can make a larger-prompt row the tighter window.
+    const candidateWindow = deriveAutoCompactWindowTokens(
+      limits?.max_prompt_tokens,
+      limits?.max_output_tokens,
+    )
+    if (
+      candidateWindow !== undefined
+      && (tightestWindow === undefined || candidateWindow < tightestWindow)
+    ) {
+      tightestWindow = candidateWindow
+    }
+  }
+
   for (const key of LEAD_CAPABLE_MODEL_ENV_KEYS) {
     // A tier row the USER pinned never lands in `vars` (the seed helpers bail
     // on a parent-set value), but it is still selectable from `/model` and so
     // still binds the window. Read through to the parent env for exactly that
     // case. `ANTHROPIC_MODEL` is sanitized out of the parent env upstream, so
     // for the lead this only ever reads what we just set.
-    const value = vars[key] ?? process.env[key]
-    // Undecorated ids keep the client's 200K default; see the doc comment.
-    if (!value || !/\[1m\]/i.test(value)) continue
-    const limits = catalogEntryForSeededModel(value)?.capabilities?.limits
-    const prompt = limits?.max_prompt_tokens
-    if (typeof prompt !== "number" || !Number.isFinite(prompt) || prompt <= 0) {
-      continue
-    }
-    if (tightestPrompt === undefined || prompt < tightestPrompt) {
-      tightestPrompt = prompt
-      outputForTightest = limits?.max_output_tokens
-    }
+    consider(vars[key] ?? process.env[key])
   }
+  // Gateway-discovered rows are equally selectable active lead ids even though
+  // they have no dedicated ANTHROPIC_DEFAULT_* env. Ignoring them makes a
+  // standard Opus launch derive 828600, then overflow after `/model` switches
+  // to Luna whose 922K prompt ceiling requires 816700.
+  for (const model of nativeSelectableModelsInCatalog()) consider(model.id)
 
-  const window = deriveAutoCompactWindowTokens(tightestPrompt, outputForTightest)
-  if (window === undefined) return
-  vars.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(window)
+  if (tightestWindow === undefined) return
+  vars.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(tightestWindow)
 }
 
 /**

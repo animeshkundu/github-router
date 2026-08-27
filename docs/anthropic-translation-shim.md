@@ -27,7 +27,7 @@ There are two independent gates, and both must be satisfied for a non-Claude
 model to run a Claude Code session end-to-end:
 
 1. **Selection gate (client side)** — Claude Code has to let the user *pick* a
-   non-Claude id. Phase 3 makes the five target models appear as first-class rows
+   non-Claude id. Phase 3 makes the four fast-profile target models appear as first-class rows
    in Claude Code's `/model` picker by pre-seeding its gateway-model discovery
    cache (see [Phase 3](#phase-3-native-model-selection-gateway-cache-seed)).
    Any explicit selection (`github-router claude -m <id>`) also works without the
@@ -38,14 +38,16 @@ model to run a Claude Code session end-to-end:
 
 ## Target models
 
-Live-verified working end-to-end against real Copilot:
+The shim is generic across catalog-advertised Responses/Chat models. The current fast picker seeds these four live-verified rows:
 
 | Model | Served via | Notes |
 |---|---|---|
-| `gpt-5.5` | `/responses` | 1M context on the base slug |
-| `gpt-5.3-codex` | `/responses` | 400k context (see [Model gaps](#model-gaps-inherent-copilot-limits)) |
-| `gemini-3.5-flash` | `/chat/completions` | |
-| `gemini-3.1-pro-preview` | `/chat/completions` | preview slug — NOT `gemini-3.1-pro` |
+| `gpt-5.6-sol` | `/responses` | 1.05M context on the base slug |
+| `gpt-5.6-luna` | `/responses` | 1.05M context on the base slug |
+| `gemini-3.7-flash` | `/chat/completions` | 1M context on the base slug |
+| `grok-4.6` | `/responses` | 500K total / 372K prompt; kept bare |
+
+The compatibility matrix also retains older explicit model probes (`gpt-5.5`, `gpt-5.3-codex`, `gemini-3.5-flash`, `gemini-3.1-pro-preview`) because raw clients can still name them and the generic shim continues to support them.
 
 The routing is derived from each model's catalog `supported_endpoints`, never a
 hardcoded slug list, so it generalizes to any future non-Claude model Copilot
@@ -276,10 +278,10 @@ selectedModel, originalModel)` exactly once.
 
 Non-regression is **structural**, not "we were careful": the Claude path shares
 no code with the shim beyond the branch, and the classifier is guard-tested to
-keep every Claude model on the passthrough. ADVISOR (`advisor-tool` beta) plus a
-non-Claude model is refused with a clear 400 — there is no server-side advisor
-translate-loop for either shim path, so failing fast beats silently translating
-the injected tool with no handler.
+keep every Claude model on the passthrough. ADVISOR (`advisor-tool` beta) plus an ordinary non-Claude model degrades by
+stripping the internal tool. An authenticated fast primary lead is the exception:
+both shim paths run the server-side Advisor loop, dispatch Gemini 3.7 Flash on
+Chat, and continue on the selected lead's original endpoint.
 
 `classifyMessagesRoute` fails **CLOSED toward Claude**. `isClaudeModel` returns
 true on any of: catalog vendor containing `anthropic`, capability family
@@ -346,8 +348,8 @@ design already neutralizes the one batching case that does occur.
 **Blast radius** if the contract were violated: a dropped text suffix or a missing
 `thinking` signature on affected turns — a content-fidelity regression, not a
 crash or a lifecycle/leak bug (the stream still terminates cleanly). The empirical
-backstop is the Phase 5 live end-to-end suite that exercises the five target
-models against real Copilot, which is where a real-world ordering change would
+backstop is the Phase 5 live end-to-end suite that exercises the current four
+fast rows plus retained compatibility models against real Copilot, which is where a real-world ordering change would
 surface.
 
 ## Fields
@@ -426,15 +428,16 @@ honestly rather than papered over:
 
 > **Fast profile (shipped).** The picker inventory is exactly `gpt-5.6-sol` /
 > `gpt-5.6-luna` / `gemini-3.7-flash` / `grok-4.6`, gated on the live catalog.
-> A literal `-m fast` launch uses Luna as the lead, fixes native role efforts,
-> and routes its optional lead-only Advisor to Gemini 3.7 Flash through the
-> shared streaming shim. The fixed endpoint contract is Responses for Luna,
-> Sol, and Grok; Chat Completions for Gemini; native Messages for the Opus
-> Oracle. Standard launches, including direct `-m gpt-5.6-luna`, retain their
+> A literal `-m fast` launch starts on Luna, fixes native role efforts, and keeps
+> its optional primary-lead-only Advisor on Gemini 3.7 Flash after `/model`
+> switches to any fixed fast row. The fixed endpoint contract is Responses for
+> Luna, Sol, and Grok; Chat Completions for Gemini; native Messages for Opus.
+> Non-Claude Advisor continuations return through the selected lead's same endpoint;
+> Task subagents still have Advisor stripped. Standard launches, including direct `-m gpt-5.6-luna`, retain their
 > standard surface and catalog-derived routing. See [`default-models.md`](default-models.md)
 > and [`claude-env-injection.md`](claude-env-injection.md).
 
-Phase 3 (`src/lib/server-setup.ts`) makes the five target models selectable in
+Phase 3 (`src/lib/server-setup.ts`) makes the four fast-profile target models selectable in
 Claude Code's `/model` picker WITHOUT a network round-trip and without touching
 the Claude tier defaults.
 
@@ -460,7 +463,7 @@ rename, so a concurrent Claude Code read never sees torn JSON) and (2) enables
 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`. The enable is conditional and
 presence-guarded:
 
-- Only the subset of the five models actually present in the live Copilot catalog
+- Only the subset of the four fast-profile rows actually present in the live Copilot catalog
   is seeded (`nativeSelectableModelsInCatalog`) — license tiers differ, so a
   missing model is silently dropped and lesser tiers see the unchanged picker.
 - Discovery is turned on ONLY when the seed actually landed AND neither the parent
@@ -476,7 +479,7 @@ capability registry and would silently degrade advanced tool use. Phase 3 doesn'
 change that verdict: the network fetch is **permanently blocked** here (the proxy
 always sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and the fetch never reads
 the synthetic OAuth credential), so it can never overwrite the seed. The seed is
-authoritative for the session, and it contains ONLY these five non-Claude ids. The
+authoritative for the session, and it contains ONLY these four non-Claude ids. The
 capability-mapping hazard lived entirely on the fetch path, which stays closed.
 
 **Display labels only / context accounting.** The cache schema is `{id,
@@ -484,10 +487,10 @@ display_name?}` per model — there is no per-model context-window field, so the
 seed decorates `id` with `[1m]` when that exact catalog entry advertises at least
 1M context and `CLAUDE_CODE_DISABLE_1M_CONTEXT` is unset. Claude Code recognizes
 the literal suffix and accounts a decorated row at 1M; `display_name` remains
-bare. In the current target set this decorates `gpt-5.6-sol`, `gpt-5.5`,
-`gemini-3.5-flash`, and `gemini-3.1-pro-preview`, while 400k `gpt-5.3-codex`
-stays bare because the cache schema has no representation for 400k and
-over-budgeting would risk overflow.
+bare. In the current fast target set this decorates `gpt-5.6-sol`,
+`gpt-5.6-luna`, and `gemini-3.7-flash`; `grok-4.6` stays bare because the cache
+schema has no representation for 500K and over-budgeting it as 1M would risk
+overflow.
 
 **Version-coupling caveat.** The cache path and schema are Claude Code internals,
 verified against build 2.1.201. This is graceful-degradation-coupled: if a future

@@ -46,7 +46,6 @@ import {
   buildAdvisorStream,
   injectAdvisorTool,
   isAdvisorRequested,
-  isFastProfileLead,
   resolveAdvisorEffort,
   resolveAdvisorModel,
 } from "~/services/advisor/advisor"
@@ -508,18 +507,13 @@ export async function handleCompletion(c: Context) {
   )
   if (messagesRoute !== "claude-passthrough") {
     // ADVISOR is Claude-only in the GENERAL case: the server-side advisor
-    // translate-loop (buildAdvisorStream) exists only on the native
-    // /v1/messages path. The ONE exception is the fast Luna-lead profile,
-    // whose advisor (Gemini 3.7 Flash, via `resolveAdvisorModel`) runs
-    // through THIS SAME shim's translation + SSE-synthesis machinery
-    // (`streamParsedRequestViaShim` for the initial turn, a
-    // `makeShimContinueTurn`-built continuation for every turn after) —
-    // see plan section 8 "Enable Gemini 3.7 Flash Advisor on the Luna
-    // translation path". Every OTHER non-Claude lead still gracefully
-    // degrades below exactly as before. Advisor only ever runs on a
-    // STREAMING request (mirrors the Claude-passthrough branch, which gates
-    // buildAdvisorStream on `isStreaming` too — a non-streaming request
-    // never gets the advisor loop on ANY lead).
+    // translate-loop (buildAdvisorStream) exists only on native Messages.
+    // The authenticated fast primary lead is the one exception: regardless of
+    // which fixed fast model `/model` selected, Gemini 3.7 Flash Advisor runs
+    // through THIS SAME shim's translation + SSE synthesis machinery
+    // (`streamParsedRequestViaShim` initially, `makeShimContinueTurn` after).
+    // Every ordinary non-Claude lead still degrades below. Advisor only runs on
+    // a STREAMING request, matching the Claude-passthrough branch.
     const endpoint: ShimEndpoint = messagesRoute === "chat-shim" ? "chat" : "responses"
     let parsedBase: AnyRecord | undefined
     try {
@@ -533,8 +527,7 @@ export async function handleCompletion(c: Context) {
     if (
       advisorEnabled
       && wantsStream
-      && identity.launch?.profileId === "fast"
-      && isFastProfileLead(modelId)
+      && fastLeadAdvisor
     ) {
       const initialConversation = Array.isArray(parsedBase!.messages)
         ? (parsedBase!.messages as Array<AnyRecord>)
@@ -566,7 +559,7 @@ export async function handleCompletion(c: Context) {
         startTime,
       )
 
-      const advisorChoice = resolveAdvisorModel(modelId, true)
+      const advisorChoice = resolveAdvisorModel(modelId, fastLeadAdvisor)
       return new Response(
         buildAdvisorStream({
           firstResponse,
@@ -601,7 +594,7 @@ export async function handleCompletion(c: Context) {
       )
     }
 
-    // ADVISOR is unavailable on every OTHER non-Claude model — whether picked
+    // ADVISOR is unavailable on every ordinary non-Claude model — whether picked
     // via `-m <model>` or switched at runtime via the /model picker —
     // gracefully DEGRADE instead of 400ing every request (which would break
     // `github-router claude -m gpt-5.5` entirely, since the claude launcher

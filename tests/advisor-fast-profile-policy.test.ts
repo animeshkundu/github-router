@@ -12,6 +12,7 @@ import { LAUNCH_SECRET_HEADER } from "~/lib/messages-identity-preflight"
 import { state } from "~/lib/state"
 import { server } from "~/server"
 import {
+  ADVISOR_FAST_PROFILE_MODEL,
   ADVISOR_INTERNAL_TOOL_NAME,
   ADVISOR_TOOL_INSTRUCTIONS,
   FAST_ADVISOR_TOOL_INSTRUCTIONS,
@@ -184,6 +185,7 @@ describe("fast Advisor request policy", () => {
       ["implementer", LUNA_IMPLEMENTER_ALIAS_ID],
       ["reviewer", "grok-4.6"],
       ["planner", "gpt-5.6-sol"],
+      ["critic", "gemini-3.7-flash"],
     ] as const) {
       const response = await server.request("/v1/messages", {
         method: "POST",
@@ -198,7 +200,7 @@ describe("fast Advisor request policy", () => {
       expect(response.status).toBe(200)
     }
 
-    expect(forwarded).toHaveLength(4)
+    expect(forwarded).toHaveLength(5)
     for (const body of forwarded) {
       expect(body).not.toContain(ADVISOR_INTERNAL_TOOL_NAME)
       expect(body).not.toContain("advisor_20260301")
@@ -220,14 +222,29 @@ describe("fast Advisor request policy", () => {
 
     globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
       const url = String(_url)
-      if (url.includes("/responses")) {
+      if (url.includes("/chat/completions")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as {
-          instructions?: string
-          reasoning?: { effort?: string }
+          messages?: Array<{ role?: string; content?: string }>
+          reasoning_effort?: string
+          model?: string
         }
-        advisorSystemPrompt = body.instructions ?? ""
-        advisorEffort = body.reasoning?.effort ?? ""
-        return Promise.resolve(responsesObjectResponse())
+        expect(body.model).toBe(ADVISOR_FAST_PROFILE_MODEL)
+        advisorSystemPrompt =
+          body.messages?.find((message) => message.role === "system")?.content ?? ""
+        advisorEffort = body.reasoning_effort ?? ""
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: { role: "assistant", content: "Advisor advice." },
+                  finish_reason: "stop",
+                },
+              ],
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
+        )
       }
 
       messagesCalls++

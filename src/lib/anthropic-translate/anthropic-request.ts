@@ -319,7 +319,7 @@ function anthropicMessageToNeutral(msg: AnyRecord): Array<NeutralMessage> {
           // embeds `server_tool_use`/`advisor_tool_result` blocks directly in
           // a replayed assistant turn. Neither shim endpoint understands
           // these Anthropic-native block types, so they were previously
-          // silently dropped here — a Luna-lead session that consulted the
+          // silently dropped here — a fast-lead session that consulted the
           // advisor earlier in the SAME conversation would lose that turn's
           // substance entirely on the next request's replay. Translate to
           // visible neutral text instead, so the model (and a human reading

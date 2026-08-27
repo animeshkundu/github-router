@@ -44,18 +44,18 @@ live catalog?
   private aliases use the same one-suffix normalization, and the marker is removed
   before Copilot dispatch. The Haiku row is deliberately seeded to `claude-sonnet-5`
   in a standard Opus session to match the small/fast default.
-- **Compaction window.** Every profile injects one derived integer window when unset:
-  `floor(P * 0.85) + 20_000 + 13_000`, where `P` is the tightest `max_prompt_tokens`
-  among the `[1m]`-decorated ids this launch makes selectable (lead plus tier rows plus
-  the custom option). It puts the client's reactive trigger at 85% of the real prompt
-  ceiling instead of ~967K, which is above it. Luna-only reach gives `816700`; with the
-  Opus 5 tier row reachable, `774200`. Safe as a launch-global because the client
-  resolves it as `Math.min(modelWindow, value)` and can only lower a window, so bare
-  200K models (Grok 4.6, Haiku 4.5) are untouched. It MUST be a plain decimal integer:
-  the env path is `parseInt`-based, so `"1m"` becomes `1`, is floored to 100,000, and
-  compacts a 1M session every ~52K tokens. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is left
-  unset because the honest window already carries the client's own reserves and the
-  percentage interacts with a separate 20% precompute buffer.
+- **Compaction window.** Every profile injects one derived integer window when unset.
+  For each reachable `[1m]` candidate (lead, tier/custom rows, and gateway-discovered
+  rows), compute `floor(prompt * 0.85) + min(output, 20_000) + 13_000`; export the
+  minimum complete expression. Current Luna/Sol rows bind at `816700`; current live
+  Opus/Sonnet/Gemini rows individually derive `828600`. `/model` cannot mutate the
+  launch env, but Claude Code resolves `Math.min(locallyRecognizedModelWindow, value)`,
+  so the minimum remains safe and only slightly conservative after a switch. Native
+  subagents inherit it; true 200K models stay about 200K. Grok 4.6 advertises 500K but
+  remains bare because the client has no 500K declaration, so it is conservatively
+  treated as about 200K and compacts early. The env value MUST be a decimal integer:
+  its `parseInt` path turns `"1m"` into `1`, floors to 100,000, and compacts a 1M
+  session every ~52K tokens. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` remains unset.
 
 ## 3. Raise-the-floor assessment
 
