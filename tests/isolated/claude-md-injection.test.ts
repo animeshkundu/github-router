@@ -1073,6 +1073,7 @@ test("profile:'fast' names exactly the fast roster and never a removed native/to
   expect(directive).toContain("`implementer`")
   expect(directive).toContain("`reviewer`")
   expect(directive).toContain("`planner`")
+  expect(directive).toContain("`critic`")
   expect(directive).toContain("Advisor")
   expect(directive).toContain("lead-only")
   expect(directive).toContain("never use it for routine progress")

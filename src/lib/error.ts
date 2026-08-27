@@ -71,21 +71,33 @@ export async function forwardError(c: Context, error: unknown) {
       errorJson = undefined
     }
 
-    // Map upstream context-overflow errors (413, or 400 with a known
-    // overflow substring) to Anthropic's "prompt is too long" 400 shape so
-    // Claude Code triggers self-compaction instead of bubbling the error.
-    // Note: a live probe of an oversized prompt against Copilot returned
-    // 200 with stop_reason:"refusal" rather than 413/400 — this guard is
-    // defensive for the documented Anthropic contract, not load-bearing.
-    if (isContextOverflow(error.response.status, errorJson, errorText)) {
+    // Map an upstream context-overflow rejection onto Claude Code's gateway
+    // capability-rejection contract, so the client runs its own recovery
+    // (reactive compaction + retry) instead of stranding the session.
+    //
+    // This is the whole reason a long session used to brick: Copilot rejects
+    // with "Your input exceeds the context window of this model" on a 400, and
+    // the client's classifier only consults its "context window" test on a
+    // 413 — so that 400 matched no class, produced no canonical error, and no
+    // compaction was ever triggered. `/compact` then re-sent the same
+    // oversized request and failed identically.
+    const overflowClass = classifyOverflow(
+      error.response.status,
+      errorJson,
+      errorText,
+    )
+    if (overflowClass) {
       const upstream = resolveErrorMessage(errorJson, errorText)
-      consola.error("HTTP error (mapped to overflow):", errorJson ?? errorText)
+      consola.error(
+        `HTTP error (mapped to ${overflowClass}):`,
+        errorJson ?? errorText,
+      )
       return c.json(
         {
           type: "error",
           error: {
             type: "invalid_request_error",
-            message: `prompt is too long: ${upstream}`,
+            message: buildCapabilityRejectedMessage(overflowClass, upstream),
           },
         },
         400,
@@ -179,7 +191,83 @@ const CONTEXT_OVERFLOW_SUBSTRINGS = [
   "input is too long",
   "maximum context length",
   "too many tokens",
+  // Copilot's exact wording. Load-bearing: Claude Code's own classifier only
+  // consults its "context window" test on a 413, so this phrasing on a 400
+  // classifies as NOTHING there and the session strands instead of compacting.
+  "exceeds the context window",
 ]
+
+/** Upstream wording for the `max_tokens_context_overflow` class: the prompt
+ *  itself fits, but prompt + requested `max_tokens` does not. A different
+ *  client recovery (lower `max_tokens`) than dropping history, so it must not
+ *  be collapsed into `prompt_too_long`. */
+const MAX_TOKENS_OVERFLOW_SUBSTRING =
+  "input length and `max_tokens` exceed context limit"
+
+/**
+ * Prefix of Claude Code's gateway capability-rejection contract.
+ *
+ * A gateway that replaces an upstream 400/413 body hides the wording the
+ * client recovers from, so the client accepts a stable token in its place:
+ * `capability_rejected: <class>`. Verified in the installed 2.1.247 bundle —
+ * `IZ(e) = JBn(e.message) || wd(e.message, "prompt_too_long")`, i.e. the
+ * ORIGINAL WORDING or the TOKEN, either one. We emit both: the token is the
+ * documented contract, the wording is the older independently-matched path,
+ * and neither costs anything. `wd` boundary-checks the character after the
+ * class, so whatever follows the token must not match `[A-Za-z0-9_:.-]`.
+ */
+const CAPABILITY_REJECTED_PREFIX = "capability_rejected: "
+
+/**
+ * Build the `error.message` for a classified overflow.
+ *
+ * A space after the class satisfies the client's right-boundary check; the
+ * human-readable tail preserves the upstream detail for a user reading the
+ * transcript, and independently satisfies the wording matcher.
+ */
+export function buildCapabilityRejectedMessage(
+  overflowClass: "prompt_too_long" | "max_tokens_context_overflow",
+  upstream: string,
+): string {
+  const wording =
+    overflowClass === "prompt_too_long"
+      ? "prompt is too long"
+      : MAX_TOKENS_OVERFLOW_SUBSTRING
+  return `${CAPABILITY_REJECTED_PREFIX}${overflowClass} (${wording}: ${upstream})`
+}
+
+/**
+ * Which overflow class an upstream rejection belongs to, or undefined when it
+ * is not an overflow at all.
+ *
+ * The `max_tokens` variant is tested FIRST and independently of
+ * `isContextOverflow`: it names a different client recovery (lower
+ * `max_tokens`, keep the history) than dropping history, so collapsing it into
+ * `prompt_too_long` would trigger the wrong one.
+ */
+export function classifyOverflow(
+  status: number,
+  errorJson: unknown,
+  errorText: string,
+): "prompt_too_long" | "max_tokens_context_overflow" | undefined {
+  if (status !== 400 && status !== 413) return undefined
+  if (overflowHaystack(errorJson, errorText).includes(MAX_TOKENS_OVERFLOW_SUBSTRING)) {
+    return "max_tokens_context_overflow"
+  }
+  return isContextOverflow(status, errorJson, errorText)
+    ? "prompt_too_long"
+    : undefined
+}
+
+function overflowHaystack(errorJson: unknown, errorText: string): string {
+  return (
+    errorText +
+    " " +
+    (typeof errorJson === "object" && errorJson !== null
+      ? JSON.stringify(errorJson)
+      : "")
+  ).toLowerCase()
+}
 
 /**
  * Detect upstream context-overflow errors so we can remap them to a 400
@@ -198,13 +286,7 @@ export function isContextOverflow(
   if (status === 413) return true
   if (status !== 400) return false
 
-  const haystack = (
-    errorText +
-    " " +
-    (typeof errorJson === "object" && errorJson !== null
-      ? JSON.stringify(errorJson)
-      : "")
-  ).toLowerCase()
+  const haystack = overflowHaystack(errorJson, errorText)
 
   return CONTEXT_OVERFLOW_SUBSTRINGS.some((s) => haystack.includes(s))
 }

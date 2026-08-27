@@ -67,6 +67,7 @@ const SUBCOMMANDS: ReadonlyArray<{ cmd: string; args: ReadonlyArray<string> }> =
     cmd: "internal-worker-guard",
     args: ["--workers-key", "workers", "--modes", "explore"],
   },
+  { cmd: "internal-fast-dispatch-guard", args: [] },
 ]
 
 /**

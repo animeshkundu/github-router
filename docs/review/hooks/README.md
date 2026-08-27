@@ -11,12 +11,14 @@ Two rules, from the approved review plan:
    - **(5a) model-facing TEXT quality**: Anthropic's tool/prompt authoring guidance: descriptive not coercive, conditional phrasing, no `MUST`/`ALWAYS` over-trigger, specific and concrete, minimal.
    - **(5b) FIRING appropriateness**: does it fire at the right lifecycle moment? Over-fire, under-fire, or wrong-action?
 
-## The 7 hooks
+## The 8 hooks
+
+Fast launches add one separate hook, `PreToolUse` matching `^(Task|Agent)$`, which enforces only the fast native delegation graph. It is registered after fast runtime generation and its installation is fatal for fast launches; standard launches do not register it. The hook uses a compiled policy and synchronous stdin parsing, so it is not a shell sandbox: Bash remains governed by each native role's toolset and the hook only controls in-session Task/Agent ACL edges.
 
 All are registered in `src/claude.ts` into `<CLAUDE_CONFIG_DIR>/settings.json` via `injectStopHookIntoSettingsFile` (`src/lib/orchestration/stop-gate-hook.ts:656`). All key off the same discriminator, the `agent_type`/`agent_id` fields Claude Code sets only inside a subagent context, but in two different ways:
 
 - The four non-guard hooks (#1 prompt-submit, #4 session-bind, #5 artifact-open, #6 stop) are TOP-LEVEL-ONLY: they stand down on ANY subagent/teammate payload via `isSubagentContext` (`src/lib/orchestration/stop-gate-policy.ts:43`), so they never recurse into spawned workers.
-- The two PreToolUse guards (#2, #3) are the INVERSE, and deliberately not blanket top-level-only. #2 INSPECTS `agent_type` to ALLOW the exact `worker-<mode>` dispatcher subagent while denying everyone else (`decideWorkerGuard`, `src/lib/worker-dispatch.ts:183-196`). #3 does NOT inspect agent context at all, it hardcodes `operatorMode=true` (`src/internal-first-mate-guard.ts:62`) and denies by tool-name prefix regardless of caller (see that doc for the subagent-over-block risk this creates).
+- The three PreToolUse guards (#2, #3, and the fast-only hook) are the INVERSE, and deliberately not blanket top-level-only. #2 INSPECTS `agent_type` to ALLOW the exact `worker-<mode>` dispatcher subagent while denying everyone else (`decideWorkerGuard`, `src/lib/worker-dispatch.ts:183-196`). #3 does NOT inspect agent context at all, it hardcodes `operatorMode=true` (`src/internal-first-mate-guard.ts:62`) and denies by tool-name prefix regardless of caller (see that doc for the subagent-over-block risk this creates). The fast-only guard recognizes only `Task`/`Agent`, resolves caller identity from the hook payload, and enforces the fast native graph.
 
 | # | Event · matcher | Executable | Gate (registration) | Model text? | Doc |
 |---|---|---|---|---|---|

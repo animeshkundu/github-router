@@ -283,6 +283,15 @@ describe("advisorTransport", () => {
   test("a /chat/completions-only advisor model uses chat", () => {
     expect(advisorTransport(ADVISOR_FAST_PROFILE_MODEL)).toBe("chat")
   })
+
+  test("fast Advisor stays on chat when Gemini advertises both endpoints", () => {
+    const gemini = state.models?.data.find((entry) => entry.id === ADVISOR_FAST_PROFILE_MODEL)
+    if (!gemini) throw new Error("missing Gemini fixture")
+    gemini.supported_endpoints = ["/responses", "/chat/completions"]
+
+    expect(advisorTransport(ADVISOR_FAST_PROFILE_MODEL)).toBe("responses")
+    expect(advisorTransport(ADVISOR_FAST_PROFILE_MODEL, true)).toBe("chat")
+  })
 })
 
 describe("resolveAdvisorEffort — precedence", () => {

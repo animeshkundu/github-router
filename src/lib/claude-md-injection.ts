@@ -160,7 +160,7 @@ export interface NativeAgentAvailability {
    *  hard restriction (not a catalog-availability signal, unlike every
    *  `*Available` flag above). When set, `buildNativeReachClauses` and
    *  `buildOperatingDefaultsDirective` return a short, self-contained
-   *  rendering naming only `scout`/`implementer`/`reviewer`/`planner`,
+   *  rendering naming only `scout`/`implementer`/`reviewer`/`planner`/`critic`,
    *  Advisor, and Oracle — it must never name the standard-only `*-fast`/
    *  `brainstorm`/`scribe`/`general-purpose-fast`, `peer-review-coordinator`,
    *  `worker-*`/`orchestrate` tools or skills, or `stand_in`, since none of
@@ -203,6 +203,7 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
       "`implementer` for approved mechanical coding changes",
       "`reviewer` for repository-aware verification, reproduction, and root-causing",
       "`planner` as the Sol plan consultant and approver after Luna has drafted with evidence",
+      "`critic` for a fresh-context cross-lab challenge to a plan, design, diff, or decision",
     ])
   }
   const clauses: Array<string> = []

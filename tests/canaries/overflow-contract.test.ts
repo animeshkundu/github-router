@@ -1,0 +1,94 @@
+import { describe, expect, test } from "bun:test"
+
+import { buildCapabilityRejectedMessage } from "../../src/lib/error"
+import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
+
+/**
+ * Drift canary for the two client-owned mechanisms the overflow fix rides on.
+ *
+ * 1. The GATEWAY CAPABILITY CONTRACT. Claude Code lets a proxy that replaces an
+ *    upstream 400/413 body substitute a stable token, `capability_rejected:
+ *    <class>`, for the wording it hid. The client matches the token exactly as
+ *    it would the original wording, and the session self-heals instead of
+ *    stranding. `src/lib/error.ts` emits `prompt_too_long` and
+ *    `max_tokens_context_overflow` through that contract.
+ *
+ * 2. The COMPACTION-WINDOW ENV BOUNDS. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is
+ *    parsed with `parseInt` (NOT the suffix-aware `/config` parser), floored to
+ *    100,000 and capped at 1,000,000. Those two constants are what
+ *    `deriveAutoCompactWindowTokens` clamps to, and the floor is why a value
+ *    like "1m" is a bug rather than a no-op: it parses to 1, gets raised to
+ *    100,000, and silently compacts a 1M session every ~52K tokens.
+ *
+ * Both failure modes are silent on our side, which is what makes a canary worth
+ * its weight. It SKIPS where no client is installed (CI, a fresh container)
+ * because absence there proves nothing.
+ */
+
+/** Marker strings that must still be present in the installed build. */
+const REQUIRED_MARKERS: ReadonlyArray<{ needle: string; why: string }> = [
+  {
+    needle: "capability_rejected: ",
+    why: "the gateway capability-rejection token prefix our overflow envelope emits",
+  },
+  {
+    needle: "prompt is too long",
+    why: "the client's wording matcher, the second half of our belt-and-braces envelope",
+  },
+  {
+    needle: "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    why: "the env var the derived compaction window is exported through",
+  },
+  {
+    needle: "IWe=1e5",
+    why: "the 100,000-token floor the env value is silently raised to",
+  },
+  {
+    needle: "ZRt=1e6",
+    why: "the 1,000,000-token cap the env value is clamped to",
+  },
+]
+
+describe("client overflow-contract canary", () => {
+  const bundle = installedClaudeBundle()
+
+  test("our envelope satisfies the client's documented token shape", () => {
+    const message = buildCapabilityRejectedMessage(
+      "prompt_too_long",
+      "Your input exceeds the context window of this model.",
+    )
+
+    // The client boundary-checks the character after the class so a class
+    // cannot be read as the prefix of a longer identifier.
+    const token = "capability_rejected: prompt_too_long"
+    const at = message.indexOf(token)
+    expect(at).toBeGreaterThanOrEqual(0)
+    const next = message[at + token.length]
+    expect(next !== undefined && /[A-Za-z0-9_:.-]/.test(next)).toBe(false)
+
+    // And the independent wording path, which is matched lowercased.
+    expect(message.toLowerCase()).toContain("prompt is too long")
+  })
+
+  test("every relied-on marker still appears in the installed build", async () => {
+    if (!bundle) {
+      console.log(
+        "[canary] no Claude Code install found — skipping overflow-contract check",
+      )
+      return
+    }
+    for (const { needle, why } of REQUIRED_MARKERS) {
+      const present = await bundleContainsAny(bundle, [needle])
+      if (!present) {
+        throw new Error(
+          `Overflow-contract marker no longer present in ${bundle}.\n`
+            + `Missing: ${JSON.stringify(needle)} (${why})\n`
+            + "Re-derive it from the installed bundle and update "
+            + "src/lib/error.ts / src/lib/grok-context.ts. Until then a long "
+            + "session can strand on an unrecognised context overflow.",
+        )
+      }
+      expect(present).toBe(true)
+    }
+  }, 120_000)
+})

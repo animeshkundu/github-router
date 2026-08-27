@@ -8,11 +8,15 @@ import { createBodyTooLargeError, limitRequestBody } from "srvx/body-limit"
 import { PATHS, ensurePaths } from "./paths"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
+import { deriveAutoCompactWindowTokens } from "./grok-context"
+import { stripTrailingOneMSuffix } from "./model-suffix"
+import type { Model } from "~/services/copilot/get-models"
 import {
   LUNA_DRIVER_ALIAS_ID,
   LUNA_HAIKU_ALIAS_ID,
   LUNA_REAL_MODEL_ID,
   LUNA_SONNET_ALIAS_ID,
+  canonicalizeAliasModel,
   type LaunchProfileId,
 } from "./launch-profile"
 import { catalogAdvertises1M, oneMContextDisabled, withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
@@ -29,7 +33,7 @@ import { setupCopilotToken, setupGitHubAgentToken, setupGitHubToken } from "./to
 import { toolbeltEnabled } from "./toolbelt"
 import { toolbeltPathOverride } from "./toolbelt/path-inject"
 import { provisionTreeSitterAssets } from "./tree-sitter-assets/provision"
-import { cacheModels, cacheCopilotVersion, cacheVSCodeVersion } from "./utils"
+import { cacheModels, cacheCopilotVersion, cacheVSCodeVersion, resolveModel } from "./utils"
 import { warnOnTokenPriceDrift } from "./worker-agent/model-resolve"
 import { resolveMcpToolTimeoutMs } from "./worker-agent/budget"
 import { server as app } from "../server"
@@ -996,6 +1000,7 @@ export function getClaudeCodeEnvVars(
   // ANTHROPIC_SMALL_FAST_MODEL pass-through documented in launch.ts's
   // STRIPPED_PARENT_ENV_KEYS comment.
   const isFastProfile = launchProfileId === "fast"
+
   const smallFastModel =
     isFastProfile
       ? LUNA_HAIKU_ALIAS_ID
@@ -1247,6 +1252,31 @@ export function getClaudeCodeEnvVars(
     clearGatewayModelCache()
   }
 
+  // Context-window safety, applied AFTER every model-bearing var is seeded so
+  // it can read the exact ids this launch made selectable.
+  //
+  // The defect it closes: Claude Code budgets against a TOTAL context window
+  // (1,000,000, unlocked by the `[1m]` bracket) while Copilot enforces the
+  // smaller `max_prompt_tokens` (Luna 922K, Opus 5 872K). Its own compaction
+  // threshold — `window - min(maxOutput, 20_000) - 13_000` ~= 967K — therefore
+  // sits ABOVE the ceiling, so a long session sends a request Copilot rejects
+  // before the client ever decides to compact. Observed 2026-08-26: a
+  // top-level Luna turn at 919,814 input tokens, rejected at `/responses`.
+  //
+  // `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is the right lever precisely because the
+  // client resolves it as `Math.min(modelWindow, value)`. It can only ever
+  // LOWER a window, so one launch-global value is safe across a mixed roster:
+  // a bare 200K model (Grok, Haiku 4.5) keeps its own 200K and is unaffected.
+  // `CLAUDE_CODE_MAX_CONTEXT_TOKENS` was rejected as the alternative because
+  // the client applies it only to ids that do NOT start with `claude-`, so it
+  // cannot fix the Opus 5 default lead.
+  //
+  // It MUST be a decimal integer string. The env path does not use the
+  // suffix-aware `/config` parser — it is `parseInt`-based, so "1m" parses to
+  // 1 and is then floored to 100,000, which would compact a 1M session every
+  // ~52K tokens. Pinned by a regression test.
+  applyAutoCompactWindow(vars)
+
   // Prepend the toolbelt bin dir to the spawned agent's PATH so it can
   // call rg/fd/jq/sd/sg/yq directly. Uses the parent's existing PATH
   // key casing to avoid creating a duplicate `Path`/`PATH` on Windows.
@@ -1255,6 +1285,78 @@ export function getClaudeCodeEnvVars(
   }
 
   return vars
+}
+
+/**
+ * Every env var whose value can become the ACTIVE main-loop model id, and so
+ * whose prompt ceiling the compaction window has to respect. `ANTHROPIC_MODEL`
+ * is the lead; the tier rows and the custom option each become the active id
+ * verbatim when picked from `/model`.
+ *
+ * `ANTHROPIC_SMALL_FAST_MODEL` is deliberately absent: background ops run
+ * there, but compaction itself runs on the main-loop model (verified in the
+ * 2.1.247 bundle — the summarizer starts from `r.options.mainLoopModel`).
+ */
+const LEAD_CAPABLE_MODEL_ENV_KEYS = [
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "ANTHROPIC_CUSTOM_MODEL_OPTION",
+] as const
+
+/**
+ * Resolve one seeded env value to its live catalog entry: strip the `[1m]`
+ * accounting bracket, erase router-owned alias provenance, then translate the
+ * Anthropic-dashed slug onto Copilot's catalog id.
+ */
+function catalogEntryForSeededModel(value: string): Model | undefined {
+  const { base } = stripTrailingOneMSuffix(canonicalizeAliasModel(value))
+  const id = resolveModel(base)
+  return state.models?.data?.find((m) => m.id === id)
+}
+
+/**
+ * Set `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the largest window that still keeps
+ * the client's reactive compaction trigger at 85% of the TIGHTEST prompt
+ * ceiling this launch can reach.
+ *
+ * Only `[1m]`-decorated candidates participate. An undecorated row already
+ * budgets at the client's conservative 200K default, which is below every
+ * prompt ceiling in the lineup, so including it would drag the window down for
+ * no benefit. When nothing is decorated, or no candidate carries usable
+ * catalog limits, the variable is omitted entirely rather than guessed.
+ *
+ * Presence-guarded on the parent env, symmetric with every other guard here.
+ */
+function applyAutoCompactWindow(vars: Record<string, string>): void {
+  if (process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW !== undefined) return
+
+  let tightestPrompt: number | undefined
+  let outputForTightest: number | undefined
+  for (const key of LEAD_CAPABLE_MODEL_ENV_KEYS) {
+    // A tier row the USER pinned never lands in `vars` (the seed helpers bail
+    // on a parent-set value), but it is still selectable from `/model` and so
+    // still binds the window. Read through to the parent env for exactly that
+    // case. `ANTHROPIC_MODEL` is sanitized out of the parent env upstream, so
+    // for the lead this only ever reads what we just set.
+    const value = vars[key] ?? process.env[key]
+    // Undecorated ids keep the client's 200K default; see the doc comment.
+    if (!value || !/\[1m\]/i.test(value)) continue
+    const limits = catalogEntryForSeededModel(value)?.capabilities?.limits
+    const prompt = limits?.max_prompt_tokens
+    if (typeof prompt !== "number" || !Number.isFinite(prompt) || prompt <= 0) {
+      continue
+    }
+    if (tightestPrompt === undefined || prompt < tightestPrompt) {
+      tightestPrompt = prompt
+      outputForTightest = limits?.max_output_tokens
+    }
+  }
+
+  const window = deriveAutoCompactWindowTokens(tightestPrompt, outputForTightest)
+  if (window === undefined) return
+  vars.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(window)
 }
 
 /**

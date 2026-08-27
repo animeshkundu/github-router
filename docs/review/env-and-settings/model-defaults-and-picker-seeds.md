@@ -13,7 +13,9 @@ live catalog?
 | `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | `src/lib/server-setup.ts:633-635` | set in parent shell (presence-guarded); NOT stripped from parent (`src/lib/launch.ts:77-81`) |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `claude-sonnet-5` | `src/lib/server-setup.ts:660-662` | set in parent shell (presence-guarded) |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claude-sonnet-5` (NOT a Haiku slug) | `src/lib/server-setup.ts:663-665` | set in parent shell (presence-guarded) |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5` (bare, no `[1m]`) | `src/lib/server-setup.ts:666-668` | set in parent shell (presence-guarded) |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5` (catalog-gated `[1m]`) | `src/lib/server-setup.ts` tier seed | set in parent shell (presence-guarded) |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | catalog-derived decimal integer, every profile | `applyAutoCompactWindow` in `src/lib/server-setup.ts` | parent value wins; omitted when catalog limits are unusable |
+| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | never set | n/a | deliberately unset; see note below |
 | Design doc | `docs/default-models.md` | | |
 
 ## 2. What they do + behavior effect
@@ -36,12 +38,24 @@ live catalog?
   multipliers), deliberately Sonnet over Haiku for the quality lift on those ops on the
   canonical enterprise deployment (`docs/default-models.md:20`).
 - **The three `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL`** knobs seed the `/model`
-  picker's tier rows (cc-backup `modelOptions.ts:78,109,167`) so a user switching model
-  lands on ids the proxy can route. All are BARE slugs — the `[1m]` decoration lives only
-  on the active `ANTHROPIC_MODEL`, never on picker rows (seeding a bracketed slug would
-  bypass cap-awareness and risk a Copilot 400 or local over-accounting, `src/lib/server-setup.ts:646-655`).
-  The Haiku row is deliberately seeded to `claude-sonnet-5` (not a Haiku slug) to match
-  the small/fast default.
+  picker's tier rows so a user switching model lands on ids the proxy can route. Values
+  are catalog-gated and carry at most one `[1m]` suffix when the resolved backend
+  advertises 1M; paired `*_MODEL_NAME` values remain bare for readable labels. Fast
+  private aliases use the same one-suffix normalization, and the marker is removed
+  before Copilot dispatch. The Haiku row is deliberately seeded to `claude-sonnet-5`
+  in a standard Opus session to match the small/fast default.
+- **Compaction window.** Every profile injects one derived integer window when unset:
+  `floor(P * 0.85) + 20_000 + 13_000`, where `P` is the tightest `max_prompt_tokens`
+  among the `[1m]`-decorated ids this launch makes selectable (lead plus tier rows plus
+  the custom option). It puts the client's reactive trigger at 85% of the real prompt
+  ceiling instead of ~967K, which is above it. Luna-only reach gives `816700`; with the
+  Opus 5 tier row reachable, `774200`. Safe as a launch-global because the client
+  resolves it as `Math.min(modelWindow, value)` and can only lower a window, so bare
+  200K models (Grok 4.6, Haiku 4.5) are untouched. It MUST be a plain decimal integer:
+  the env path is `parseInt`-based, so `"1m"` becomes `1`, is floored to 100,000, and
+  compacts a 1M session every ~52K tokens. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is left
+  unset because the honest window already carries the client's own reserves and the
+  percentage interacts with a separate 20% precompute buffer.
 
 ## 3. Raise-the-floor assessment
 

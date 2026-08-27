@@ -1,4 +1,5 @@
 import { state } from "./state"
+import { normalizeTrailingOneMSuffix } from "./model-suffix"
 import { resolveModel } from "./utils"
 
 /**
@@ -68,8 +69,10 @@ export function oneMContextDisabled(): boolean {
  * conservative 200K accounting rather than being over-budgeted into an overflow.
  */
 export function withOneMSuffix(id: string): string {
-  if (oneMContextDisabled()) return id
-  return catalogAdvertises1M(id) ? `${id}[1m]` : id
+  const normalized = normalizeTrailingOneMSuffix(id)
+  const base = normalized.replace(/\[1m\]$/i, "")
+  if (oneMContextDisabled()) return base
+  return catalogAdvertises1M(base) ? `${base}[1m]` : base
 }
 
 /**
@@ -117,7 +120,8 @@ export function withOneMSuffix(id: string): string {
  * default — under-accounting, never overflow.
  */
 export function withOneMSuffixForLead(slug: string): string {
-  if (oneMContextDisabled()) return slug
-  if (/\[1m\]$/i.test(slug)) return slug
-  return catalogAdvertises1M(resolveModel(slug)) ? `${slug}[1m]` : slug
+  const normalized = normalizeTrailingOneMSuffix(slug)
+  const base = normalized.replace(/\[1m\]$/i, "")
+  if (oneMContextDisabled()) return base
+  return catalogAdvertises1M(resolveModel(base)) ? `${base}[1m]` : base
 }

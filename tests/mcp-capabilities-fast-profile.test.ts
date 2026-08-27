@@ -24,6 +24,9 @@ import {
   FAST_IMPLEMENTER_FAST_MODEL,
   FAST_REVIEWER_FAST_MODEL,
   FAST_REVIEWER_MIN_PROMPT_TOKENS,
+  FAST_CRITIC_MODEL,
+  FAST_CRITIC_EFFORT,
+  fastCriticModel,
   FAST_SCOUT_MODEL,
   fastImplementerFastModel,
   fastReviewerFastModel,
@@ -76,7 +79,7 @@ test("fastScoutModel and fastImplementerFastModel pin to Luna, requiring tool_ca
   expect(FAST_SCOUT_MODEL).toBe("gpt-5.6-luna")
   expect(FAST_IMPLEMENTER_FAST_MODEL).toBe("gpt-5.6-luna")
 
-  setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000 }))
+  setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000, endpoints: ["/responses"] }))
   expect(fastScoutModel()).toBe("gpt-5.6-luna")
   expect(fastImplementerFastModel()).toBe("gpt-5.6-luna")
 
@@ -98,6 +101,22 @@ test("fastScoutModel and fastImplementerFastModel pin to Luna, requiring tool_ca
   // No fallback: another 1M-context Luna-adjacent model must NOT substitute.
   setCatalog(entry("gpt-5.6-terra", { ctx: 1_050_000 }))
   expect(fastScoutModel()).toBeUndefined()
+})
+
+test("fastCriticModel pins to Gemini Flash with tool calls, 1M, medium, and chat", () => {
+  expect(FAST_CRITIC_MODEL).toBe("gemini-3.7-flash")
+  expect(FAST_CRITIC_EFFORT).toBe("medium")
+  setCatalog(entry("gemini-3.7-flash", { ctx: ONE_M, efforts: ["medium"], endpoints: ["/chat/completions"] }))
+  expect(fastCriticModel()).toBe("gemini-3.7-flash")
+  for (const opts of [
+    { ctx: ONE_M, efforts: ["high"], endpoints: ["/chat/completions"] },
+    { ctx: 400_000, efforts: ["medium"], endpoints: ["/chat/completions"] },
+    { ctx: ONE_M, efforts: ["medium"], endpoints: ["/responses"] },
+    { ctx: ONE_M, efforts: ["medium"], endpoints: ["/chat/completions"], toolCalls: false },
+  ]) {
+    setCatalog(entry("gemini-3.7-flash", opts))
+    expect(fastCriticModel()).toBeUndefined()
+  }
 })
 
 test("fastReviewerFastModel pins to Grok 4.6 via max_prompt_tokens, not total context", () => {

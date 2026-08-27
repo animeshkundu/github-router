@@ -35,6 +35,7 @@ import {
 } from "~/lib/thinking-history-repair"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { preprocessFastRequest } from "~/lib/fast-request-preprocess"
+import { salvageOversizedPrompt } from "~/lib/prompt-window-salvage"
 import {
   buildWebSearchContext,
   injectAnthropicWebSearchContext,
@@ -485,6 +486,10 @@ export async function handleCompletion(c: Context) {
   } = resolveModelInBody(finalBody)
 
   const modelId = resolvedModel ?? originalModel
+  const { body: promptWindowBody } = await salvageOversizedPrompt(
+    resolvedBody,
+    selectedModel,
+  )
 
   // Non-Claude models are diverted to the Anthropic-translation shim: those
   // Copilot serves via `/responses` (gpt-5.5, gpt-5.3-codex) take the Responses
@@ -495,7 +500,12 @@ export async function handleCompletion(c: Context) {
   // slug list. The ORIGINAL (pre-resolution) request model id is passed as the
   // 3rd arg so a Claude alias that resolveModel maps onto a non-Claude-looking
   // id can never be diverted to either shim (fail-closed to Claude).
-  const messagesRoute = classifyMessagesRoute(modelId, selectedModel, originalModel)
+  const messagesRoute = classifyMessagesRoute(
+    modelId,
+    selectedModel,
+    originalModel,
+    fastProfileRequest,
+  )
   if (messagesRoute !== "claude-passthrough") {
     // ADVISOR is Claude-only in the GENERAL case: the server-side advisor
     // translate-loop (buildAdvisorStream) exists only on the native
@@ -513,7 +523,7 @@ export async function handleCompletion(c: Context) {
     const endpoint: ShimEndpoint = messagesRoute === "chat-shim" ? "chat" : "responses"
     let parsedBase: AnyRecord | undefined
     try {
-      parsedBase = JSON.parse(resolvedBody) as AnyRecord
+      parsedBase = JSON.parse(promptWindowBody) as AnyRecord
     } catch {
       // Malformed body — fall through to the plain shim handlers below,
       // which re-parse and surface their own 400.
@@ -606,7 +616,7 @@ export async function handleCompletion(c: Context) {
     // path, so it must never reach gpt/gemini regardless of whether the advisor
     // beta was present — a hand-crafted client could decouple the tool from the
     // beta. stripAdvisorTool returns the same string when nothing matched.
-    const shimBody = stripAdvisorTool(resolvedBody)
+    const shimBody = stripAdvisorTool(promptWindowBody)
     if (advisorEnabled) {
       consola.info(
         "ADVISOR requested with a non-Claude model — stripping the injected "
@@ -644,7 +654,7 @@ export async function handleCompletion(c: Context) {
     ...selectedModel?.requestHeaders,
     ...effectiveBetas,
   }
-  let nativeBody = resolvedBody
+  let nativeBody = promptWindowBody
   const knownThinkingRepair = repairKnownThinkingHistory(nativeBody)
   if (knownThinkingRepair) {
     nativeBody = knownThinkingRepair.body

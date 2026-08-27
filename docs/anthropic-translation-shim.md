@@ -424,28 +424,15 @@ honestly rather than papered over:
 
 ## Phase 3: native model selection (gateway cache-seed)
 
-> **Fast profile.** The four picker rows this section
-> describes today are planned to be REPLACED with exactly `gpt-5.6-sol` /
-> `gpt-5.6-luna` / `gemini-3.7-flash` / `grok-4.6` (dropping `gpt-5.5`,
-> `gpt-5.3-codex`, `gemini-3.5-flash`, and the dynamic Gemini-review append), as
-> part of a Luna-led `-m fast` launch profile. This change applies to BOTH
-> standard and fast Claude launches (it does not alter either surface's active
-> default lead). See the "Fast launch profile" → "Replaced gateway picker rows"
-> section of [`default-models.md`](default-models.md) for the full design, and
-> [`claude-env-injection.md`](claude-env-injection.md) for the discovery-gate
-> mechanics this section's cache-seed relies on (those are unchanged by the row
-> replacement).
->
-> The same fast profile also makes the ADVISOR-degrades-on-non-Claude rule below
-> gain one exception: on a fast-profile launch, the primary lead's optional,
-> non-binding Advisor routes to Gemini 3.7 Flash through a newly extracted
-> streaming shim entry point instead of degrading. Fast Task subagents have the
-> Advisor tool stripped and cannot enter the translate loop. See
-> "Gemini 3.7 Flash Advisor on the Luna translation path" in
-> [`default-models.md`](default-models.md) for the endpoint-selection, tool-use-id,
-> and cancellation-contract details — this is a separate, later-landing workstream
-> from the row replacement above, kept in its own commit for an isolated bisect
-> range.
+> **Fast profile (shipped).** The picker inventory is exactly `gpt-5.6-sol` /
+> `gpt-5.6-luna` / `gemini-3.7-flash` / `grok-4.6`, gated on the live catalog.
+> A literal `-m fast` launch uses Luna as the lead, fixes native role efforts,
+> and routes its optional lead-only Advisor to Gemini 3.7 Flash through the
+> shared streaming shim. The fixed endpoint contract is Responses for Luna,
+> Sol, and Grok; Chat Completions for Gemini; native Messages for the Opus
+> Oracle. Standard launches, including direct `-m gpt-5.6-luna`, retain their
+> standard surface and catalog-derived routing. See [`default-models.md`](default-models.md)
+> and [`claude-env-injection.md`](claude-env-injection.md).
 
 Phase 3 (`src/lib/server-setup.ts`) makes the five target models selectable in
 Claude Code's `/model` picker WITHOUT a network round-trip and without touching

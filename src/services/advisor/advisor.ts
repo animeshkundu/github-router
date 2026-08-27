@@ -50,6 +50,7 @@ import { events } from "fetch-event-stream"
 
 import { isClaudeModel } from "~/lib/anthropic-translate/classifier"
 import { HTTPError } from "~/lib/error"
+import { fastEndpointForModel } from "~/lib/fast-endpoint"
 import { isBudgetClaudeLead } from "~/lib/port"
 import {
   applyClaudeCachePolicy,
@@ -241,14 +242,27 @@ export type AdvisorTransport = "responses" | "chat" | "messages"
  * chat, mirroring `pickEndpoint`'s "omits supported_endpoints => chat-eligible"
  * convention — the same convention `classifyMessagesRoute` relies on for a
  * lead model, applied here to the advisor's OWN model instead.
+ *
+ * The authenticated fast Advisor passes `fastProfile:true`, which uses the same
+ * fixed endpoint policy as its lead/agent roster. Standard calls leave this
+ * false and retain the historical catalog/name behavior.
  */
-export function advisorTransport(resolvedAdvisorModel: string): AdvisorTransport {
+export function advisorTransport(
+  resolvedAdvisorModel: string,
+  fastProfile = false,
+): AdvisorTransport {
   const bare = resolvedAdvisorModel.slice(
     resolvedAdvisorModel.lastIndexOf("/") + 1,
   )
   const entry = state.models?.data?.find(
     (m) => m.id === resolvedAdvisorModel || m.id === bare,
   )
+  if (fastProfile && entry) {
+    const fixed = fastEndpointForModel(entry)
+    if (fixed === "messages" || fixed === "responses" || fixed === "chat") {
+      return fixed
+    }
+  }
   if (isClaudeModel(resolvedAdvisorModel, entry)) return "messages"
   if (advisorUsesResponses(resolvedAdvisorModel)) return "responses"
   return "chat"
@@ -886,7 +900,7 @@ async function runAdvisor(
   // Route by model family/catalog endpoint — see `advisorTransport` for the
   // three-way (`responses` / `chat` / `messages`) decision and its ordering
   // rationale.
-  const transport = advisorTransport(resolvedAdvisorModel)
+  const transport = advisorTransport(resolvedAdvisorModel, fastProfile)
 
   if (transport === "responses") {
     const payload = applyResponsesCachePolicy({

@@ -19,6 +19,7 @@ import {
 } from "./peer-mcp-personas"
 import { type Effort as SubagentEffort } from "./reasoning-effort"
 import {
+  FAST_CRITIC_ALIAS_ID,
   LUNA_IMPLEMENTER_ALIAS_ID,
   LUNA_SCOUT_ALIAS_ID,
 } from "./launch-profile"
@@ -160,7 +161,7 @@ interface BuildOpts {
    *  registers only `gemini-critic`) should pass `false`. */
   includeCoordinator?: boolean
   /** Fast-profile role assignments. When present, the explicit fast branch
-   *  emits the exact `scout`/`implementer`/`reviewer`/`planner` roster instead
+   *  emits the exact `scout`/`implementer`/`reviewer`/`planner`/`critic` roster instead
    *  of reusing standard role bodies. Standard callers omit these fields. */
   fastProfile?: boolean
   plannerModel?: string
@@ -170,6 +171,9 @@ interface BuildOpts {
   implementerEffort?: SubagentEffort
   reviewerEffort?: SubagentEffort
   plannerEffort?: SubagentEffort
+  criticEffort?: SubagentEffort
+  /** Resolved fast native critic model. */
+  criticModel?: string
   /** Compatibility fields for the original fast-profile implementation. */
   implementerFastEffort?: SubagentEffort
   reviewerFastEffort?: SubagentEffort
@@ -445,6 +449,7 @@ export const ALL_NATIVE_AGENT_NAMES = [
   "scribe",
   "implementer-fast",
   "general-purpose-fast",
+  "critic",
 ] as const
 
 /** Empty-string-safe read of an optional model id. */
@@ -541,8 +546,9 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
   const implementerModel = nonEmptyModel(opts.nativeSubagentModel)
   const reviewerModel = nonEmptyModel(opts.reviewerModel)
   const plannerModel = nonEmptyModel(opts.plannerModel)
-  if (!scoutModel || !implementerModel || !reviewerModel || !plannerModel) {
-    throw new Error("fast profile requires resolved scout, implementer, reviewer, and planner models")
+  const criticModel = nonEmptyModel(opts.criticModel)
+  if (!scoutModel || !implementerModel || !reviewerModel || !plannerModel || !criticModel) {
+    throw new Error("fast profile requires resolved scout, implementer, reviewer, planner, and critic models")
   }
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
@@ -554,21 +560,35 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     ? { mcpServers: { [peersKey]: httpEntryFor(opts.serverUrl, "peers", opts.nonce, opts.workspaceHeaderCmd) } }
     : {}
   const oracleTool = opts.groupKeys.peers ? `mcp__${peersKey}__oracle` : undefined
-  const readOnlyTools = readOnlyToolAllowlist(searchKey)
-  const consultTools = oracleTool ? [...readOnlyTools, oracleTool] : readOnlyTools
+  const readSearchTools = ["Read", "Grep", "Glob", "Bash"]
+  const scoutTools = [...readSearchTools, `mcp__${searchKey}__*`]
+  const reviewerTools = [...scoutTools, ...(oracleTool ? [oracleTool] : [])]
+  const plannerTools = [
+    ...readSearchTools,
+    "WebFetch",
+    "WebSearch",
+    `mcp__${searchKey}__*`,
+    ...(oracleTool ? [oracleTool] : []),
+    // Claude Code 2.1.246 exposes the native dispatcher as `Agent`; the
+    // historical `Task` spelling remains accepted by the policy hook for
+    // older clients but is not emitted as a frontmatter capability.
+    "Agent",
+  ]
 
   const reviewerPrompt =
     "You are the fast profile's repository-aware reviewer. Verify what is actually true by reading the code and running the relevant build, tests, or end-to-end reproduction. Find root causes rather than symptoms. Do not modify production code. Report severity-ranked findings with `file:line` evidence and a clear go/no-go. You do not have Advisor; independently reach your verdict from repository evidence. Use Oracle only as a last resort for one precise unresolved question after your own investigation. "
     + fileToolSteer("builds and reproductions")
     + " Do not spawn further agents."
-
+  const criticPrompt =
+    "You are the fast profile's fresh-context cross-lab critic. Assess the supplied plan, design, diff, or decision against its stated constraints. Look for overlooked failure modes, unsupported assumptions, and simpler safer alternatives. Do not modify files, run mutating commands, or spawn agents. Return concise severity-ranked findings with `file:line` evidence where applicable. "
+    + readOnlyToolSteer()
   const out: PeerAgentDefinitions = {
     scout: {
       description: `Read-only exploration subagent running ${scoutModel}. Use for broad repository discovery before the lead drafts a plan; return conclusions with file:line evidence, not file dumps.`,
       prompt:
         "Investigate the repository read-only. Cast a wide net, then return a concise evidence packet for the lead: conclusions, load-bearing `file:line` citations, commands checked, and explicit gaps. Do not plan, edit, or spawn agents. "
         + readOnlyToolSteer(),
-      tools: readOnlyTools,
+      tools: scoutTools,
       model: decorateGuaranteedOneM(LUNA_SCOUT_ALIAS_ID),
       effort: opts.scoutEffort ?? "high",
       ...searchMcp,
@@ -576,7 +596,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     implementer: {
       description: `Implementation subagent running ${implementerModel}. Use for well-specified mechanical changes after the plan is approved; implement and verify end to end in its own context.`,
       prompt:
-        "Implement the approved, well-specified change surgically. Match surrounding style, minimize unrelated churn, use dedicated file tools, and run the relevant build/tests. Do not redesign the plan or spawn more agents. Report changes, verification, and unresolved risk. "
+        "Implement the approved, well-specified change surgically. Match surrounding style, minimize unrelated churn, use dedicated file tools, and run the relevant build/tests. For verification, you may invoke only the fast-profile `reviewer` or `critic` native subagent; do not invoke any other role or redesign the plan. Report changes, verification, and unresolved risk. "
         + fileToolSteer("builds"),
       model: decorateGuaranteedOneM(LUNA_IMPLEMENTER_ALIAS_ID),
       effort: opts.implementerEffort ?? "max",
@@ -586,14 +606,26 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
       prompt: reviewerPrompt,
       model: reviewerModel,
       effort: opts.reviewerEffort ?? "medium",
-      ...peersMcp,
+      tools: reviewerTools,
+      mcpServers: {
+        ...(searchMcp.mcpServers ?? {}),
+        ...(peersMcp.mcpServers ?? {}),
+      },
+    },
+    critic: {
+      description: `Fresh-context cross-lab critic running ${criticModel} at medium effort. Use to challenge a plan, design, diff, or decision against its stated constraints and expose overlooked failure modes.`,
+      prompt: criticPrompt,
+      model: decorateGuaranteedOneM(FAST_CRITIC_ALIAS_ID),
+      effort: opts.criticEffort ?? "medium",
+      tools: scoutTools,
+      ...searchMcp,
     },
     planner: {
       description: `Plan consultant and approver running ${plannerModel}. Invoke only after Luna has done the repository legwork and drafted a plan; pass a handcrafted evidence packet and the complete draft. The lead must not implement until this agent returns APPROVE.`,
       prompt:
-        "You are the fast profile's final plan consultant and approver, not a first-pass planner. The caller must provide the user goal, acceptance criteria, repository/domain constraints, Luna's `file:line` and command/test evidence, the complete draft plan, settled decisions, and one focused review question. Selectively verify disputed citations or narrow evidence gaps with read/search tools, but do not repeat broad discovery, edit files, or execute the plan. Return exactly one leading verdict: `APPROVE`, `REVISE`, or `NEED_MORE_CONTEXT`. APPROVE only when the plan is safe, ordered, complete, and verifiable. REVISE must give concrete corrections. NEED_MORE_CONTEXT must name the exact evidence Luna should collect. You do not have Advisor; independently reach your verdict from the evidence packet and selective verification. Use Oracle only as a last resort for one precise unresolved question after your own review. Do not spawn further agents. "
+        "You are the fast profile's final plan consultant and approver, not a first-pass planner. The caller must provide the user goal, acceptance criteria, repository/domain constraints, Luna's `file:line` and command/test evidence, the complete draft plan, settled decisions, and one focused review question. Selectively verify disputed citations or narrow evidence gaps with read/search tools, but do not repeat broad discovery, edit files, or execute the plan. Return exactly one leading verdict: `APPROVE`, `REVISE`, or `NEED_MORE_CONTEXT`. APPROVE only when the plan is safe, ordered, complete, and verifiable. REVISE must give concrete corrections. NEED_MORE_CONTEXT must name the exact evidence Luna should collect. You do not have Advisor; independently reach your verdict from the evidence packet and selective verification. Use Oracle only as a last resort for one precise unresolved question after your own review. The Task/Agent capability is restricted by the fast in-session ACL: you may invoke only `reviewer`, `scout`, or `critic`; do not invoke any other role. Bash is for evidence commands only; this is not a shell sandbox. "
         + readOnlyToolSteer(),
-      tools: consultTools,
+      tools: plannerTools,
       model: decorateGuaranteedOneM(plannerModel),
       effort: opts.plannerEffort ?? "high",
       mcpServers: {
@@ -964,6 +996,9 @@ interface WriteOpts {
   implementerEffort?: SubagentEffort
   reviewerEffort?: SubagentEffort
   plannerEffort?: SubagentEffort
+  criticEffort?: SubagentEffort
+  /** Resolved fast native critic model. */
+  criticModel?: string
   /** Extra subagent definitions to register alongside the peer/worker agents
    *  (written as `.md` files so they appear in the Task `subagent_type` enum).
    *  Used by `serve` to inject Claude Code's built-in subagents (Explore/Plan/
@@ -1505,6 +1540,8 @@ export async function writePeerMcpRuntimeFiles(
     implementerEffort: opts.implementerEffort,
     reviewerEffort: opts.reviewerEffort,
     plannerEffort: opts.plannerEffort,
+    criticModel: opts.criticModel,
+    criticEffort: opts.criticEffort,
     nonce,
     codexHome,
     serverUrl,
@@ -1519,26 +1556,36 @@ export async function writePeerMcpRuntimeFiles(
   await fs.unlink(mcpConfigPath).catch(() => {})
   await fs.unlink(agentsPath).catch(() => {})
 
-  await writeRuntimeFileSecure(mcpConfigPath, JSON.stringify(mcpConfig, null, 2))
-  await writeRuntimeFileSecure(agentsPath, JSON.stringify(agents, null, 2))
+  let mdResult: Awaited<ReturnType<typeof writePeerAgentMdFiles>> | undefined
+  try {
+    await writeRuntimeFileSecure(mcpConfigPath, JSON.stringify(mcpConfig, null, 2))
+    await writeRuntimeFileSecure(agentsPath, JSON.stringify(agents, null, 2))
 
-  // Phase 2.5: also write the same agents as .md files into
-  // ~/.claude/agents/ — this is the registry Claude Code's Task
-  // `subagent_type` enum reads from at session start. The `--agents`
-  // JSON path above is kept for inspection / future-proofing but the
-  // .md files are what makes the subagents actually invokable from
-  // Opus's tool surface.
-  //
-  // `builtinSubagents` (serve only) adds Claude Code's built-in Explore/Plan/
-  // general-purpose, which the Agent SDK does NOT register — so the model's
-  // habitual `Agent(subagent_type:"Explore")` calls resolve instead of 404ing.
-  const agentsToWrite = opts.builtinSubagents
-    ? { ...agents, ...opts.builtinSubagents }
-    : agents
-  const mdResult = await writePeerAgentMdFiles(agentsToWrite, {
-    agentsDir: opts.agentsDir,
-    fileSuffix,
-  })
+    // Phase 2.5: also write the same agents as .md files into
+    // ~/.claude/agents/ — this is the registry Claude Code's Task
+    // `subagent_type` enum reads from at session start. The `--agents`
+    // JSON path above is kept for inspection / future-proofing but the
+    // .md files are what makes the subagents actually invokable from
+    // Opus's tool surface.
+    //
+    // `builtinSubagents` (serve only) adds Claude Code's built-in Explore/Plan/
+    // general-purpose, which the Agent SDK does NOT register — so the model's
+    // habitual `Agent(subagent_type:"Explore")` calls resolve instead of 404ing.
+    const agentsToWrite = opts.builtinSubagents
+      ? { ...agents, ...opts.builtinSubagents }
+      : agents
+    mdResult = await writePeerAgentMdFiles(agentsToWrite, {
+      agentsDir: opts.agentsDir,
+      fileSuffix,
+    })
+  } catch (err) {
+    if (mdResult) await mdResult.cleanup().catch(() => {})
+    await Promise.allSettled([fs.unlink(mcpConfigPath), fs.unlink(agentsPath)])
+    throw err
+  }
+
+  const completeMdResult = mdResult
+  if (!completeMdResult) throw new Error("peer MCP agent files were not generated")
 
   const personas = opts.fastProfile
     ? []
@@ -1553,14 +1600,14 @@ export async function writePeerMcpRuntimeFiles(
     await Promise.allSettled([
       fs.unlink(mcpConfigPath),
       fs.unlink(agentsPath),
-      mdResult.cleanup(),
+      completeMdResult.cleanup(),
     ])
   }
 
   return {
     mcpConfigPath,
     agentsPath,
-    agentMdPaths: mdResult.paths,
+    agentMdPaths: completeMdResult.paths,
     nonce,
     personas,
     cleanup,

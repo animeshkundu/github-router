@@ -12,6 +12,10 @@ See [`../CLAUDE.md`](../CLAUDE.md) for project overview.
 
 The injection uses a **presence-based guard** in `getClaudeCodeEnvVars` (`src/lib/server-setup.ts`): if the parent env has set ANY value for these keys (including `0`, `false`, `no`, `off`, or any unrecognized value), the proxy preserves the user's intent — it only injects `1` when the key is unset. The parent env survives `buildLaunchCommand`'s sanitize because none of these keys are in `STRIPPED_PARENT_ENV_KEYS`.
 
+Every `github-router claude` launch also presence-guards `CLAUDE_CODE_AUTO_COMPACT_WINDOW` with a catalog-derived **decimal integer**: the window that puts Claude Code's reactive compaction trigger at 85% of the tightest prompt ceiling the launch can reach (`floor(P * 0.85) + 20_000 + 13_000`). This is not fast-only. Claude Code resolves the variable as `Math.min(modelWindow, value)`, so it can only lower a window and a bare 200K model is unaffected. The value must be a plain integer: that env path is `parseInt`-based, not the suffix-aware `/config` parser, so `"1m"` would parse to `1`, be floored to the client's 100,000 minimum, and compact a 1M session roughly every 52K tokens. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is deliberately not set. See the "Context-window safety" section of [`default-models.md`](default-models.md).
+
+This closes the failure observed on 2026-08-26: a top-level (`isSidechain:false`) Luna turn reached about 919,814 input tokens, then Copilot rejected the `/responses` request because Luna's 1.05M total window exposes only a 922K prompt ceiling after reserving 128K output. The failing call was not a planner/reviewer/scout/critic or `/responses/compact` request, and the same gap exists on the standard-profile Opus 5 lead (1M total, 872K prompt).
+
 | Env var | Feature |
 |---|---|
 | `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL` | gpt-5.6-sol/xhigh advisor tool (Phase I server-side wiring; see [`unsupported-features.md`](unsupported-features.md) ADVISOR section) |

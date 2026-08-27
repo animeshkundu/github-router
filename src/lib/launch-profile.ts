@@ -1,5 +1,6 @@
 import type { Effort } from "./reasoning-effort"
-import { pickEndpoint } from "~/services/copilot/endpoint"
+import { normalizeTrailingOneMSuffix, stripTrailingOneMSuffix } from "./model-suffix"
+import { fastEndpointForModel } from "./fast-endpoint"
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
 /**
@@ -10,7 +11,7 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  * group (`peers`/`search`/`workers`/`orchestrate`, plus the independently
  * opted-in `browser`/`fleet`/`first-mate`/`decide` groups under their own
  * predicates). `"fast"` is the deliberately lean `-m fast` profile: a
- * `gpt-5.6-luna` lead, exactly four native agents, the fast-only Oracle,
+ * `gpt-5.6-luna` lead, exactly five native agents, the fast-only Oracle,
  * and only the `peers`/`search` plus independently opted-in `browser` MCP groups.
  *
  * Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
@@ -52,15 +53,15 @@ export const STANDARD_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
- * The `-m fast` roster: exactly four native agents (`scout`, `implementer`,
- * `reviewer`, `planner`), the fast-only `oracle` peer tool, no coordinator,
+ * The `-m fast` roster: exactly five native agents (`scout`, `implementer`,
+ * `reviewer`, `planner`, `critic`), the fast-only `oracle` peer tool, no coordinator,
  * and only `peers`/`search` plus the ordinary opt-in `browser` group.
  * `workers`/`orchestrate`/`decide`/`fleet`/`first-mate` are hard denies even
  * when their independent standard-profile gates pass.
  */
 export const FAST_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "fast",
-  nativeRoster: new Set(["scout", "implementer", "reviewer", "planner"]),
+  nativeRoster: new Set(["scout", "implementer", "reviewer", "planner", "critic"]),
   personaAllowlist: new Set(["oracle"]),
   allowedGroups: new Set(["peers", "search", "browser"]),
   hasCoordinator: false,
@@ -104,6 +105,11 @@ export const LUNA_DRIVER_ALIAS_ID = "gh-router-luna-driver-max"
 export const LUNA_SCOUT_ALIAS_ID = "gh-router-luna-scout-high"
 export const LUNA_IMPLEMENTER_ALIAS_ID = "gh-router-luna-implementer-max"
 
+/** Fast-profile critic alias. It preserves Gemini's fixed medium effort until
+ * the authenticated request boundary; bare Gemini remains high for the lead
+ * and Advisor traffic. */
+export const FAST_CRITIC_ALIAS_ID = "gh-router-fast-critic-medium"
+
 export const LUNA_SONNET_ALIAS_ID = "gh-router-luna-sonnet-xhigh"
 
 /**
@@ -118,8 +124,8 @@ export const LUNA_REAL_MODEL_ID = "gpt-5.6-luna"
 
 export interface ModelAliasDescriptor {
   /** The id as it appears on the wire / in `body.model` before
-   *  canonicalization — either the real Luna id (the driver) or one of the
-   *  router-owned tier-alias ids above. */
+   *  canonicalization — either a real Luna id, the fast critic alias, or one
+   *  of the router-owned tier-alias ids above. */
   aliasId: string
   /** The real catalog id to send upstream. */
   realModel: string
@@ -131,13 +137,13 @@ export interface ModelAliasDescriptor {
 /**
  * The full alias table, keyed by `aliasId`. A simpler model-id-only table is
  * rejected by design: the driver, the Sonnet tier, and the Haiku tier all
- * resolve to the SAME Luna catalog id, so after early canonicalization a
- * table keyed on the real id could no longer tell which absent-effort
- * default applies. Alias provenance — which of the three ids the request
- * actually carried — is the minimum discriminator that survives from tier
- * selection through to request preprocessing, which is why canonicalization
- * must happen LAST (in the `/v1/messages` identity preflight), after the
- * effort default has already been read off the alias.
+ * resolve to the SAME Luna catalog id, while the fast critic alias resolves
+ * to Gemini. After early canonicalization a table keyed on the real id could
+ * no longer tell which absent-effort default applies. Alias provenance is the
+ * minimum discriminator that survives from tier selection through to request
+ * preprocessing, which is why canonicalization must happen LAST (in the
+ * `/v1/messages` identity preflight), after the effort default has already
+ * been read off the alias.
  */
 const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   [
@@ -153,6 +159,10 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
     { aliasId: LUNA_IMPLEMENTER_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "max" },
   ],
   [
+    FAST_CRITIC_ALIAS_ID,
+    { aliasId: FAST_CRITIC_ALIAS_ID, realModel: "gemini-3.7-flash", absentEffortDefault: "medium" },
+  ],
+  [
     LUNA_SONNET_ALIAS_ID,
     { aliasId: LUNA_SONNET_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "xhigh" },
   ],
@@ -166,12 +176,12 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
  * Look up the alias descriptor for a wire-facing model id (with or without
  * a trailing `[1m]` bracket — the bracket is stripped before the table
  * lookup and is orthogonal to alias identity). Returns undefined for any
- * id that isn't one of the three registered aliases (including the bare
- * `claude-*` ids and every other real Copilot catalog id).
+ * id that isn't one of the registered aliases (including bare `claude-*`
+ * ids and every other real Copilot catalog id).
  */
 export function resolveModelAlias(id: string): ModelAliasDescriptor | undefined {
-  const bare = id.replace(/\[1m\]$/i, "")
-  return MODEL_ALIAS_TABLE.get(bare)
+  const { base } = stripTrailingOneMSuffix(id)
+  return MODEL_ALIAS_TABLE.get(base)
 }
 
 /**
@@ -183,10 +193,10 @@ export function resolveModelAlias(id: string): ModelAliasDescriptor | undefined 
  * erases ALIAS identity, not the 1M-context accounting decoration.
  */
 export function canonicalizeAliasModel(id: string): string {
-  const bracket = /\[1m\]$/i.test(id) ? "[1m]" : ""
-  const bare = bracket ? id.slice(0, -bracket.length) : id
-  const alias = MODEL_ALIAS_TABLE.get(bare)
-  return alias ? `${alias.realModel}${bracket}` : id
+  const { base, hadSuffix } = stripTrailingOneMSuffix(id)
+  const alias = MODEL_ALIAS_TABLE.get(base)
+  if (!alias) return normalizeTrailingOneMSuffix(id)
+  return hadSuffix ? `${alias.realModel}[1m]` : alias.realModel
 }
 
 /**
@@ -245,17 +255,20 @@ function supportsEffort(model: Model | undefined, effort: Effort): boolean {
   return Array.isArray(list) && list.includes(effort)
 }
 
-function supportsEndpoint(model: Model | undefined, paths: ReadonlySet<string>): boolean {
-  const endpoints = model?.supported_endpoints
-  return Array.isArray(endpoints) && endpoints.some((endpoint) => paths.has(endpoint))
-}
+export const FAST_REVIEWER_MIN_PROMPT_TOKENS = 200_000
 
-const RESPONSES_ENDPOINTS = new Set(["/responses", "/v1/responses"])
-const MESSAGES_ENDPOINTS = new Set(["/messages", "/v1/messages"])
+function supportsEndpoint(model: Model | undefined, endpoint: "chat" | "responses" | "messages"): boolean {
+  return model !== undefined && fastEndpointForModel(model) === endpoint
+}
 
 function hasUsablePromptMetadata(model: Model | undefined): boolean {
   const prompt = model?.capabilities?.limits?.max_prompt_tokens
   return typeof prompt === "number" && Number.isFinite(prompt) && prompt > 0
+}
+
+function hasPromptAtLeast(model: Model | undefined, tokens: number): boolean {
+  const prompt = model?.capabilities?.limits?.max_prompt_tokens
+  return typeof prompt === "number" && Number.isFinite(prompt) && prompt >= tokens
 }
 
 /**
@@ -271,6 +284,7 @@ function hasUsablePromptMetadata(model: Model | undefined): boolean {
  *   - Sol planner: tool calls, >=1M, high, Responses.
  *   - Grok reviewer: tool calls, medium, Responses, usable prompt metadata.
  *   - Gemini Advisor: >=1M, high, chat-completions.
+ *   - Gemini critic: tool calls, >=1M, medium, chat-completions.
  *   - Opus Oracle: exact Opus 5, >=1M, adaptive/high, Messages, prompt metadata.
  *
  * Pure over the passed-in catalog snapshot so it's unit-testable without
@@ -292,7 +306,7 @@ export function validateFastProfilePrerequisites(
     if (!supportsEffort(luna, "high") || !supportsEffort(luna, "max")) {
       missing.push(`${LUNA_REAL_MODEL_ID}: does not advertise both "high" and "max" reasoning effort`)
     }
-    if (!supportsEndpoint(luna, RESPONSES_ENDPOINTS)) {
+    if (!supportsEndpoint(luna, "responses")) {
       missing.push(`${LUNA_REAL_MODEL_ID}: does not advertise a supported Responses endpoint`)
     }
   }
@@ -308,7 +322,7 @@ export function validateFastProfilePrerequisites(
     if (!supportsEffort(sol, "high")) {
       missing.push("gpt-5.6-sol: does not advertise a \"high\" reasoning effort")
     }
-    if (!supportsEndpoint(sol, RESPONSES_ENDPOINTS)) {
+    if (!supportsEndpoint(sol, "responses")) {
       missing.push("gpt-5.6-sol: does not advertise a supported Responses endpoint")
     }
   }
@@ -321,10 +335,12 @@ export function validateFastProfilePrerequisites(
     if (!supportsEffort(grok, "medium")) {
       missing.push("grok-4.6: does not advertise a \"medium\" reasoning effort")
     }
-    if (!hasUsablePromptMetadata(grok)) {
-      missing.push("grok-4.6: no usable max_prompt_tokens metadata")
+    if (!hasPromptAtLeast(grok, FAST_REVIEWER_MIN_PROMPT_TOKENS)) {
+      missing.push(
+        `grok-4.6: advertised max_prompt_tokens is below ${FAST_REVIEWER_MIN_PROMPT_TOKENS}`,
+      )
     }
-    if (!supportsEndpoint(grok, RESPONSES_ENDPOINTS)) {
+    if (!supportsEndpoint(grok, "responses")) {
       missing.push("grok-4.6: does not advertise a supported Responses endpoint")
     }
   }
@@ -333,17 +349,23 @@ export function validateFastProfilePrerequisites(
   if (!gemini) {
     missing.push("gemini-3.7-flash: absent from the live catalog")
   } else {
+    if (!hasToolCalls(gemini)) {
+      missing.push("gemini-3.7-flash: does not advertise tool_calls for the native critic")
+    }
     if (!hasContextAtLeast(gemini, FAST_REQUIRED_CONTEXT_TOKENS)) {
       missing.push("gemini-3.7-flash: advertised context window is below 1M")
     }
     if (!supportsEffort(gemini, "high")) {
-      missing.push("gemini-3.7-flash: does not advertise a \"high\" reasoning effort")
+      missing.push("gemini-3.7-flash: does not advertise a \"high\" reasoning effort for Advisor")
+    }
+    if (!supportsEffort(gemini, "medium")) {
+      missing.push("gemini-3.7-flash: does not advertise a \"medium\" reasoning effort for the native critic")
     }
     // Reuse the canonical catalog endpoint resolver. Copilot's live catalog
     // uses bare `/chat/completions`, while fixtures and older snapshots may use
     // `/v1/chat/completions`; an exact check against only one spelling made a
     // fully-capable live catalog fail the whole launch.
-    if (pickEndpoint(gemini) !== "chat") {
+    if (!supportsEndpoint(gemini, "chat")) {
       missing.push(
         "gemini-3.7-flash: does not advertise a supported chat-completions endpoint",
       )
@@ -366,7 +388,7 @@ export function validateFastProfilePrerequisites(
     if (!hasUsablePromptMetadata(opus)) {
       missing.push("claude-opus-5: no usable max_prompt_tokens metadata")
     }
-    if (!supportsEndpoint(opus, MESSAGES_ENDPOINTS)) {
+    if (!supportsEndpoint(opus, "messages")) {
       missing.push("claude-opus-5: does not advertise a supported Messages endpoint")
     }
   }

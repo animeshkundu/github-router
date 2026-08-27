@@ -22,6 +22,8 @@ import {
 import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
 import { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 import { ONE_M_TOKENS } from "./one-m-context"
+import { fastEndpointForModel } from "./fast-endpoint"
+import { FAST_REVIEWER_MIN_PROMPT_TOKENS } from "./launch-profile"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -367,30 +369,39 @@ export const FAST_IMPLEMENTER_MODEL = "gpt-5.6-luna"
  *  and is gated by max_prompt_tokens rather than the 1M floor. */
 export const FAST_REVIEWER_MODEL = "grok-4.6"
 export const FAST_PLANNER_MODEL = "gpt-5.6-sol"
+export const FAST_CRITIC_MODEL = "gemini-3.7-flash"
 export const FAST_ORACLE_MODEL = "claude-opus-5"
 
-/** Presence floor, not the client compaction trigger. */
-export const FAST_REVIEWER_MIN_PROMPT_TOKENS = 200_000
+/** Shared with startup validation so the reviewer resolver and fast launch
+ * prerequisite cannot drift. */
+export { FAST_REVIEWER_MIN_PROMPT_TOKENS } from "./launch-profile"
 
 /** Fixed effort pins for the fast profile. */
 export const FAST_SCOUT_EFFORT = "high"
 export const FAST_IMPLEMENTER_EFFORT = "max"
 export const FAST_REVIEWER_EFFORT = "medium"
 export const FAST_PLANNER_EFFORT = "high"
+export const FAST_CRITIC_EFFORT = "medium"
 export const FAST_ORACLE_EFFORT = "high"
 
 export function fastScoutModel(): string | undefined {
-  return firstPresentInCatalog(
+  const id = firstPresentInCatalog(
     [FAST_SCOUT_MODEL],
     { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
   )
+  if (!id) return undefined
+  const found = state.models?.data.find((m) => m.id === id)
+  return found && fastEndpointForModel(found) === "responses" ? id : undefined
 }
 
 export function fastImplementerModel(): string | undefined {
-  return firstPresentInCatalog(
+  const id = firstPresentInCatalog(
     [FAST_IMPLEMENTER_MODEL],
     { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
   )
+  if (!id) return undefined
+  const found = state.models?.data.find((m) => m.id === id)
+  return found && fastEndpointForModel(found) === "responses" ? id : undefined
 }
 
 export function fastPlannerModel(): string | undefined {
@@ -402,7 +413,7 @@ export function fastPlannerModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === id)
   const efforts = found?.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(FAST_PLANNER_EFFORT)) return undefined
-  if (pickEndpoint(found!) !== "responses") return undefined
+  if (!found || fastEndpointForModel(found) !== "responses") return undefined
   return id
 }
 
@@ -417,8 +428,21 @@ export function fastReviewerModel(): string | undefined {
   if (!Array.isArray(efforts) || !efforts.includes(FAST_REVIEWER_EFFORT)) return undefined
   const maxPrompt = found.capabilities?.limits?.max_prompt_tokens ?? 0
   if (maxPrompt < FAST_REVIEWER_MIN_PROMPT_TOKENS) return undefined
-  if (pickEndpoint(found) !== "responses") return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
   return FAST_REVIEWER_MODEL
+}
+
+/** Exact Gemini 3.7 Flash only: the fast native critic has no fallback.
+ * Unlike the fast Advisor, it needs tool calls and a medium effort choice. */
+export function fastCriticModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === FAST_CRITIC_MODEL)
+  if (!found) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < ONE_M_TOKENS) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_CRITIC_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "chat") return undefined
+  return FAST_CRITIC_MODEL
 }
 
 /** Exact Opus 5 only: the fast Oracle never inherits standard opus_critic's
@@ -431,8 +455,7 @@ export function fastOracleModel(): string | undefined {
   const efforts = found.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(FAST_ORACLE_EFFORT)) return undefined
   if (found.capabilities?.supports?.adaptive_thinking !== true) return undefined
-  const endpoints = found.supported_endpoints ?? []
-  if (!endpoints.some((endpoint) => endpoint === "/messages" || endpoint === "/v1/messages")) return undefined
+  if (fastEndpointForModel(found) !== "messages") return undefined
   return FAST_ORACLE_MODEL
 }
 

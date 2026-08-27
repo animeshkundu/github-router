@@ -247,8 +247,10 @@ mock.module("~/lib/mcp-capabilities", () => ({
   fastImplementerModel: mock(() => "gpt-5.6-luna"),
   fastReviewerModel: mock(() => "grok-4.6"),
   fastPlannerModel: mock(() => "gpt-5.6-sol"),
+  fastCriticModel: mock(() => "gemini-3.7-flash"),
   fastOracleModel: mock(() => "claude-opus-5"),
   FAST_SCOUT_EFFORT: "high",
+  FAST_CRITIC_EFFORT: "medium",
   FAST_IMPLEMENTER_EFFORT: "max",
   FAST_REVIEWER_EFFORT: "medium",
   FAST_PLANNER_EFFORT: "high",
@@ -630,7 +632,7 @@ describe("claude command", () => {
         },
         {
           id: "gemini-3.7-flash",
-          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
           supported_endpoints: ["/v1/chat/completions"],
         },
       ] as unknown as NonNullable<typeof state.models>["data"],
@@ -676,7 +678,7 @@ describe("claude command", () => {
         },
         {
           id: "gemini-3.7-flash",
-          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
           supported_endpoints: ["/v1/chat/completions"],
         },
       ] as unknown as NonNullable<typeof state.models>["data"],
@@ -1114,7 +1116,7 @@ describe("claude command", () => {
           },
           {
             id: "gemini-3.7-flash",
-            capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+            capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
             supported_endpoints: ["/v1/chat/completions"],
           },
         ] as unknown as NonNullable<typeof state.models>["data"],
@@ -1138,7 +1140,7 @@ describe("claude command", () => {
       expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
       const [, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
       // Hard roster/persona/coordinator restriction per FAST_PROFILE.
-      expect(opts.nativeRoster).toEqual(new Set(["scout", "implementer", "reviewer", "planner"]))
+      expect(opts.nativeRoster).toEqual(new Set(["scout", "implementer", "reviewer", "planner", "critic"]))
       expect(opts.personaAllowlist).toBeUndefined()
       expect(opts.includeCoordinator).toBe(false)
       expect(opts.fastProfile).toBe(true)
@@ -1148,6 +1150,8 @@ describe("claude command", () => {
       expect(opts.nativeSubagentModel).toBe("gpt-5.6-luna")
       expect(opts.reviewerModel).toBe("grok-4.6")
       expect(opts.plannerModel).toBe("gpt-5.6-sol")
+      expect(opts.criticModel).toBe("gemini-3.7-flash")
+      expect(opts.criticEffort).toBe("medium")
       expect(opts.brainstormModel).toBeUndefined()
       expect(opts.scribeModel).toBeUndefined()
       expect(opts.generalPurposeFastModel).toBeUndefined()
@@ -1326,17 +1330,62 @@ describe("claude command", () => {
       expect(args).toContain("--strict-mcp-config")
     })
 
-    test("writePeerMcpRuntimeFiles failure does not block claude launch", async () => {
+    test("writePeerMcpRuntimeFiles failure does not block standard claude launch", async () => {
       writePeerMcpRuntimeFilesMock.mockRejectedValue(new Error("disk full"))
       const run = getRunFn()
       await run({ args: {} })
 
-      // Spawn still happened (claude launches without MCP wiring)
+      // Standard launches remain best-effort: claude launches without MCP wiring.
       expect(spawnMock).toHaveBeenCalledTimes(1)
       const [, args] = spawnMock.mock.calls[0]
       expect(args).not.toContain("--mcp-config")
       // Mirror inject was never attempted because runtime files failed first.
       expect(injectPeerMcpIntoMirrorMock).not.toHaveBeenCalled()
+    })
+
+    test("fast runtime failure is fatal and does not spawn an unguarded child", async () => {
+      state.models = {
+        object: "list",
+        data: [
+          {
+            id: "gpt-5.6-luna",
+            capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "gpt-5.6-sol",
+            capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "claude-opus-5",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/v1/messages"],
+          },
+          {
+            id: "grok-4.6",
+            capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "gemini-3.7-flash",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
+            supported_endpoints: ["/chat/completions"],
+          },
+        ] as unknown as NonNullable<typeof state.models>["data"],
+      }
+      writePeerMcpRuntimeFilesMock.mockRejectedValue(new Error("disk full"))
+      const run = getRunFn()
+      await expect(run({ args: { model: "fast" } })).rejects.toThrow(ExitError)
+      expect(spawnMock).not.toHaveBeenCalled()
+      expect(fakeServer.close).toHaveBeenCalled()
+    })
+
+    test("fast plus --no-codex-mcp is rejected before spawning", async () => {
+      const run = getRunFn()
+      await expect(run({ args: { model: "fast", "codex-mcp": false } })).rejects.toThrow(ExitError)
+      expect(spawnMock).not.toHaveBeenCalled()
+      expect(writePeerMcpRuntimeFilesMock).not.toHaveBeenCalled()
     })
 
     test("injectPeerMcpIntoMirror failure does not block claude launch", async () => {
