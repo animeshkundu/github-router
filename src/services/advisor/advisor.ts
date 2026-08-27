@@ -50,6 +50,10 @@ import { events } from "fetch-event-stream"
 
 import { isClaudeModel } from "~/lib/anthropic-translate/classifier"
 import { HTTPError } from "~/lib/error"
+import {
+  fastEndpointForCatalogId,
+  fastEndpointForModel,
+} from "~/lib/fast-endpoint"
 import { isBudgetClaudeLead } from "~/lib/port"
 import {
   applyClaudeCachePolicy,
@@ -135,43 +139,20 @@ const ADVISOR_MIN_EFFORT: Effort = "high"
  *  keeps a cross-lab advisor one env var away for anyone who wants it back. */
 export const ADVISOR_ESCALATION_MODEL = "claude-opus-5"
 
-/** The lead model name for the fast Luna profile (plan: "Fast launch profile
- *  and gateway model defaults", section 1). When the request's lead resolves
- *  to this model, `resolveAdvisorModel` picks `ADVISOR_FAST_PROFILE_MODEL`
- *  instead of the cross-lab default.
- *
- *  Model-shape check only. Callers must also pass the authenticated launch
- *  profile to `resolveAdvisorModel`; a direct Luna pick in a standard session
- *  must not gain the fast-profile Advisor path. */
-export const FAST_PROFILE_LEAD_MODEL = "gpt-5.6-luna"
-
-/** The Advisor model for the fast Luna profile. Gemini 3.7 Flash is a
- *  different lab from BOTH the Luna lead (OpenAI) and the fast profile's
- *  `gemini-critic` persona shares this same model — see
- *  `docs/default-models.md` "Fast launch profile" for the roster this
- *  belongs to. Kept distinct from `ADVISOR_DEFAULT_MODEL` so the two never
- *  have to agree; `resolveAdvisorModel` picks between them purely on lead
- *  identity, never model availability heuristics beyond a live-catalog
- *  presence check (mirrors `shouldEscalateAdvisor`'s pattern). */
+/** The Advisor model for an authenticated fast primary lead. Gemini 3.7 Flash
+ * is cross-lab from the OpenAI-backed Luna/Sol leads and is selected only when
+ * its live catalog entry advertises the required Chat endpoint. Kept distinct
+ * from `ADVISOR_DEFAULT_MODEL` so standard launches remain unchanged. */
 export const ADVISOR_FAST_PROFILE_MODEL = "gemini-3.7-flash"
 
-/**
- * True when `leadModel` names the fast-profile Luna lead (bare, or with the
- * `[1m]` context decoration `withOneMSuffixForLead` applies to it).
- */
-export function isFastProfileLead(leadModel: string | undefined): boolean {
-  if (!leadModel) return false
-  const bare = leadModel.replace(/\[1m\]$/, "").trim()
-  const lastSegment = bare.slice(bare.lastIndexOf("/") + 1)
-  return bare === FAST_PROFILE_LEAD_MODEL || lastSegment === FAST_PROFILE_LEAD_MODEL
-}
-
-/** True when the live catalog actually carries `ADVISOR_FAST_PROFILE_MODEL`.
- *  Mirrors `shouldEscalateAdvisor`'s catalog probe: never advertise a model
- *  the account cannot reach, and fall back to the cross-lab default instead
- *  of a hard failure when it's absent. */
+/** True only when the live Gemini entry satisfies the fixed fast transport.
+ * An ID-only presence check is insufficient: selecting a model whose catalog
+ * row lost Chat support would silently degrade every fast Advisor call. */
 function fastProfileAdvisorAvailable(): boolean {
-  return state.models?.data?.some((m) => m.id === ADVISOR_FAST_PROFILE_MODEL) ?? false
+  return fastEndpointForCatalogId(
+    ADVISOR_FAST_PROFILE_MODEL,
+    state.models?.data,
+  ) === "chat"
 }
 
 /** Output cap for the Anthropic-branch advisor call when the catalog carries no
@@ -224,7 +205,7 @@ export function advisorUsesResponses(resolvedAdvisorModel: string): boolean {
  *  Generalizes the historical two-way `useResponses` branch (added when
  *  `gpt-5.6-sol` was the only advisor candidate) to three, now that
  *  `resolveAdvisorModel` can also pick a `/chat/completions`-only model
- *  (`gemini-3.7-flash`, the fast Luna profile's advisor). */
+ *  (`gemini-3.7-flash`, the authenticated fast profile's advisor). */
 export type AdvisorTransport = "responses" | "chat" | "messages"
 
 /**
@@ -241,14 +222,27 @@ export type AdvisorTransport = "responses" | "chat" | "messages"
  * chat, mirroring `pickEndpoint`'s "omits supported_endpoints => chat-eligible"
  * convention — the same convention `classifyMessagesRoute` relies on for a
  * lead model, applied here to the advisor's OWN model instead.
+ *
+ * The authenticated fast Advisor passes `fastProfile:true`, which uses the same
+ * fixed endpoint policy as its lead/agent roster. Standard calls leave this
+ * false and retain the historical catalog/name behavior.
  */
-export function advisorTransport(resolvedAdvisorModel: string): AdvisorTransport {
+export function advisorTransport(
+  resolvedAdvisorModel: string,
+  fastProfile = false,
+): AdvisorTransport {
   const bare = resolvedAdvisorModel.slice(
     resolvedAdvisorModel.lastIndexOf("/") + 1,
   )
   const entry = state.models?.data?.find(
     (m) => m.id === resolvedAdvisorModel || m.id === bare,
   )
+  if (fastProfile && entry) {
+    const fixed = fastEndpointForModel(entry)
+    if (fixed === "messages" || fixed === "responses" || fixed === "chat") {
+      return fixed
+    }
+  }
   if (isClaudeModel(resolvedAdvisorModel, entry)) return "messages"
   if (advisorUsesResponses(resolvedAdvisorModel)) return "responses"
   return "chat"
@@ -301,40 +295,29 @@ export interface AdvisorModelChoice {
    *  on the resolved model id, so pinning opus on an opus lead cannot inject a
    *  sentence that is false. */
   escalated: boolean
-  /** True ONLY for the automatic fast-Luna-profile selection of
-   *  `ADVISOR_FAST_PROFILE_MODEL`. Distinct from `escalated` — different
-   *  trigger (a non-Claude lead, not a lighter Claude tier), different target
-   *  model, and different transport. The authenticated launch identity—not
-   *  this model-selection result—controls the fast consultative system prompt.
-   *  See `FAST_PROFILE_LEAD_MODEL`'s doc comment for the temporary nature of
-   *  the underlying signal. */
+  /** True ONLY for the automatic authenticated-fast selection of
+   *  `ADVISOR_FAST_PROFILE_MODEL`. Distinct from `escalated`: launch policy,
+   *  not lead family, selects this model and its fixed fast transport. The
+   *  authenticated launch identity, not this result, independently controls
+   *  the non-binding consultative system prompt. */
   fastProfile: boolean
 }
 
 /**
- * Pick the advisor model for one request from the LEAD model that request is
- * running on.
- *
- * Resolved per request rather than at launch because the lead changes
- * mid-session via the `/model` picker; launch-time env plumbing would pin the
- * advisor to whatever was selected at spawn.
+ * Pick the Advisor model for one request. Standard selection follows the
+ * current lead so a `/model` switch can change budget escalation; authenticated
+ * fast selection follows launch identity instead, so changing among the fixed
+ * fast lead models never removes Gemini Advisor.
  *
  * Precedence:
- *   1. `GH_ROUTER_ADVISOR_MODEL` (trimmed) — the operator pin, checked first so
- *      it works on every lead.
- *   2. An authenticated fast launch whose current lead is Luna, with
- *      `ADVISOR_FAST_PROFILE_MODEL` present in the live catalog.
- *   3. A lighter Claude lead with the escalation model in the catalog.
- *   4. `ADVISOR_DEFAULT_MODEL`.
+ *   1. `GH_ROUTER_ADVISOR_MODEL` (trimmed), on every launch and lead.
+ *   2. Authenticated fast primary lead, when Gemini advertises the required
+ *      Chat endpoint.
+ *   3. Standard lighter Claude lead with Opus escalation available.
+ *   4. The literal `ADVISOR_DEFAULT_MODEL`.
  *
- * Steps 2 and 3 are mutually exclusive lead families (non-Claude Luna vs. a
- * lighter Claude tier) so their relative order does not matter functionally;
- * fast-profile is checked first only because it is the more specific match.
- *
- * Step 4 returns the LITERAL constant rather than walking the OpenAI frontier
- * chain. An Opus lead must resolve to exactly what it resolves to today, and a
- * frontier walk could yield `gpt-5.5` on a catalog missing `gpt-5.6-sol` —
- * a silent change to the one path that is required not to move.
+ * Step 4 deliberately does not walk the OpenAI frontier chain. That would
+ * silently change the standard Opus-lead path when Sol is absent.
  */
 /**
  * Map an operator pin onto the id the catalog actually carries.
@@ -369,7 +352,7 @@ export function resolveAdvisorModel(
   if (pinned) {
     return { model: normalizeAdvisorPin(pinned), escalated: false, fastProfile: false }
   }
-  if (fastProfile && leadModel && isFastProfileLead(leadModel) && fastProfileAdvisorAvailable()) {
+  if (fastProfile && fastProfileAdvisorAvailable()) {
     return { model: ADVISOR_FAST_PROFILE_MODEL, escalated: false, fastProfile: true }
   }
   if (leadModel && shouldEscalateAdvisor(leadModel)) {
@@ -478,7 +461,7 @@ If you've already retrieved data pointing one way and the advisor points another
 
 /** Fast-profile lead-only policy. Unlike the standard Claude Code instructions
  * above, this makes consultation optional and leaves decision ownership with
- * the Luna lead. Fast Task subagents never receive an advisor tool at all. */
+ * the authenticated fast primary lead. Fast Task subagents never receive an advisor tool at all. */
 export const FAST_ADVISOR_TOOL_INSTRUCTIONS = `# Advisor Tool
 
 You have access to an optional, transcript-aware \`advisor\` tool. It takes no parameters and returns non-binding consultation. You remain responsible for every decision.
@@ -886,7 +869,7 @@ async function runAdvisor(
   // Route by model family/catalog endpoint — see `advisorTransport` for the
   // three-way (`responses` / `chat` / `messages`) decision and its ordering
   // rationale.
-  const transport = advisorTransport(resolvedAdvisorModel)
+  const transport = advisorTransport(resolvedAdvisorModel, fastProfile)
 
   if (transport === "responses") {
     const payload = applyResponsesCachePolicy({
@@ -938,7 +921,7 @@ async function runAdvisor(
 
   // chat branch: /chat/completions with the conversation as a single user
   // message. Reachable now that `resolveAdvisorModel` can pick a
-  // chat-only advisor (`gemini-3.7-flash`, the fast Luna profile). No
+  // chat-only advisor (`gemini-3.7-flash`, the authenticated fast profile). No
   // request-shaping helper is extracted from `dispatchModelCall` here:
   // the advisor's payload (one system + one user message, no tools, no
   // caching hints) is simple enough that reuse would cost more in
@@ -1070,7 +1053,7 @@ interface ToolUseTracker {
  *   1. A real Anthropic `toolu_*` id whose suffix is already in the
  *      `^[a-zA-Z0-9_]+$` charset: `srvtoolu_<suffix>`, byte-for-byte
  *      identical to the historical (Claude-lead) behavior.
- *   2. Anything else — a Responses `call_*` id (the fast Luna profile's
+ *   2. Anything else — a Responses `call_*` id (an authenticated fast lead's
  *      lead, once its `tool_use{__anthropic_advisor}` block is synthesized
  *      by the anthropic-translate shim from a Copilot `/responses` tool
  *      call), a hyphenated or otherwise non-conforming id, an empty string,
@@ -1093,7 +1076,7 @@ interface ToolUseTracker {
  * Historically this threw "advisor tool_use id is not round-trippable" for
  * any non-`toolu_` shape. That was correct for a Claude-only advisor lead —
  * Copilot's native `/v1/messages` never emits anything else — but became a
- * live defect once the advisor loop could run on a non-Claude (Luna) lead
+ * live defect once the advisor loop could run on a non-Claude fast lead
  * shimmed through `/responses`: `responses-egress.ts` forwards a Responses
  * `call_*` id VERBATIM as the synthesized `tool_use.id` (see
  * `makeToolUseId` — it only synthesizes a `toolu_*` id when the upstream id
@@ -1165,7 +1148,7 @@ function sseEvent(type: string, data: AnyRecord): string {
  * passthrough (`createMessages`) plus signed-thinking-history repair-and-retry.
  * Extracted verbatim from the loop body so the behavior is byte-identical to
  * before `continueTurn` became injectable, and so a non-Claude
- * `continueTurn` (the fast Luna profile's shim-backed one) can omit this
+ * `continueTurn` (the fast profile's shim-backed one) can omit this
  * Claude-only repair path entirely rather than inherit dead code that would
  * never fire for it.
  */
@@ -1257,7 +1240,7 @@ export function buildAdvisorStream(opts: {
    * call plus its signed-thinking repair-and-retry, byte-identical to this
    * module's behavior before this parameter existed.
    *
-   * A non-Claude lead (the fast Luna profile) passes a shim-backed
+   * A non-Claude model selected by the fast primary lead passes a shim-backed
    * continuation instead: `makeShimContinueTurn` in
    * `src/lib/anthropic-translate/index.ts` builds one that routes through the
    * SAME translation + Anthropic-SSE-synthesis machinery as the initial
@@ -1797,7 +1780,7 @@ export function buildAdvisorStream(opts: {
           // tools, etc.) but with the extended conversation and
           // stream:true. Dispatched through the injectable `continueTurn`
           // (default: Claude passthrough + signed-thinking repair via
-          // `defaultContinueTurn`; the fast Luna profile injects a
+          // `defaultContinueTurn`; the fast profile injects a
           // shim-backed one — see `buildAdvisorStream`'s option doc).
           if (aborter.signal.aborted) return
           response = await continueTurn(

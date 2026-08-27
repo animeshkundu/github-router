@@ -66,6 +66,13 @@ import {
   buildWorkerGuardHookCommand,
   guardToolMatcher,
 } from "./lib/worker-dispatch"
+import { buildFastDispatchGuardHookCommand } from "./internal-fast-dispatch-guard"
+import {
+  FAST_DISPATCH_TOOL_MATCHER,
+} from "./lib/fast-dispatch-acl"
+import {
+  assertFastDispatchGuardInstalled,
+} from "./lib/orchestration/fast-dispatch-hook"
 import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
 import { parseBoolEnv } from "./lib/exec"
@@ -116,8 +123,10 @@ import {
   fastImplementerModel,
   fastReviewerModel,
   fastPlannerModel,
+  fastCriticModel,
   fastOracleModel,
   FAST_SCOUT_EFFORT,
+  FAST_CRITIC_EFFORT,
   FAST_IMPLEMENTER_EFFORT,
   FAST_REVIEWER_EFFORT,
   FAST_PLANNER_EFFORT,
@@ -139,6 +148,7 @@ import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
 import { LAUNCH_SECRET_HEADER } from "./lib/messages-identity-preflight"
 import { state } from "./lib/state"
 import { resolveModel } from "./lib/utils"
+import { createFastLaunchCleanup } from "./lib/fast-launch-cleanup"
 
 function isFirstMateSkillName(name: string): boolean {
   return (
@@ -321,6 +331,19 @@ export const claude = defineCommand({
     }
 
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
+    const requestedLaunchProfileId = resolveLaunchProfile(args.model)
+    const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
+
+    // Fast native agents depend on the generated MCP runtime and its mandatory
+    // Task/Agent ACL hook. Refuse this combination before setup or any runtime
+    // artifact is written rather than silently launching a fast lead with no
+    // native roster enforcement.
+    if (requestedLaunchProfileId === "fast" && !codexMcpEnabled) {
+      const message =
+        "github-router claude -m fast requires codex MCP wiring for its native roster and dispatch ACL; remove --no-codex-mcp or choose a standard model."
+      process.stderr.write(`${message}\n`)
+      process.exit(1)
+    }
 
     // Phase E P2.2: stealth-vs-leverage policy.
     // The `claude` subcommand defaults to LEVERAGE mode (extended-betas
@@ -420,6 +443,15 @@ export const claude = defineCommand({
     // never delays spawning Claude Code.
     void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
 
+    // A failed mirror provision happens after the server is listening but before
+    // any runtime artifacts exist. Close the server explicitly before exiting;
+    // process.exit does not await pending shutdown work.
+    const cleanupPreMirrorFailure = createFastLaunchCleanup({
+      server,
+      stopKeepAwake,
+      removeMirror: removeOwnClaudeConfigMirror,
+    })
+
     // Provision the router-owned CLAUDE_CONFIG_DIR with our synthetic
     // .credentials.json + a snapshot copy of the user's ~/.claude/.
     // The spawned Claude Code (and any teammates it spawns via the
@@ -440,10 +472,43 @@ export const claude = defineCommand({
           err instanceof Error ? err.message : String(err)
         }. Spawned Claude Code would not be able to authenticate.`,
       )
+      await cleanupPreMirrorFailure()
       process.exit(1)
     }
 
     enableFileLogging() // redirect errors/warnings to file; suppress terminal output
+
+    // Fast runtime artifacts are not owned by `launchChild` until its shutdown
+    // callback is transferred. Keep an explicit pre-spawn cleanup handle so a
+    // fast-only setup failure cannot leave runtime files or a launch-registry
+    // entry behind while the broad standard-profile catch remains lenient.
+    let fastRuntimeCleanup: (() => Promise<void>) | undefined
+    let fastLaunchId: string | undefined
+    let fastCleanupPromise: Promise<void> | undefined
+    const disposeFastRuntime = async (): Promise<void> => {
+      if (!fastRuntimeCleanup) return
+      fastCleanupPromise ??= fastRuntimeCleanup()
+      await fastCleanupPromise
+    }
+    const resetFastRuntimeOwnership = (): void => {
+      fastRuntimeCleanup = undefined
+      fastLaunchId = undefined
+    }
+    const cleanupFastLaunch = createFastLaunchCleanup({
+      server,
+      stopKeepAwake,
+      removeMirror: removeOwnClaudeConfigMirror,
+      runtimeCleanup: async () => {
+        if (fastRuntimeCleanup) await fastRuntimeCleanup()
+      },
+    })
+    const fastFatal = async (message: string): Promise<never> => {
+      consola.error(message)
+      process.stderr.write(`${message}\n`)
+      await cleanupFastLaunch()
+      process.exit(1)
+      throw new Error("process.exit returned unexpectedly")
+    }
 
     // Two slugs flow through this code:
     //   * `chosenSlug` — the value we set for `ANTHROPIC_MODEL`. Must be an
@@ -493,14 +558,11 @@ export const claude = defineCommand({
       const prereqCheck = validateFastProfilePrerequisites(state.models)
       if (!prereqCheck.ok) {
         const message = formatFastPrerequisiteFailure(prereqCheck.missing)
-        consola.error(message)
-        // `enableFileLogging()` above replaces the terminal reporter, so a fatal
-        // launch error logged only through consola is written to error.log and
-        // the CLI appears to stop silently. Mirror the actionable error to the
-        // terminal before exiting.
-        process.stderr.write(`${message}\n`)
-        process.exit(1)
+        await fastFatal(message)
       }
+    } else {
+      // Standard profile behavior is unchanged. This branch intentionally keeps
+      // all ordinary launches on the existing catalog/model flow.
     }
     let chosenSlug =
       launchProfileId === "fast"
@@ -661,10 +723,7 @@ export const claude = defineCommand({
     // off (then only the operating-defaults directive is injected).
     let peerAwarenessSnippet: string | undefined
     let peerAwarenessSummary: string | undefined
-    let fastRuntimeWired = launchProfileId !== "fast"
-    // Resolved ONCE per launch and reused by the `.md` generation, the
-    // awareness snippet, and the operating-defaults directive, so the three
-    // surfaces cannot disagree about which conditionally-emitted natives exist.
+    let fastWiringComplete = launchProfileId !== "fast"
     // Three of them are dropped rather than downgraded when their chain misses,
     // and a prompt naming a dropped agent sends the lead at something absent
     // from the Task `subagent_type` enum.
@@ -681,6 +740,7 @@ export const claude = defineCommand({
             implementer: fastImplementerModel(),
             reviewer: fastReviewerModel(),
             planner: fastPlannerModel(),
+            critic: fastCriticModel(),
           }
         : {
             implementer: nativeSubagentModel(),
@@ -708,7 +768,6 @@ export const claude = defineCommand({
       // renders a short, self-contained fast-profile surface instead.
       profile: launchProfileId,
     }
-    const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
     // Resolve before any settings/runtime file can persist a self-command. The
     // launcher publication must finish before those writes, never race them.
     const selfInvocation = await resolveSelfInvocation()
@@ -786,8 +845,8 @@ export const claude = defineCommand({
         // so no worker-* .md (and no injected worker/orchestration skill or
         // guard, both gated on this same flag below) survives the profile
         // restriction even if the catalog gate would otherwise pass.
-        if (isFastProfile && fastOracleModel() == null) {
-          throw new Error("fast profile prerequisite drift: exact claude-opus-5 Oracle no longer resolves")
+        if (isFastProfile && (fastOracleModel() == null || fastCriticModel() == null)) {
+          throw new Error("fast profile prerequisite drift: exact Oracle or critic model no longer resolves")
         }
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
           codexCli: backend === "cli",
@@ -816,14 +875,16 @@ export const claude = defineCommand({
             ? {
                 fastProfile: true,
                 plannerModel: nativeAgentModels.planner,
+                criticModel: nativeAgentModels.critic,
                 scoutEffort: FAST_SCOUT_EFFORT,
                 implementerEffort: FAST_IMPLEMENTER_EFFORT,
                 reviewerEffort: FAST_REVIEWER_EFFORT,
                 plannerEffort: FAST_PLANNER_EFFORT,
+                criticEffort: FAST_CRITIC_EFFORT,
               }
             : {}),
         })
-        fastRuntimeWired = true
+        if (isFastProfile) fastRuntimeCleanup = runtime.cleanup
         // Keyed launch registry entry for this session: the `/mcp` nonce
         // (already minted by `writePeerMcpRuntimeFiles`) plus a SEPARATE
         // `/v1/messages` identity-preflight secret, scoped to this launch's
@@ -840,6 +901,8 @@ export const claude = defineCommand({
           allowedGroups: fastDescriptor.allowedGroups,
           allowedPersonas: fastDescriptor.personaAllowlist,
         })
+        if (isFastProfile) fastLaunchId = launchEntry.launchId
+
         // Delivered via `ANTHROPIC_CUSTOM_HEADERS` (an Anthropic SDK env var
         // Claude Code already forwards on every `/v1/messages` request) so
         // the identity preflight in `routes/messages/handler.ts` can bind
@@ -858,11 +921,24 @@ export const claude = defineCommand({
         // the detached reviewer they spawn — inherit it.
         envVars.GH_ROUTER_HOOK_MCP_URL = serverUrl
         envVars.GH_ROUTER_HOOK_NONCE = runtime.nonce
-        onShutdown = async (): Promise<void> => {
-          unregisterLaunch(launchEntry.launchId)
-          await runtime.cleanup()
-          await baseShutdown()
-        }
+        onShutdown = isFastProfile
+          ? async (): Promise<void> => {
+              try {
+                unregisterLaunch(launchEntry.launchId)
+              } finally {
+                try {
+                  await runtime.cleanup()
+                } finally {
+                  resetFastRuntimeOwnership()
+                  await baseShutdown()
+                }
+              }
+            }
+          : async (): Promise<void> => {
+              unregisterLaunch(launchEntry.launchId)
+              await runtime.cleanup()
+              await baseShutdown()
+            }
 
         // Standard-profile subagent MCP visibility: inject `gh-router-peers` (and the
         // `codex-cli` stdio entry when enabled) into the mirrored
@@ -927,6 +1003,26 @@ export const claude = defineCommand({
           subagentVisibility = injected.ok
             ? `subagent-visible (mirrored mcpServers: [${injected.serversAdded.join(", ")}])`
             : `subagent-INVISIBLE (collision on user-side mcpServers: [${injected.conflictingServers.join(", ")}]; parent-only via --mcp-config)`
+        }
+
+        if (isFastProfile) {
+          let fastGuardInstalled = false
+          try {
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const guardCommand = buildFastDispatchGuardHookCommand(selfInvocation)
+            await injectStopHookIntoSettingsFile(
+              settingsPath,
+              guardCommand,
+              "PreToolUse",
+              10,
+              FAST_DISPATCH_TOOL_MATCHER,
+            )
+            fastGuardInstalled = true
+          } catch (err) {
+            consola.error(`Could not register the fast native dispatch ACL hook: ${String(err)}`)
+          }
+          assertFastDispatchGuardInstalled(true, fastGuardInstalled)
+          fastWiringComplete = true
         }
 
         const personaNames = runtime.personas.map((p) => p.agentName).join(", ")
@@ -1393,6 +1489,7 @@ export const claude = defineCommand({
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
           ...nativeAvailability,
+          profile: launchProfileId,
           groupKeys,
         })
         // Capture the peer-awareness snippet; the always-on operating-defaults
@@ -1406,6 +1503,7 @@ export const claude = defineCommand({
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
           ...nativeAvailability,
+          profile: launchProfileId,
           nativeAgentModels,
           groupKeys,
         })
@@ -1443,6 +1541,17 @@ export const claude = defineCommand({
           )
         }
       } catch (err) {
+        if (launchProfileId === "fast") {
+          if (fastLaunchId) unregisterLaunch(fastLaunchId)
+          await disposeFastRuntime().catch(() => {})
+          await server.close(true).catch(() => {})
+          await baseShutdown().catch(() => {})
+          resetFastRuntimeOwnership()
+          const message = `Fast profile wiring failed; refusing to launch an unguarded session: ${err instanceof Error ? err.message : String(err)}`
+          consola.error(message)
+          process.stderr.write(`${message}\n`)
+          process.exit(1)
+        }
         consola.warn(
           `Peer MCP wiring failed (claude will launch without it): ${
             err instanceof Error ? err.message : String(err)
@@ -1480,7 +1589,7 @@ export const claude = defineCommand({
       await prependOperatingDefaultsToMirroredClaudeMd(
         buildOperatingDefaultsDirective({
           ...nativeAvailability,
-          fastRuntimeAvailable: fastRuntimeWired,
+          fastRuntimeAvailable: fastWiringComplete,
         }),
       )
     } catch (err) {

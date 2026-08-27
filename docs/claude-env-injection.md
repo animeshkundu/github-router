@@ -12,6 +12,10 @@ See [`../CLAUDE.md`](../CLAUDE.md) for project overview.
 
 The injection uses a **presence-based guard** in `getClaudeCodeEnvVars` (`src/lib/server-setup.ts`): if the parent env has set ANY value for these keys (including `0`, `false`, `no`, `off`, or any unrecognized value), the proxy preserves the user's intent — it only injects `1` when the key is unset. The parent env survives `buildLaunchCommand`'s sanitize because none of these keys are in `STRIPPED_PARENT_ENV_KEYS`.
 
+Every `github-router claude` launch also presence-guards `CLAUDE_CODE_AUTO_COMPACT_WINDOW` with a catalog-derived **decimal integer**. It derives the complete client window for each reachable `[1m]` active/tier/custom/gateway model — `floor(max_prompt_tokens * 0.85) + min(max_output_tokens, 20_000) + 13_000` — and exports the minimum. This is not fast-only. `/model` does not mutate the process env, but Claude Code resolves the effective value as `Math.min(locallyRecognizedModelWindow, launchValue)`, so one launch-global minimum remains safe after a switch. Native subagents inherit it; 1M roles use the launch value, true 200K roles remain about 200K, and Grok's bare 500K id is conservatively treated as about 200K because Claude Code has no 500K declaration. The value must be a plain integer: that env path is `parseInt`-based, not the suffix-aware `/config` parser, so `"1m"` would parse to `1`, be floored to the client's 100,000 minimum, and compact a 1M session roughly every 52K tokens. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is deliberately not set. See the "Context-window safety" section of [`default-models.md`](default-models.md).
+
+This closes the failure observed on 2026-08-26: a top-level (`isSidechain:false`) Luna turn reached about 919,814 input tokens, then Copilot rejected the `/responses` request because Luna's 1.05M total window exposes only a 922K prompt ceiling after reserving 128K output. The failing call was not a planner/reviewer/scout/critic or `/responses/compact` request. Current live Opus/Sonnet/Gemini rows expose 1M total / 936K prompt; the defect class is any locally 1M-accounted model whose provider prompt ceiling lies below Claude Code's uncorrected ~967K trigger.
+
 | Env var | Feature |
 |---|---|
 | `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL` | gpt-5.6-sol/xhigh advisor tool (Phase I server-side wiring; see [`unsupported-features.md`](unsupported-features.md) ADVISOR section) |
@@ -22,9 +26,9 @@ The injection uses a **presence-based guard** in `getClaudeCodeEnvVars` (`src/li
 
 **Opt out per-feature** by setting the env to `0` / `false` / `no` / `off` / empty string in your shell — the presence-based guard preserves any value you set. ADVISOR has a documented hard opt-out (`CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1`) that wins via `JI()` ordering.
 
-## Adjacent proxy-side opt-out: `GH_ROUTER_PEER_AWARENESS`
+## Adjacent proxy-side awareness injection
 
-Independent of the Claude Code feature gates above, the proxy appends a short (~100-token) `--append-system-prompt` snippet introducing Claude to the peer-review MCP tools, the `peer-review-coordinator` fan-out subagent, and Claude Code's built-in `advisor` tool. Non-prescriptive — the prescriptive auto-invocation triggers live in each MCP tool's own `description` (see [`peer-mcp-design.md`](peer-mcp-design.md) Phase 2A). Default-on; opt out per-launch with `GH_ROUTER_PEER_AWARENESS=0` (also accepts `false` / `off` / `no` / empty string, case-insensitive — same surface as the CLAUDE_CODE_* opt-outs). Built by `buildPeerAwarenessSnippet` in `src/lib/peer-mcp-personas.ts`; size-pinned by tests in `tests/peer-mcp-personas.test.ts` to stay under 700 bytes minimal / 900 bytes maximal so it doesn't bloat the system prompt.
+Independent of the Claude Code feature gates above, the proxy appends a short `--append-system-prompt` snippet introducing the model to the capabilities that actually resolved for this launch. `GH_ROUTER_PEER_AWARENESS` is intentionally no longer a behavioral opt-out: keeping the prompt and emitted tool/agent surface in sync is required for deterministic routing, so old values are accepted as a silent no-op for compatibility. The launch-specific builder omits every unavailable/droppable role rather than naming tools that do not exist.
 
 **Race-surface coverage**: enabling FORK_SUBAGENT and FINE_GRAINED_TOOL_STREAMING by default amplifies the SSE frame distribution through `relayAnthropicStream`. Per the Review checklist in `CLAUDE.md`, `tests/integration/fork-fgts-cancel.test.ts` exercises consumer cancels against fragmented `input_json_delta` streams to assert no smoking-gun warns surface.
 
@@ -51,9 +55,9 @@ dashes). Discovery has two code paths and only one of them carries that hazard:
 
 Phase 3 of the Anthropic-translation shim exploits exactly that asymmetry.
 `getClaudeCodeEnvVars` (`src/lib/server-setup.ts`) pre-seeds
-`<CLAUDE_CONFIG_DIR>/cache/gateway-models.json` with the non-Claude models present
-in the live catalog (`gpt-5.5`, `gpt-5.3-codex`, `gemini-3.5-flash`,
-`gemini-3.1-pro-preview`) via `seedGatewayModelCache`, then enables
+`<CLAUDE_CONFIG_DIR>/cache/gateway-models.json` with the current fast-profile
+non-Claude rows present in the live catalog (`gpt-5.6-sol`, `gpt-5.6-luna`,
+`gemini-3.7-flash`, `grok-4.6`) via `seedGatewayModelCache`, then enables
 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` — but ONLY when the seed actually
 landed AND the key is unset in both the parent env and the injected `vars` (a
 user-set value always wins, same presence guard as the five features above). When

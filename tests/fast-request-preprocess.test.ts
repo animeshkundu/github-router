@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { preprocessFastRequest } from "../src/lib/fast-request-preprocess"
+import { FAST_CRITIC_ALIAS_ID } from "../src/lib/launch-profile"
 import type { LaunchRegistryEntry } from "../src/lib/state"
 
 const fastLaunch: LaunchRegistryEntry = {
@@ -37,6 +38,13 @@ describe("fast request preprocessing", () => {
     expect(parsed.thinking).toEqual({ type: "adaptive" })
   })
 
+  test("preserves the fast critic's medium effort through alias canonicalization", () => {
+    const result = preprocessFastRequest(body(`${FAST_CRITIC_ALIAS_ID}[1m]`), fastLaunch)
+    const parsed = JSON.parse(result.body)
+    expect(parsed.model).toBe("gemini-3.7-flash[1m]")
+    expect(parsed.output_config.effort).toBe("medium")
+  })
+
   test("forces bare fast role models and rejects every other model", () => {
     for (const [model, effort] of [
       ["gpt-5.6-luna", "max"],
@@ -49,6 +57,19 @@ describe("fast request preprocessing", () => {
       expect(parsed.output_config.effort).toBe(effort)
     }
     expect(preprocessFastRequest(body("gpt-5.5"), fastLaunch).rejectedModel).toBe("gpt-5.5")
+  })
+
+  test("accepts repeated 1M suffixes on fixed fast model ids", () => {
+    for (const [model, effort] of [
+      ["gpt-5.6-luna[1m][1M]", "max"],
+      ["gpt-5.6-sol[1m][1m]", "high"],
+      ["gemini-3.7-flash[1m][1m]", "high"],
+      ["claude-opus-5[1m][1m]", "high"],
+    ] as const) {
+      const result = preprocessFastRequest(body(model), fastLaunch)
+      expect(result.rejectedModel).toBeUndefined()
+      expect(JSON.parse(result.body).output_config.effort).toBe(effort)
+    }
   })
 
   test("standard bare models remain byte-identical", () => {

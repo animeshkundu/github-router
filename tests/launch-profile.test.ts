@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 
 import {
+  FAST_CRITIC_ALIAS_ID,
   LUNA_DRIVER_ALIAS_ID,
   LUNA_HAIKU_ALIAS_ID,
   LUNA_REAL_MODEL_ID,
@@ -60,7 +61,7 @@ const fullCatalog = {
     model("gpt-5.6-luna", { context: 1_050_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
     model("gpt-5.6-sol", { context: 1_050_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
     model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["medium"], endpoints: ["/responses"] }),
-    model("gemini-3.7-flash", { context: 1_000_000, efforts: ["high"], endpoints: ["/chat/completions"] }),
+    model("gemini-3.7-flash", { context: 1_000_000, efforts: ["medium", "high"], endpoints: ["/chat/completions"] }),
     {
       ...model("claude-opus-5", { context: 1_000_000, prompt: 872_000, efforts: ["high", "max"], endpoints: ["/v1/messages"] }),
       capabilities: {
@@ -93,6 +94,8 @@ describe("launch profile selection", () => {
 describe("Luna aliases", () => {
   test("canonicalize to Luna while retaining distinct defaults", () => {
     expect(resolveModelAlias(`${LUNA_DRIVER_ALIAS_ID}[1m]`)?.absentEffortDefault).toBe("max")
+    expect(resolveModelAlias(`${FAST_CRITIC_ALIAS_ID}[1m]`)?.absentEffortDefault).toBe("medium")
+    expect(canonicalizeAliasModel(`${FAST_CRITIC_ALIAS_ID}[1m]`)).toBe("gemini-3.7-flash[1m]")
     expect(resolveModelAlias(LUNA_SONNET_ALIAS_ID)?.absentEffortDefault).toBe("xhigh")
     expect(resolveModelAlias(LUNA_HAIKU_ALIAS_ID)?.absentEffortDefault).toBe("high")
     expect(canonicalizeAliasModel(`${LUNA_SONNET_ALIAS_ID}[1m]`)).toBe(`${LUNA_REAL_MODEL_ID}[1m]`)

@@ -1,14 +1,13 @@
 /**
- * Real-Bun.serve cancellation-race test for the fast Luna-lead profile's
- * advisor translate-loop (plan section 8: "Enable Gemini 3.7 Flash Advisor
- * on the Luna translation path").
+ * Real-Bun.serve cancellation-race tests for the authenticated fast primary
+ * lead's translated Advisor loop.
  *
- * Twin of `tests/integration/advisor-cancel-leak.test.ts`, which pins the
- * SAME race for the Claude-passthrough lead. This file exercises the NEW
- * code path instead: a non-Claude lead (`gpt-5.6-luna`, /responses) whose
- * advisor (`gemini-3.7-flash`, /chat/completions) and continuation both run
- * through `streamParsedRequestViaShim` / `makeShimContinueTurn`
- * (`src/lib/anthropic-translate/index.ts`) rather than native `createMessages`.
+ * Twin of `tests/integration/advisor-cancel-leak.test.ts`, which pins the SAME
+ * race for a Claude-passthrough lead. This file exercises both translated
+ * endpoints: Luna on Responses and Gemini 3.7 Flash on Chat. Their Advisor
+ * dispatches on non-streaming Chat, while continuations return through each
+ * selected lead's original shim via `streamParsedRequestViaShim` /
+ * `makeShimContinueTurn` (`src/lib/anthropic-translate/index.ts`).
  *
  * Per CLAUDE.md's stream-lifecycle mandate, this MUST use a real
  * `Bun.serve` listener (not `app.request()`) so consumer-cancel propagates
@@ -159,6 +158,181 @@ function buildResponsesSse(
     headers: { "content-type": "text/event-stream" },
   })
 }
+
+/** Chat streams require the literal `[DONE]` terminal in addition to chunks. */
+function buildChatSse(
+  events: Array<Record<string, unknown>>,
+  perEventDelayMs: number,
+): Response {
+  const encoder = new TextEncoder()
+  const lines = [
+    ...events.map((event) => `data: ${JSON.stringify(event)}\n\n`),
+    "data: [DONE]\n\n",
+  ]
+  let i = 0
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (i >= lines.length) {
+        try {
+          controller.close()
+        } catch {
+          /* already closed */
+        }
+        return
+      }
+      try {
+        controller.enqueue(encoder.encode(lines[i]))
+      } catch {
+        /* enqueue after close */
+      }
+      i++
+      await new Promise((r) => setTimeout(r, perEventDelayMs))
+    },
+  })
+  return new Response(stream, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  })
+}
+
+test(
+  "Gemini lead reaches Gemini Advisor and consumer cancel aborts it before continuation",
+  async () => {
+    // Same provider endpoint, two distinct wire shapes: lead is streaming Chat,
+    // Advisor is non-streaming Chat. This is the route Luna's Responses test
+    // cannot cover and the microsecond cancellation window must use Bun.serve.
+    delete process.env.GH_ROUTER_ADVISOR_MODEL
+    let leadChatCalls = 0
+    let advisorChatCalls = 0
+    let advisorSignalAborted = false
+    let continuationStartedAfterCancel = false
+    let advisorStartedAfterCancel = false
+    let cancelObservedAt = -1
+
+    globalThis.fetch = mock((url: string | URL, init?: RequestInit) => {
+      const u = typeof url === "string" ? url : url.toString()
+      if (u.startsWith(baseUrl)) return realFetch(url, init)
+      if (!u.includes("/chat/completions")) {
+        return new Response("unexpected endpoint", { status: 500 })
+      }
+
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        stream?: boolean
+        model?: string
+      }
+      if (body.stream === false) {
+        advisorChatCalls++
+        if (cancelObservedAt > 0) advisorStartedAfterCancel = true
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            resolve(
+              new Response(
+                JSON.stringify({
+                  model: GEMINI_ADVISOR_MODEL,
+                  choices: [{ message: { role: "assistant", content: "advice" } }],
+                }),
+                { headers: { "content-type": "application/json" } },
+              ),
+            )
+          }, 500)
+          init?.signal?.addEventListener("abort", () => {
+            advisorSignalAborted = true
+            clearTimeout(timer)
+            reject(new DOMException("Aborted", "AbortError"))
+          })
+        })
+      }
+
+      leadChatCalls++
+      if (cancelObservedAt > 0) continuationStartedAfterCancel = true
+      if (leadChatCalls === 1) {
+        return buildChatSse(
+          [
+            {
+              choices: [
+                {
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call_gemini_advisor_1",
+                        function: {
+                          name: ADVISOR_INTERNAL_TOOL_NAME,
+                          arguments: "{}",
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: "tool_calls",
+                },
+              ],
+            },
+          ],
+          30,
+        )
+      }
+      return buildChatSse(
+        [{ choices: [{ delta: { content: "continued" }, finish_reason: "stop" }] }],
+        5,
+      )
+    }) as unknown as typeof globalThis.fetch
+
+    const aborter = new AbortController()
+    const response = await fetch(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+        [LAUNCH_SECRET_HEADER]: FAST_SECRET,
+      },
+      body: JSON.stringify({
+        model: GEMINI_ADVISOR_MODEL,
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }),
+      signal: aborter.signal,
+    })
+    expect(response.status).toBe(200)
+    const reader = response.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ""
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
+      const { value, done } = await reader.read().catch(() => ({
+        value: undefined,
+        done: true,
+      }))
+      if (done) break
+      if (value) buffer += decoder.decode(value, { stream: true })
+      if (buffer.includes("server_tool_use")) break
+    }
+    expect(buffer).toContain("server_tool_use")
+
+    const advisorDeadline = Date.now() + 3000
+    while (advisorChatCalls === 0 && Date.now() < advisorDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    expect(advisorChatCalls).toBe(1)
+
+    cancelObservedAt = Date.now()
+    aborter.abort()
+    try {
+      while (!(await reader.read()).done) { /* drain until cancel */ }
+    } catch {
+      /* expected */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+
+    expect(advisorStartedAfterCancel).toBe(false)
+    expect(advisorSignalAborted).toBe(true)
+    expect(continuationStartedAfterCancel).toBe(false)
+    expect(leadChatCalls).toBe(1)
+    expect(advisorChatCalls).toBe(1)
+  },
+  15_000,
+)
 
 test(
   "aliased Luna lead reaches Gemini Advisor and consumer cancel aborts it before continuation",

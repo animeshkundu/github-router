@@ -145,6 +145,8 @@ declare -a PROBE_REGISTRY=(
   "advisor_claude_adaptive_thinking|claude-emits|claude-opus-5 on /v1/messages accepts the escalated advisor body (stream:false + thinking:{type:'adaptive'} + output_config.effort) and returns 200"
   "advisor_claude_nonstreaming_cap|claude-emits|claude-opus-5 on /v1/messages accepts max_tokens at the advertised max_non_streaming_output_tokens (16000) when stream:false"
   "advisor_claude_streaming_cap_accepted|exploratory|claude-opus-5 on /v1/messages ACCEPTS max_tokens at the streaming ceiling (64000) even when stream:false — max_non_streaming_output_tokens is advertised but not enforced; the advisor stays inside it by choice, not necessity"
+  "fast_advisor_all_leads_policy|proxy-internal|authenticated fast Advisor route matrix: Luna/Sol/Grok Responses, Gemini Chat, Opus Messages; Gemini Advisor Chat/high and same-lead continuation on every row"
+  "fast_advisor_endpoint_gate|proxy-internal|automatic fast Advisor selects Gemini only when its live catalog row advertises Chat; missing/wrong endpoint falls back; explicit pin remains authoritative"
 
   # ===== Peer-MCP personas (Phase B6 of cap-codex-effort-add-opus-critic) =====
   # Two probe shapes:
@@ -230,14 +232,18 @@ declare -a PROBE_REGISTRY=(
 
   # ===== Fast-launch-profile model shapes (Luna / Gemini 3.7 Flash / Grok 4.6) =====
   # These probe the live upstream request shapes the fast launch profile design
-  # depends on (docs/default-models.md "Fast launch profile") — the profile's
-  # native/MCP/persona surface narrowing itself is a separate, in-progress
-  # workstream, but the model+endpoint+effort shapes below are ordinary
+  # depends on (docs/default-models.md "Fast launch profile"). The native
+  # profile surface and its in-session dispatch ACL are separate local policy
+  # layers, but the model+endpoint+effort shapes below are ordinary
   # Copilot passthrough/shim contracts and are testable against today's proxy.
   "fast_luna_responses_reasoning_high|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's scout assignment)"
-  "fast_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the fast profile's implementer-fast assignment; 'max' is the top of Luna's none..max ladder)"
-  "fast_gemini37flash_chat_reasoning_high|exploratory|gemini-3.7-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (the fast profile's gemini-critic persona / Advisor assignment)"
-  "fast_grok46_responses_reasoning_medium|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'medium'} (the fast profile's reviewer-fast assignment)"
+  "fast_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the fast profile's implementer assignment; 'max' is the top of Luna's none..max ladder)"
+  "fast_sol_responses_reasoning_high|exploratory|gpt-5.6-sol on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's planner assignment)"
+  "fast_opus5_messages_reasoning_high|exploratory|claude-opus-5 on /v1/messages accepts tools[] + adaptive thinking + high effort (the fast profile's Oracle assignment)"
+  "fast_gemini37flash_messages_tool_use|exploratory|gemini-3.7-flash on /v1/messages translation shim accepts a tool-use request (the fast profile's critic path)"
+  "fast_gemini37flash_chat_reasoning_high|exploratory|gemini-3.7-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (the fast profile's Advisor assignment)"
+  "fast_gemini37flash_chat_reasoning_medium|exploratory|gemini-3.7-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'medium' (the fast profile's native critic assignment)"
+  "fast_grok46_responses_reasoning_medium|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'medium'} (the fast profile's reviewer assignment)"
   "shim_grok46_messages|exploratory|grok-4.6 on /v1/messages (→ /responses shim, generic supported_endpoints routing — no shim code change needed): 200 + well-formed Anthropic message (the translated Grok lead path)"
   "shim_grok46_messages_tool_use|exploratory|grok-4.6 on /v1/messages with forced tool_choice (→ /responses shim): 200 + tool_use block with non-empty input (the translated Grok tool path)"
 )
@@ -612,6 +618,31 @@ probe_stream_with_tools() {
   assert_status 200 \
     && assert_body_contains "event: message_start" \
     && assert_body_contains "event: content_block_start"
+}
+
+# ===========================================================================
+# Fast Advisor local-policy probes
+# ===========================================================================
+
+probe_fast_advisor_all_leads_policy() {
+  # Launch identity is private and nonce-bound, so a raw live probe cannot
+  # construct it without scraping runtime files. Execute the deterministic
+  # authenticated route matrix instead: it drives the real Hono handler and
+  # asserts every upstream model/endpoint/body through a mocked Copilot edge.
+  if ! bun test "${PROJECT_ROOT}/tests/advisor-fast-profile-route-matrix.test.ts" >/dev/null 2>&1; then
+    echo "  ${C_RED}FAIL${C_RESET}: fast Advisor five-lead route matrix failed"
+    return 1
+  fi
+}
+
+probe_fast_advisor_endpoint_gate() {
+  # Resolver coverage pins the missing/wrong-Chat fallback and explicit-pin
+  # precedence. Keep separate from the full route matrix so a catalog-gate
+  # regression names its own failure class.
+  if ! bun test "${PROJECT_ROOT}/tests/advisor-lead-aware.test.ts" >/dev/null 2>&1; then
+    echo "  ${C_RED}FAIL${C_RESET}: fast Advisor endpoint-gate selection failed"
+    return 1
+  fi
 }
 
 # ===========================================================================
@@ -1408,12 +1439,38 @@ probe_shim_parallel_tool_emit_gpt55() {
 # Fast-launch-profile model shapes (Luna / Gemini 3.7 Flash / Grok 4.6)
 # ===========================================================================
 # See docs/default-models.md "Fast launch profile" for the design these shapes
-# support: gpt-5.6-luna is the fast lead (and backs the scout/implementer-fast
-# natives at high/max effort respectively), gemini-3.7-flash backs the fast
-# profile's sole persona (gemini-critic) and its Advisor target, and grok-4.6
-# backs reviewer-fast at medium effort. None of that native/MCP roster
-# narrowing has landed yet; these probes only assert the underlying Copilot
+# support: gpt-5.6-luna is the fast lead (and backs the scout/implementer
+# natives at high/max effort respectively), gemini-3.7-flash backs the native
+# critic at medium effort and the Advisor target at high effort, and grok-4.6
+# backs the reviewer at medium effort. The native/MCP roster narrowing and its
+# Task/Agent ACL are local policy; these probes assert the underlying Copilot
 # request shapes, which are ordinary passthrough/shim contracts today.
+
+probe_fast_opus5_messages_reasoning_high() {
+  # Claude Opus 5 backs the fast profile's stateless Oracle MCP tool.
+  do_request POST /v1/messages '{
+    "model": "claude-opus-5",
+    "max_tokens": 50,
+    "stream": false,
+    "thinking": {"type":"adaptive"},
+    "output_config": {"effort":"high"},
+    "messages": [{"role":"user","content":"reply with the literal string ok"}],
+    "tools": [{"name":"echo","description":"echo the input","input_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]
+  }'
+  assert_status 200
+}
+
+probe_fast_gemini37flash_messages_tool_use() {
+  # The critic reaches Gemini through the /v1/messages translation shim.
+  do_request POST /v1/messages '{
+    "model": "gemini-3.7-flash",
+    "max_tokens": 50,
+    "messages": [{"role":"user","content":"Use the echo tool with text ok."}],
+    "tools": [{"name":"echo","description":"echo the input","input_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+    "tool_choice": {"type":"tool","name":"echo"}
+  }'
+  assert_status 200 && assert_anthropic_message && assert_tool_use_count_at_least 1
+}
 
 probe_fast_luna_responses_reasoning_high() {
   # gpt-5.6-luna at reasoning.effort:"high" — the fast profile's scout
@@ -1431,9 +1488,22 @@ probe_fast_luna_responses_reasoning_high() {
   assert_status 200
 }
 
+probe_fast_sol_responses_reasoning_high() {
+  # gpt-5.6-sol is the fast profile's planner assignment at high effort.
+  do_request POST /v1/responses '{
+    "model": "gpt-5.6-sol",
+    "input": "reply with the literal string ok",
+    "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+    "tool_choice": "auto",
+    "reasoning": {"effort":"high"},
+    "max_output_tokens": 50
+  }'
+  assert_status 200
+}
+
 probe_fast_luna_responses_reasoning_max() {
   # gpt-5.6-luna at reasoning.effort:"max" — the fast profile's
-  # implementer-fast assignment (the top of Luna's none..max ladder).
+  # implementer assignment (the top of Luna's none..max ladder).
   do_request POST /v1/responses '{
     "model": "gpt-5.6-luna",
     "input": "reply with the literal string ok",
@@ -1461,9 +1531,23 @@ probe_fast_gemini37flash_chat_reasoning_high() {
   assert_status 200
 }
 
+probe_fast_gemini37flash_chat_reasoning_medium() {
+  # gemini-3.7-flash at medium effort is the native fast critic's exact
+  # assignment. Advisor separately uses the high-effort shape above.
+  do_request POST /v1/chat/completions '{
+    "model": "gemini-3.7-flash",
+    "messages": [{"role":"user","content":"reply with the literal string ok"}],
+    "tools": [{"type":"function","function":{"name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}}],
+    "tool_choice": "auto",
+    "reasoning_effort": "medium",
+    "max_tokens": 50
+  }'
+  assert_status 200
+}
+
 probe_fast_grok46_responses_reasoning_medium() {
   # grok-4.6 on /v1/responses at reasoning.effort:"medium" — the fast
-  # profile's reviewer-fast assignment. Grok 4.6 advertises a low..xhigh
+  # profile's reviewer assignment. Grok 4.6 advertises a low..xhigh
   # ladder (no "max"), 500K total / 372K max-prompt / 128K max-output — see
   # docs/default-models.md "Grok context accounting" for why the proxy keeps
   # Grok bare (no [1m]) rather than decorating it.

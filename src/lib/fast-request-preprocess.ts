@@ -2,6 +2,7 @@ import {
   canonicalizeAliasModel,
   resolveModelAlias,
 } from "./launch-profile"
+import { stripTrailingOneMSuffix } from "./model-suffix"
 import type { LaunchRegistryEntry } from "./state"
 
 export type FastFixedEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max"
@@ -42,7 +43,7 @@ export function preprocessFastRequest(
     return { body: rawBody, originalModel, modified: false }
   }
 
-  const bare = originalModel.replace(/\[1m\]$/i, "")
+  const { base: bare } = stripTrailingOneMSuffix(originalModel)
   let effort: FastFixedEffort | undefined
   if (alias) {
     effort = alias.absentEffortDefault

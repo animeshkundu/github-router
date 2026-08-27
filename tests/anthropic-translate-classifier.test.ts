@@ -125,6 +125,27 @@ describe("classifyMessagesRoute", () => {
     expect(classifyMessagesRoute("gemini-3.5-flash", chatDefault)).toBe("chat-shim")
   })
 
+  test("fast profile keeps fixed endpoint policy when a model advertises both", () => {
+    const luna = model({
+      id: "gpt-5.6-luna",
+      vendor: "openai",
+      supported_endpoints: ["/chat/completions", "/responses"],
+    })
+    const gemini = model({
+      id: "gemini-3.7-flash",
+      vendor: "google",
+      supported_endpoints: ["/responses", "/chat/completions"],
+    })
+
+    expect(classifyMessagesRoute("gpt-5.6-luna", luna)).toBe("chat-shim")
+    expect(classifyMessagesRoute("gpt-5.6-luna", luna, undefined, true)).toBe(
+      "responses-shim",
+    )
+    expect(classifyMessagesRoute("gemini-3.7-flash", gemini, undefined, true)).toBe(
+      "chat-shim",
+    )
+  })
+
   test("undefined model id / model absent from catalog → passthrough", () => {
     expect(classifyMessagesRoute(undefined)).toBe("claude-passthrough")
     expect(classifyMessagesRoute("gpt-5.5", undefined)).toBe("claude-passthrough")

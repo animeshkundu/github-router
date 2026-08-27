@@ -125,10 +125,10 @@ export interface ShimTurnOptions {
  *     from the catalog (which would also mean re-parsing/re-picking work the
  *     caller already did).
  *   - `makeShimContinueTurn` (below), which `buildAdvisorStream`
- *     (`src/services/advisor/advisor.ts`) injects as its `continueTurn` for
- *     the fast Luna-lead profile, so an advisor continuation on a non-Claude
- *     lead runs through the SAME translation + SSE-synthesis machinery as
- *     the initial turn instead of a parallel, divergent implementation.
+ *     (`src/services/advisor/advisor.ts`) injects for any non-Claude model
+ *     selected by an authenticated fast primary lead, so its Advisor
+ *     continuation runs through the SAME translation + SSE-synthesis machinery
+ *     as the initial turn instead of a parallel, divergent implementation.
  */
 export async function streamParsedRequestViaShim(
   parsed: ParsedAnthropicRequest,
@@ -172,8 +172,8 @@ export async function streamParsedRequestViaShim(
  * Build an injectable `continueTurn(body, signal)` for `buildAdvisorStream`
  * (`src/services/advisor/advisor.ts`) that routes a continuation turn
  * through THIS module's non-Claude shim instead of Claude passthrough — used
- * for the fast Luna-lead profile's advisor translate-loop. No `onCancel` is
- * threaded through: the advisor loop's own `aborter` (shared with `signal`
+ * by any non-Claude model selected in an authenticated fast primary lead.
+ * No `onCancel` is threaded through: the advisor loop's own `aborter` (shared with `signal`
  * here) already tears down on consumer cancel via `buildAdvisorStream`'s
  * `cancel()`, so this stream needs no independent teardown hook.
  */

@@ -217,6 +217,94 @@ test("forwardError remaps 400 containing context_length_exceeded substring", asy
   expect(json.error.message).toContain("prompt is too long")
 })
 
+test("forwardError remaps Copilot's exact context-window wording", async () => {
+  const app = new Hono()
+  const message =
+    "Your input exceeds the context window of this model. Please adjust your input and try again."
+  app.get("/", (c) =>
+    forwardError(
+      c,
+      new HTTPError(
+        "Failed",
+        Response.json(
+          { error: { message, code: "invalid_request_body" } },
+          { status: 400 },
+        ),
+      ),
+    ),
+  )
+
+  const response = await app.request("/")
+  expect(response.status).toBe(400)
+  await expect(response.json()).resolves.toEqual({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: `capability_rejected: prompt_too_long (prompt is too long: ${message})`,
+    },
+  })
+})
+
+/**
+ * Both halves of the envelope are load-bearing, and each is matched
+ * independently by the client: verified in the installed Claude Code bundle as
+ * `IZ(e) = JBn(e.message) || wd(e.message, "prompt_too_long")` — the wording
+ * matcher OR the capability token. These assertions replicate both matchers so
+ * a future reword of our message cannot silently break recovery.
+ */
+test("overflow envelope satisfies BOTH client matchers independently", async () => {
+  const app = new Hono()
+  app.get("/", (c) =>
+    forwardError(
+      c,
+      new HTTPError(
+        "Failed",
+        Response.json(
+          { error: { message: "Your input exceeds the context window of this model." } },
+          { status: 400 },
+        ),
+      ),
+    ),
+  )
+
+  const json = (await (await app.request("/")).json()) as {
+    error: { message: string }
+  }
+  const message = json.error.message
+
+  // Client matcher 1 (`JBn`): lowercased substring on the wording.
+  expect(message.toLowerCase().includes("prompt is too long")).toBe(true)
+
+  // Client matcher 2 (`wd`): the token, followed by a character that is NOT
+  // in [A-Za-z0-9_:.-] (its right-boundary check), so the class cannot be read
+  // as a longer identifier.
+  const token = "capability_rejected: prompt_too_long"
+  const at = message.indexOf(token)
+  expect(at).toBeGreaterThanOrEqual(0)
+  const next = message[at + token.length]
+  expect(next !== undefined && /[A-Za-z0-9_:.-]/.test(next)).toBe(false)
+})
+
+test("max_tokens overflow classifies as its own class, not prompt_too_long", async () => {
+  const app = new Hono()
+  const message =
+    "input length and `max_tokens` exceed context limit: 900000 + 128000 > 1000000"
+  app.get("/", (c) =>
+    forwardError(
+      c,
+      new HTTPError("Failed", Response.json({ error: { message } }, { status: 400 })),
+    ),
+  )
+
+  const json = (await (await app.request("/")).json()) as {
+    error: { message: string }
+  }
+  expect(json.error.message).toContain(
+    "capability_rejected: max_tokens_context_overflow",
+  )
+  expect(json.error.message).not.toContain("prompt_too_long")
+})
+
 test("forwardError does NOT remap 400 'model not found' (regression discriminator)", async () => {
   const app = new Hono()
   app.get("/", (c) =>

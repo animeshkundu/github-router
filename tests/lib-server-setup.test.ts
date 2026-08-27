@@ -91,6 +91,291 @@ describe("parseSharedArgs", () => {
 })
 
 describe("getClaudeCodeEnvVars", () => {
+  /**
+   * Minimal live-catalog stand-in carrying the two limits that matter. Numbers
+   * are the real advertised values at time of writing: the total window is what
+   * unlocks `[1m]`, the prompt ceiling is what Copilot actually enforces, and
+   * the gap between them is the whole defect this guards.
+   */
+  function catalogModel(
+    id: string,
+    totalTokens: number,
+    promptTokens: number,
+    outputTokens = 128_000,
+  ) {
+    return {
+      id,
+      object: "model",
+      vendor: id.startsWith("claude") ? "anthropic" : "openai",
+      capabilities: {
+        family: id,
+        object: "model_capabilities",
+        tokenizer: "o200k_base",
+        type: "chat",
+        supports: { tool_calls: true },
+        limits: {
+          max_context_window_tokens: totalTokens,
+          max_prompt_tokens: promptTokens,
+          max_output_tokens: outputTokens,
+        },
+      },
+      supported_endpoints: ["/responses", "/v1/messages"],
+    }
+  }
+
+  function withCatalog<T>(
+    entries: ReadonlyArray<ReturnType<typeof catalogModel>>,
+    fn: () => T,
+  ): T {
+    const saved = state.models
+    state.models = {
+      object: "list",
+      data: entries as unknown as NonNullable<typeof state.models>["data"],
+    }
+    try {
+      return fn()
+    } finally {
+      state.models = saved
+    }
+  }
+
+  function withoutCompactionEnv<T>(fn: () => T): T {
+    // The test process itself may have been launched by `github-router claude`
+    // and therefore inherit tier/custom model envs. Clear them so every fixture
+    // is determined only by this call's model/profile/catalog, not by whichever
+    // model the developer happened to start this test session with.
+    const keys = [
+      "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+      "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_CUSTOM_MODEL_OPTION",
+    ]
+    const prior = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+    for (const key of keys) delete process.env[key]
+    try {
+      return fn()
+    } finally {
+      for (const key of keys) {
+        if (prior[key] === undefined) delete process.env[key]
+        else process.env[key] = prior[key]
+      }
+    }
+  }
+
+  /**
+   * The regression that shipped and had to be caught: the env path is NOT the
+   * suffix-aware `/config` parser. It is `parseInt`-based, so a value like
+   * "1m" resolves to 1 and is then floored to the client's 100,000 minimum —
+   * which would auto-compact a 1M-context session roughly every 52K tokens.
+   * Anything but a plain decimal integer is a bug.
+   */
+  test("auto-compact window is a plain decimal integer (parseInt round-trips)", () => {
+    const value = withCatalog(
+      [
+        catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
+        catalogModel("claude-opus-5", 1_000_000, 936_000),
+      ],
+      () =>
+        withoutCompactionEnv(
+          () =>
+            getClaudeCodeEnvVars(
+              "http://127.0.0.1:8787",
+              "gh-router-luna-driver-max",
+              "fast",
+            ).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+
+    expect(value).toBeDefined()
+    expect(value).toMatch(/^\d+$/)
+    expect(String(Number.parseInt(value as string, 10))).toBe(value)
+    expect(Number.parseInt(value as string, 10)).toBeGreaterThan(100_000)
+  })
+
+  /**
+   * The window must respect the tightest COMPLETE derived window reachable in
+   * the launch, not just the lead's. Current live Opus 5 is 936K prompt, so
+   * Luna/Sol's 922K ceiling binds a normal fast launch at 816700.
+   */
+  test("derives the window from the tightest reachable prompt ceiling", () => {
+    const lunaOnly = withCatalog(
+      [catalogModel("gpt-5.6-luna", 1_050_000, 922_000)],
+      () =>
+        withoutCompactionEnv(
+          () =>
+            getClaudeCodeEnvVars(
+              "http://127.0.0.1:8787",
+              "gh-router-luna-driver-max",
+              "fast",
+            ).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    // floor(922_000 * 0.85) + 20_000 + 13_000
+    expect(lunaOnly).toBe("816700")
+
+    const withOpusRow = withCatalog(
+      [
+        catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
+        catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
+      ],
+      () =>
+        withoutCompactionEnv(
+          () =>
+            getClaudeCodeEnvVars(
+              "http://127.0.0.1:8787",
+              "gh-router-luna-driver-max",
+              "fast",
+            ).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    expect(withOpusRow).toBe("816700")
+  })
+
+  /**
+   * Regression for the old aggregation. It selected the smallest PROMPT and
+   * then used that row's output reserve, but output participates in the full
+   * expression. Crossed inputs make the lower complete result belong to the
+   * row with the larger prompt, so the old implementation returns 803000 and
+   * this test fails.
+   */
+  test("minimizes the complete per-candidate derived window", () => {
+    const value = withCatalog(
+      [
+        // 900K prompt + 20K client-capped output -> 798000
+        catalogModel("gpt-5.6-luna", 1_050_000, 900_000, 128_000),
+        // 905K prompt + 1K output -> 783250 (the true minimum)
+        catalogModel("claude-opus-5", 1_000_000, 905_000, 1_000),
+      ],
+      () =>
+        withoutCompactionEnv(
+          () =>
+            getClaudeCodeEnvVars(
+              "http://127.0.0.1:8787",
+              "gh-router-luna-driver-max",
+              "fast",
+            ).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    expect(value).toBe("783250")
+  })
+
+  /**
+   * The standard profile is covered too: this is not a fast-only defect. The
+   * current live Opus 5 lead advertises 1M total against a 936K prompt ceiling.
+   */
+  test("applies to the standard Opus 5 lead, not just the fast profile", () => {
+    const value = withCatalog(
+      [catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000)],
+      () =>
+        withoutCompactionEnv(
+          () =>
+            getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5[1m]")
+              .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    expect(value).toBe("828600")
+  })
+
+  test("includes gateway-discovered 1M models after a standard launch", () => {
+    const value = withCatalog(
+      [
+        // Standard Opus alone would derive 828600.
+        catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
+        // The gateway-discovered Luna row is selectable through `/model` and
+        // binds lower even though it has no dedicated ANTHROPIC_DEFAULT_* env.
+        catalogModel("gpt-5.6-luna", 1_050_000, 922_000, 128_000),
+      ],
+      () =>
+        withoutCompactionEnv(
+          () =>
+            getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5[1m]")
+              .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    expect(value).toBe("816700")
+  })
+
+  /**
+   * A bare (undecorated) model already budgets at the client's conservative
+   * 200K default, below every prompt ceiling in the lineup, so it must not
+   * drag the window down. Grok 4.6 is the live instance of this.
+   */
+  test("undecorated models do not constrain the window", () => {
+    const value = withCatalog(
+      [
+        catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
+        catalogModel("grok-4.6", 500_000, 372_000),
+      ],
+      () =>
+        withoutCompactionEnv(
+          () =>
+            getClaudeCodeEnvVars(
+              "http://127.0.0.1:8787",
+              "gh-router-luna-driver-max",
+              "fast",
+            ).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    // Grok's 372K ceiling would have produced 349_200 had it been counted.
+    expect(value).toBe("816700")
+  })
+
+  test("omits the window entirely when catalog limits are unusable", () => {
+    const vars = withCatalog([], () =>
+      withoutCompactionEnv(() =>
+        getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5[1m]"),
+      ),
+    )
+    expect(vars).not.toHaveProperty("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+  })
+
+  test("preserves a parent-set auto-compaction window", () => {
+    const prior = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
+    process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = "500000"
+    try {
+      const vars = withCatalog(
+        [catalogModel("gpt-5.6-luna", 1_050_000, 922_000)],
+        () =>
+          getClaudeCodeEnvVars(
+            "http://127.0.0.1:8787",
+            "gh-router-luna-driver-max",
+            "fast",
+          ),
+      )
+      expect(vars).not.toHaveProperty("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
+      else process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = prior
+    }
+  })
+
+  /**
+   * The percentage override is deliberately no longer set. It interacts with a
+   * separate 20% precompute buffer in the client and is a test hook; with an
+   * honest window the client's own reserves are already correct.
+   */
+  test("never sets CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", () => {
+    for (const [lead, profile] of [
+      ["gh-router-luna-driver-max", "fast"],
+      ["claude-opus-5[1m]", "standard"],
+      ["gpt-5.6-luna", "standard"],
+    ] as const) {
+      const vars = withCatalog(
+        [
+          catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
+          catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
+        ],
+        () =>
+          withoutCompactionEnv(() =>
+            getClaudeCodeEnvVars("http://127.0.0.1:8787", lead, profile),
+          ),
+      )
+      expect(vars).not.toHaveProperty("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE")
+    }
+  })
+
   test("returns minimal proxy override set", () => {
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     expect(vars.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8787")

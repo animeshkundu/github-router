@@ -23,6 +23,7 @@
  * correct — a non-Claude request sent to `/v1/messages` would 400.
  */
 
+import { fastEndpointForModel } from "~/lib/fast-endpoint"
 import { pickEndpoint } from "~/services/copilot/endpoint"
 import type { Model } from "~/services/copilot/get-models"
 
@@ -100,16 +101,21 @@ export function isClaudeModel(
  * `originalModelId` is the optional pre-resolution request id; when supplied it
  * is checked for Claude-likeness alongside the resolved id so an alias that
  * resolves to a non-Claude-looking id can't slip past.
+ *
+ * `fastProfile` is an authenticated launch-policy signal. It replaces only the
+ * endpoint selection step with the fixed fast roster policy; Claude identity
+ * still wins first, and standard/BYO callers retain `pickEndpoint` unchanged.
  */
 export function classifyMessagesRoute(
   modelId: string | undefined,
   model?: Model,
   originalModelId?: string,
+  fastProfile = false,
 ): MessagesRoute {
   if (!modelId) return "claude-passthrough"
   if (isClaudeModel(modelId, model, originalModelId)) return "claude-passthrough"
   if (!model) return "claude-passthrough"
-  const endpoint = pickEndpoint(model)
+  const endpoint = fastProfile ? fastEndpointForModel(model) : pickEndpoint(model)
   if (endpoint === "responses") return "responses-shim"
   if (endpoint === "chat") return "chat-shim"
   return "claude-passthrough"
