@@ -1,8 +1,8 @@
 # Fast-profile critic
 
-The fast launch profile's `critic` native subagent runs `gemini-3.7-flash` with a 1M-context `[1m]` frontmatter id and medium effort. It is a fresh-context, cross-lab reviewer for plans, designs, diffs, and decisions. Its tools are Read, Grep, Glob, Bash, and the resolved search MCP wildcard. Bash is available for evidence commands, but the dispatch hook is only an in-session Task/Agent ACL, not a shell sandbox.
+The fast launch profile's `critic` native subagent runs `gemini-3.7-flash` with a 1M-context `[1m]` frontmatter id and medium effort. It is a fresh-context, cross-lab reviewer for plans, designs, diffs, and decisions. Its tools are Read, Grep, Glob, Bash, and the resolved search MCP wildcard. Bash is available for evidence commands, but the dispatch hook is only an in-session Task/Agent ACL, not a shell sandbox. Fast `Explore` also uses a bare alias/frontmatter id, so Claude Code keeps its conservative/default local context accounting; the provider's live Luna window remains 1.05M.
 
-The fast delegation graph is lead → all five roles; planner → reviewer/Explore/critic; implementer → reviewer/critic; reviewer, Explore, and critic → no native subagents. Capitalized `Explore` is the sole fast exploration role and replaces fast `scout`. The compiled PreToolUse guard accepts both `Task` and `Agent`, supports snake/camel target aliases, denies unknown or malformed caller/target identities, and removes invocation-level model overrides from allowed dispatches so fixed frontmatter wins. Standard launches and direct `-m gpt-5.6-luna` do not register this role or guard.
+The fast delegation graph is lead → all five roles; Plan → reviewer/Explore/critic; implementer → reviewer/critic; reviewer, Explore, and critic → no native subagents. Capitalized `Explore` is the sole fast exploration role and replaces fast `scout`. The compiled PreToolUse guard accepts both `Task` and `Agent`, supports snake/camel target aliases, denies unknown or malformed caller/target identities, and removes invocation-level model overrides from allowed dispatches so fixed frontmatter wins. Standard launches and direct `-m gpt-5.6-luna` do not register this role or guard.
 
 The fast profile requires the critic's live catalog shape: exact `gemini-3.7-flash`, tool calls, at least 1M context, medium effort, and a chat-completions endpoint. There is no fallback.
 
@@ -26,12 +26,12 @@ The fast profile's live prerequisite also retains Gemini's independent high-effo
 
 The role is intentionally named `critic`, not `brainstorm`, `gemini-critic`, or `reviewer`; this keeps native ACL identities distinct from MCP persona names and standard native roles.
 
-The planner's Task/Agent tools are paired with the runtime ACL. Tool visibility alone is not the authority boundary: the compiled hook remains the enforcement path, and its install failure is fatal before Claude Code is spawned.
+The Plan's Task/Agent tools are paired with the runtime ACL. Tool visibility alone is not the authority boundary: the compiled hook remains the enforcement path, and its install failure is fatal before Claude Code is spawned.
 
 The implementer keeps the inherited full toolset for edits and verification. Its native dispatch authority remains limited to `reviewer` and `critic` by the same hook.
 
 The lead receives the fast MCP config without persistent mirror injection. Inline server keys continue to use the collision-resolved keys from the launch.
 
-The `critic` model is decorated with `[1m]` because its resolver requires the advertised 1M context; the upstream request uses the bare catalog id after normal model preprocessing.
+The `critic` model is decorated with `[1m]` because its resolver requires the advertised 1M context; the upstream request uses the bare catalog id after normal model preprocessing. Fast `Explore` intentionally is not decorated: its bare private alias is canonicalized to Luna with high effort, while Claude Code uses its conservative/default local accounting. Grok `reviewer` remains bare for the same local-accounting reason; neither choice claims a provider window of only 200K.
 
 No attribution markers are included.

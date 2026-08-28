@@ -435,12 +435,17 @@ honestly rather than papered over:
 > `gpt-5.6-luna` / `gemini-3.7-flash` / `grok-4.6`, gated on the live catalog.
 > A literal `-m fast` launch starts on Luna, fixes native role efforts, and keeps
 > its optional primary-lead-only Advisor on Gemini 3.7 Flash after `/model`
-> switches to any fixed fast row. The fixed endpoint contract is Responses for
-> Luna, Sol, and Grok; Chat Completions for Gemini; native Messages for Opus.
-> Non-Claude Advisor continuations return through the selected lead's same endpoint;
-> Task subagents still have Advisor stripped. Standard launches, including direct `-m gpt-5.6-luna`, retain their
-> standard surface and catalog-derived routing. See [`default-models.md`](default-models.md)
-> and [`claude-env-injection.md`](claude-env-injection.md).
+> switches to any fixed fast row. The fixed native roster is `Explore` (Luna/high,
+> bare/default local accounting), `implementer` (Luna/max), `reviewer`
+> (Grok/medium, bare/default local accounting), `Plan` (Sol/high), and `critic`
+> (Gemini/medium). Luna's 1M catalog/startup prerequisite is retained because it
+> serves as both lead and implementer; bare does not claim a provider window of
+> only 200K. The fixed endpoint contract is Responses for Luna, Sol, and Grok;
+> Chat Completions for Gemini; native Messages for Opus. Non-Claude Advisor
+> continuations return through the selected lead's same endpoint; Task subagents
+> still have Advisor stripped. Standard launches, including direct `-m gpt-5.6-luna`,
+> retain their standard surface and catalog-derived routing. See
+> [`default-models.md`](default-models.md) and [`claude-env-injection.md`](claude-env-injection.md).
 
 Phase 3 (`src/lib/server-setup.ts`) makes the four fast-profile target models selectable in
 Claude Code's `/model` picker WITHOUT a network round-trip and without touching

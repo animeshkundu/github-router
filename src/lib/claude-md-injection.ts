@@ -160,7 +160,7 @@ export interface NativeAgentAvailability {
    *  hard restriction (not a catalog-availability signal, unlike every
    *  `*Available` flag above). When set, `buildNativeReachClauses` and
    *  `buildOperatingDefaultsDirective` return a short, self-contained
-   *  rendering naming only `Explore`/`implementer`/`reviewer`/`planner`/`critic`,
+   *  rendering naming only `Explore`/`implementer`/`reviewer`/`Plan`/`critic`,
    *  Advisor, and Oracle — it must never name the standard-only `*-fast`/
    *  `brainstorm`/`scribe`/`general-purpose-fast`, `peer-review-coordinator`,
    *  `worker-*`/`orchestrate` tools or skills, or `stand_in`, since none of
@@ -202,7 +202,7 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
       "`Explore` to find or understand something in the repo",
       "`implementer` for approved mechanical coding changes",
       "`reviewer` for repository-aware verification, reproduction, and root-causing",
-      "`planner` as the Sol plan consultant and approver after Luna has drafted with evidence",
+      "`Plan` as the Sol plan consultant and approver after Luna has drafted with evidence",
       "`critic` for a fresh-context cross-lab challenge to a plan, design, diff, or decision",
     ])
   }
@@ -340,8 +340,8 @@ const OPERATING_DEFAULTS_TAIL =
  */
 const FAST_OPERATING_DEFAULTS_TAIL =
   "context free to reason and collaborate with the user. Delegate only when work is wide or slow; do trivial and surgical work directly. "
-  + "Luna investigates and drafts. The lead must give `planner` a handcrafted evidence packet and must not implement until `planner` returns `APPROVE`. "
-  + "Advisor is an optional, non-binding, lead-only transcript-aware sounding board for consequential unresolved uncertainty, conflicting evidence, or a genuinely stuck path; never use it for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. "
+  + "Luna investigates and drafts. The lead must give `Plan` a handcrafted evidence packet and must not implement until `Plan` returns `APPROVE`. "
+  + "Advisor is an optional, non-binding, lead-only transcript-aware sounding board for consequential unresolved uncertainty, conflicting evidence, or a genuinely stuck path; never use it for routine progress, waiting, directly verifiable facts, Plan approval, reviewer verification, or completion ritual. "
   + "`oracle` is exact Opus 5 (1M/high), stateless and last resort after the normal paths remain stuck. "
   + "Before declaring work done, run the relevant build/tests and ask `reviewer` for repository-aware verification. "
   + "Verify claims, report uncertainty, and stop named teammates when finished."

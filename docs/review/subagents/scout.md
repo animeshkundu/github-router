@@ -7,14 +7,14 @@
 | Field | Value |
 |---|---|
 | Subagent name | Standard: `scout`; fast profile: capitalized `Explore` |
-| Subagent's OWN model | Standard: `gpt-5.6-luna` preferred, then `gemini-3.7-flash`; fast: exact Luna/high via `gh-router-luna-scout-high[1m]` |
+| Subagent's OWN model | Standard: `gpt-5.6-luna` preferred, then `gemini-3.7-flash`; fast: exact Luna/high via bare `gh-router-luna-scout-high` (Claude Code's conservative/default local accounting) |
 | Gate | Standard `scout` is conditional. Fast `Explore` is mandatory under the fast-profile prerequisite and replaces fast `scout`. |
 | Registered via | `buildPeerAgentDefinitions` in `src/lib/codex-mcp-config.ts` |
 | Description source | Inline native-agent definition in `buildPeerAgentDefinitions` |
 | System prompt | Inline native-agent definition in `buildPeerAgentDefinitions` |
 | Tools | Read-only allowlist: Read, Grep, Glob, Bash, WebFetch, WebSearch, and the resolved `search` MCP server |
 
-In standard launches, `scout` is one of seven native agents and its cheap-tier-only model policy is deliberate: silently inheriting an expensive lead model would defeat the purpose of a low-cost lookup agent. The resolver prefers Luna, falls back to Gemini Flash, and enforces a 1M context floor across both. In `-m fast`, the same job becomes the mandatory capitalized `Explore` role, fixed to Luna/high/1M with no fallback and no separate fast `scout`. The fast ACL strips invocation-level model overrides before spawn.
+In standard launches, `scout` is one of seven native agents and its cheap-tier-only model policy is deliberate: silently inheriting an expensive lead model would defeat the purpose of a low-cost lookup agent. The resolver prefers Luna, falls back to Gemini Flash, and enforces a 1M context floor across both. In `-m fast`, the same job becomes the mandatory capitalized `Explore` role, fixed to Luna/high with a bare alias and Claude Code's conservative/default local context accounting. Luna still requires the advertised 1.05M catalog window (922K max prompt, 128K max output) because it is also the fast lead and implementer. There is no fallback and no separate fast `scout`. The fast ACL strips invocation-level model overrides before spawn.
 
 ## 2. Description (verbatim)
 

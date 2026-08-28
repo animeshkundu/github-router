@@ -58,7 +58,7 @@ export const STANDARD_PROFILE: LaunchProfileDescriptor = Object.freeze({
 
 /**
  * The `-m fast` roster: exactly five native agents (`Explore`, `implementer`,
- * `reviewer`, `planner`, `critic`), the fast-only `oracle` peer tool, no coordinator,
+ * `reviewer`, `Plan`, `critic`), the fast-only `oracle` peer tool, no coordinator,
  * and only `peers`/`search` plus the ordinary opt-in `browser` group.
  * `workers`/`orchestrate`/`decide`/`fleet`/`first-mate` are hard denies even
  * when their independent standard-profile gates pass.
@@ -285,7 +285,7 @@ function hasPromptAtLeast(model: Model | undefined, tokens: number): boolean {
  *
  * Checks, per the fast-launch-profile design:
  *   - Luna lead/Explore/implementer: tool calls, >=1M, high+max, Responses.
- *   - Sol planner: tool calls, >=1M, high, Responses.
+ *   - Sol Plan: tool calls, >=1M, high, Responses.
  *   - Grok reviewer: tool calls, medium, Responses, usable prompt metadata.
  *   - Gemini Advisor: >=1M, high, chat-completions.
  *   - Gemini critic: tool calls, >=1M, medium, chat-completions.
@@ -315,21 +315,21 @@ export function validateFastProfilePrerequisites(
     }
   }
 
-  const sol = findModel(catalog, FAST_PROFILE_MODELS.planner)
+  const sol = findModel(catalog, FAST_PROFILE_MODELS.Plan)
   if (!sol) {
-    missing.push(`${FAST_PROFILE_MODELS.planner}: absent from the live catalog`)
+    missing.push(`${FAST_PROFILE_MODELS.Plan}: absent from the live catalog`)
   } else {
     if (!hasToolCalls(sol)) {
-      missing.push(`${FAST_PROFILE_MODELS.planner}: does not advertise tool_calls`)
+      missing.push(`${FAST_PROFILE_MODELS.Plan}: does not advertise tool_calls`)
     }
     if (!hasContextAtLeast(sol, FAST_REQUIRED_CONTEXT_TOKENS)) {
-      missing.push(`${FAST_PROFILE_MODELS.planner}: advertised context window is below 1M`)
+      missing.push(`${FAST_PROFILE_MODELS.Plan}: advertised context window is below 1M`)
     }
     if (!supportsEffort(sol, "high")) {
-      missing.push(`${FAST_PROFILE_MODELS.planner}: does not advertise a "high" reasoning effort`)
+      missing.push(`${FAST_PROFILE_MODELS.Plan}: does not advertise a "high" reasoning effort`)
     }
     if (!supportsEndpoint(sol, "responses")) {
-      missing.push(`${FAST_PROFILE_MODELS.planner}: does not advertise a supported Responses endpoint`)
+      missing.push(`${FAST_PROFILE_MODELS.Plan}: does not advertise a supported Responses endpoint`)
     }
   }
 

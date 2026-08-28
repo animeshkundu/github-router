@@ -743,7 +743,7 @@ export const claude = defineCommand({
     // from the Task `subagent_type` enum.
     // Fast profile uses its own single-entry, no-fallback resolvers (pinned
     // to the exact roster: Explore/implementer -> Luna, reviewer -> Grok 4.6,
-    // planner -> Sol) instead of the standard chains, and registers none of
+    // Plan -> Sol) instead of the standard chains, and registers none of
     // the standard-only brainstorm/scribe/*-fast/catch-all roles. The
     // launch already failed above (`validateFastProfilePrerequisites`) if
     // the fast roster's models aren't live, so these always resolve here.
@@ -753,7 +753,7 @@ export const claude = defineCommand({
             Explore: fastScoutModel(),
             implementer: fastImplementerModel(),
             reviewer: fastReviewerModel(),
-            planner: fastPlannerModel(),
+            Plan: fastPlannerModel(),
             critic: fastCriticModel(),
           }
         : {
@@ -891,7 +891,7 @@ export const claude = defineCommand({
           ...(isFastProfile
             ? {
                 fastProfile: true,
-                plannerModel: nativeAgentModels.planner,
+                plannerModel: nativeAgentModels.Plan,
                 criticModel: nativeAgentModels.critic,
                 scoutEffort: FAST_SCOUT_EFFORT,
                 implementerEffort: FAST_IMPLEMENTER_EFFORT,
@@ -972,8 +972,8 @@ export const claude = defineCommand({
         // remain blind in that case, by design — explicit branch, not
         // silent precedence).
         // Fast is deliberately different: the parent receives peers/search
-        // through --mcp-config, while only reviewer/planner receive an inline
-        // peers entry and scout/planner receive inline search. Do NOT persist
+        // through --mcp-config, while only reviewer/Plan receive an inline
+        // peers entry and Explore/Plan receive inline search. Do NOT persist
         // the proxy MCPs into the shared mirror for this profile: an
         // implementer with omitted `tools:` inherits persistent-scope MCPs,
         // which would otherwise expose Oracle despite the role contract.
