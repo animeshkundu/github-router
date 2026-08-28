@@ -650,6 +650,81 @@ describe("claude command", () => {
     expect(options.env.ANTHROPIC_MODEL).toBe("gh-router-luna-driver-max")
   })
 
+  test("`-m fast` overrides mirrored/caller Advisor identity with fixed Gemini", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.6-luna",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gpt-5.6-sol",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "claude-opus-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/v1/messages"],
+        },
+        {
+          id: "grok-4.6",
+          capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gemini-3.7-flash",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
+          supported_endpoints: ["/v1/chat/completions"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    const run = getRunFn()
+    await run({
+      args: { model: "fast" },
+      rawArgs: [
+        "-m", "fast", "--advisor", "opus", "--advisor=sonnet",
+        "--", "--advisor", "haiku",
+      ],
+    })
+
+    const [, args] = spawnMock.mock.calls[0]
+    const advisorAt = args.indexOf("--advisor")
+    expect(advisorAt).toBeGreaterThanOrEqual(0)
+    expect(args[advisorAt + 1]).toBe("gemini-3.7-flash[1m]")
+    expect(args.filter((arg: string) => arg === "--advisor")).toHaveLength(1)
+    expect(args.some((arg: string) => arg.startsWith("--advisor="))).toBe(false)
+    expect(args).not.toContain("opus")
+    expect(args).not.toContain("sonnet")
+    expect(args).not.toContain("haiku")
+  })
+
+  test("`-m fast` omits fixed Advisor under the hard disable", async () => {
+    mockProcessEnv.CLAUDE_CODE_DISABLE_ADVISOR_TOOL = "1"
+    state.models = {
+      object: "list",
+      data: [
+        { id: "gpt-5.6-luna", capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } }, supported_endpoints: ["/responses"] },
+        { id: "gpt-5.6-sol", capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } }, supported_endpoints: ["/responses"] },
+        { id: "claude-opus-5", capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } }, supported_endpoints: ["/v1/messages"] },
+        { id: "grok-4.6", capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } }, supported_endpoints: ["/responses"] },
+        { id: "gemini-3.7-flash", capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } }, supported_endpoints: ["/v1/chat/completions"] },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    const run = getRunFn()
+    await run({
+      args: { model: "fast" },
+      rawArgs: ["-m", "fast", "--advisor", "opus"],
+    })
+
+    const [, args] = spawnMock.mock.calls[0]
+    expect(args).not.toContain("--advisor")
+    expect(args).not.toContain("opus")
+    delete mockProcessEnv.CLAUDE_CODE_DISABLE_ADVISOR_TOOL
+  })
+
   test("`-m fast` carries the [1m] bracket all the way into ANTHROPIC_MODEL", async () => {
     // Assert on the spawned child's env rather than only on the resolver: Luna's
     // live 1M capability must survive the launcher boundary.
@@ -1140,7 +1215,7 @@ describe("claude command", () => {
       expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
       const [, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
       // Hard roster/persona/coordinator restriction per FAST_PROFILE.
-      expect(opts.nativeRoster).toEqual(new Set(["scout", "implementer", "reviewer", "planner", "critic"]))
+      expect(opts.nativeRoster).toEqual(new Set(["Explore", "implementer", "reviewer", "planner", "critic"]))
       expect(opts.personaAllowlist).toBeUndefined()
       expect(opts.includeCoordinator).toBe(false)
       expect(opts.fastProfile).toBe(true)
@@ -1161,7 +1236,7 @@ describe("claude command", () => {
       expect(opts.plannerEffort).toBe("high")
 
       // Fast keeps proxy MCPs out of the persistent mirror. The lead gets the
-      // runtime config, while reviewer/planner/scout receive only their inline
+      // runtime config, while reviewer/planner/Explore receive only their inline
       // role-scoped servers; implementer therefore cannot inherit Oracle.
       expect(injectPeerMcpIntoMirrorMock).not.toHaveBeenCalled()
       const [, args] = spawnMock.mock.calls[0]

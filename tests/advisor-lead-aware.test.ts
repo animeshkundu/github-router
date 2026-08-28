@@ -232,19 +232,17 @@ describe("resolveAdvisorModel — authenticated fast profile", () => {
     })
   }
 
-  test("falls back when Gemini is absent", () => {
+  test("fails closed when Gemini is absent", () => {
     setCatalog(
       model("gpt-5.6-sol", "openai", SOL_EFFORTS, {}, ["/responses"]),
       model(ADVISOR_DEFAULT_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
     )
-    expect(resolveAdvisorModel("gpt-5.6-sol", true)).toEqual({
-      model: ADVISOR_DEFAULT_MODEL,
-      escalated: false,
-      fastProfile: false,
-    })
+    expect(() => resolveAdvisorModel("gpt-5.6-sol", true)).toThrow(
+      "fast Advisor invariant failed",
+    )
   })
 
-  test("falls back when Gemini does not advertise Chat", () => {
+  test("fails closed when Gemini does not advertise Chat", () => {
     setCatalog(
       model("gpt-5.6-sol", "openai", SOL_EFFORTS, {}, ["/responses"]),
       model(ADVISOR_DEFAULT_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
@@ -252,19 +250,17 @@ describe("resolveAdvisorModel — authenticated fast profile", () => {
         "/responses",
       ]),
     )
-    expect(resolveAdvisorModel("gpt-5.6-sol", true)).toEqual({
-      model: ADVISOR_DEFAULT_MODEL,
-      escalated: false,
-      fastProfile: false,
-    })
+    expect(() => resolveAdvisorModel("gpt-5.6-sol", true)).toThrow(
+      "fast Advisor invariant failed",
+    )
   })
 
-  test("the operator pin still wins even when its endpoint is outside fast policy", () => {
+  test("fast selection ignores an operator pin", () => {
     process.env.GH_ROUTER_ADVISOR_MODEL = ADVISOR_ESCALATION_MODEL
     expect(resolveAdvisorModel("grok-4.6", true)).toEqual({
-      model: ADVISOR_ESCALATION_MODEL,
+      model: ADVISOR_FAST_PROFILE_MODEL,
       escalated: false,
-      fastProfile: false,
+      fastProfile: true,
     })
   })
 

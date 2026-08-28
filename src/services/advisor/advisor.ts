@@ -49,6 +49,10 @@ import consola from "consola"
 import { events } from "fetch-event-stream"
 
 import { isClaudeModel } from "~/lib/anthropic-translate/classifier"
+import {
+  FAST_PROFILE_ADVISOR_EFFORT,
+  FAST_PROFILE_ADVISOR_MODEL,
+} from "~/lib/fast-profile-contract"
 import { HTTPError } from "~/lib/error"
 import {
   fastEndpointForCatalogId,
@@ -143,7 +147,7 @@ export const ADVISOR_ESCALATION_MODEL = "claude-opus-5"
  * is cross-lab from the OpenAI-backed Luna/Sol leads and is selected only when
  * its live catalog entry advertises the required Chat endpoint. Kept distinct
  * from `ADVISOR_DEFAULT_MODEL` so standard launches remain unchanged. */
-export const ADVISOR_FAST_PROFILE_MODEL = "gemini-3.7-flash"
+export const ADVISOR_FAST_PROFILE_MODEL = FAST_PROFILE_ADVISOR_MODEL
 
 /** True only when the live Gemini entry satisfies the fixed fast transport.
  * An ID-only presence check is insufficient: selecting a model whose catalog
@@ -309,14 +313,13 @@ export interface AdvisorModelChoice {
  * fast selection follows launch identity instead, so changing among the fixed
  * fast lead models never removes Gemini Advisor.
  *
- * Precedence:
- *   1. `GH_ROUTER_ADVISOR_MODEL` (trimmed), on every launch and lead.
- *   2. Authenticated fast primary lead, when Gemini advertises the required
- *      Chat endpoint.
- *   3. Standard lighter Claude lead with Opus escalation available.
- *   4. The literal `ADVISOR_DEFAULT_MODEL`.
+ * Fast profile is a separate fixed contract: it requires Gemini's Chat endpoint
+ * and ignores standard operator pins. Standard-profile precedence remains:
+ *   1. `GH_ROUTER_ADVISOR_MODEL` (trimmed).
+ *   2. A lighter Claude lead with Opus escalation available.
+ *   3. The literal `ADVISOR_DEFAULT_MODEL`.
  *
- * Step 4 deliberately does not walk the OpenAI frontier chain. That would
+ * Step 3 deliberately does not walk the OpenAI frontier chain. That would
  * silently change the standard Opus-lead path when Sol is absent.
  */
 /**
@@ -348,12 +351,21 @@ export function resolveAdvisorModel(
   leadModel: string | undefined,
   fastProfile = false,
 ): AdvisorModelChoice {
+  if (fastProfile) {
+    if (!fastProfileAdvisorAvailable()) {
+      throw new Error(
+        `fast Advisor invariant failed: ${ADVISOR_FAST_PROFILE_MODEL} must advertise the Chat endpoint`,
+      )
+    }
+    return {
+      model: ADVISOR_FAST_PROFILE_MODEL,
+      escalated: false,
+      fastProfile: true,
+    }
+  }
   const pinned = process.env.GH_ROUTER_ADVISOR_MODEL?.trim()
   if (pinned) {
     return { model: normalizeAdvisorPin(pinned), escalated: false, fastProfile: false }
-  }
-  if (fastProfile && fastProfileAdvisorAvailable()) {
-    return { model: ADVISOR_FAST_PROFILE_MODEL, escalated: false, fastProfile: true }
   }
   if (leadModel && shouldEscalateAdvisor(leadModel)) {
     return { model: ADVISOR_ESCALATION_MODEL, escalated: true, fastProfile: false }
@@ -393,7 +405,9 @@ export function resolveAdvisorEffort(
   advisorModel: string,
   fastProfile = false,
 ): string {
-  let requested: Effort = fastProfile ? "high" : ADVISOR_DEFAULT_EFFORT
+  let requested: Effort = fastProfile
+    ? FAST_PROFILE_ADVISOR_EFFORT
+    : ADVISOR_DEFAULT_EFFORT
   if (rawRequestBody) {
     try {
       const body = JSON.parse(rawRequestBody) as AnyRecord
@@ -424,7 +438,7 @@ export function resolveAdvisorEffort(
     }
   }
 
-  if (fastProfile) requested = "high"
+  if (fastProfile) requested = FAST_PROFILE_ADVISOR_EFFORT
   else if (EFFORT_ORDER.indexOf(requested) < EFFORT_ORDER.indexOf(ADVISOR_MIN_EFFORT)) {
     requested = ADVISOR_MIN_EFFORT
   }
@@ -870,6 +884,11 @@ async function runAdvisor(
   // three-way (`responses` / `chat` / `messages`) decision and its ordering
   // rationale.
   const transport = advisorTransport(resolvedAdvisorModel, fastProfile)
+  if (fastProfile) {
+    consola.warn(
+      `fast Advisor dispatch: model=${resolvedAdvisorModel} transport=${transport} effort=${advisorEffort}`,
+    )
+  }
 
   if (transport === "responses") {
     const payload = applyResponsesCachePolicy({

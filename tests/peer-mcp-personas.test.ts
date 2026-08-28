@@ -1136,9 +1136,10 @@ describe("fastProfile rendering (buildPeerAwarenessSnippet / buildPeerAwarenessS
 
   test("snippet names only the final fast roles, Advisor, Oracle, search, and opt-in browser", () => {
     const snippet = buildPeerAwarenessSnippet(FAST_OPTS)
-    for (const present of ["`scout`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
+    for (const present of ["`Explore`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
       expect(snippet).toContain(present)
     }
+    expect(snippet).not.toContain("`scout`")
     expect(snippet).toContain("lead-only")
     expect(snippet).toContain("available to the lead, reviewer, and planner")
     for (const removed of [
@@ -1153,9 +1154,10 @@ describe("fastProfile rendering (buildPeerAwarenessSnippet / buildPeerAwarenessS
 
   test("summary names only the final fast surface", () => {
     const summary = buildPeerAwarenessSummary(FAST_OPTS)
-    for (const present of ["`scout`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
+    for (const present of ["`Explore`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
       expect(summary).toContain(present)
     }
+    expect(summary).not.toContain("`scout`")
     expect(summary).toContain("lead-only")
     for (const removed of [
       "gemini_critic", "peer-review-coordinator", "worker-*", "stand_in",

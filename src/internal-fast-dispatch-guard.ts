@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs"
 
 import {
   decideFastDispatchGuard,
+  fastDispatchAllowOutput,
   fastDispatchDenyOutput,
 } from "./lib/fast-dispatch-acl"
 import { buildSelfCommand, type SelfInvocation } from "./lib/hook-launcher/self-invocation"
@@ -34,6 +35,8 @@ export const internalFastDispatchGuard = defineCommand({
     const decision = decideFastDispatchGuard(readStdinSync())
     if (!decision.allowed && decision.reason) {
       process.stdout.write(fastDispatchDenyOutput(decision.reason))
+    } else if (decision.verdict === "allow" && decision.updatedInput) {
+      process.stdout.write(fastDispatchAllowOutput(decision.updatedInput))
     }
     // Natural exit is required on Windows. Claude Code consumes the JSON
     // permission decision; an exit code is not used to deny this hook.

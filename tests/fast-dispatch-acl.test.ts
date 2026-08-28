@@ -5,6 +5,7 @@ import {
   FAST_DISPATCH_TOOL_MATCHER,
   FAST_NATIVE_AGENT_NAMES,
   decideFastDispatchGuard,
+  fastDispatchAllowOutput,
   fastDispatchDenyOutput,
 } from "~/lib/fast-dispatch-acl"
 
@@ -53,8 +54,8 @@ describe("fast native dispatch ACL", () => {
     }
   })
 
-  test("reviewer, scout, and critic cannot dispatch any native role", () => {
-    for (const caller of ["reviewer", "scout", "critic"]) {
+  test("reviewer, Explore, and critic cannot dispatch any native role", () => {
+    for (const caller of ["reviewer", "Explore", "critic"]) {
       for (const target of roles) expectDenied(dispatch(target, caller))
     }
   })
@@ -62,7 +63,7 @@ describe("fast native dispatch ACL", () => {
   test("supports Task and snake/camel target aliases, but rejects conflicts", () => {
     expectAllowed(payload({ tool_name: "Task", tool_input: { subagent_type: "critic" }, agent_type: "implementer" }))
     expectAllowed(payload({ tool_name: "Agent", tool_input: { subagentType: "critic" }, agentType: "implementer" }))
-    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic", subagentType: "scout" } }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic", subagentType: "Explore" } }))
     expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: 42 } }))
   })
 
@@ -97,6 +98,48 @@ describe("fast native dispatch ACL", () => {
       tool_input: { subagent_type: "critic" },
       agent_type: "reviewer",
     }))
+  })
+
+  test("allowed dispatch clones input and removes only the model override", () => {
+    const originalInput = {
+      subagent_type: "planner",
+      prompt: "review this",
+      model: "sonnet",
+      isolation: "worktree",
+      future: { keep: true },
+    }
+    const hook = {
+      tool_name: "Agent",
+      tool_input: originalInput,
+    }
+    const decision = decideFastDispatchGuard(hook)
+    expect(decision.updatedInput).toEqual({
+      subagent_type: "planner",
+      prompt: "review this",
+      isolation: "worktree",
+      future: { keep: true },
+    })
+    expect(originalInput.model).toBe("sonnet")
+    expect(Object.hasOwn(originalInput, "model")).toBe(true)
+  })
+
+  test("ordinary tools are never rewritten", () => {
+    expect(decideFastDispatchGuard({
+      tool_name: "Read",
+      tool_input: { model: "keep-me", file_path: "x" },
+    }).updatedInput).toBeUndefined()
+  })
+
+  test("allow output follows Claude Code PreToolUse rewrite protocol", () => {
+    const parsed = JSON.parse(fastDispatchAllowOutput({
+      subagent_type: "Explore",
+      prompt: "find it",
+    }))
+    expect(parsed.hookSpecificOutput).toEqual({
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      updatedInput: { subagent_type: "Explore", prompt: "find it" },
+    })
   })
 
   test("deny output follows Claude Code PreToolUse protocol", () => {

@@ -280,8 +280,13 @@ Non-regression is **structural**, not "we were careful": the Claude path shares
 no code with the shim beyond the branch, and the classifier is guard-tested to
 keep every Claude model on the passthrough. ADVISOR (`advisor-tool` beta) plus an ordinary non-Claude model degrades by
 stripping the internal tool. An authenticated fast primary lead is the exception:
-both shim paths run the server-side Advisor loop, dispatch Gemini 3.7 Flash on
-Chat, and continue on the selected lead's original endpoint.
+both shim paths run the server-side Advisor loop, dispatch fixed Gemini 3.7 Flash
+on Chat/high, and continue on the selected lead's original endpoint. The fast
+launcher also pins Claude Code's client-side Advisor setting to
+`gemini-3.7-flash[1m]`, so its native tool schema, UI, and JSONL no longer retain a
+mirrored standard-profile Advisor id while the proxy dispatches Gemini. A missing
+Gemini Chat runtime invariant or a conflicting in-session Advisor model fails
+visibly rather than selecting the standard Sol/Opus path.
 
 `classifyMessagesRoute` fails **CLOSED toward Claude**. `isClaudeModel` returns
 true on any of: catalog vendor containing `anthropic`, capability family

@@ -40,12 +40,8 @@ const REQUIRED_MARKERS: ReadonlyArray<{ needle: string; why: string }> = [
     why: "the env var the derived compaction window is exported through",
   },
   {
-    needle: "IWe=1e5",
-    why: "the 100,000-token floor the env value is silently raised to",
-  },
-  {
-    needle: "ZRt=1e6",
-    why: "the 1,000,000-token cap the env value is clamped to",
+    needle: ".int().min(1e5).max(1e6).optional().catch(void 0).describe(\"Auto-compact window size\")",
+    why: "the 100,000 floor and 1,000,000 cap applied to autoCompactWindow",
   },
 ]
 

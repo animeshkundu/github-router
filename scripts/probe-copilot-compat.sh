@@ -145,8 +145,11 @@ declare -a PROBE_REGISTRY=(
   "advisor_claude_adaptive_thinking|claude-emits|claude-opus-5 on /v1/messages accepts the escalated advisor body (stream:false + thinking:{type:'adaptive'} + output_config.effort) and returns 200"
   "advisor_claude_nonstreaming_cap|claude-emits|claude-opus-5 on /v1/messages accepts max_tokens at the advertised max_non_streaming_output_tokens (16000) when stream:false"
   "advisor_claude_streaming_cap_accepted|exploratory|claude-opus-5 on /v1/messages ACCEPTS max_tokens at the streaming ceiling (64000) even when stream:false — max_non_streaming_output_tokens is advertised but not enforced; the advisor stays inside it by choice, not necessity"
-  "fast_advisor_all_leads_policy|proxy-internal|authenticated fast Advisor route matrix: Luna/Sol/Grok Responses, Gemini Chat, Opus Messages; Gemini Advisor Chat/high and same-lead continuation on every row"
-  "fast_advisor_endpoint_gate|proxy-internal|automatic fast Advisor selects Gemini only when its live catalog row advertises Chat; missing/wrong endpoint falls back; explicit pin remains authoritative"
+  "fast_advisor_all_leads_policy|proxy-internal|authenticated fast Advisor route matrix: fixed client identity + Gemini Chat/high nested dispatch and same-lead continuation on every lead"
+  "fast_advisor_beta_without_tools|proxy-internal|fast Advisor beta on tool-less compaction-style turns passes through without injection or Gemini resolution"
+  "fast_advisor_endpoint_gate|proxy-internal|fixed fast Advisor fails closed when Gemini Chat is unavailable and ignores conflicting operator pins"
+  "fast_native_model_override|proxy-internal|fast PreToolUse ACL removes invocation-level Agent model overrides before fixed-role dispatch"
+  "fast_explore_fixed_model|proxy-internal|capitalized fast Explore replaces scout and is pinned to Luna/high/1M"
 
   # ===== Peer-MCP personas (Phase B6 of cap-codex-effort-add-opus-critic) =====
   # Two probe shapes:
@@ -236,7 +239,7 @@ declare -a PROBE_REGISTRY=(
   # profile surface and its in-session dispatch ACL are separate local policy
   # layers, but the model+endpoint+effort shapes below are ordinary
   # Copilot passthrough/shim contracts and are testable against today's proxy.
-  "fast_luna_responses_reasoning_high|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's scout assignment)"
+  "fast_luna_responses_reasoning_high|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's Explore assignment)"
   "fast_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the fast profile's implementer assignment; 'max' is the top of Luna's none..max ladder)"
   "fast_sol_responses_reasoning_high|exploratory|gpt-5.6-sol on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's planner assignment)"
   "fast_opus5_messages_reasoning_high|exploratory|claude-opus-5 on /v1/messages accepts tools[] + adaptive thinking + high effort (the fast profile's Oracle assignment)"
@@ -635,12 +638,37 @@ probe_fast_advisor_all_leads_policy() {
   fi
 }
 
+probe_fast_advisor_beta_without_tools() {
+  # The Advisor beta can accompany Claude Code /compact requests with no tools.
+  # The policy test removes Gemini from the live catalog and verifies that both
+  # translated and native Claude requests still pass without proxy Advisor work.
+  if ! bun test "${PROJECT_ROOT}/tests/advisor-fast-profile-policy.test.ts" \
+    --test-name-pattern 'without tools' >/dev/null 2>&1; then
+    echo "  ${C_RED}FAIL${C_RESET}: tool-less fast Advisor beta boundary failed"
+    return 1
+  fi
+}
+
 probe_fast_advisor_endpoint_gate() {
-  # Resolver coverage pins the missing/wrong-Chat fallback and explicit-pin
-  # precedence. Keep separate from the full route matrix so a catalog-gate
-  # regression names its own failure class.
+  # Resolver coverage pins the fixed fast fail-closed contract separately from
+  # the standard profile's existing operator-pin and fallback behavior.
   if ! bun test "${PROJECT_ROOT}/tests/advisor-lead-aware.test.ts" >/dev/null 2>&1; then
     echo "  ${C_RED}FAIL${C_RESET}: fast Advisor endpoint-gate selection failed"
+    return 1
+  fi
+}
+
+probe_fast_native_model_override() {
+  if ! bun test "${PROJECT_ROOT}/tests/fast-dispatch-acl.test.ts" >/dev/null 2>&1; then
+    echo "  ${C_RED}FAIL${C_RESET}: fast native model override guard failed"
+    return 1
+  fi
+}
+
+probe_fast_explore_fixed_model() {
+  if ! bun test --path-ignore-patterns 'node_modules/**' \
+    "${PROJECT_ROOT}/tests/isolated/codex-mcp-config.test.ts" >/dev/null 2>&1; then
+    echo "  ${C_RED}FAIL${C_RESET}: fast Explore fixed-model definition failed"
     return 1
   fi
 }
@@ -1439,7 +1467,7 @@ probe_shim_parallel_tool_emit_gpt55() {
 # Fast-launch-profile model shapes (Luna / Gemini 3.7 Flash / Grok 4.6)
 # ===========================================================================
 # See docs/default-models.md "Fast launch profile" for the design these shapes
-# support: gpt-5.6-luna is the fast lead (and backs the scout/implementer
+# support: gpt-5.6-luna is the fast lead (and backs Explore/implementer
 # natives at high/max effort respectively), gemini-3.7-flash backs the native
 # critic at medium effort and the Advisor target at high effort, and grok-4.6
 # backs the reviewer at medium effort. The native/MCP roster narrowing and its
@@ -1473,7 +1501,7 @@ probe_fast_gemini37flash_messages_tool_use() {
 }
 
 probe_fast_luna_responses_reasoning_high() {
-  # gpt-5.6-luna at reasoning.effort:"high" — the fast profile's scout
+  # gpt-5.6-luna at reasoning.effort:"high" — the fast profile's Explore
   # assignment. Same flat function tools[] shape as the gpt-5.6-sol probe
   # above; Luna is 1.05M context, /responses-capable, and advertises the full
   # none..max effort ladder (so "high" is a real mid-tier choice, not a clamp).
