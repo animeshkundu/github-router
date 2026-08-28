@@ -23,6 +23,13 @@ import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
 import { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 import { ONE_M_TOKENS } from "./one-m-context"
 import { fastEndpointForModel } from "./fast-endpoint"
+import {
+  FAST_PROFILE_ADVISOR_EFFORT,
+  FAST_PROFILE_NATIVE_EFFORTS,
+  FAST_PROFILE_NATIVE_MODELS,
+  FAST_PROFILE_ORACLE_EFFORT,
+  FAST_PROFILE_ORACLE_MODEL,
+} from "./fast-profile-contract"
 import { FAST_REVIEWER_MIN_PROMPT_TOKENS } from "./launch-profile"
 import { state, type State } from "./state"
 import {
@@ -358,31 +365,36 @@ export function generalPurposeFastModel(): string | undefined {
  * Fast-launch-profile ("-m fast") native model resolvers.
  *
  * These are deliberately separate from the standard resolvers above. The fast
- * profile is a hard, single-entry, no-fallback assignment: `scout` and
+ * profile is a hard, single-entry, no-fallback assignment: `Explore` and
  * `implementer` pin to Luna, `reviewer` pins to Grok, and `planner` pins to
  * Sol. Retuning a standard resolver must never move a fast role silently.
  */
 
-export const FAST_SCOUT_MODEL = "gpt-5.6-luna"
-export const FAST_IMPLEMENTER_MODEL = "gpt-5.6-luna"
+export const FAST_EXPLORE_MODEL = FAST_PROFILE_NATIVE_MODELS.Explore
+/** @deprecated Fast `scout` was renamed to capitalized `Explore`. */
+export const FAST_SCOUT_MODEL = FAST_EXPLORE_MODEL
+export const FAST_IMPLEMENTER_MODEL = FAST_PROFILE_NATIVE_MODELS.implementer
 /** Grok 4.6 advertises 500K total context / 372K max prompt, so it remains bare
  *  and is gated by max_prompt_tokens rather than the 1M floor. */
-export const FAST_REVIEWER_MODEL = "grok-4.6"
-export const FAST_PLANNER_MODEL = "gpt-5.6-sol"
-export const FAST_CRITIC_MODEL = "gemini-3.7-flash"
-export const FAST_ORACLE_MODEL = "claude-opus-5"
+export const FAST_REVIEWER_MODEL = FAST_PROFILE_NATIVE_MODELS.reviewer
+export const FAST_PLANNER_MODEL = FAST_PROFILE_NATIVE_MODELS.planner
+export const FAST_CRITIC_MODEL = FAST_PROFILE_NATIVE_MODELS.critic
+export const FAST_ORACLE_MODEL = FAST_PROFILE_ORACLE_MODEL
 
 /** Shared with startup validation so the reviewer resolver and fast launch
  * prerequisite cannot drift. */
 export { FAST_REVIEWER_MIN_PROMPT_TOKENS } from "./launch-profile"
 
 /** Fixed effort pins for the fast profile. */
-export const FAST_SCOUT_EFFORT = "high"
-export const FAST_IMPLEMENTER_EFFORT = "max"
-export const FAST_REVIEWER_EFFORT = "medium"
-export const FAST_PLANNER_EFFORT = "high"
-export const FAST_CRITIC_EFFORT = "medium"
-export const FAST_ORACLE_EFFORT = "high"
+export const FAST_EXPLORE_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.Explore
+/** @deprecated Fast `scout` was renamed to capitalized `Explore`. */
+export const FAST_SCOUT_EFFORT = FAST_EXPLORE_EFFORT
+export const FAST_IMPLEMENTER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.implementer
+export const FAST_REVIEWER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.reviewer
+export const FAST_PLANNER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.planner
+export const FAST_CRITIC_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.critic
+export const FAST_ORACLE_EFFORT = FAST_PROFILE_ORACLE_EFFORT
+export const FAST_ADVISOR_EFFORT = FAST_PROFILE_ADVISOR_EFFORT
 
 export function fastScoutModel(): string | undefined {
   const id = firstPresentInCatalog(

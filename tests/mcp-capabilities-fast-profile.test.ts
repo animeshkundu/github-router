@@ -3,8 +3,8 @@
 //
 // These are DELIBERATELY separate resolvers from the standard-profile ones
 // covered in `mcp-capabilities-native-agents.test.ts`: single-entry,
-// no-fallback, pinned to the fast profile's exact roster (scout/
-// implementer-fast -> Luna, reviewer-fast -> Grok). Load-bearing properties
+// no-fallback, pinned to the fast profile's exact roster (Explore/
+// implementer -> Luna, reviewer -> Grok). Load-bearing properties
 // pinned here:
 //
 //   1. Each resolver requires `tool_calls` and returns undefined (never a
@@ -75,7 +75,7 @@ afterEach(() => {
   state.models = savedModels
 })
 
-test("fastScoutModel and fastImplementerFastModel pin to Luna, requiring tool_calls + 1M", () => {
+test("fast Explore and implementer resolvers pin to Luna, requiring tool_calls + 1M", () => {
   expect(FAST_SCOUT_MODEL).toBe("gpt-5.6-luna")
   expect(FAST_IMPLEMENTER_FAST_MODEL).toBe("gpt-5.6-luna")
 

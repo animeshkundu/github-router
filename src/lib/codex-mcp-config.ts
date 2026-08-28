@@ -4,6 +4,8 @@ import path from "node:path"
 
 import consola from "consola"
 
+import { FAST_PROFILE_NATIVE_AGENT_NAMES } from "./fast-profile-contract"
+
 import { type SelfInvocation } from "./hook-launcher/self-invocation"
 import { buildCodexProviderConfigFlags } from "./launch"
 import { buildWorkspaceHeaderHelperCommand } from "./mcp-workspace-header"
@@ -161,7 +163,7 @@ interface BuildOpts {
    *  registers only `gemini-critic`) should pass `false`. */
   includeCoordinator?: boolean
   /** Fast-profile role assignments. When present, the explicit fast branch
-   *  emits the exact `scout`/`implementer`/`reviewer`/`planner`/`critic` roster instead
+   *  emits the exact `Explore`/`implementer`/`reviewer`/`planner`/`critic` roster instead
    *  of reusing standard role bodies. Standard callers omit these fields. */
   fastProfile?: boolean
   plannerModel?: string
@@ -273,8 +275,8 @@ export interface PeerAgentDefinition {
    *  Claude Code session's effort picker for this subagent only (documented
    *  Claude Code subagent frontmatter behavior). Absent → the subagent
    *  follows the session's picker, which is the standard-profile default for
-   *  every native today. Only the fast profile's `scout`/`implementer-fast`/
-   *  `reviewer-fast` set this. */
+   *  every native today. The fast profile fixes effort on all five of its role
+   *  definitions (`Explore`, `implementer`, `reviewer`, `planner`, `critic`). */
   effort?: SubagentEffort
   tools?: ReadonlyArray<string>
   /** Inline MCP servers scoped to this subagent, emitted into its `.md`
@@ -446,6 +448,7 @@ export const ALL_NATIVE_AGENT_NAMES = [
   "reviewer-fast",
   "brainstorm",
   "scout",
+  "Explore",
   "scribe",
   "implementer-fast",
   "general-purpose-fast",
@@ -489,7 +492,7 @@ function readOnlyToolSteer(): string {
 }
 
 /**
- * `tools:` allowlist for the read-only natives (`scout`, `brainstorm`), modelled
+ * `tools:` allowlist for read-only natives (`scout`, fast `Explore`, `brainstorm`), modelled
  * on Claude Code's own `Explore`/`Plan` built-ins, which run with every tool
  * EXCEPT Agent / Artifact / ExitPlanMode / Edit / Write / NotebookEdit — note
  * that Anthropic's own read-only agent keeps Bash, which is what makes `git log`
@@ -548,7 +551,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
   const plannerModel = nonEmptyModel(opts.plannerModel)
   const criticModel = nonEmptyModel(opts.criticModel)
   if (!scoutModel || !implementerModel || !reviewerModel || !plannerModel || !criticModel) {
-    throw new Error("fast profile requires resolved scout, implementer, reviewer, planner, and critic models")
+    throw new Error("fast profile requires resolved Explore, implementer, reviewer, planner, and critic models")
   }
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
@@ -583,7 +586,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     "You are the fast profile's fresh-context cross-lab critic. Assess the supplied plan, design, diff, or decision against its stated constraints. Look for overlooked failure modes, unsupported assumptions, and simpler safer alternatives. Do not modify files, run mutating commands, or spawn agents. Return concise severity-ranked findings with `file:line` evidence where applicable. "
     + readOnlyToolSteer()
   const out: PeerAgentDefinitions = {
-    scout: {
+    Explore: {
       description: `Read-only exploration subagent running ${scoutModel}. Use for broad repository discovery before the lead drafts a plan; return conclusions with file:line evidence, not file dumps.`,
       prompt:
         "Investigate the repository read-only. Cast a wide net, then return a concise evidence packet for the lead: conclusions, load-bearing `file:line` citations, commands checked, and explicit gaps. Do not plan, edit, or spawn agents. "
@@ -623,7 +626,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     planner: {
       description: `Plan consultant and approver running ${plannerModel}. Invoke only after Luna has done the repository legwork and drafted a plan; pass a handcrafted evidence packet and the complete draft. The lead must not implement until this agent returns APPROVE.`,
       prompt:
-        "You are the fast profile's final plan consultant and approver, not a first-pass planner. The caller must provide the user goal, acceptance criteria, repository/domain constraints, Luna's `file:line` and command/test evidence, the complete draft plan, settled decisions, and one focused review question. Selectively verify disputed citations or narrow evidence gaps with read/search tools, but do not repeat broad discovery, edit files, or execute the plan. Return exactly one leading verdict: `APPROVE`, `REVISE`, or `NEED_MORE_CONTEXT`. APPROVE only when the plan is safe, ordered, complete, and verifiable. REVISE must give concrete corrections. NEED_MORE_CONTEXT must name the exact evidence Luna should collect. You do not have Advisor; independently reach your verdict from the evidence packet and selective verification. Use Oracle only as a last resort for one precise unresolved question after your own review. The Task/Agent capability is restricted by the fast in-session ACL: you may invoke only `reviewer`, `scout`, or `critic`; do not invoke any other role. Bash is for evidence commands only; this is not a shell sandbox. "
+        "You are the fast profile's final plan consultant and approver, not a first-pass planner. The caller must provide the user goal, acceptance criteria, repository/domain constraints, Luna's `file:line` and command/test evidence, the complete draft plan, settled decisions, and one focused review question. Selectively verify disputed citations or narrow evidence gaps with read/search tools, but do not repeat broad discovery, edit files, or execute the plan. Return exactly one leading verdict: `APPROVE`, `REVISE`, or `NEED_MORE_CONTEXT`. APPROVE only when the plan is safe, ordered, complete, and verifiable. REVISE must give concrete corrections. NEED_MORE_CONTEXT must name the exact evidence Luna should collect. You do not have Advisor; independently reach your verdict from the evidence packet and selective verification. Use Oracle only as a last resort for one precise unresolved question after your own review. The Task/Agent capability is restricted by the fast in-session ACL: you may invoke only `reviewer`, `Explore`, or `critic`; do not invoke any other role. Bash is for evidence commands only; this is not a shell sandbox. "
         + readOnlyToolSteer(),
       tools: plannerTools,
       model: decorateGuaranteedOneM(plannerModel),
@@ -635,7 +638,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     },
   }
   const roster = opts.nativeRoster == null
-    ? undefined
+    ? new Set(FAST_PROFILE_NATIVE_AGENT_NAMES)
     : opts.nativeRoster instanceof Set
       ? opts.nativeRoster
       : new Set(opts.nativeRoster)

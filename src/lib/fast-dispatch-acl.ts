@@ -7,27 +7,30 @@
  * narrow the available tools while this graph narrows native dispatch edges.
  */
 
-export const FAST_NATIVE_AGENT_NAMES = [
-  "scout",
-  "implementer",
-  "reviewer",
-  "planner",
-  "critic",
-] as const
+import {
+  FAST_PROFILE_DELEGATION_GRAPH,
+  FAST_PROFILE_NATIVE_AGENT_NAMES,
+  type FastProfileNativeAgentName,
+} from "./fast-profile-contract"
 
-export type FastNativeAgentName = (typeof FAST_NATIVE_AGENT_NAMES)[number]
+export const FAST_NATIVE_AGENT_NAMES = FAST_PROFILE_NATIVE_AGENT_NAMES
+
+export type FastNativeAgentName = FastProfileNativeAgentName
 
 const FAST_NATIVE_AGENT_SET = new Set<string>(FAST_NATIVE_AGENT_NAMES)
 
 /** Frozen authority graph: each key is a caller and each value its targets. */
-export const FAST_DISPATCH_GRAPH: Readonly<Record<FastNativeAgentName, ReadonlySet<FastNativeAgentName>>> =
-  Object.freeze({
-    scout: new Set<FastNativeAgentName>(),
-    implementer: new Set<FastNativeAgentName>(["reviewer", "critic"]),
-    reviewer: new Set<FastNativeAgentName>(),
-    planner: new Set<FastNativeAgentName>(["reviewer", "scout", "critic"]),
-    critic: new Set<FastNativeAgentName>(),
-  })
+export const FAST_DISPATCH_GRAPH: Readonly<
+  Record<FastNativeAgentName, ReadonlySet<FastNativeAgentName>>
+> = Object.freeze({
+  Explore: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.Explore),
+  implementer: new Set<FastNativeAgentName>(
+    FAST_PROFILE_DELEGATION_GRAPH.implementer,
+  ),
+  reviewer: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.reviewer),
+  planner: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.planner),
+  critic: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.critic),
+})
 
 /** The hook matcher is intentionally limited to native dispatch tool names. */
 export const FAST_DISPATCH_TOOL_MATCHER = "^(Task|Agent)$"
@@ -48,6 +51,8 @@ export interface FastDispatchGuardResult {
   reason?: string
   caller?: FastNativeAgentName | "lead"
   target?: FastNativeAgentName
+  /** Cloned Agent/Task input with a caller model override removed. */
+  updatedInput?: Record<string, unknown>
   verdict: "allow-non-dispatch" | "allow" | "deny"
 }
 
@@ -133,6 +138,12 @@ export function decideFastDispatchGuard(stdin: string | unknown): FastDispatchGu
     )
   }
   const target = targetValue as FastNativeAgentName
+  const toolInput = payload.tool_input as Record<string, unknown>
+  // Invocation-level `model` outranks custom-agent frontmatter in Claude Code.
+  // The fast profile promises fixed role models, so allowed dispatches must
+  // remove that one caller-owned field while preserving every other input.
+  const updatedInput = { ...toolInput }
+  delete updatedInput.model
 
   const callerType = resolveAliasedString(payload as Record<string, unknown>, ["agent_type", "agentType"])
   const callerId = resolveAliasedString(payload as Record<string, unknown>, ["agent_id", "agentId"])
@@ -170,7 +181,13 @@ export function decideFastDispatchGuard(stdin: string | unknown): FastDispatchGu
     if (hasPresentMarker && hasUnresolvedNonNullMarker) {
       return deny(`fast dispatch denied: ${toolName} has no resolvable caller role`, target)
     }
-    return { allowed: true, caller: "lead", target, verdict: "allow" }
+    return {
+      allowed: true,
+      caller: "lead",
+      target,
+      updatedInput,
+      verdict: "allow",
+    }
   }
   if (!FAST_NATIVE_AGENT_SET.has(callerTypeValue)) {
     return deny(`fast dispatch denied: unknown caller role ${JSON.stringify(callerTypeValue)}`, target)
@@ -180,7 +197,20 @@ export function decideFastDispatchGuard(stdin: string | unknown): FastDispatchGu
   if (!allowedTargets.has(target)) {
     return deny(`fast dispatch denied: ${caller} cannot invoke ${target}`, target, caller)
   }
-  return { allowed: true, caller, target, verdict: "allow" }
+  return { allowed: true, caller, target, updatedInput, verdict: "allow" }
+}
+
+/** JSON response consumed by Claude Code for an allowed, model-pinned dispatch. */
+export function fastDispatchAllowOutput(
+  updatedInput: Record<string, unknown>,
+): string {
+  return JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      updatedInput,
+    },
+  })
 }
 
 /** JSON response consumed by Claude Code's PreToolUse hook protocol. */

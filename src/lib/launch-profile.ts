@@ -1,6 +1,10 @@
 import type { Effort } from "./reasoning-effort"
 import { normalizeTrailingOneMSuffix, stripTrailingOneMSuffix } from "./model-suffix"
 import { fastEndpointForModel } from "./fast-endpoint"
+import {
+  FAST_PROFILE_MODELS,
+  FAST_PROFILE_NATIVE_AGENT_NAMES,
+} from "./fast-profile-contract"
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
 /**
@@ -53,7 +57,7 @@ export const STANDARD_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
- * The `-m fast` roster: exactly five native agents (`scout`, `implementer`,
+ * The `-m fast` roster: exactly five native agents (`Explore`, `implementer`,
  * `reviewer`, `planner`, `critic`), the fast-only `oracle` peer tool, no coordinator,
  * and only `peers`/`search` plus the ordinary opt-in `browser` group.
  * `workers`/`orchestrate`/`decide`/`fleet`/`first-mate` are hard denies even
@@ -61,7 +65,7 @@ export const STANDARD_PROFILE: LaunchProfileDescriptor = Object.freeze({
  */
 export const FAST_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "fast",
-  nativeRoster: new Set(["scout", "implementer", "reviewer", "planner", "critic"]),
+  nativeRoster: new Set(FAST_PROFILE_NATIVE_AGENT_NAMES),
   personaAllowlist: new Set(["oracle"]),
   allowedGroups: new Set(["peers", "search", "browser"]),
   hasCoordinator: false,
@@ -101,7 +105,7 @@ export const LUNA_DRIVER_ALIAS_ID = "gh-router-luna-driver-max"
 
 /** Fast native-agent alias ids preserve role-specific effort provenance until
  *  the authenticated request boundary. They both canonicalize to Luna, but the
- *  scout is fixed high while the implementer is fixed max. */
+ *  Explore is fixed high while the implementer is fixed max. */
 export const LUNA_SCOUT_ALIAS_ID = "gh-router-luna-scout-high"
 export const LUNA_IMPLEMENTER_ALIAS_ID = "gh-router-luna-implementer-max"
 
@@ -120,7 +124,7 @@ export const LUNA_HAIKU_ALIAS_ID = "gh-router-luna-haiku-high"
 
 /** The real Copilot catalog id every Luna alias (including the driver
  *  itself) canonicalizes to. */
-export const LUNA_REAL_MODEL_ID = "gpt-5.6-luna"
+export const LUNA_REAL_MODEL_ID = FAST_PROFILE_MODELS.luna
 
 export interface ModelAliasDescriptor {
   /** The id as it appears on the wire / in `body.model` before
@@ -160,7 +164,7 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   ],
   [
     FAST_CRITIC_ALIAS_ID,
-    { aliasId: FAST_CRITIC_ALIAS_ID, realModel: "gemini-3.7-flash", absentEffortDefault: "medium" },
+    { aliasId: FAST_CRITIC_ALIAS_ID, realModel: FAST_PROFILE_MODELS.critic, absentEffortDefault: "medium" },
   ],
   [
     LUNA_SONNET_ALIAS_ID,
@@ -280,7 +284,7 @@ function hasPromptAtLeast(model: Model | undefined, tokens: number): boolean {
  * than silently substituting or dropping an agent.
  *
  * Checks, per the fast-launch-profile design:
- *   - Luna lead/scout/implementer: tool calls, >=1M, high+max, Responses.
+ *   - Luna lead/Explore/implementer: tool calls, >=1M, high+max, Responses.
  *   - Sol planner: tool calls, >=1M, high, Responses.
  *   - Grok reviewer: tool calls, medium, Responses, usable prompt metadata.
  *   - Gemini Advisor: >=1M, high, chat-completions.
@@ -311,55 +315,59 @@ export function validateFastProfilePrerequisites(
     }
   }
 
-  const sol = findModel(catalog, "gpt-5.6-sol")
+  const sol = findModel(catalog, FAST_PROFILE_MODELS.planner)
   if (!sol) {
-    missing.push("gpt-5.6-sol: absent from the live catalog")
+    missing.push(`${FAST_PROFILE_MODELS.planner}: absent from the live catalog`)
   } else {
-    if (!hasToolCalls(sol)) missing.push("gpt-5.6-sol: does not advertise tool_calls")
+    if (!hasToolCalls(sol)) {
+      missing.push(`${FAST_PROFILE_MODELS.planner}: does not advertise tool_calls`)
+    }
     if (!hasContextAtLeast(sol, FAST_REQUIRED_CONTEXT_TOKENS)) {
-      missing.push("gpt-5.6-sol: advertised context window is below 1M")
+      missing.push(`${FAST_PROFILE_MODELS.planner}: advertised context window is below 1M`)
     }
     if (!supportsEffort(sol, "high")) {
-      missing.push("gpt-5.6-sol: does not advertise a \"high\" reasoning effort")
+      missing.push(`${FAST_PROFILE_MODELS.planner}: does not advertise a "high" reasoning effort`)
     }
     if (!supportsEndpoint(sol, "responses")) {
-      missing.push("gpt-5.6-sol: does not advertise a supported Responses endpoint")
+      missing.push(`${FAST_PROFILE_MODELS.planner}: does not advertise a supported Responses endpoint`)
     }
   }
 
-  const grok = findModel(catalog, "grok-4.6")
+  const grok = findModel(catalog, FAST_PROFILE_MODELS.reviewer)
   if (!grok) {
-    missing.push("grok-4.6: absent from the live catalog")
+    missing.push(`${FAST_PROFILE_MODELS.reviewer}: absent from the live catalog`)
   } else {
-    if (!hasToolCalls(grok)) missing.push("grok-4.6: does not advertise tool_calls")
+    if (!hasToolCalls(grok)) {
+      missing.push(`${FAST_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
+    }
     if (!supportsEffort(grok, "medium")) {
-      missing.push("grok-4.6: does not advertise a \"medium\" reasoning effort")
+      missing.push(`${FAST_PROFILE_MODELS.reviewer}: does not advertise a "medium" reasoning effort`)
     }
     if (!hasPromptAtLeast(grok, FAST_REVIEWER_MIN_PROMPT_TOKENS)) {
       missing.push(
-        `grok-4.6: advertised max_prompt_tokens is below ${FAST_REVIEWER_MIN_PROMPT_TOKENS}`,
+        `${FAST_PROFILE_MODELS.reviewer}: advertised max_prompt_tokens is below ${FAST_REVIEWER_MIN_PROMPT_TOKENS}`,
       )
     }
     if (!supportsEndpoint(grok, "responses")) {
-      missing.push("grok-4.6: does not advertise a supported Responses endpoint")
+      missing.push(`${FAST_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`)
     }
   }
 
-  const gemini = findModel(catalog, "gemini-3.7-flash")
+  const gemini = findModel(catalog, FAST_PROFILE_MODELS.critic)
   if (!gemini) {
-    missing.push("gemini-3.7-flash: absent from the live catalog")
+    missing.push(`${FAST_PROFILE_MODELS.critic}: absent from the live catalog`)
   } else {
     if (!hasToolCalls(gemini)) {
-      missing.push("gemini-3.7-flash: does not advertise tool_calls for the native critic")
+      missing.push(`${FAST_PROFILE_MODELS.critic}: does not advertise tool_calls for the native critic`)
     }
     if (!hasContextAtLeast(gemini, FAST_REQUIRED_CONTEXT_TOKENS)) {
-      missing.push("gemini-3.7-flash: advertised context window is below 1M")
+      missing.push(`${FAST_PROFILE_MODELS.critic}: advertised context window is below 1M`)
     }
     if (!supportsEffort(gemini, "high")) {
-      missing.push("gemini-3.7-flash: does not advertise a \"high\" reasoning effort for Advisor")
+      missing.push(`${FAST_PROFILE_MODELS.critic}: does not advertise a "high" reasoning effort for Advisor`)
     }
     if (!supportsEffort(gemini, "medium")) {
-      missing.push("gemini-3.7-flash: does not advertise a \"medium\" reasoning effort for the native critic")
+      missing.push(`${FAST_PROFILE_MODELS.critic}: does not advertise a "medium" reasoning effort for the native critic`)
     }
     // Reuse the canonical catalog endpoint resolver. Copilot's live catalog
     // uses bare `/chat/completions`, while fixtures and older snapshots may use
@@ -367,29 +375,29 @@ export function validateFastProfilePrerequisites(
     // fully-capable live catalog fail the whole launch.
     if (!supportsEndpoint(gemini, "chat")) {
       missing.push(
-        "gemini-3.7-flash: does not advertise a supported chat-completions endpoint",
+        `${FAST_PROFILE_MODELS.critic}: does not advertise a supported chat-completions endpoint`,
       )
     }
   }
 
-  const opus = findModel(catalog, "claude-opus-5")
+  const opus = findModel(catalog, FAST_PROFILE_MODELS.oracle)
   if (!opus) {
-    missing.push("claude-opus-5: absent from the live catalog")
+    missing.push(`${FAST_PROFILE_MODELS.oracle}: absent from the live catalog`)
   } else {
     if (!hasContextAtLeast(opus, FAST_REQUIRED_CONTEXT_TOKENS)) {
-      missing.push("claude-opus-5: advertised context window is below 1M")
+      missing.push(`${FAST_PROFILE_MODELS.oracle}: advertised context window is below 1M`)
     }
     if (!supportsEffort(opus, "high")) {
-      missing.push("claude-opus-5: does not advertise a \"high\" reasoning effort")
+      missing.push(`${FAST_PROFILE_MODELS.oracle}: does not advertise a "high" reasoning effort`)
     }
     if (opus.capabilities?.supports?.adaptive_thinking !== true) {
-      missing.push("claude-opus-5: does not advertise adaptive_thinking")
+      missing.push(`${FAST_PROFILE_MODELS.oracle}: does not advertise adaptive_thinking`)
     }
     if (!hasUsablePromptMetadata(opus)) {
-      missing.push("claude-opus-5: no usable max_prompt_tokens metadata")
+      missing.push(`${FAST_PROFILE_MODELS.oracle}: no usable max_prompt_tokens metadata`)
     }
     if (!supportsEndpoint(opus, "messages")) {
-      missing.push("claude-opus-5: does not advertise a supported Messages endpoint")
+      missing.push(`${FAST_PROFILE_MODELS.oracle}: does not advertise a supported Messages endpoint`)
     }
   }
 

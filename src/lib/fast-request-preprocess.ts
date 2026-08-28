@@ -51,7 +51,7 @@ export function preprocessFastRequest(
   } else if (bare === "gpt-5.6-luna") {
     // The global gateway picker exposes bare Luna. Within an authenticated fast
     // launch that selection is the lead/driver role, fixed at max; role-specific
-    // scout/implementer traffic uses private aliases above.
+    // Explore/implementer traffic uses private aliases above.
     effort = "max"
   } else if (bare === "gpt-5.6-sol") {
     effort = "high"

@@ -2,7 +2,7 @@
 
 The fast launch profile's `critic` native subagent runs `gemini-3.7-flash` with a 1M-context `[1m]` frontmatter id and medium effort. It is a fresh-context, cross-lab reviewer for plans, designs, diffs, and decisions. Its tools are Read, Grep, Glob, Bash, and the resolved search MCP wildcard. Bash is available for evidence commands, but the dispatch hook is only an in-session Task/Agent ACL, not a shell sandbox.
 
-The fast delegation graph is lead → all five roles; planner → reviewer/scout/critic; implementer → reviewer/critic; reviewer, scout, and critic → no native subagents. The compiled PreToolUse guard accepts both `Task` and `Agent`, supports snake/camel target aliases, and denies unknown or malformed caller/target identities. Standard launches and direct `-m gpt-5.6-luna` do not register this role or guard.
+The fast delegation graph is lead → all five roles; planner → reviewer/Explore/critic; implementer → reviewer/critic; reviewer, Explore, and critic → no native subagents. Capitalized `Explore` is the sole fast exploration role and replaces fast `scout`. The compiled PreToolUse guard accepts both `Task` and `Agent`, supports snake/camel target aliases, denies unknown or malformed caller/target identities, and removes invocation-level model overrides from allowed dispatches so fixed frontmatter wins. Standard launches and direct `-m gpt-5.6-luna` do not register this role or guard.
 
 The fast profile requires the critic's live catalog shape: exact `gemini-3.7-flash`, tool calls, at least 1M context, medium effort, and a chat-completions endpoint. There is no fallback.
 

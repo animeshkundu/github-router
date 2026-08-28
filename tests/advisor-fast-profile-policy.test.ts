@@ -83,6 +83,7 @@ function requestBody(model: string, stream = false) {
       {
         type: "advisor_20260301",
         name: "advisor",
+        model: `${ADVISOR_FAST_PROFILE_MODEL}[1m]`,
         input_schema: { type: "object", properties: {} },
       },
       {
@@ -342,6 +343,57 @@ describe("fast Advisor request policy", () => {
     )
     expect(advisorEffort).toBe("high")
     expect(messagesCalls).toBe(2)
+  })
+
+  test("rejects a fast Advisor beta request whose native tool is absent", async () => {
+    const fetchMock = mock(() => Promise.resolve(responsesObjectResponse()))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+        [LAUNCH_SECRET_HEADER]: FAST_SECRET,
+      },
+      body: JSON.stringify({
+        model: "gpt-5.6-luna",
+        max_tokens: 100,
+        stream: true,
+        messages: [{ role: "user", content: "Inspect." }],
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.text()).toContain("native Advisor tool was absent")
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test("rejects a fast native Advisor model that disagrees with fixed Gemini", async () => {
+    const fetchMock = mock(() => Promise.resolve(responsesObjectResponse()))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+        [LAUNCH_SECRET_HEADER]: FAST_SECRET,
+      },
+      body: JSON.stringify({
+        model: "gpt-5.6-luna",
+        max_tokens: 100,
+        stream: true,
+        messages: [{ role: "user", content: "Inspect." }],
+        tools: [{
+          type: "advisor_20260301",
+          name: "advisor",
+          model: "claude-opus-5",
+        }],
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.text()).toContain("Fast Advisor model mismatch")
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   test("standard injection keeps the existing mandatory policy byte-for-byte", () => {

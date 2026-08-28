@@ -35,6 +35,8 @@ import {
 } from "~/lib/thinking-history-repair"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { preprocessFastRequest } from "~/lib/fast-request-preprocess"
+import { FAST_PROFILE_ADVISOR_MODEL } from "~/lib/fast-profile-contract"
+import { stripTrailingOneMSuffix } from "~/lib/model-suffix"
 import { salvageOversizedPrompt } from "~/lib/prompt-window-salvage"
 import {
   buildWebSearchContext,
@@ -163,6 +165,33 @@ function stripWebSearchTool(body: AnyRecord): void {
  * in probes `shim_advisor_degrade_gpt55` and
  * `shim_advisor_degrade_gemini35flash`.
  */
+function fastAdvisorMetadataMismatch(rawBody: string): string | undefined {
+  let body: AnyRecord
+  try {
+    body = JSON.parse(rawBody) as AnyRecord
+  } catch {
+    return undefined
+  }
+  if (!Array.isArray(body.tools)) return "the native Advisor tool was absent"
+  let sawNativeAdvisor = false
+  for (const tool of body.tools as Array<AnyRecord>) {
+    if (!tool || typeof tool !== "object") continue
+    const type = tool.type
+    if (typeof type !== "string" || !type.startsWith("advisor_")) continue
+    sawNativeAdvisor = true
+    const model = tool.model
+    if (typeof model !== "string") {
+      return "the native Advisor tool omitted its fixed model"
+    }
+    if (stripTrailingOneMSuffix(model).base !== FAST_PROFILE_ADVISOR_MODEL) {
+      return `the native Advisor tool requested ${JSON.stringify(model)} instead of ${JSON.stringify(FAST_PROFILE_ADVISOR_MODEL)}`
+    }
+  }
+  return sawNativeAdvisor
+    ? undefined
+    : "the native Advisor tool was absent"
+}
+
 function stripAdvisorTool(rawBody: string): string {
   let body: AnyRecord
   try {
@@ -372,6 +401,38 @@ export async function handleCompletion(c: Context) {
     fastProfileRequest && Boolean(c.req.header("x-claude-code-agent-id"))
   const fastLeadAdvisor = fastProfileRequest && !fastSubagentRequest
   const advisorEnabled = advisorRequested && !fastSubagentRequest
+  let fastAdvisorChoice: ReturnType<typeof resolveAdvisorModel> | undefined
+  if (advisorEnabled && fastLeadAdvisor) {
+    const mismatch = fastAdvisorMetadataMismatch(rawBody)
+    if (mismatch) {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message:
+              `Fast Advisor model mismatch: ${mismatch}. `
+              + `Run \`/advisor ${FAST_PROFILE_ADVISOR_MODEL}[1m]\` to restore the fixed fast profile, or relaunch with \`github-router claude -m fast\`.`,
+          },
+        },
+        400,
+      )
+    }
+    try {
+      fastAdvisorChoice = resolveAdvisorModel(undefined, true)
+    } catch (error) {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "api_error",
+            message: error instanceof Error ? error.message : String(error),
+          },
+        },
+        503,
+      )
+    }
+  }
 
   const fastPreprocess = preprocessFastRequest(rawBody, identity.launch)
   if (fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
@@ -559,7 +620,7 @@ export async function handleCompletion(c: Context) {
         startTime,
       )
 
-      const advisorChoice = resolveAdvisorModel(modelId, fastLeadAdvisor)
+      const advisorChoice = fastAdvisorChoice!
       return new Response(
         buildAdvisorStream({
           firstResponse,
@@ -571,9 +632,8 @@ export async function handleCompletion(c: Context) {
           requestHeaders: {},
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          // Policy follows the authenticated launch identity, independently of
-          // model selection. An operator-pinned Advisor model must still act as
-          // a non-binding consultant for a fast lead.
+          // Policy follows authenticated fast launch identity, independently
+          // of lead-model selection. Fast Advisor identity itself is fixed.
           advisorFastProfile: fastLeadAdvisor,
           advisorEffort: resolveAdvisorEffort(rawBody, advisorChoice.model, true),
           externalAborter: fastAdvisorAborter,
@@ -832,7 +892,8 @@ export async function handleCompletion(c: Context) {
       // been through `translateThinking`, which clamps to the LEAD model's
       // allowlist; reading them would hand the advisor what the lead could do
       // instead of what the user picked.
-      const advisorChoice = resolveAdvisorModel(originalModel, fastLeadAdvisor)
+      const advisorChoice = fastAdvisorChoice
+        ?? resolveAdvisorModel(originalModel, false)
       return new Response(
         buildAdvisorStream({
           firstResponse: response,

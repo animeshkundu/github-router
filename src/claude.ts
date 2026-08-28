@@ -149,6 +149,10 @@ import { LAUNCH_SECRET_HEADER } from "./lib/messages-identity-preflight"
 import { state } from "./lib/state"
 import { resolveModel } from "./lib/utils"
 import { createFastLaunchCleanup } from "./lib/fast-launch-cleanup"
+import {
+  fastAdvisorClientEnabled,
+  withFixedFastAdvisorArg,
+} from "./lib/fast-advisor-client"
 
 function isFirstMateSkillName(name: string): boolean {
   return (
@@ -625,7 +629,17 @@ export const claude = defineCommand({
     // `args._`; walking rawArgs and dropping only github-router's OWN flags
     // makes `github-router claude -m <model> --print "…"` work headless
     // without requiring the `--` separator. See collectChildPassthroughArgs.
-    const extraArgs = collectChildPassthroughArgs(rawArgs, claudeArgs)
+    let extraArgs = collectChildPassthroughArgs(rawArgs, claudeArgs)
+    if (launchProfileId === "fast") {
+      // Claude Code renders/persists Advisor identity from its own session
+      // setting, independently of the proxy's nested Advisor dispatch. Pin both
+      // layers to the same fixed model and remove every caller-supplied value so
+      // a mirrored `advisorModel` or passthrough flag cannot make the UI lie.
+      extraArgs = withFixedFastAdvisorArg(
+        extraArgs,
+        fastAdvisorClientEnabled(process.env),
+      )
+    }
 
     // LLM toolbelt: materialize curated CLI tools (rg/fd/jq/sd/sg/yq)
     // into the router bin dir prepended to the agent's PATH (the prepend
@@ -728,7 +742,7 @@ export const claude = defineCommand({
     // and a prompt naming a dropped agent sends the lead at something absent
     // from the Task `subagent_type` enum.
     // Fast profile uses its own single-entry, no-fallback resolvers (pinned
-    // to the exact roster: scout/implementer -> Luna, reviewer -> Grok 4.6,
+    // to the exact roster: Explore/implementer -> Luna, reviewer -> Grok 4.6,
     // planner -> Sol) instead of the standard chains, and registers none of
     // the standard-only brainstorm/scribe/*-fast/catch-all roles. The
     // launch already failed above (`validateFastProfilePrerequisites`) if
@@ -736,7 +750,7 @@ export const claude = defineCommand({
     const nativeAgentModels: Partial<Record<NativeAgentName, string | undefined>> =
       launchProfileId === "fast"
         ? {
-            scout: fastScoutModel(),
+            Explore: fastScoutModel(),
             implementer: fastImplementerModel(),
             reviewer: fastReviewerModel(),
             planner: fastPlannerModel(),
@@ -753,7 +767,9 @@ export const claude = defineCommand({
             "general-purpose-fast": generalPurposeFastModel(),
           }
     const nativeAvailability: NativeAgentAvailability = {
-      scoutAvailable: nativeAgentModels.scout != null,
+      scoutAvailable:
+        (launchProfileId === "fast" ? nativeAgentModels.Explore : nativeAgentModels.scout)
+        != null,
       implementerFastAvailable: nativeAgentModels["implementer-fast"] != null,
       reviewerFastAvailable: nativeAgentModels["reviewer-fast"] != null,
       generalPurposeFastAvailable: nativeAgentModels["general-purpose-fast"] != null,
@@ -860,7 +876,8 @@ export const claude = defineCommand({
           reviewerModel: nativeAgentModels.reviewer,
           reviewerFastModel: nativeAgentModels["reviewer-fast"],
           brainstormModel: nativeAgentModels.brainstorm,
-          scoutModel: nativeAgentModels.scout,
+          scoutModel:
+            isFastProfile ? nativeAgentModels.Explore : nativeAgentModels.scout,
           scribeModel: nativeAgentModels.scribe,
           implementerFastModel: nativeAgentModels["implementer-fast"],
           generalPurposeFastModel: nativeAgentModels["general-purpose-fast"],

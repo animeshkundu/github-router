@@ -1,6 +1,7 @@
 import consola from "consola"
 
 import { ONE_M_TOKENS, withOneMSuffixForLead } from "./one-m-context"
+import { FAST_PROFILE_MODELS } from "./fast-profile-contract"
 import { state } from "./state"
 import { isClaudeModel } from "./anthropic-translate/classifier"
 import { resolveModel } from "./utils"
@@ -102,7 +103,7 @@ const DEFAULT_OPUS_FAMILY = "5"
  * keys off the same raw `-m` argument this constant is selected by, so the
  * two can never disagree about which launches count as "fast".
  */
-export const FAST_LEAD_MODEL = "gpt-5.6-luna"
+export const FAST_LEAD_MODEL = FAST_PROFILE_MODELS.luna
 
 /** Small/fast tier for a budget lead, in the two forms this codebase needs.
  *

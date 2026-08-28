@@ -1069,7 +1069,8 @@ test("profile:'fast' names exactly the fast roster and never a removed native/to
     generalPurposeFastAvailable: true,
     budgetLead: true,
   })
-  expect(directive).toContain("`scout`")
+  expect(directive).toContain("`Explore`")
+  expect(directive).not.toContain("`scout`")
   expect(directive).toContain("`implementer`")
   expect(directive).toContain("`reviewer`")
   expect(directive).toContain("`planner`")
@@ -1089,7 +1090,7 @@ test("profile:'fast' with unavailable runtime does not advertise absent agents o
     fastRuntimeAvailable: false,
   })
   expect(directive).toContain("runtime wiring is unavailable")
-  for (const absent of ["`planner`", "`reviewer`", "`oracle`", "`scout`", "`implementer`"]) {
+  for (const absent of ["`planner`", "`reviewer`", "`oracle`", "`Explore`", "`implementer`"]) {
     expect(directive).not.toContain(absent)
   }
 })
