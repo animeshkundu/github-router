@@ -146,6 +146,7 @@ declare -a PROBE_REGISTRY=(
   "advisor_claude_nonstreaming_cap|claude-emits|claude-opus-5 on /v1/messages accepts max_tokens at the advertised max_non_streaming_output_tokens (16000) when stream:false"
   "advisor_claude_streaming_cap_accepted|exploratory|claude-opus-5 on /v1/messages ACCEPTS max_tokens at the streaming ceiling (64000) even when stream:false — max_non_streaming_output_tokens is advertised but not enforced; the advisor stays inside it by choice, not necessity"
   "fast_advisor_all_leads_policy|proxy-internal|authenticated fast Advisor route matrix: fixed client identity + Gemini Chat/high nested dispatch and same-lead continuation on every lead"
+  "fast_advisor_beta_without_tools|proxy-internal|fast Advisor beta on tool-less compaction-style turns passes through without injection or Gemini resolution"
   "fast_advisor_endpoint_gate|proxy-internal|fixed fast Advisor fails closed when Gemini Chat is unavailable and ignores conflicting operator pins"
   "fast_native_model_override|proxy-internal|fast PreToolUse ACL removes invocation-level Agent model overrides before fixed-role dispatch"
   "fast_explore_fixed_model|proxy-internal|capitalized fast Explore replaces scout and is pinned to Luna/high/1M"
@@ -633,6 +634,17 @@ probe_fast_advisor_all_leads_policy() {
   # asserts every upstream model/endpoint/body through a mocked Copilot edge.
   if ! bun test "${PROJECT_ROOT}/tests/advisor-fast-profile-route-matrix.test.ts" >/dev/null 2>&1; then
     echo "  ${C_RED}FAIL${C_RESET}: fast Advisor five-lead route matrix failed"
+    return 1
+  fi
+}
+
+probe_fast_advisor_beta_without_tools() {
+  # The Advisor beta can accompany Claude Code /compact requests with no tools.
+  # The policy test removes Gemini from the live catalog and verifies that both
+  # translated and native Claude requests still pass without proxy Advisor work.
+  if ! bun test "${PROJECT_ROOT}/tests/advisor-fast-profile-policy.test.ts" \
+    --test-name-pattern 'without tools' >/dev/null 2>&1; then
+    echo "  ${C_RED}FAIL${C_RESET}: tool-less fast Advisor beta boundary failed"
     return 1
   fi
 }

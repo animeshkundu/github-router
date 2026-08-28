@@ -73,7 +73,11 @@ function responsesObjectResponse() {
   )
 }
 
-function requestBody(model: string, stream = false) {
+function requestBody(
+  model: string,
+  stream = false,
+  advisorModel = `${ADVISOR_FAST_PROFILE_MODEL}[1m]`,
+) {
   return JSON.stringify({
     model,
     max_tokens: 100,
@@ -83,7 +87,7 @@ function requestBody(model: string, stream = false) {
       {
         type: "advisor_20260301",
         name: "advisor",
-        model: `${ADVISOR_FAST_PROFILE_MODEL}[1m]`,
+        model: advisorModel,
         input_schema: { type: "object", properties: {} },
       },
       {
@@ -93,6 +97,89 @@ function requestBody(model: string, stream = false) {
       },
     ],
   })
+}
+
+function requestWithoutTools(model: string, stream = false) {
+  return JSON.stringify({
+    model,
+    max_tokens: 100,
+    stream,
+    messages: [{ role: "user", content: "Compact the conversation." }],
+  })
+}
+
+function requestWithTools(model: string, tools: Array<Record<string, unknown>>, stream = true) {
+  return JSON.stringify({
+    model,
+    max_tokens: 100,
+    stream,
+    messages: [{ role: "user", content: "Inspect the repository." }],
+    tools,
+  })
+}
+
+function advisorMetadataTool(model?: string) {
+  return {
+    type: "advisor_20260301",
+    name: "advisor",
+    ...(model === undefined ? {} : { model }),
+    input_schema: { type: "object", properties: {} },
+  }
+}
+
+function fastRequestOptions(body: string) {
+  return {
+    method: "POST" as const,
+    headers: {
+      "content-type": "application/json",
+      "anthropic-beta": "advisor-tool-2026-03-01",
+      [LAUNCH_SECRET_HEADER]: FAST_SECRET,
+    },
+    body,
+  }
+}
+
+function removeGeminiModels() {
+  state.models = {
+    object: "list",
+    data: state.models?.data?.filter((model) => model.id !== ADVISOR_FAST_PROFILE_MODEL),
+  } as never
+}
+
+function simpleResponsesSse(): Response {
+  const events = [
+    { type: "response.created", response: { status: "in_progress" } },
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { type: "message", id: "m0" },
+    },
+    { type: "response.output_text.delta", output_index: 0, delta: "ok" },
+    { type: "response.output_text.done", output_index: 0, text: "ok" },
+    {
+      type: "response.completed",
+      response: { status: "completed", usage: { input_tokens: 1, output_tokens: 1 } },
+    },
+  ]
+  const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")
+    + "data: [DONE]\n\n"
+  return new Response(body, { headers: { "content-type": "text/event-stream" } })
+}
+
+function standardMessagesResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      model: "claude-opus-5",
+      content: [{ type: "text", text: "ok" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }),
+    { headers: { "content-type": "application/json" } },
+  )
 }
 
 beforeEach(() => {
@@ -345,55 +432,109 @@ describe("fast Advisor request policy", () => {
     expect(messagesCalls).toBe(2)
   })
 
-  test("rejects a fast Advisor beta request whose native tool is absent", async () => {
+  test("translated fast beta compaction without tools passes without Gemini", async () => {
+    let forwarded = ""
+    const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
+      forwarded = String(init?.body ?? "")
+      return Promise.resolve(simpleResponsesSse())
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    removeGeminiModels()
+
+    const response = await server.request(
+      "/v1/messages",
+      fastRequestOptions(requestWithoutTools("gpt-5.6-luna", true)),
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain("ok")
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(forwarded).not.toContain(ADVISOR_INTERNAL_TOOL_NAME)
+  })
+
+  test("native Claude beta compaction without tools passes without Gemini", async () => {
+    let forwarded = ""
+    const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
+      forwarded = String(init?.body ?? "")
+      return Promise.resolve(standardMessagesResponse())
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    removeGeminiModels()
+
+    const response = await server.request(
+      "/v1/messages",
+      fastRequestOptions(requestWithoutTools("claude-opus-5")),
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain('"text":"ok"')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(forwarded).not.toContain(ADVISOR_INTERNAL_TOOL_NAME)
+  })
+
+  test("fast primary with unrelated tools still receives proxy Advisor injection", async () => {
+    let forwarded = ""
+    const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
+      forwarded = String(init?.body ?? "")
+      return Promise.resolve(simpleResponsesSse())
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const response = await server.request(
+      "/v1/messages",
+      fastRequestOptions(
+        requestWithTools("gpt-5.6-luna", [{
+          name: "lookup",
+          description: "Look something up.",
+          input_schema: { type: "object", properties: {}, required: [] },
+        }]),
+      ),
+    )
+
+    expect(response.status).toBe(200)
+    await response.text()
+    expect(forwarded).toContain(ADVISOR_INTERNAL_TOOL_NAME)
+    expect(forwarded).toContain('"name":"lookup"')
+  })
+
+  test.each([
+    ["missing model", advisorMetadataTool(), "omitted its fixed model"],
+    ["wrong model", advisorMetadataTool("gemini-3.7-flash-wrong"), "requested"],
+    ["non-Gemini model", advisorMetadataTool("claude-opus-5"), "requested"],
+  ])("rejects fast native Advisor metadata with %s", async (_label, tool, detail) => {
     const fetchMock = mock(() => Promise.resolve(responsesObjectResponse()))
     globalThis.fetch = fetchMock as unknown as typeof fetch
-    const response = await server.request("/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "anthropic-beta": "advisor-tool-2026-03-01",
-        [LAUNCH_SECRET_HEADER]: FAST_SECRET,
-      },
-      body: JSON.stringify({
-        model: "gpt-5.6-luna",
-        max_tokens: 100,
-        stream: true,
-        messages: [{ role: "user", content: "Inspect." }],
-      }),
-    })
+
+    const response = await server.request(
+      "/v1/messages",
+      fastRequestOptions(requestWithTools("gpt-5.6-luna", [tool])),
+    )
 
     expect(response.status).toBe(400)
-    expect(await response.text()).toContain("native Advisor tool was absent")
+    expect(await response.text()).toContain(detail)
+    expect(response.headers.get("x-should-retry")).toBe("false")
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
-  test("rejects a fast native Advisor model that disagrees with fixed Gemini", async () => {
-    const fetchMock = mock(() => Promise.resolve(responsesObjectResponse()))
-    globalThis.fetch = fetchMock as unknown as typeof fetch
-    const response = await server.request("/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "anthropic-beta": "advisor-tool-2026-03-01",
-        [LAUNCH_SECRET_HEADER]: FAST_SECRET,
-      },
-      body: JSON.stringify({
-        model: "gpt-5.6-luna",
-        max_tokens: 100,
-        stream: true,
-        messages: [{ role: "user", content: "Inspect." }],
-        tools: [{
-          type: "advisor_20260301",
-          name: "advisor",
-          model: "claude-opus-5",
-        }],
-      }),
+  test.each([
+    ADVISOR_FAST_PROFILE_MODEL,
+    `${ADVISOR_FAST_PROFILE_MODEL}[1m]`,
+  ])("accepts fast native Advisor model metadata %s", async (advisorModel) => {
+    let forwarded = ""
+    const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
+      forwarded = String(init?.body ?? "")
+      return Promise.resolve(simpleResponsesSse())
     })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
 
-    expect(response.status).toBe(400)
-    expect(await response.text()).toContain("Fast Advisor model mismatch")
-    expect(fetchMock).not.toHaveBeenCalled()
+    const response = await server.request(
+      "/v1/messages",
+      fastRequestOptions(requestBody("gpt-5.6-luna", true, advisorModel)),
+    )
+
+    expect(response.status).toBe(200)
+    await response.text()
+    expect(forwarded).toContain(ADVISOR_INTERNAL_TOOL_NAME)
   })
 
   test("standard injection keeps the existing mandatory policy byte-for-byte", () => {

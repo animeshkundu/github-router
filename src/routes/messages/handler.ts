@@ -165,6 +165,16 @@ function stripWebSearchTool(body: AnyRecord): void {
  * in probes `shim_advisor_degrade_gpt55` and
  * `shim_advisor_degrade_gemini35flash`.
  */
+function hasNonEmptyTools(rawBody: string): boolean {
+  let body: AnyRecord
+  try {
+    body = JSON.parse(rawBody) as AnyRecord
+  } catch {
+    return false
+  }
+  return Array.isArray(body.tools) && body.tools.length > 0
+}
+
 function fastAdvisorMetadataMismatch(rawBody: string): string | undefined {
   let body: AnyRecord
   try {
@@ -172,13 +182,14 @@ function fastAdvisorMetadataMismatch(rawBody: string): string | undefined {
   } catch {
     return undefined
   }
-  if (!Array.isArray(body.tools)) return "the native Advisor tool was absent"
-  let sawNativeAdvisor = false
+  // Compaction and other tool-less turns legitimately carry the Advisor beta
+  // without declaring a native Advisor tool. Only validate metadata when a
+  // non-empty tools array actually declares an advisor_* entry.
+  if (!Array.isArray(body.tools) || body.tools.length === 0) return undefined
   for (const tool of body.tools as Array<AnyRecord>) {
     if (!tool || typeof tool !== "object") continue
     const type = tool.type
     if (typeof type !== "string" || !type.startsWith("advisor_")) continue
-    sawNativeAdvisor = true
     const model = tool.model
     if (typeof model !== "string") {
       return "the native Advisor tool omitted its fixed model"
@@ -187,9 +198,7 @@ function fastAdvisorMetadataMismatch(rawBody: string): string | undefined {
       return `the native Advisor tool requested ${JSON.stringify(model)} instead of ${JSON.stringify(FAST_PROFILE_ADVISOR_MODEL)}`
     }
   }
-  return sawNativeAdvisor
-    ? undefined
-    : "the native Advisor tool was absent"
+  return undefined
 }
 
 function stripAdvisorTool(rawBody: string): string {
@@ -401,9 +410,12 @@ export async function handleCompletion(c: Context) {
     fastProfileRequest && Boolean(c.req.header("x-claude-code-agent-id"))
   const fastLeadAdvisor = fastProfileRequest && !fastSubagentRequest
   const advisorEnabled = advisorRequested && !fastSubagentRequest
+  const fastAdvisorEnabled = fastLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
+  const advisorBehaviorEnabled = fastLeadAdvisor ? fastAdvisorEnabled : advisorEnabled
   let fastAdvisorChoice: ReturnType<typeof resolveAdvisorModel> | undefined
-  if (advisorEnabled && fastLeadAdvisor) {
+  if (fastAdvisorEnabled) {
     const mismatch = fastAdvisorMetadataMismatch(rawBody)
+
     if (mismatch) {
       return c.json(
         {
@@ -416,6 +428,7 @@ export async function handleCompletion(c: Context) {
           },
         },
         400,
+        { "x-should-retry": "false" },
       )
     }
     try {
@@ -487,7 +500,7 @@ export async function handleCompletion(c: Context) {
   }
   if (loopGuard.body !== undefined) finalBody = loopGuard.body
 
-  if (advisorEnabled) {
+  if (advisorBehaviorEnabled) {
     // Inject __anthropic_advisor tool definition (with cc-backup's
     // ADVISOR_TOOL_INSTRUCTIONS as description) so the model knows
     // when to call it. Tool name uses double-underscore prefix to
@@ -586,9 +599,8 @@ export async function handleCompletion(c: Context) {
     const wantsStream = parsedBase?.stream === true
 
     if (
-      advisorEnabled
+      fastAdvisorEnabled
       && wantsStream
-      && fastLeadAdvisor
     ) {
       const initialConversation = Array.isArray(parsedBase!.messages)
         ? (parsedBase!.messages as Array<AnyRecord>)
@@ -670,7 +682,7 @@ export async function handleCompletion(c: Context) {
     // beta was present — a hand-crafted client could decouple the tool from the
     // beta. stripAdvisorTool returns the same string when nothing matched.
     const shimBody = stripAdvisorTool(promptWindowBody)
-    if (advisorEnabled) {
+    if (advisorBehaviorEnabled) {
       consola.info(
         "ADVISOR requested with a non-Claude model — stripping the injected "
           + "__anthropic_advisor tool and proceeding without advisor (Claude-only "
@@ -702,7 +714,7 @@ export async function handleCompletion(c: Context) {
   // burning tokens and holding a socket.
   // NOTE: do NOT use c.req.raw.signal here — Bun aborts it after request-
   // body consumption (see CLAUDE.md "Bun request-signal quirk").
-  const advisorAborter = advisorEnabled ? new AbortController() : undefined
+  const advisorAborter = advisorBehaviorEnabled ? new AbortController() : undefined
   const requestHeaders = {
     ...selectedModel?.requestHeaders,
     ...effectiveBetas,
@@ -866,7 +878,7 @@ export async function handleCompletion(c: Context) {
     // Copilot conversation on the SAME SSE connection (no intermediate
     // message_stop). See src/services/advisor/advisor.ts for the design
     // (gemini-critic streaming-during-loop pattern).
-    if (advisorEnabled && response.body) {
+    if (advisorBehaviorEnabled && response.body) {
       // Parse the resolved body once to extract the conversation +
       // base body for continuation calls. The translate-loop needs
       // these to extend the conversation across advisor turns.
