@@ -14,7 +14,7 @@ The injection uses a **presence-based guard** in `getClaudeCodeEnvVars` (`src/li
 
 Every `github-router claude` launch also presence-guards `CLAUDE_CODE_AUTO_COMPACT_WINDOW` with a catalog-derived **decimal integer**. It derives the complete client window for each reachable `[1m]` active/tier/custom/gateway model — `floor(max_prompt_tokens * 0.85) + min(max_output_tokens, 20_000) + 13_000` — and exports the minimum. This is not fast-only. `/model` does not mutate the process env, but Claude Code resolves the effective value as `Math.min(locallyRecognizedModelWindow, launchValue)`, so one launch-global minimum remains safe after a switch. Native subagents inherit it; 1M roles use the launch value, true 200K roles remain about 200K, and Grok's bare 500K id is conservatively treated as about 200K because Claude Code has no 500K declaration. The value must be a plain integer: that env path is `parseInt`-based, not the suffix-aware `/config` parser, so `"1m"` would parse to `1`, be floored to the client's 100,000 minimum, and compact a 1M session roughly every 52K tokens. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is deliberately not set. See the "Context-window safety" section of [`default-models.md`](default-models.md).
 
-This closes the failure observed on 2026-08-26: a top-level (`isSidechain:false`) Luna turn reached about 919,814 input tokens, then Copilot rejected the `/responses` request because Luna's 1.05M total window exposes only a 922K prompt ceiling after reserving 128K output. The failing call was not a planner/reviewer/scout/critic or `/responses/compact` request. Current live Opus/Sonnet/Gemini rows expose 1M total / 936K prompt; the defect class is any locally 1M-accounted model whose provider prompt ceiling lies below Claude Code's uncorrected ~967K trigger.
+This closes the failure observed on 2026-08-26: a top-level (`isSidechain:false`) Luna turn reached about 919,814 input tokens, then Copilot rejected the `/responses` request because Luna's 1.05M total window exposes only a 922K prompt ceiling after reserving 128K output. The failing call was not a Plan/reviewer/scout/critic or `/responses/compact` request. Current live Opus/Sonnet/Gemini rows expose 1M total / 936K prompt; the defect class is any locally 1M-accounted model whose provider prompt ceiling lies below Claude Code's uncorrected ~967K trigger.
 
 | Env var | Feature |
 |---|---|
@@ -77,5 +77,9 @@ in [`anthropic-translation-shim.md`](anthropic-translation-shim.md).
 `gpt-5.6-luna`, `gemini-3.7-flash`, and `grok-4.6`, gated on the live catalog.
 The cache-read-vs-fetch asymmetry, presence guard, and version-coupling caveat are
 unchanged. The literal raw `-m fast` profile additionally seeds private Luna
-role aliases for fixed effort; those aliases are accepted only on an
-authenticated fast request and never reach Copilot. See [`default-models.md`](default-models.md).
+role aliases for fixed effort; the fast `Explore` alias intentionally stays bare
+so Claude Code uses conservative/default local context accounting, while Luna
+still remains a required 1M catalog/startup prerequisite as the lead and
+implementer. Fast `reviewer` (Grok 4.6) is also bare/default-accounted; bare does
+not claim either provider window is only 200K. These aliases are accepted only on
+an authenticated fast request and never reach Copilot. See [`default-models.md`](default-models.md).

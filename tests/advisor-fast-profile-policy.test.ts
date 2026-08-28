@@ -213,6 +213,9 @@ afterEach(() => {
 
 describe("fast Advisor request policy", () => {
   test("the authenticated lead receives the restrained fast instructions", async () => {
+    expect(FAST_ADVISOR_TOOL_INSTRUCTIONS).toContain("Plan approval")
+    expect(FAST_ADVISOR_TOOL_INSTRUCTIONS).toContain("Plan output")
+    expect(FAST_ADVISOR_TOOL_INSTRUCTIONS).not.toContain("planner")
     let forwarded = ""
     globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
       forwarded = String(init?.body ?? "")
@@ -269,10 +272,10 @@ describe("fast Advisor request policy", () => {
     }) as unknown as typeof fetch
 
     for (const [agentId, model] of [
-      ["scout", LUNA_SCOUT_ALIAS_ID],
+      ["Explore", LUNA_SCOUT_ALIAS_ID],
       ["implementer", LUNA_IMPLEMENTER_ALIAS_ID],
       ["reviewer", "grok-4.6"],
-      ["planner", "gpt-5.6-sol"],
+      ["Plan", "gpt-5.6-sol"],
       ["critic", "gemini-3.7-flash"],
     ] as const) {
       const response = await server.request("/v1/messages", {

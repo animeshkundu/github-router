@@ -366,7 +366,7 @@ export function generalPurposeFastModel(): string | undefined {
  *
  * These are deliberately separate from the standard resolvers above. The fast
  * profile is a hard, single-entry, no-fallback assignment: `Explore` and
- * `implementer` pin to Luna, `reviewer` pins to Grok, and `planner` pins to
+ * `implementer` pin to Luna, `reviewer` pins to Grok, and `Plan` pins to
  * Sol. Retuning a standard resolver must never move a fast role silently.
  */
 
@@ -377,7 +377,7 @@ export const FAST_IMPLEMENTER_MODEL = FAST_PROFILE_NATIVE_MODELS.implementer
 /** Grok 4.6 advertises 500K total context / 372K max prompt, so it remains bare
  *  and is gated by max_prompt_tokens rather than the 1M floor. */
 export const FAST_REVIEWER_MODEL = FAST_PROFILE_NATIVE_MODELS.reviewer
-export const FAST_PLANNER_MODEL = FAST_PROFILE_NATIVE_MODELS.planner
+export const FAST_PLANNER_MODEL = FAST_PROFILE_NATIVE_MODELS.Plan
 export const FAST_CRITIC_MODEL = FAST_PROFILE_NATIVE_MODELS.critic
 export const FAST_ORACLE_MODEL = FAST_PROFILE_ORACLE_MODEL
 
@@ -391,7 +391,7 @@ export const FAST_EXPLORE_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.Explore
 export const FAST_SCOUT_EFFORT = FAST_EXPLORE_EFFORT
 export const FAST_IMPLEMENTER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.implementer
 export const FAST_REVIEWER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.reviewer
-export const FAST_PLANNER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.planner
+export const FAST_PLANNER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.Plan
 export const FAST_CRITIC_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.critic
 export const FAST_ORACLE_EFFORT = FAST_PROFILE_ORACLE_EFFORT
 export const FAST_ADVISOR_EFFORT = FAST_PROFILE_ADVISOR_EFFORT

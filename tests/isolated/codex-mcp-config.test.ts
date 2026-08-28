@@ -811,7 +811,7 @@ describe("buildPeerAgentDefinitions", () => {
   })
 
   describe("fast launch profile", () => {
-    const FAST_ROSTER = ["Explore", "implementer", "reviewer", "planner", "critic"]
+    const FAST_ROSTER = ["Explore", "implementer", "reviewer", "Plan", "critic"]
 
     function buildFastAgents(extra?: Partial<Parameters<typeof buildPeerAgentDefinitions>[0]>) {
       return buildPeerAgentDefinitions({
@@ -838,45 +838,45 @@ describe("buildPeerAgentDefinitions", () => {
       })
     }
 
-    test("emits exactly Explore, implementer, reviewer, planner, critic", () => {
+    test("emits exactly Explore, implementer, reviewer, Plan, critic", () => {
       const agents = buildFastAgents()
-      expect(Object.keys(agents).sort()).toEqual(["Explore", "critic", "implementer", "planner", "reviewer"])
+      expect(Object.keys(agents).sort()).toEqual(["Explore", "Plan", "critic", "implementer", "reviewer"])
       for (const absent of [
         "peer-review-coordinator", "codex-critic", "gemini-critic", "opus-critic",
         "implementer-fast", "reviewer-fast", "brainstorm", "scribe", "general-purpose-fast",
       ]) expect(agents[absent]).toBeUndefined()
     })
 
-    test("pins fast role models, effort and planner approval contract", () => {
+    test("pins fast role models, effort and Plan approval contract", () => {
       const agents = buildFastAgents()
-      expect(agents.Explore!.model).toBe("gh-router-luna-scout-high[1m]")
+      expect(agents.Explore!.model).toBe("gh-router-luna-scout-high")
       expect(agents.implementer!.model).toBe("gh-router-luna-implementer-max[1m]")
       expect(agents.reviewer!.model).toBe("grok-4.6")
-      expect(agents.planner!.model).toBe("gpt-5.6-sol[1m]")
+      expect(agents.Plan!.model).toBe("gpt-5.6-sol[1m]")
       expect(agents.critic!.model).toBe("gh-router-fast-critic-medium[1m]")
       expect(agents.Explore!.effort).toBe("high")
       expect(agents.critic!.effort).toBe("medium")
       expect(agents.critic!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "mcp__search__*"])
       expect(agents.critic!.mcpServers).toEqual(expect.objectContaining({ search: expect.anything() }))
       expect(agents.reviewer!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "mcp__search__*", "mcp__peers__oracle"])
-      expect(agents.planner!.tools).toContain("Agent")
-      expect(agents.planner!.tools).not.toContain("Task")
-      expect(agents.planner!.tools).toContain("mcp__search__*")
-      expect(agents.planner!.tools).toContain("mcp__peers__oracle")
+      expect(agents.Plan!.tools).toContain("Agent")
+      expect(agents.Plan!.tools).not.toContain("Task")
+      expect(agents.Plan!.tools).toContain("mcp__search__*")
+      expect(agents.Plan!.tools).toContain("mcp__peers__oracle")
       expect(agents.Explore!.effort).toBe("high")
       expect(agents.implementer!.effort).toBe("max")
       expect(agents.reviewer!.effort).toBe("medium")
-      expect(agents.planner!.effort).toBe("high")
-      expect(agents.planner!.prompt).toContain("`APPROVE`, `REVISE`, or `NEED_MORE_CONTEXT`")
-      expect(agents.planner!.prompt).toContain("`reviewer`, `Explore`, or `critic`")
-      expect(agents.planner!.prompt).not.toContain("`scout`")
-      expect(agents.planner!.description).toContain("must not implement until")
-      expect(agents.planner!.tools).toContain("mcp__peers__oracle")
-      expect(agents.planner!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything(), search: expect.anything() }))
+      expect(agents.Plan!.effort).toBe("high")
+      expect(agents.Plan!.prompt).toContain("`APPROVE`, `REVISE`, or `NEED_MORE_CONTEXT`")
+      expect(agents.Plan!.prompt).toContain("`reviewer`, `Explore`, or `critic`")
+      expect(agents.Plan!.prompt).not.toContain("`scout`")
+      expect(agents.Plan!.description).toContain("must not implement until")
+      expect(agents.Plan!.tools).toContain("mcp__peers__oracle")
+      expect(agents.Plan!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything(), search: expect.anything() }))
       expect(agents.reviewer!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "mcp__search__*", "mcp__peers__oracle"])
       expect(agents.reviewer!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything() }))
       expect(agents.reviewer!.prompt).toContain("You do not have Advisor")
-      expect(agents.planner!.prompt).toContain("You do not have Advisor")
+      expect(agents.Plan!.prompt).toContain("You do not have Advisor")
       expect(agents.Explore!.mcpServers).not.toHaveProperty("peers")
       expect(agents.implementer!.mcpServers).toBeUndefined()
     })
@@ -884,16 +884,20 @@ describe("buildPeerAgentDefinitions", () => {
     test("effort round-trips through markdown frontmatter", () => {
       const agents = buildFastAgents()
       const md = buildAgentMd({
-        name: "planner",
-        description: agents.planner!.description,
-        prompt: agents.planner!.prompt,
-        model: agents.planner!.model,
-        effort: agents.planner!.effort,
-        tools: agents.planner!.tools,
+        name: "Plan",
+        description: agents.Plan!.description,
+        prompt: agents.Plan!.prompt,
+        model: agents.Plan!.model,
+        effort: agents.Plan!.effort,
+        tools: agents.Plan!.tools,
       })
       expect(md).toContain('effort: "high"')
-      expect(md).toContain("name: planner")
+      expect(md).toContain("name: Plan")
       expect(md).toContain("mcp__peers__oracle")
+    })
+
+    test("retired lowercase planner is not emitted", () => {
+      expect(buildFastAgents().planner).toBeUndefined()
     })
 
     test("standard unrestricted calls remain picker-driven and unchanged", () => {

@@ -1215,7 +1215,7 @@ describe("claude command", () => {
       expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
       const [, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
       // Hard roster/persona/coordinator restriction per FAST_PROFILE.
-      expect(opts.nativeRoster).toEqual(new Set(["Explore", "implementer", "reviewer", "planner", "critic"]))
+      expect(opts.nativeRoster).toEqual(new Set(["Explore", "implementer", "reviewer", "Plan", "critic"]))
       expect(opts.personaAllowlist).toBeUndefined()
       expect(opts.includeCoordinator).toBe(false)
       expect(opts.fastProfile).toBe(true)
@@ -1236,7 +1236,7 @@ describe("claude command", () => {
       expect(opts.plannerEffort).toBe("high")
 
       // Fast keeps proxy MCPs out of the persistent mirror. The lead gets the
-      // runtime config, while reviewer/planner/Explore receive only their inline
+      // runtime config, while reviewer/Plan/Explore receive only their inline
       // role-scoped servers; implementer therefore cannot inherit Oracle.
       expect(injectPeerMcpIntoMirrorMock).not.toHaveBeenCalled()
       const [, args] = spawnMock.mock.calls[0]

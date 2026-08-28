@@ -43,15 +43,20 @@ describe("fast native dispatch ACL", () => {
     for (const target of roles) expectAllowed(dispatch(target, undefined, { agent_type: null, agent_id: null }))
   })
 
-  test("planner and implementer follow the exact graph", () => {
+  test("Plan and implementer follow the exact graph", () => {
     for (const target of roles) {
-      const plannerAllowed = FAST_DISPATCH_GRAPH.planner.has(target)
+      const planAllowed = FAST_DISPATCH_GRAPH.Plan.has(target)
       const implementerAllowed = FAST_DISPATCH_GRAPH.implementer.has(target)
-      if (plannerAllowed) expectAllowed(dispatch(target, "planner"))
-      else expectDenied(dispatch(target, "planner"))
+      if (planAllowed) expectAllowed(dispatch(target, "Plan"))
+      else expectDenied(dispatch(target, "Plan"))
       if (implementerAllowed) expectAllowed(dispatch(target, "implementer"))
       else expectDenied(dispatch(target, "implementer"))
     }
+  })
+
+  test("lowercase planner is rejected as both target and caller", () => {
+    expectDenied(dispatch("planner"))
+    expectDenied(dispatch("critic", "planner"))
   })
 
   test("reviewer, Explore, and critic cannot dispatch any native role", () => {
@@ -72,7 +77,7 @@ describe("fast native dispatch ACL", () => {
     expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic" }, agent_id: "id" }))
     expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic" }, parent_tool_use_id: "parent" }))
     expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic" }, agent_type: 42 }))
-    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic" }, agent_type: "implementer", agentType: "planner" }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic" }, agent_type: "implementer", agentType: "Plan" }))
   })
 
   test("malformed dispatch payloads fail closed while valid lead markers pass", () => {
@@ -102,7 +107,7 @@ describe("fast native dispatch ACL", () => {
 
   test("allowed dispatch clones input and removes only the model override", () => {
     const originalInput = {
-      subagent_type: "planner",
+      subagent_type: "Plan",
       prompt: "review this",
       model: "sonnet",
       isolation: "worktree",
@@ -114,7 +119,7 @@ describe("fast native dispatch ACL", () => {
     }
     const decision = decideFastDispatchGuard(hook)
     expect(decision.updatedInput).toEqual({
-      subagent_type: "planner",
+      subagent_type: "Plan",
       prompt: "review this",
       isolation: "worktree",
       future: { keep: true },

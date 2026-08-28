@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test"
 
 import { preprocessFastRequest } from "../src/lib/fast-request-preprocess"
-import { FAST_CRITIC_ALIAS_ID } from "../src/lib/launch-profile"
+import {
+  FAST_CRITIC_ALIAS_ID,
+  LUNA_SCOUT_ALIAS_ID,
+} from "../src/lib/launch-profile"
 import type { LaunchRegistryEntry } from "../src/lib/state"
 
 const fastLaunch: LaunchRegistryEntry = {
@@ -36,6 +39,13 @@ describe("fast request preprocessing", () => {
     expect(parsed.model).toBe("gpt-5.6-luna[1m]")
     expect(parsed.output_config.effort).toBe("high")
     expect(parsed.thinking).toEqual({ type: "adaptive" })
+  })
+
+  test("canonicalizes the bare Explore alias without adding a 1M suffix", () => {
+    const result = preprocessFastRequest(body(LUNA_SCOUT_ALIAS_ID), fastLaunch)
+    const parsed = JSON.parse(result.body)
+    expect(parsed.model).toBe("gpt-5.6-luna")
+    expect(parsed.output_config.effort).toBe("high")
   })
 
   test("preserves the fast critic's medium effort through alias canonicalization", () => {

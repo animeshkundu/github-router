@@ -163,7 +163,7 @@ interface BuildOpts {
    *  registers only `gemini-critic`) should pass `false`. */
   includeCoordinator?: boolean
   /** Fast-profile role assignments. When present, the explicit fast branch
-   *  emits the exact `Explore`/`implementer`/`reviewer`/`planner`/`critic` roster instead
+   *  emits the exact `Explore`/`implementer`/`reviewer`/`Plan`/`critic` roster instead
    *  of reusing standard role bodies. Standard callers omit these fields. */
   fastProfile?: boolean
   plannerModel?: string
@@ -276,7 +276,7 @@ export interface PeerAgentDefinition {
    *  Claude Code subagent frontmatter behavior). Absent → the subagent
    *  follows the session's picker, which is the standard-profile default for
    *  every native today. The fast profile fixes effort on all five of its role
-   *  definitions (`Explore`, `implementer`, `reviewer`, `planner`, `critic`). */
+   *  definitions (`Explore`, `implementer`, `reviewer`, `Plan`, `critic`). */
   effort?: SubagentEffort
   tools?: ReadonlyArray<string>
   /** Inline MCP servers scoped to this subagent, emitted into its `.md`
@@ -443,6 +443,7 @@ export const BUILTIN_SUBAGENT_DEFINITIONS: PeerAgentDefinitions = {
  */
 export const ALL_NATIVE_AGENT_NAMES = [
   "implementer",
+  "Plan",
   "planner",
   "reviewer",
   "reviewer-fast",
@@ -551,7 +552,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
   const plannerModel = nonEmptyModel(opts.plannerModel)
   const criticModel = nonEmptyModel(opts.criticModel)
   if (!scoutModel || !implementerModel || !reviewerModel || !plannerModel || !criticModel) {
-    throw new Error("fast profile requires resolved Explore, implementer, reviewer, planner, and critic models")
+    throw new Error("fast profile requires resolved Explore, implementer, reviewer, Plan, and critic models")
   }
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
@@ -592,7 +593,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
         "Investigate the repository read-only. Cast a wide net, then return a concise evidence packet for the lead: conclusions, load-bearing `file:line` citations, commands checked, and explicit gaps. Do not plan, edit, or spawn agents. "
         + readOnlyToolSteer(),
       tools: scoutTools,
-      model: decorateGuaranteedOneM(LUNA_SCOUT_ALIAS_ID),
+      model: LUNA_SCOUT_ALIAS_ID,
       effort: opts.scoutEffort ?? "high",
       ...searchMcp,
     },
@@ -623,7 +624,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
       tools: scoutTools,
       ...searchMcp,
     },
-    planner: {
+    Plan: {
       description: `Plan consultant and approver running ${plannerModel}. Invoke only after Luna has done the repository legwork and drafted a plan; pass a handcrafted evidence packet and the complete draft. The lead must not implement until this agent returns APPROVE.`,
       prompt:
         "You are the fast profile's final plan consultant and approver, not a first-pass planner. The caller must provide the user goal, acceptance criteria, repository/domain constraints, Luna's `file:line` and command/test evidence, the complete draft plan, settled decisions, and one focused review question. Selectively verify disputed citations or narrow evidence gaps with read/search tools, but do not repeat broad discovery, edit files, or execute the plan. Return exactly one leading verdict: `APPROVE`, `REVISE`, or `NEED_MORE_CONTEXT`. APPROVE only when the plan is safe, ordered, complete, and verifiable. REVISE must give concrete corrections. NEED_MORE_CONTEXT must name the exact evidence Luna should collect. You do not have Advisor; independently reach your verdict from the evidence packet and selective verification. Use Oracle only as a last resort for one precise unresolved question after your own review. The Task/Agent capability is restricted by the fast in-session ACL: you may invoke only `reviewer`, `Explore`, or `critic`; do not invoke any other role. Bash is for evidence commands only; this is not a shell sandbox. "
@@ -1186,8 +1187,9 @@ export async function writePeerAgentMdFiles(
   // outside (--agent flag, MCP tool registration, etc.). Names appear
   // in BOTH the filename (path-traversal vector if unvalidated) and the
   // YAML frontmatter `name:` field (parser-confusion if it contains
-  // YAML indicator chars). The strict regex matches only safe lowercase
-  // identifiers — every current persona/coordinator name passes.
+  // YAML indicator chars). The strict regex matches only safe identifiers
+  // made of letters, digits, and hyphens — every current persona/coordinator
+  // name passes, including the capitalized fast-profile `Plan`.
   for (const name of Object.keys(agents)) {
     if (!VALID_AGENT_NAME.test(name)) {
       throw new Error(

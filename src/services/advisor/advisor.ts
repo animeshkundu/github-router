@@ -482,9 +482,9 @@ You have access to an optional, transcript-aware \`advisor\` tool. It takes no p
 
 Use advisor only when a focused, consequential uncertainty remains after direct investigation: conflicting evidence, a materially changed assumption, a genuinely non-converging approach, a hard-to-reverse trade-off, or an explicit request for a fresh perspective. State the precise uncertainty in your response immediately before calling it.
 
-Do not call advisor for routine progress, while waiting on a subagent, after ordinary tool output, for a fact that code or a command can verify, to obtain planner approval or reviewer verification, or as a ritual before implementation or completion.
+Do not call advisor for routine progress, while waiting on a subagent, after ordinary tool output, for a fact that code or a command can verify, to obtain Plan approval or reviewer verification, or as a ritual before implementation or completion.
 
-Treat the result as advice, not authority. Weigh it against the user's intent, verified repository evidence, planner output, and reviewer findings. You may consult again when materially new evidence creates a different question or directly conflicts with earlier advice.`
+Treat the result as advice, not authority. Weigh it against the user's intent, verified repository evidence, Plan output, and reviewer findings. You may consult again when materially new evidence creates a different question or directly conflicts with earlier advice.`
 
 const ADVISOR_OPT_OUT_ENV = "CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
 

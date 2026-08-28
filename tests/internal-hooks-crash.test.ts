@@ -94,7 +94,7 @@ const CASES: ReadonlyArray<{ cmd: string; label: string; stdin: string }> = [
   { cmd: "internal-plan-review", label: "malformed", stdin: "x{" },
   // internal-fast-dispatch-guard: a denied native call must emit its JSON
   // decision and still drain/exit cleanly through the fallback launcher.
-  { cmd: "internal-fast-dispatch-guard", label: "denied-subagent", stdin: JSON.stringify({ tool_name: "Task", tool_input: { subagent_type: "planner" }, agent_type: "reviewer" }) },
+  { cmd: "internal-fast-dispatch-guard", label: "denied-subagent", stdin: JSON.stringify({ tool_name: "Task", tool_input: { subagent_type: "Plan" }, agent_type: "reviewer" }) },
 ]
 
 describe("internal hook subcommands: Windows libuv teardown regression", () => {

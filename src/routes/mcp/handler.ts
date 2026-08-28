@@ -300,7 +300,7 @@ function oracleToolEntry(): ToolEntry {
   return {
     name: "oracle",
     description:
-      "Fast-profile last-resort guidance from exact Opus 5 (1M context) at high effort. Stateless and tool-less: pass complete context plus one precise query only after the primary Luna path, Advisor, and the relevant reviewer/planner path remain stuck. It can advise or request missing information; it cannot inspect the repo, execute, merge, or authorize actions.",
+      "Fast-profile last-resort guidance from exact Opus 5 (1M context) at high effort. Stateless and tool-less: pass complete context plus one precise query only after the primary Luna path, Advisor, and the relevant reviewer/Plan path remain stuck. It can advise or request missing information; it cannot inspect the repo, execute, merge, or authorize actions.",
     inputSchema: {
       type: "object",
       required: ["query", "context"],

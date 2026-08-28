@@ -9,7 +9,7 @@
 export const FAST_PROFILE_MODELS = Object.freeze({
   luna: "gpt-5.6-luna",
   reviewer: "grok-4.6",
-  planner: "gpt-5.6-sol",
+  Plan: "gpt-5.6-sol",
   critic: "gemini-3.7-flash",
   oracle: "claude-opus-5",
 } as const)
@@ -18,7 +18,7 @@ export const FAST_PROFILE_NATIVE_AGENT_NAMES = [
   "Explore",
   "implementer",
   "reviewer",
-  "planner",
+  "Plan",
   "critic",
 ] as const
 
@@ -31,7 +31,7 @@ export const FAST_PROFILE_NATIVE_MODELS: Readonly<
   Explore: FAST_PROFILE_MODELS.luna,
   implementer: FAST_PROFILE_MODELS.luna,
   reviewer: FAST_PROFILE_MODELS.reviewer,
-  planner: FAST_PROFILE_MODELS.planner,
+  Plan: FAST_PROFILE_MODELS.Plan,
   critic: FAST_PROFILE_MODELS.critic,
 })
 
@@ -39,7 +39,7 @@ export const FAST_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Explore: "high",
   implementer: "max",
   reviewer: "medium",
-  planner: "high",
+  Plan: "high",
   critic: "medium",
 } as const)
 
@@ -55,7 +55,7 @@ export const FAST_PROFILE_DELEGATION_GRAPH = Object.freeze({
   Explore: Object.freeze([]),
   implementer: Object.freeze(["reviewer", "critic"]),
   reviewer: Object.freeze([]),
-  planner: Object.freeze(["reviewer", "Explore", "critic"]),
+  Plan: Object.freeze(["reviewer", "Explore", "critic"]),
   critic: Object.freeze([]),
 } as const satisfies Record<
   FastProfileNativeAgentName,

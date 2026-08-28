@@ -28,7 +28,7 @@ export const FAST_DISPATCH_GRAPH: Readonly<
     FAST_PROFILE_DELEGATION_GRAPH.implementer,
   ),
   reviewer: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.reviewer),
-  planner: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.planner),
+  Plan: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.Plan),
   critic: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.critic),
 })
 
