@@ -54,6 +54,13 @@ import {
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
+import { maxPersonasFor } from "~/lib/peer-mcp-personas"
+import {
+  MAX_PROFILE_MODELS,
+  maxGeminiModel,
+  maxGrokModel,
+  maxOpusModel,
+} from "~/lib/max-profile-contract"
 import {
   MAX_INFLIGHT_TOOLS_CALL,
   acquireInFlightSlot,
@@ -264,7 +271,16 @@ function resolveOpusCriticModel(): string {
   return oneM ? oneM.id : "claude-opus-4-6"
 }
 
-function activePersonas(): Array<PersonaSpec> {
+function activePersonas(launch?: LaunchRegistryEntry): Array<PersonaSpec> {
+  if (launch?.profileId === "max") {
+    return maxPersonasFor({
+      solModel: MAX_PROFILE_MODELS.sol,
+      lunaModel: MAX_PROFILE_MODELS.luna,
+      opusModel: maxOpusModel(),
+      geminiModel: maxGeminiModel(),
+      grokModel: maxGrokModel(),
+    })
+  }
   // Drop personas whose model family is missing from Copilot's live
   // catalog (currently only gemini-critic, gated by `requiresGeminiCatalog`).
   // Distinct from `requiresHttp` (codex-cli stdio routing constraint) —
@@ -313,7 +329,76 @@ function oracleToolEntry(): ToolEntry {
   }
 }
 
+function maxToolIsEnabled(tool: NonPersonaMcpTool): boolean {
+  if (tool.capability === "worker") return false
+  if (tool.capability === "browse_agent") return browseAgentEnabled()
+  if (tool.capability === "stand_in") return standInToolEnabled() && maxOpusModel() !== undefined
+  if (tool.capability === "browser") return browserToolsEnabled()
+  if (tool.capability === "browser_compound") return browserToolsEnabled() && browserCompoundToolsEnabled()
+  if (tool.capability === "browser_power") return browserToolsEnabled() && browserPowerToolsEnabled()
+  if (tool.capability === "fleet") return fleetToolsEnabled()
+  if (tool.capability === "agents") return agentToolsEnabled()
+  if (tool.capability === "artifact") return artifactToolsEnabled()
+  return true
+}
+
+type MaxProjectionItem = {
+  group: McpGroup
+  name: string
+  persona?: PersonaSpec
+  tool?: NonPersonaMcpTool
+}
+
+/**
+ * One max-profile projection predicate for both tools/list and tools/call.
+ * Max is a restricted launch, so a missing allow-list fails closed rather than
+ * turning an incomplete registry entry into an unrestricted session. Capability
+ * gates are included here too, keeping a hard-coded call from reaching a tool
+ * hidden at list time.
+ */
+function maxAllowsTool(
+  scope: McpScope,
+  launch: LaunchRegistryEntry,
+  item: MaxProjectionItem,
+): boolean {
+  if (launch.profileId !== "max") return true
+  if (scope !== "all" && item.group !== scope) return false
+  if (!launch.allowedGroups?.has(item.group)) return false
+  if (item.persona) {
+    return Boolean(
+      launch.allowedPersonas?.has(item.persona.toolNameHttp),
+    )
+  }
+  if (!item.tool) return false
+  if (item.tool.group === "orchestrate") return false
+  if (item.tool.group === "workers" && item.tool.toolNameHttp !== "browse") return false
+  return maxToolIsEnabled(item.tool)
+}
+
 function toolEntries(scope: McpScope, launch: LaunchRegistryEntry): Array<ToolEntry> {
+  if (launch.profileId === "max") {
+    const personaEntries: Array<ToolEntry> = activePersonas(launch)
+      .filter((persona) => maxAllowsTool(scope, launch, { group: "peers", name: persona.toolNameHttp, persona }))
+      .map((persona) => ({
+        name: persona.toolNameHttp,
+        description: persona.description,
+        inputSchema: {
+          type: "object",
+          required: ["prompt"],
+          additionalProperties: false,
+          properties: {
+            prompt: { type: "string", description: "The lead's brief — the artifact under review plus constraints." },
+            context: { type: "string", description: "Optional additional context for the peer." },
+            imagePaths: { type: "array", items: { type: "string" }, description: "Optional image paths inside the workspace." },
+            effort: { type: "string", enum: [...persona.allowedEfforts], description: `Reasoning depth (${persona.allowedEfforts.join(" | ")}). Default "${persona.defaultEffort}".` },
+          },
+        },
+      }))
+    const nonPersonaEntries = NON_PERSONA_MCP_TOOLS
+      .filter((tool) => maxAllowsTool(scope, launch, { group: tool.group, name: tool.toolNameHttp, tool }))
+      .map((tool) => ({ name: tool.toolNameHttp, description: tool.description, inputSchema: tool.inputSchema }))
+    return [...personaEntries, ...nonPersonaEntries]
+  }
   if (launch.profileId === "fast") {
     const entries: Array<ToolEntry> = []
     if (
@@ -350,7 +435,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry): Array<ToolEn
   const peersGroupAllowed = !launch.allowedGroups || launch.allowedGroups.has("peers")
   const personaEntries: Array<ToolEntry> =
     peersGroupAllowed && (scope === "all" || scope === "peers")
-      ? activePersonas()
+      ? activePersonas(launch)
           .filter((p) => !launch.allowedPersonas || launch.allowedPersonas.has(p.toolNameHttp))
           .map((p) => ({
           name: p.toolNameHttp,
@@ -685,7 +770,7 @@ async function predictedWindowOverflow(
  *   - invalid effort string → handleRpc returns -32602
  *   - effort not in persona.allowedEfforts → handleRpc returns -32602
  */
-function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope):
+function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope, launch: LaunchRegistryEntry):
   | { jsonrpc: "2.0"; id: JsonRpcRequest["id"] | null; result: ToolErrorContent }
   | undefined {
   if (body.id === undefined) return undefined
@@ -752,7 +837,7 @@ function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope):
   const context = typeof args.context === "string" ? args.context : undefined
   const rawEffort = args.effort
   if (!prompt) return undefined
-  const persona = activePersonas().find((p) => p.toolNameHttp === name)
+  const persona = activePersonas(launch).find((p) => p.toolNameHttp === name)
   if (!persona) return undefined
   // Personas are the `peers` group — skip the cap on any other scoped
   // endpoint so handleToolsCall's scope reject (-32601) wins.
@@ -1052,6 +1137,19 @@ async function handleToolsCall(
     return rpcError(body.id, RPC_INVALID_PARAMS, "tools/call missing name")
   }
 
+  if (launch.profileId === "max") {
+    const maxPersona = activePersonas(launch).find((persona) => persona.toolNameHttp === name)
+    const maxTool = NON_PERSONA_MCP_TOOLS.find((tool) => tool.toolNameHttp === name)
+    const maxAllowed = maxPersona
+      ? maxAllowsTool(scope, launch, { group: "peers", name, persona: maxPersona })
+      : maxTool
+        ? maxAllowsTool(scope, launch, { group: maxTool.group, name, tool: maxTool })
+        : false
+    if (!maxAllowed) {
+      return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
+    }
+  }
+
   if (launch.profileId === "fast" && name === "oracle") {
     if (
       (scope !== "all" && scope !== "peers")
@@ -1132,7 +1230,7 @@ async function handleToolsCall(
   // tools/list surface but have different validation gates — personas
   // get the prompt+effort+predictedTooLong gauntlet; non-persona tools
   // do their own arg validation inside the handler closure.
-  const persona = activePersonas().find((p) => p.toolNameHttp === name)
+  const persona = activePersonas(launch).find((p) => p.toolNameHttp === name)
   const nonPersonaTool: NonPersonaMcpTool | undefined = persona
     ? undefined
     : NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === name)
@@ -1822,7 +1920,7 @@ export async function handleMcpPost(
     && !Array.isArray(body)
     && body.method === "tools/call"
   ) {
-    const preflight = jsonPathPreflightCap(body, scope)
+    const preflight = jsonPathPreflightCap(body, scope, launch)
     if (preflight) return c.json(preflight, 200)
   }
 

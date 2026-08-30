@@ -2,6 +2,32 @@
 
 `github-router claude` defaults to `claude-opus-5`; `github-router codex` defaults to `gpt-5.6-sol`. Full model fallback and slug-translation behavior is implemented in `src/lib/port.ts` and `src/lib/utils.ts`.
 
+## Max launch profile (`-m max`)
+
+Only the trimmed raw alias `max` selects this profile. It starts on
+`gpt-5.6-sol[1m]` at high effort and accepts controlled lead switches only among
+Sol, Luna, Gemini 3.7 Flash, and Opus 5. Grok 4.6 is not a Max lead or picker
+row because its advertised context is below 1M.
+
+Max emits the native roles `Explore`, `Plan`, `general-purpose`, `implementer`,
+`reviewer`, `brainstorm`, and `peer-review-coordinator`. Their assignments are
+Luna/high, Sol/high, Luna/max, Gemini 3.7 Flash/high, Gemini 3.7 Flash/high with Grok fallback,
+Grok/medium with Gemini fallback, and Luna/max. Max peer MCP names are
+`sol_critic`, `luna_reviewer`, optional `opus_critic`, Gemini critic/reviewer,
+and Grok critic/reviewer when their catalog capabilities are usable.
+
+Max exposes search, optional browser control, browse-only workers, optional
+stand-in, fleet, and first-mate surfaces. It never exposes orchestration or core
+worker modes. Advisor is lead-only and defaults to Opus 5/high over native
+Messages; `GH_ROUTER_ADVISOR_MODEL=gpt-5.6-sol` selects Sol instead. Native
+subagents and browse workers do not receive Advisor. Max rejects `--codex-cli`,
+`--no-codex-mcp`, and arbitrary lead models before creating launch artifacts.
+
+The picker cache is restricted to Sol, Luna, Gemini 3.7 Flash, and Opus 5, with
+`[1m]` attached only when the live catalog advertises at least 1M context. The
+existing catalog-derived `CLAUDE_CODE_AUTO_COMPACT_WINDOW` formula remains the
+source of truth across every reachable Max `[1m]` model.
+
 ## Standard launch
 
 Plain `github-router claude` keeps the standard surface: Opus 5 lead, the full catalog-driven native roster, all normally gated MCP groups/personas, picker-controlled native effort, the standard Sol Advisor at xhigh with a high floor, and every existing hook/skill. Direct `-m gpt-5.6-luna` is also a standard launch. Fast behavior is never inferred from a resolved model id.

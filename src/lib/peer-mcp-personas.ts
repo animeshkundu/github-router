@@ -25,6 +25,7 @@ import path from "node:path"
 
 import { ARTIFACT_TOOLS } from "./artifact/tools"
 import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
+import { MAX_PROFILE_MODELS } from "./max-profile-contract"
 import type { McpToolResult } from "./attachments"
 import { FLEET_TOOLS } from "./fleet/tools"
 import { FIRST_MATE_TOOLS } from "./first-mate/tools"
@@ -631,9 +632,25 @@ export function buildPeerAwarenessSnippet(opts: {
    *  claude-md-injection.ts (deliberately) so a caller can spread ONE
    *  `nativeAvailability`-shaped object into both builders without a
    *  field-name translation layer. Absent/`"standard"` is today's behavior. */
-  profile?: "standard" | "fast"
+  profile?: "standard" | "fast" | "max"
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
+  if (opts.profile === "max") {
+    const searchKey = key("search")
+    const browserClause = opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""
+    const workerClause = opts.browseAvailable
+      ? ` Browse-only workers are exposed as \`worker-browse\` through \`mcp__${key("workers")}__browse\`. Core workers and orchestration are not part of max.`
+      : ""
+    const decideClause = opts.standInAvailable ? ` \`mcp__${key("decide")}__stand_in\` provides deterministic three-lab decision tiebreak.` : ""
+    const fleetClause = opts.fleetAvailable ? ` \`mcp__${key("fleet")}__*\` provides gated remote session control.` : ""
+    const agentsClause = opts.agentToolsAvailable ? " `/gh-first-mate` remains available when its own gate passes." : ""
+    return [
+      "## Peer review and advisor",
+      "",
+      `Max launch profile. Max-native roles are \`Explore\`, \`Plan\`, \`general-purpose\`, \`implementer\`, \`reviewer\`, \`brainstorm\`, and \`peer-review-coordinator\`. The coordinator fans out to max-profile \`sol_critic\`, \`luna_reviewer\`, and the catalog-present \`opus_critic\`, \`gemini_critic\`/\`gemini_reviewer\`, and \`grok_critic\`/\`grok_reviewer\`.`,
+      `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is primary-lead-only and transcript-aware; it remains available across controlled max lead switches, while native subagents and browse workers do not receive it.${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}`,
+    ].join("\n")
+  }
   if (opts.profile === "fast") {
     const fastPeersKey = key("peers")
     const fastSearchKey = key("search")
@@ -766,6 +783,9 @@ export type NativeAgentName =
   | "Explore"
   | "scribe"
   | "general-purpose-fast"
+  | "general-purpose"
+  | "Plan"
+  | "peer-review-coordinator"
 
 /**
  * Compact, gated capability SUMMARY for the spawned session's system prompt
@@ -804,9 +824,17 @@ export function buildPeerAwarenessSummary(opts: {
    *  matching option on `buildPeerAwarenessSnippet`). Every other flag on
    *  this call is ignored in favor of a short fast-profile rendering. Same
    *  field name/values as `NativeAgentAvailability.profile`. */
-  profile?: "standard" | "fast"
+  profile?: "standard" | "fast" | "max"
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
+  if (opts.profile === "max") {
+    return [
+      "## Injected capabilities (summary)",
+      "",
+      "Max launch profile. Native roles: `Explore`, `Plan`, `general-purpose`, `implementer`, `reviewer`, `brainstorm`, and `peer-review-coordinator`. Max peer names are `sol_critic`, `luna_reviewer`, and catalog-present `opus_critic`, `gemini_critic`/`gemini_reviewer`, or `grok_critic`/`grok_reviewer`. Advisor is primary-lead-only and remains available across controlled max lead switches; native subagents and browse workers do not receive it.",
+      `\`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide code and web search.${opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` provides browser control.` : ""}${opts.workerToolsAvailable ? ` Browse-only worker dispatch is \`mcp__${key("workers")}__browse\`.` : ""}${opts.standInAvailable ? ` \`mcp__${key("decide")}__stand_in\` provides deterministic decision tiebreak.` : ""}${opts.fleetAvailable ? ` \`mcp__${key("fleet")}__*\` provides gated remote sessions.` : ""}${opts.agentToolsAvailable ? " First-mate remains available when its own gate passes." : ""}`,
+    ].join("\n")
+  }
   if (opts.profile === "fast") {
     return [
       "## Injected capabilities (summary)",
@@ -970,6 +998,129 @@ export function personasFor(opts: {
       if (allow && !allow.has(p.agentName)) continue
       result.push(p)
     }
+  }
+  return result
+}
+
+function maxPersona(
+  agentName: string,
+  toolNameHttp: string,
+  model: string,
+  endpoint: PersonaSpec["endpoint"],
+  description: string,
+  baseInstructions: string,
+  allowedEfforts: ReadonlyArray<Effort>,
+  defaultEffort: Effort,
+): PersonaSpec {
+  return {
+    agentName,
+    toolNameHttp,
+    model,
+    endpoint,
+    description,
+    baseInstructions,
+    agentPrompt: "",
+    writeCapable: false,
+    requiresHttp: true,
+    allowedEfforts,
+    defaultEffort,
+  }
+}
+
+/** Max-only peer registry. It never changes the standard persona registry. */
+export function maxPersonasFor(opts: {
+  solModel?: string
+  lunaModel?: string
+  opusModel?: string
+  geminiModel?: string
+  grokModel?: string
+}): Array<PersonaSpec> {
+  const sol = opts.solModel ?? MAX_PROFILE_MODELS.sol
+  const luna = opts.lunaModel ?? MAX_PROFILE_MODELS.luna
+  const opus = opts.opusModel
+  const gemini = opts.geminiModel
+  const grok = opts.grokModel
+  const result: Array<PersonaSpec> = [
+    maxPersona(
+      "sol-critic",
+      "sol_critic",
+      sol,
+      "/v1/responses",
+      `Max-profile strategic critic backed by ${sol} (OpenAI). Reviews plans, designs, tradeoffs, and large artifacts for unsound assumptions and missing failure modes.`,
+      `You are sol_critic, a fresh-context adversarial architecture critic running on ${sol}. Review the complete artifact and constraints, report concrete assumptions and failure modes, and do not invent objections.`,
+      ["low", "medium", "high", "xhigh"],
+      "xhigh",
+    ),
+    maxPersona(
+      "luna-reviewer",
+      "luna_reviewer",
+      luna,
+      "/v1/responses",
+      `Max-profile line-level reviewer backed by ${luna} (OpenAI). Reviews concrete diffs and files for bugs, edge cases, security, concurrency, and resource issues.`,
+      `You are luna_reviewer, a fresh-context line-level code reviewer running on ${luna}. Cite real file:line locations and report severity-ranked findings with minimal fixes.`,
+      ["low", "medium", "high", "xhigh"],
+      "high",
+    ),
+  ]
+  if (opus) {
+    result.push(maxPersona(
+      "opus-critic",
+      "opus_critic",
+      opus,
+      "/v1/messages",
+      `Max-profile same-lab critic backed by ${opus} (Anthropic). Provides a fresh-context sanity check for plans, designs, and code tradeoffs.`,
+      `You are opus_critic, a fresh-context adversarial reviewer running on ${opus}. Find cognitive momentum and unsupported assumptions in the supplied artifact; silence on sound work is valid.`,
+      ["low", "medium", "high"],
+      "high",
+    ))
+  }
+  if (gemini) {
+    result.push(
+      maxPersona(
+        "gemini-critic",
+        "gemini_critic",
+        gemini,
+        "/v1/chat/completions",
+        `Max-profile third-lab strategic critic backed by ${gemini} (Google). Reviews plans, invariants, proofs, and formal tradeoffs.`,
+        `You are gemini_critic, a fresh-context strategic critic running on ${gemini}. Review the artifact against its constraints and report only concrete invariant or assumption failures.`,
+        ["low", "medium", "high"],
+        "high",
+      ),
+      maxPersona(
+        "gemini-reviewer",
+        "gemini_reviewer",
+        gemini,
+        "/v1/chat/completions",
+        `Max-profile line-level reviewer backed by ${gemini} (Google). Provides an independent second-lab review of concrete code.`,
+        `You are gemini_reviewer, a fresh-context line-level code reviewer running on ${gemini}. Cite real file:line locations and report severity-ranked findings.`,
+        ["low", "medium", "high"],
+        "high",
+      ),
+    )
+  }
+  if (grok) {
+    result.push(
+      maxPersona(
+        "grok-critic",
+        "grok_critic",
+        grok,
+        "/v1/responses",
+        `Max-profile strategic critic backed by ${grok} (xAI). Challenges plans, designs, and decisions with a fresh context.`,
+        `You are grok_critic, a fresh-context strategic critic running on ${grok}. Challenge the supplied artifact against its constraints and report concrete findings only.`,
+        ["low", "medium", "high"],
+        "medium",
+      ),
+      maxPersona(
+        "grok-reviewer",
+        "grok_reviewer",
+        grok,
+        "/v1/responses",
+        `Max-profile line-level reviewer backed by ${grok} (xAI). Reviews concrete code and diffs at medium effort.`,
+        `You are grok_reviewer, a fresh-context line-level code reviewer running on ${grok}. Cite real file:line locations and report severity-ranked findings.`,
+        ["low", "medium", "high"],
+        "medium",
+      ),
+    )
   }
   return result
 }

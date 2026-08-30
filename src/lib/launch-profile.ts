@@ -5,6 +5,10 @@ import {
   FAST_PROFILE_MODELS,
   FAST_PROFILE_NATIVE_AGENT_NAMES,
 } from "./fast-profile-contract"
+import {
+  MAX_PROFILE_NATIVE_AGENT_NAMES,
+  validateMaxProfilePrerequisites,
+} from "./max-profile-contract"
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 
 /**
@@ -23,7 +27,7 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  * the same model the fast profile drives) stays a standard-surface launch,
  * and only the literal `fast` alias narrows the surface.
  */
-export type LaunchProfileId = "standard" | "fast"
+export type LaunchProfileId = "standard" | "fast" | "max"
 
 /**
  * Everything a launch profile needs to declare about its own surface.
@@ -71,8 +75,32 @@ export const FAST_PROFILE: LaunchProfileDescriptor = Object.freeze({
   hasCoordinator: false,
 })
 
+/**
+ * The `-m max` profile: Sol/Luna-led, browse-only workers, and explicit
+ * cross-lab peer names. The descriptor is a hard projection for bound launch
+ * requests; unbound/BYO traffic remains standard because it has no registry
+ * entry carrying this allow-list.
+ */
+export const MAX_PROFILE: LaunchProfileDescriptor = Object.freeze({
+  id: "max",
+  nativeRoster: new Set(MAX_PROFILE_NATIVE_AGENT_NAMES),
+  personaAllowlist: new Set([
+    "sol_critic",
+    "luna_reviewer",
+    "opus_critic",
+    "gemini_critic",
+    "gemini_reviewer",
+    "grok_critic",
+    "grok_reviewer",
+  ]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser", "decide", "fleet", "first-mate"]),
+  hasCoordinator: true,
+})
+
 export function profileDescriptor(id: LaunchProfileId): LaunchProfileDescriptor {
-  return id === "fast" ? FAST_PROFILE : STANDARD_PROFILE
+  if (id === "fast") return FAST_PROFILE
+  if (id === "max") return MAX_PROFILE
+  return STANDARD_PROFILE
 }
 
 /**
@@ -88,8 +116,18 @@ export function profileDescriptor(id: LaunchProfileId): LaunchProfileDescriptor 
  */
 export function resolveLaunchProfile(modelArg: string | undefined): LaunchProfileId {
   const arg = modelArg?.trim().toLowerCase()
-  return arg === "fast" ? "fast" : "standard"
+  if (arg === "fast") return "fast"
+  if (arg === "max") return "max"
+  return "standard"
 }
+
+export function validateMaxProfileLaunch(
+  catalog: ModelsResponse | undefined,
+): ReturnType<typeof validateMaxProfilePrerequisites> {
+  return validateMaxProfilePrerequisites(catalog)
+}
+
+export { formatMaxPrerequisiteFailure, MAX_REQUIRED_CONTEXT_TOKENS, MAX_PROFILE_MODELS, MAX_PROFILE_ALLOWED_LEAD_MODEL_IDS } from "./max-profile-contract"
 
 // ---------------------------------------------------------------------------
 // Luna driver/Sonnet/Haiku alias registry
@@ -122,9 +160,40 @@ export const LUNA_SONNET_ALIAS_ID = "gh-router-luna-sonnet-xhigh"
  */
 export const LUNA_HAIKU_ALIAS_ID = "gh-router-luna-haiku-high"
 
+/** Max-profile aliases are intentionally separate from the fast aliases. They
+ * preserve the fixed max role effort until the authenticated max request
+ * boundary and are never valid on standard or fast launches. */
+export const MAX_LUNA_HIGH_ALIAS_ID = "gh-router-max-luna-high"
+export const MAX_LUNA_MAX_ALIAS_ID = "gh-router-max-luna-max"
+
 /** The real Copilot catalog id every Luna alias (including the driver
  *  itself) canonicalizes to. */
 export const LUNA_REAL_MODEL_ID = FAST_PROFILE_MODELS.luna
+
+const MAX_ALIAS_IDS = new Set([
+  MAX_LUNA_HIGH_ALIAS_ID,
+  MAX_LUNA_MAX_ALIAS_ID,
+])
+
+export function isMaxModelAlias(id: string): boolean {
+  return MAX_ALIAS_IDS.has(stripTrailingOneMSuffix(id).base)
+}
+
+export function maxAliasEffort(id: string): Effort | undefined {
+  const base = stripTrailingOneMSuffix(id).base
+  if (base === MAX_LUNA_HIGH_ALIAS_ID) return "high"
+  if (base === MAX_LUNA_MAX_ALIAS_ID) return "max"
+  return undefined
+}
+
+export function maxAliasModel(id: string): string | undefined {
+  return isMaxModelAlias(id) ? LUNA_REAL_MODEL_ID : undefined
+}
+
+export function maxAliasWithOneMSuffix(id: string): string {
+  const { base } = stripTrailingOneMSuffix(id)
+  return `${base}[1m]`
+}
 
 export interface ModelAliasDescriptor {
   /** The id as it appears on the wire / in `body.model` before
@@ -153,6 +222,14 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   [
     LUNA_DRIVER_ALIAS_ID,
     { aliasId: LUNA_DRIVER_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "max" },
+  ],
+  [
+    MAX_LUNA_HIGH_ALIAS_ID,
+    { aliasId: MAX_LUNA_HIGH_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "high" },
+  ],
+  [
+    MAX_LUNA_MAX_ALIAS_ID,
+    { aliasId: MAX_LUNA_MAX_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "max" },
   ],
   [
     LUNA_SCOUT_ALIAS_ID,

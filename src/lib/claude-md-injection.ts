@@ -166,7 +166,7 @@ export interface NativeAgentAvailability {
    *  `worker-*`/`orchestrate` tools or skills, or `stand_in`, since none of
    *  those are registered in this profile regardless of catalog state.
    *  Absent/`"standard"` is today's catalog-driven full roster. */
-  profile?: "standard" | "fast"
+  profile?: "standard" | "fast" | "max"
   /** False when a fast launch disabled or failed its MCP/native runtime wiring.
    *  The fallback directive must not advertise agents/tools that do not exist. */
   fastRuntimeAvailable?: boolean
@@ -349,6 +349,12 @@ const FAST_OPERATING_DEFAULTS_TAIL =
 export function buildOperatingDefaultsDirective(
   opts: NativeAgentAvailability = {},
 ): string {
+  if (opts.profile === "max") {
+    return (
+      "## Operating defaults (apply when the user has not specified otherwise; the user's explicit direction and the domain's own standards always override)\n\n"
+      + "Max launch profile. Delegate only when work is wide or slow; use `Explore` for broad read-only discovery, `Plan` for an evidence-grounded plan, `implementer` for coding that needs judgment, `general-purpose` for catch-all implementation, `reviewer` for repository-aware verification, and `brainstorm` before an approach is chosen. `peer-review-coordinator` fans out to the max-profile peer critics when a consequential plan or diff needs independent review. The lead keeps decision ownership, runs relevant tests before declaring done, and uses only capabilities actually listed in this session."
+    )
+  }
   if (opts.profile === "fast") {
     if (opts.fastRuntimeAvailable === false) {
       return (

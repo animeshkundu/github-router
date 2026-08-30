@@ -10,6 +10,7 @@ import { countTokens } from "~/services/copilot/create-messages"
 import { parseJsonOrDiagnose } from "~/lib/diagnose-response"
 import { clampOutputConfigEffortInPlace } from "./handler"
 import { preprocessFastRequest } from "~/lib/fast-request-preprocess"
+import { maxRequestError } from "~/lib/max-request-preprocess"
 import {
   identityPreflightErrorResponse,
   runMessagesIdentityPreflight,
@@ -80,9 +81,11 @@ export async function handleCountTokens(c: Context) {
   const rawBody = await c.req.text()
   const fastPreprocess = preprocessFastRequest(rawBody, identity.launch)
   if (fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
-    const message = fastPreprocess.rejectedAlias
-      ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m fast launch.`
-      : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m fast model set.`
+    const message = identity.launch?.profileId === "max"
+      ? (maxRequestError(fastPreprocess) ?? "Invalid max request")
+      : fastPreprocess.rejectedAlias
+        ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m fast launch.`
+        : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m fast model set.`
     return c.json(
       { type: "error", error: { type: "invalid_request_error", message } },
       400,

@@ -20,7 +20,7 @@ import type { LaunchProfileId } from "./launch-profile"
  *
  * `allowedGroups` / `allowedPersonas` are the narrowing declaration for
  * scoped MCP surfaces: `undefined` means UNRESTRICTED (the standard/BYO
- * launch shape today), and a concrete `ReadonlySet` is the fast profile's
+ * launch shape today), and a concrete `ReadonlySet` is a restricted profile's
  * hard allow-list. This module only stores and looks up the declaration;
  * enforcing it against `tools/list` / `tools/call` is the MCP route
  * handler's job.

@@ -1,7 +1,9 @@
 import {
   canonicalizeAliasModel,
+  isMaxModelAlias,
   resolveModelAlias,
 } from "./launch-profile"
+import { preprocessMaxRequest } from "./max-request-preprocess"
 import { stripTrailingOneMSuffix } from "./model-suffix"
 import type { LaunchRegistryEntry } from "./state"
 
@@ -26,6 +28,9 @@ export function preprocessFastRequest(
   rawBody: string,
   launch: LaunchRegistryEntry | undefined,
 ): FastRequestPreprocessResult {
+  if (launch?.profileId === "max") {
+    return preprocessMaxRequest(rawBody, launch)
+  }
   let parsed: AnyRecord
   try {
     parsed = JSON.parse(rawBody) as AnyRecord
@@ -36,7 +41,7 @@ export function preprocessFastRequest(
   if (!originalModel) return { body: rawBody, modified: false }
 
   const alias = resolveModelAlias(originalModel)
-  if (alias && launch?.profileId !== "fast") {
+  if (alias && (launch?.profileId !== "fast" || isMaxModelAlias(originalModel))) {
     return { body: rawBody, originalModel, modified: false, rejectedAlias: originalModel }
   }
   if (launch?.profileId !== "fast") {
