@@ -7,7 +7,12 @@ import type { Effort } from "./reasoning-effort"
 
 export const MAX_DISPATCH_TOOL_MATCHER = "^(Task|Agent)$"
 
-const MAX_NATIVE_AGENT_SET = new Set<string>(MAX_PROFILE_NATIVE_AGENT_NAMES)
+export const MAX_BROWSE_DISPATCH_AGENT = "worker-browse" as const
+
+const MAX_NATIVE_AGENT_SET = new Set<string>([
+  ...MAX_PROFILE_NATIVE_AGENT_NAMES,
+  MAX_BROWSE_DISPATCH_AGENT,
+])
 
 /** Assert max launches never start without their native Task/Agent ACL. */
 export class MaxDispatchGuardInstallError extends Error {
@@ -136,9 +141,9 @@ export function decideMaxDispatchGuard(stdin: string | unknown): MaxDispatchDeci
   const toolInput = payload.tool_input as Record<string, unknown>
   const target = stringField(toolInput, "subagent_type", "subagentType")
   if (!target || !MAX_NATIVE_AGENT_SET.has(target)) {
-    return { allowed: false, reason: `max dispatch denied: target must be one of ${MAX_PROFILE_NATIVE_AGENT_NAMES.join(", ")}`, verdict: "deny" }
+    return { allowed: false, reason: `max dispatch denied: target must be one of ${[...MAX_PROFILE_NATIVE_AGENT_NAMES, MAX_BROWSE_DISPATCH_AGENT].join(", ")}`, verdict: "deny" }
   }
-  const nativeTarget = target as MaxProfileNativeAgentName
+  const nativeTarget = target as MaxProfileNativeAgentName | typeof MAX_BROWSE_DISPATCH_AGENT
   const modelValue = toolInput.model
   const schemaAlias = isMaxAgentSchemaModelAlias(modelValue)
   const normalizedModel = modelValue === undefined || schemaAlias
@@ -150,7 +155,11 @@ export function decideMaxDispatchGuard(stdin: string | unknown): MaxDispatchDeci
   const requestedEffort = toolInput.thinking ?? toolInput.effort
   const effectiveModel = normalizedModel
     ? baseModel(normalizedModel)
-    : MAX_PROFILE_NATIVE_MODELS[nativeTarget]
+    : nativeTarget === MAX_BROWSE_DISPATCH_AGENT
+      // Keep this aligned with BROWSE_DEFAULT_MODEL. Importing worker-agent/engine
+      // here would pull the worker runtime into the small hook bundle.
+      ? "gpt-5.6-luna"
+      : MAX_PROFILE_NATIVE_MODELS[nativeTarget]
   const effort = normalizeMaxDispatchEffort(effectiveModel, requestedEffort)
   if ((toolInput.thinking !== undefined || toolInput.effort !== undefined) && !effort) {
     return { allowed: false, reason: "max dispatch denied: reasoning override is not supported by the selected model", target, verdict: "deny" }

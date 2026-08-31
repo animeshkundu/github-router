@@ -40,8 +40,16 @@ const REQUIRED_MARKERS: ReadonlyArray<{ needle: string; why: string }> = [
     why: "the env var the derived compaction window is exported through",
   },
   {
-    needle: ".int().min(1e5).max(1e6).optional().catch(void 0).describe(\"Auto-compact window size\")",
-    why: "the 100,000 floor and 1,000,000 cap applied to autoCompactWindow",
+    needle: "ike=1e5,JNe=1e6",
+    why: "the 100,000 floor and 1,000,000 cap used by the auto-compact env parser",
+  },
+  {
+    needle: "cee(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,ike,JNe)",
+    why: "the auto-compact env parser receiving those floor and cap constants",
+  },
+  {
+    needle: "Math.max(ike,A.effective)",
+    why: "the parsed auto-compact window being raised to the 100,000 floor",
   },
 ]
 

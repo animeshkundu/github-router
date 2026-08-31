@@ -29,6 +29,12 @@ export interface InjectedSkill {
   md: string
 }
 
+export interface InjectedSkillSelection {
+  profileId: "standard" | "fast" | "max"
+  workerSkillsActive: boolean
+  firstMateEnabled: boolean
+}
+
 /** All injected skills, in dependency order (research underpins the others). */
 export const INJECTED_SKILLS: ReadonlyArray<InjectedSkill> = [
   RESEARCH_SKILL,
@@ -40,3 +46,18 @@ export const INJECTED_SKILLS: ReadonlyArray<InjectedSkill> = [
   FIRST_MATE_OPERATE_SKILL,
   FIRST_MATE_CONDUCT_SKILL,
 ]
+
+export function injectedSkillsForLaunch(
+  selection: InjectedSkillSelection,
+): ReadonlyArray<InjectedSkill> {
+  if (selection.profileId === "fast") return []
+  if (selection.profileId === "max") {
+    return selection.firstMateEnabled
+      ? INJECTED_SKILLS.filter((skill) => skill.name.startsWith("gh-first-mate"))
+      : []
+  }
+  if (!selection.workerSkillsActive) return []
+  return INJECTED_SKILLS.filter(
+    (skill) => selection.firstMateEnabled || !skill.name.startsWith("gh-first-mate"),
+  )
+}

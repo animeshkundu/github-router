@@ -84,7 +84,7 @@ import {
   maxGrokModel,
   maxOpusModel,
 } from "./lib/max-profile-contract"
-import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
+import { ARTIFACT_REVIEW_SKILL, injectedSkillsForLaunch, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
 import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
@@ -166,15 +166,6 @@ import {
   fastAdvisorClientEnabled,
   withFixedFastAdvisorArg,
 } from "./lib/fast-advisor-client"
-
-function isFirstMateSkillName(name: string): boolean {
-  return (
-    name === "gh-first-mate" ||
-    name === "gh-first-mate-scaffold" ||
-    name === "gh-first-mate-operate" ||
-    name === "gh-first-mate-conduct"
-  )
-}
 
 export const claudeArgs = {
   ...sharedServerArgs,
@@ -1167,22 +1158,21 @@ export const claude = defineCommand({
         // The hooks scope themselves to the top-level session via the payload's
         // agent_type, so subagents/teammates are untouched.
         const sessionCwd = process.cwd()
-        // Fast profile hard-denies the worker/orchestrate surface (plan
-        // section 6: "no coordinator/workers/orchestrate/related skills or
-        // guards"): no injected worker/orchestration skill, no
-        // UserPromptSubmit worker steer, no worker PreToolUse guard,
-        // regardless of what `workerToolsEnabled()`'s catalog gate says.
-        const workerSkillsActive = workerToolsEnabled() && !isFastProfile
+        // Worker/orchestration skills and their prompt-submit steering belong
+        // only to the standard profile. Fast and max intentionally omit the
+        // slash commands even when the worker catalog gate is otherwise open.
+        const workerSkillsActive = workerToolsEnabled() && launchProfileId === "standard"
+        const skillsToWrite = injectedSkillsForLaunch({
+          profileId: launchProfileId,
+          workerSkillsActive,
+          firstMateEnabled: agentToolsEnabled(),
+        })
         let skillsWritten = 0
-        let skillsToWrite: typeof INJECTED_SKILLS = []
+        for (const s of skillsToWrite) {
+          const r = await writeInjectedSkill(s.name, s.md).catch(() => ({ written: false }))
+          if (r.written) skillsWritten++
+        }
         if (workerSkillsActive) {
-          skillsToWrite = INJECTED_SKILLS.filter(
-            (s) => !isFirstMateSkillName(s.name) || agentToolsEnabled(),
-          )
-          for (const s of skillsToWrite) {
-            const r = await writeInjectedSkill(s.name, s.md).catch(() => ({ written: false }))
-            if (r.written) skillsWritten++
-          }
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const cmd = buildPromptSubmitHookCommand(selfInvocation)
@@ -1233,7 +1223,8 @@ export const claude = defineCommand({
         } catch (err) {
           consola.warn(`Could not auto-approve injected tools: ${String(err)}`)
         }
-        if (workerSkillsActive) {
+        const workerGuardActive = workerSkillsActive || (isMaxProfile && browseAgentEnabled())
+        if (workerGuardActive) {
           // Workers non-blocking guard: a PreToolUse hook scoped (matcher) to the
           // active worker tools that DENIES a raw `mcp__<workersKey>__<mode>` call
           // from the main agent (redirecting it to the `worker-<mode>` background
@@ -1272,7 +1263,9 @@ export const claude = defineCommand({
             try {
               const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
               const workersKey = workersKeyOf(groupKeys)
-              const modes = activeDispatchModes({ browse: browseAgentEnabled() })
+              const modes = isMaxProfile
+                ? (["browse"] as const)
+                : activeDispatchModes({ browse: browseAgentEnabled() })
               const cmd = buildWorkerGuardHookCommand(
                 selfInvocation,
                 workersKey,
@@ -1284,12 +1277,12 @@ export const claude = defineCommand({
               consola.warn(`Could not register the workers PreToolUse guard hook: ${String(err)}`)
             }
           }
-          if (skillsWritten > 0) {
-            const skillNames = skillsToWrite.map((s) => `/${s.name}`).join(", ")
-            process.stderr.write(
-              `Injected skills (${skillsWritten}/${skillsToWrite.length}): ${skillNames}.\n`,
-            )
-          }
+        }
+        if (skillsWritten > 0) {
+          const skillNames = skillsToWrite.map((s) => `/${s.name}`).join(", ")
+          process.stderr.write(
+            `Injected skills (${skillsWritten}/${skillsToWrite.length}): ${skillNames}.\n`,
+          )
         }
 
         // In operator/`--agents` mode, keep local worker/orchestrate MCP tools
@@ -1601,6 +1594,7 @@ export const claude = defineCommand({
             ? (maxOpusModel() !== undefined && standInToolEnabled({ maxProfile: true }))
             : standInToolEnabled(),
           browseAvailable: isMaxProfile ? browseAgentEnabled() : browserToolsEnabled(),
+          browserToolsAvailable: browserToolsEnabled(),
           compoundBrowseAvailable: isMaxProfile ? false : browserCompoundToolsEnabled(),
           powerBrowseAvailable: isMaxProfile ? false : state.powerBrowseEnabled,
           fleetAvailable: fleetToolsEnabled(),
@@ -1619,6 +1613,7 @@ export const claude = defineCommand({
             ? (maxOpusModel() !== undefined && standInToolEnabled({ maxProfile: true }))
             : standInToolEnabled(),
           browseAvailable: isMaxProfile ? browseAgentEnabled() : browserToolsEnabled(),
+          browserToolsAvailable: browserToolsEnabled(),
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
           ...nativeAvailability,

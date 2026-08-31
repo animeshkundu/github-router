@@ -39,7 +39,7 @@ const CLIENT_OUTPUT_RESERVE_TOKENS = 20_000
 /**
  * The client's additional flat reserve between the output-reduced window and
  * its reactive compaction threshold. Read from the installed Claude Code
- * 2.1.247 bundle: `xWe(e,t)` computes `n = e - 13000` and returns it when no
+ * 2.1.251 bundle: `E9(e,t)` computes `r = e - 13000` and returns it when no
  * percentage override is set, where `e` is already
  * `window - min(maxOutput, 20_000)`.
  */
@@ -49,7 +49,9 @@ const CLIENT_THRESHOLD_RESERVE_TOKENS = 13_000
  * Bounds the `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env path applies to whatever it
  * parses: `IWe = 1e5` floor, `ZRt = 1e6` cap. A value below the floor is
  * silently RAISED to it, so deriving something smaller would be a lie; a value
- * above the cap is clamped. Both read from the same 2.1.247 bundle.
+ * above the cap is clamped. In the 2.1.251 bundle, `ike = 1e5` and
+ * `JNe = 1e6` are passed to the shared env parser and the result is floored
+ * again with `Math.max(ike, ...)` before use.
  */
 const ENV_WINDOW_MIN_TOKENS = 100_000
 const ENV_WINDOW_MAX_TOKENS = 1_000_000

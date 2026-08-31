@@ -605,10 +605,24 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
   )
   const peersKey = peersKeyOf(opts.groupKeys)
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
-  const mcpServers = opts.serverUrl
+  const searchMcpServers = opts.serverUrl
     ? {
-        [searchKey]: httpEntryFor(opts.serverUrl, "search", opts.nonce, opts.workspaceHeaderCmd),
-        [peersKey]: httpEntryFor(opts.serverUrl, "peers", opts.nonce, opts.workspaceHeaderCmd),
+        [searchKey]: httpEntryFor(
+          opts.serverUrl,
+          "search",
+          opts.nonce,
+          opts.workspaceHeaderCmd,
+        ),
+      }
+    : undefined
+  const peersMcpServers = opts.serverUrl
+    ? {
+        [peersKey]: httpEntryFor(
+          opts.serverUrl,
+          "peers",
+          opts.nonce,
+          opts.workspaceHeaderCmd,
+        ),
       }
     : undefined
   const oneM = (model: string): string =>
@@ -621,7 +635,7 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
     model: oneM(model),
     effort: roleEffort,
   })
-  const researchTools = ["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", `mcp__${searchKey}__*`, `mcp__${peersKey}__*`]
+  const researchTools = ["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", `mcp__${searchKey}__*`]
   const peerNames = opts.maxPersonaNames
     ?? maxPersonasFor({
       solModel: opts.maxPeerModels?.sol,
@@ -634,50 +648,51 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
   const out: PeerAgentDefinitions = {
     Explore: {
       ...base("Explore", exploreModel, opts.maxExploreEffort ?? effort("Explore")),
-      description: `Max-profile read-only exploration subagent running ${exploreModel}. Use for broad repository discovery before the lead drafts; return conclusions with file:line evidence, not file dumps.`,
-      prompt: "Investigate the repository read-only. Cast a wide net, then return a concise evidence packet with load-bearing file:line citations, commands checked, and explicit gaps. Do not plan, edit, or spawn agents. " + readOnlyToolSteer(),
+      description: `Max-profile read-only exploration subagent running ${exploreModel}. Best suited to broad, multi-file discovery that should return conclusions and file:line evidence without filling the lead's context.`,
+      prompt: "Role: read-only repository exploration. Answer the supplied question with a concise evidence packet: conclusions, load-bearing file:line citations, relevant commands or sources checked, and explicit gaps. The caller retains planning and implementation. " + readOnlyToolSteer(),
       tools: researchTools,
-      ...(mcpServers ? { mcpServers } : {}),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     Plan: {
       ...base("Plan", planModel, opts.maxPlanEffort ?? effort("Plan")),
-      description: `Max-profile plan consultant running ${planModel} at high effort. Use for an evidence-grounded implementation plan before coding.`,
-      prompt: "Read the repository and produce an ordered implementation plan grounded in acceptance criteria and file:line evidence. Identify risks and verification commands. Do not edit files or spawn agents. " + readOnlyToolSteer(),
+      description: `Max-profile plan consultant running ${planModel} at high effort. Best suited to non-trivial changes where sequencing, interfaces, migration risk, or explicit acceptance criteria benefit from a separate planning view.`,
+      prompt: "Role: implementation planning. Given the goal, constraints, and available evidence, return a coherent plan with affected files or symbols, important invariants and risks, acceptance criteria, and useful verification. Surface assumptions or missing decisions; the lead owns plan acceptance and execution. " + readOnlyToolSteer(),
       tools: researchTools,
-      ...(mcpServers ? { mcpServers } : {}),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     "general-purpose": {
       ...base("general-purpose", generalModel, opts.maxGeneralPurposeEffort ?? effort("general-purpose")),
-      description: `Max-profile general-purpose implementation subagent running ${generalModel}. Use proactively for work no specialist fits; research, edit, and verify end to end.`,
-      prompt: "Handle the delegated task end to end. Read relevant files first, make only requested changes, run relevant checks, and report exact files changed plus verification and unresolved risk. " + fileToolSteer("builds, tests, and git"),
-      ...(mcpServers ? { mcpServers } : {}),
+      description: `Max-profile general-purpose execution subagent running ${generalModel}. Best suited to mixed or unusual work that does not fit the narrower discovery, planning, implementation, review, or ideation roles.`,
+      prompt: "Role: catch-all execution for the supplied bounded task. Deliver the requested outcome within its stated scope and return the files or artifacts changed, verification evidence, and unresolved risks. The lead owns integration and final decisions. " + fileToolSteer("builds, tests, and git"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     implementer: {
       ...base("implementer", implementerModel, opts.maxImplementerEffort ?? effort("implementer")),
-      description: `Max-profile implementation subagent running ${implementerModel} at high effort. Use for coding changes needing judgment or with ambiguous scope; verify end to end.`,
-      prompt: "Implement the approved change surgically. Match surrounding style, minimize unrelated churn, use dedicated file tools, and run relevant build/tests. Report changed files, verification, and unresolved risk. " + fileToolSteer("builds, tests, and git"),
-      ...(mcpServers ? { mcpServers } : {}),
+      description: `Max-profile implementation subagent running ${implementerModel} at high effort. Best suited to a bounded coding change whose desired outcome and constraints are known but whose implementation still needs judgment.`,
+      prompt: "Role: coding implementation for a settled desired outcome. Make a coherent, scoped change consistent with repository conventions and acceptance criteria. Return the files changed, observable behavior, checks and results, and unresolved risks; surface material ambiguity rather than silently deciding product or architecture questions. " + fileToolSteer("builds, tests, and git"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
       ...base("reviewer", reviewerModel, opts.maxReviewerEffort ?? effort("reviewer")),
-      description: `Max-profile repository-aware reviewer running ${reviewerModel}. Use after implementation or when a failure needs reproduction and root-cause analysis.`,
-      prompt: "Assess what is actually true about the artifact or repository state. Read code, reproduce failures, and run relevant checks. Report severity-ranked findings with file:line evidence and a clear go/no-go. Do not modify production code. " + fileToolSteer("builds, tests, and reproductions"),
+      description: `Max-profile repository-aware verifier running ${reviewerModel}. Best suited to assessing an implementation or reproducing a failure when code execution and surrounding repository context matter.`,
+      prompt: "Role: independent repository-aware verification. Assess the supplied artifact against its intent and the actual repository or runtime state. Return verified or clearly plausible findings, severity, file:line evidence, concrete failure scenarios, checks run and results, and a go/no-go; distinguish no findings from checks not run. The lead owns remediation and approval. " + fileToolSteer("builds, tests, and reproductions"),
       tools: researchTools,
-      ...(mcpServers ? { mcpServers } : {}),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     brainstorm: {
       ...base("brainstorm", brainstormModel, opts.maxBrainstormEffort ?? effort("brainstorm")),
-      description: `Max-profile divergent-options subagent running ${brainstormModel}. Use proactively before an approach is chosen to surface materially different, repository-grounded alternatives.`,
-      prompt: "Generate materially different approaches for the supplied decision. Screen every candidate against the actual repository and environment, explain costs and failure modes, and recommend only an executable option. Do not edit files or spawn agents. " + readOnlyToolSteer(),
+      description: `Max-profile divergent-options subagent running ${brainstormModel}. Best suited to an open decision where materially different repository-feasible approaches remain plausible.`,
+      prompt: "Role: divergent option generation. Return materially distinct, repository-feasible alternatives with trade-offs, assumptions, failure modes, and evidence that would discriminate among them. A recommendation is useful when the available evidence supports one; the lead owns the decision and planning. " + readOnlyToolSteer(),
       tools: researchTools,
-      ...(mcpServers ? { mcpServers } : {}),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     "peer-review-coordinator": {
-      description: `Max-profile peer-review coordinator running ${MAX_PROFILE_MODELS.luna} at maximum effort. Use proactively for consequential plans and diffs; fan out to max-profile peer personas and aggregate findings.`,
-      prompt: `You coordinate max-profile cross-lab peer review. Available fresh-context peers: ${peerList || "(none)"}. Choose peers that match the artifact, call independent reviews in parallel, and return a deduplicated severity-ranked finding list with each finding's source and file:line evidence. Pass the artifact and constraints verbatim. Do not modify files, approve irreversible actions, or invoke unrelated workers or orchestration.`,
+      description: `Max-profile peer-review coordinator running ${MAX_PROFILE_MODELS.luna} at maximum effort. Best suited to consequential plans or diffs where several independent, cross-family lenses are likely to add value beyond one review.`,
+      prompt: `Role: synthesize independent fresh-context review of the supplied artifact and constraints. Available peers: ${peerList || "(none)"}. Select a risk-proportionate set with distinct useful lenses, preserving independence and avoiding redundant same-model calls unless their scopes differ. Return deduplicated, severity-ranked findings with sources, file:line evidence where applicable, concrete failure scenarios, disagreements, confidence, and evidence gaps. Peer output is advisory; the lead owns go/no-go and remediation.`,
       model: oneM(MAX_PROFILE_MODELS.luna),
       effort: opts.maxCoordinatorEffort ?? effort("peer-review-coordinator"),
-      ...(mcpServers ? { mcpServers } : {}),
+      tools: [`mcp__${peersKey}__*`],
+      ...(peersMcpServers ? { mcpServers: peersMcpServers } : {}),
     },
   }
   if (opts.browseAvailable && opts.groupKeys.workers) {
@@ -685,6 +700,8 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
     out["worker-browse"] = {
       description: dispatcherDescription("browse"),
       prompt: dispatcherPrompt("browse", workersKey),
+      model: oneM(MAX_PROFILE_MODELS.luna),
+      effort: "high",
       tools: dispatcherTools("browse", workersKey),
       ...(opts.serverUrl
         ? {

@@ -697,9 +697,10 @@ export async function handleCompletion(c: Context) {
           requestHeaders: {},
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          // Max uses the normal advisor contract, while fast retains its
-          // authenticated fast-profile consultant framing and transport.
+          // Fast and max share the non-binding consultant posture while
+          // retaining their independent model, effort, and transport policies.
           advisorFastProfile: advisorChoice.fastProfile,
+          advisorMaxProfile: maxAdvisorEnabled,
           advisorEffort: advisorChoice.effort,
           externalAborter: translatedAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {
@@ -970,6 +971,7 @@ export async function handleCompletion(c: Context) {
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
           advisorFastProfile: fastLeadAdvisor,
+          advisorMaxProfile: maxAdvisorEnabled,
           advisorEffort: maxAdvisorChoice
             ? maxAdvisorChoice.effort
             : resolveAdvisorEffort(

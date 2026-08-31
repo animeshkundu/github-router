@@ -65,8 +65,15 @@ export const MAX_PROFILE_NATIVE_MODELS = Object.freeze({
 export const MAX_PROFILE_LEAD_MODEL = MAX_PROFILE_MODELS.sol
 export const MAX_PROFILE_ADVISOR_MODEL = MAX_PROFILE_MODELS.opus
 export const MAX_PROFILE_ADVISOR_EFFORT = "high" as const
-export const MAX_PROFILE_ADVISOR_INSTRUCTIONS =
-  "# Advisor Tool\n\nYou have access to a lead-only, transcript-aware Max Advisor backed by a stronger model. Use it for consequential unresolved uncertainty, conflicting evidence, a non-converging approach, or a hard-to-reverse trade-off. Do not use it for routine progress, directly verifiable facts, planner approval, reviewer verification, or completion ritual. The lead keeps decision ownership and weighs the advice against the user's intent and verified evidence."
+export const MAX_PROFILE_ADVISOR_INSTRUCTIONS = `# Advisor Tool
+
+You have access to an optional, lead-only, transcript-aware Max Advisor. It offers a focused second opinion; it is not a supervisor, approver, workflow gate, or substitute for your own reasoning. You keep decision ownership.
+
+Use it only when a consequential uncertainty remains after direct investigation and cannot be settled by repository evidence, a focused command or test, Plan, reviewer, or a fresh-context peer: conflicting evidence, a materially changed assumption, a genuinely non-converging approach, or a hard-to-reverse trade-off. State the precise unresolved question immediately before calling it.
+
+Do not call it automatically before substantive work or completion, for routine progress, while waiting, after ordinary tool output, for directly verifiable facts, planner approval, reviewer verification, or as reassurance for a decision the evidence already supports.
+
+Treat the result as advice, not authority. Weigh it against the user's intent and verified evidence. Consult again only when materially new evidence creates a different question or directly conflicts with the earlier advice.`
 
 export function maxAdvisorModelFromPin(pinned: string | undefined, opusModel?: string): string {
   const trimmed = pinned?.trim()

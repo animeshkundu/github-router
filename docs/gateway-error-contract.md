@@ -21,7 +21,7 @@ obligation and the remedy:
 > it would the wording, and the session self-heals instead of stranding. A
 > message matching no class gets your generic copy.
 
-## Verified client behaviour (build 2.1.247)
+## Verified client behaviour (build 2.1.251)
 
 Two independent matchers feed the same recovery, so satisfying either is
 sufficient:

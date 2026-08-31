@@ -11,7 +11,10 @@ import {
   MAX_AGENT_SCHEMA_MODEL_ALIASES,
   decideMaxDispatchGuard,
 } from "../src/lib/max-dispatch-acl"
+import { BROWSE_DEFAULT_MODEL } from "../src/lib/worker-agent/engine"
+import { advisorSystemPrompt } from "../src/services/advisor/advisor"
 import {
+  MAX_PROFILE_ADVISOR_INSTRUCTIONS,
   MAX_PROFILE_MODELS,
   formatMaxPrerequisiteFailure,
   maxAdvisorModelFromPin,
@@ -132,6 +135,16 @@ describe("max profile contract", () => {
     expect(agents.implementer?.model).toBe("gemini-3.7-flash[1m]")
     expect(agents.implementer?.effort).toBe("high")
     expect(agents["peer-review-coordinator"]?.prompt).toContain("sol_critic")
+    expect(agents["peer-review-coordinator"]?.tools).toEqual(["mcp__peers__*"])
+    for (const role of ["Explore", "Plan", "reviewer", "brainstorm"] as const) {
+      expect(agents[role]?.tools).not.toContain("mcp__peers__*")
+    }
+    expect(agents.Explore?.description).toContain("Best suited")
+    expect(agents.Plan?.prompt).toContain("the lead owns plan acceptance")
+    expect(agents.implementer?.prompt).toContain("Role: coding implementation")
+    expect(agents.reviewer?.prompt).toContain("distinguish no findings from checks not run")
+    expect(agents.brainstorm?.prompt).toContain("the lead owns the decision")
+    expect(agents["peer-review-coordinator"]?.prompt).toContain("Peer output is advisory")
     expect(agents.scout).toBeUndefined()
     expect(agents["worker-browse"]).toBeUndefined()
   })
@@ -162,6 +175,56 @@ describe("max profile contract", () => {
           prompt: "smoke test",
         })
       }
+    }
+  })
+
+  test("pins the retained browse dispatcher to Luna high", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: true,
+      maxProfile: true,
+      browseAvailable: true,
+      groupKeys: { peers: "peers", search: "search", workers: "workers" },
+      nonce: "0".repeat(64),
+      codexHome: "/tmp/codex",
+    })
+    expect(agents["worker-browse"]?.model).toBe("gpt-5.6-luna[1m]")
+    expect(agents["worker-browse"]?.effort).toBe("high")
+    expect(agents["worker-browse"]?.tools).toEqual(["mcp__workers__*"])
+  })
+
+  test("allows the retained browse dispatcher while preserving its fixed frontmatter", () => {
+    // The hook bundle deliberately avoids importing the worker runtime, so pin
+    // its local effective-model constant to the worker engine's SSOT here.
+    expect(BROWSE_DEFAULT_MODEL).toBe("gpt-5.6-luna")
+    for (const schemaModel of MAX_AGENT_SCHEMA_MODEL_ALIASES) {
+      const decision = decideMaxDispatchGuard({
+        tool_name: "Agent",
+        tool_input: {
+          subagent_type: "worker-browse",
+          prompt: "open example.com",
+          model: schemaModel,
+        },
+      })
+      expect(decision.allowed).toBe(true)
+      expect(decision.updatedInput).toEqual({
+        subagent_type: "worker-browse",
+        prompt: "open example.com",
+      })
+    }
+  })
+
+  test("continues to deny non-max native agents", () => {
+    for (const target of ["scout", "scribe", "worker-explore"]) {
+      const decision = decideMaxDispatchGuard({
+        tool_name: "Agent",
+        tool_input: {
+          subagent_type: target,
+          prompt: "smoke test",
+          model: "fable",
+        },
+      })
+      expect(decision.allowed).toBe(false)
     }
   })
 
@@ -256,6 +319,38 @@ describe("max profile contract", () => {
     expect(JSON.parse(allowedSubagent.body).output_config.effort).toBe("medium")
   })
 
+  test("keeps Max Advisor optional, non-binding, and out of routine workflow gates", () => {
+    for (const required of [
+      "optional",
+      "not a supervisor",
+      "You keep decision ownership",
+      "focused command or test",
+      "Do not call it automatically before substantive work or completion",
+      "directly verifiable facts",
+      "planner approval",
+      "reviewer verification",
+      "materially new evidence",
+      "advice, not authority",
+    ]) {
+      expect(MAX_PROFILE_ADVISOR_INSTRUCTIONS).toContain(required)
+    }
+    expect(MAX_PROFILE_ADVISOR_INSTRUCTIONS).not.toContain("call advisor at least once")
+  })
+
+  test("gives max Advisor a non-binding consultant system prompt without changing neighbors", () => {
+    const standard = advisorSystemPrompt(false, false, false)
+    const fast = advisorSystemPrompt(false, true, false)
+    const max = advisorSystemPrompt(false, false, true)
+    expect(max).toContain("non-binding consultant")
+    expect(max).toContain("not an invitation to supervise the whole session")
+    expect(max).toContain("Do not approve, veto, dictate")
+    expect(max).not.toContain("actionable advice on the next step or course-correction")
+    expect(max).not.toContain("Give a directive recommendation")
+    expect(fast).toContain("non-binding consultant")
+    expect(standard).not.toContain("non-binding consultant")
+    expect(advisorSystemPrompt(true, false, false)).toContain("Give a directive recommendation")
+  })
+
   test("validates max advisor pins strictly", () => {
     expect(maxAdvisorPinIsValid(undefined)).toBe(true)
     expect(maxAdvisorPinIsValid("")).toBe(true)
@@ -281,8 +376,42 @@ describe("max profile contract", () => {
       groupKeys: { peers: "peers", search: "search" },
     })
     expect(snippet).toContain("general-purpose")
+    expect(snippet).toContain("menu of complementary capabilities")
+    expect(snippet).toContain("Small or obvious tasks are often better handled directly")
+    expect(snippet).toContain("evidence to synthesize rather than a vote")
+    expect(snippet).toContain("Advisor is optional, non-binding")
+    expect(snippet).toContain("not a supervisor")
+    expect(snippet).toContain("materially new evidence")
     expect(snippet).not.toContain("orchestrate")
     const summary = buildPeerAwarenessSummary({ profile: "max", workerToolsAvailable: false, standInAvailable: false, browseAvailable: false })
     expect(summary).toContain("Max launch profile")
+    expect(summary).toContain("Advisor is optional, non-binding")
+    expect(summary).toContain("no approval or workflow authority")
+    expect(summary).toContain("focused consequential uncertainty")
+    expect(summary).not.toContain("worker-browse")
+
+    const browseSummary = buildPeerAwarenessSummary({
+      profile: "max",
+      workerToolsAvailable: false,
+      standInAvailable: false,
+      browseAvailable: true,
+      browserToolsAvailable: true,
+      groupKeys: { browser: "browser", workers: "workers" },
+    })
+    expect(browseSummary).toContain("worker-browse")
+    expect(browseSummary).toContain("mcp__workers__browse")
+    expect(browseSummary).toContain("mcp__browser__*")
+    expect(browseSummary).not.toContain("orchestrate")
+
+    const workerOnlySummary = buildPeerAwarenessSummary({
+      profile: "max",
+      workerToolsAvailable: false,
+      standInAvailable: false,
+      browseAvailable: true,
+      browserToolsAvailable: false,
+      groupKeys: { browser: "browser", workers: "workers" },
+    })
+    expect(workerOnlySummary).toContain("worker-browse")
+    expect(workerOnlySummary).not.toContain("mcp__browser__*")
   })
 })

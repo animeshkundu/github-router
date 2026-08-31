@@ -23,7 +23,22 @@ and strips them before dispatch, so the role's fixed frontmatter model wins.
 Clients able to send catalog ids may explicitly override only to Luna 1M,
 Gemini 3.7 Flash 1M, or bare Grok 4.6; Sol and Opus remain unavailable as native
 subagent overrides. Grok remains rejected for lead traffic, while authenticated
-max subagent requests may use it at their role effort. On every retained max
+max subagent requests may use it at their role effort. Max Advisor is optional,
+non-binding counsel for a focused consequential uncertainty that direct evidence,
+Plan, reviewer, or peers cannot settle. It is not a supervisor, approver, or
+routine pre-work/completion gate; the lead keeps decision ownership and consults
+again only when materially new evidence creates a different question.
+
+Max's injected guidance presents its tools and roles as complementary affordances,
+not a mandatory Explore → Plan → implement → review pipeline. It gives the lead
+scope, capability, and evidence hints while leaving the reasoning and tool sequence
+to the model. Hard constraints such as model allowlists, tool access, read-only
+roles, and profile boundaries stay in code. Small or obvious tasks may be handled
+directly; independent subagents and cross-family peers are useful when they improve
+context isolation, latency, or coverage of a consequential uncertainty. Success is
+measured by the resulting code, evidence, and checks, not by how many agents ran.
+
+On every retained max
 surface that would otherwise choose Gemini 3.1 Pro, max instead chooses Grok
 4.6/high when usable and falls back to Gemini 3.7 Flash 1M/high. This includes
 `stand_in` and first-mate model pins; persisted first-mate intent remains
@@ -34,8 +49,10 @@ or task-model mismatch, never speculatively.
 
 Max exposes search, optional browser control, browse-only workers, optional
 stand-in, fleet, and first-mate surfaces. It never exposes orchestration or core
-worker modes. Advisor is lead-only and defaults to Opus 5/high over native
-Messages; `GH_ROUTER_ADVISOR_MODEL=gpt-5.6-sol` selects Sol instead. Native
+worker modes, and it does not inject `/gh-research`, `/gh-orchestrate`,
+`/gh-floor-keeper`, or `/gh-worker`. First-mate operator skills remain conditional
+on the first-mate capability. Advisor is lead-only and defaults to Opus 5/high
+over native Messages; `GH_ROUTER_ADVISOR_MODEL=gpt-5.6-sol` selects Sol instead. Native
 subagents and browse workers do not receive Advisor. Max rejects `--codex-cli`,
 `--no-codex-mcp`, and arbitrary lead models before creating launch artifacts.
 

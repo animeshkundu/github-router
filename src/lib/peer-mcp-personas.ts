@@ -596,7 +596,12 @@ export function buildPeerAwarenessSnippet(opts: {
   geminiModel?: string
   workerToolsAvailable: boolean
   standInAvailable: boolean
+  /** Browse-only worker availability. In standard launches this also defaults
+   *  the direct-browser prose for backwards compatibility. */
   browseAvailable: boolean
+  /** Direct browser MCP availability. Max can retain worker-browse even when
+   *  the browser extension/tool surface itself is unavailable. */
+  browserToolsAvailable?: boolean
   compoundBrowseAvailable: boolean
   powerBrowseAvailable?: boolean
   fleetAvailable?: boolean
@@ -629,7 +634,8 @@ export function buildPeerAwarenessSnippet(opts: {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
     const searchKey = key("search")
-    const browserClause = opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""
+    const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
+    const browserClause = directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""
     const workerClause = opts.browseAvailable
       ? ` Browse-only workers are exposed as \`worker-browse\` through \`mcp__${key("workers")}__browse\`. Core workers and orchestration are not part of max.`
       : ""
@@ -639,8 +645,8 @@ export function buildPeerAwarenessSnippet(opts: {
     return [
       "## Peer review and advisor",
       "",
-      `Max launch profile. Max-native roles are \`Explore\`, \`Plan\`, \`general-purpose\`, \`implementer\`, \`reviewer\`, \`brainstorm\`, and \`peer-review-coordinator\`. Their frontmatter models are intentional defaults chosen for role fit, quality, latency, and cross-lab diversity; use them first and override only after a concrete failure or mismatch, and only within the max allowlist. The coordinator fans out to max-profile \`sol_critic\`, \`luna_reviewer\`, and the catalog-present \`opus_critic\`, \`gemini_critic\`/\`gemini_reviewer\`, and \`grok_critic\`/\`grok_reviewer\`.`,
-      `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is primary-lead-only and transcript-aware; it remains available across controlled max lead switches, while native subagents and browse workers do not receive it.${opts.standInAvailable ? " Max stand_in uses Sol + Opus 5 + Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high; it never uses Gemini 3.1 Pro." : ""}${opts.agentToolsAvailable ? " Max first-mate replaces any Gemini 3.1 Pro model choice with the same Grok/high → Gemini 3.7 Flash/high fallback." : ""}${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}`,
+      `Max launch profile. The native roster is a menu of complementary capabilities rather than a required workflow: \`Explore\` for broad discovery, \`brainstorm\` for open design choices, \`Plan\` when sequencing or acceptance criteria benefit from a separate view, \`implementer\` for bounded coding, \`general-purpose\` for mixed work, and \`reviewer\` for repository-aware verification. Their frontmatter models are intentional defaults chosen for role fit and cross-lab diversity; overrides are most useful after a concrete mismatch and remain within the max allowlist. Independent work can run in parallel when it improves context isolation or latency. Fresh-context peers can reduce correlated blind spots where deterministic evidence does not settle the issue; \`peer-review-coordinator\` can combine max-profile \`sol_critic\`, \`luna_reviewer\`, and catalog-present \`opus_critic\`, \`gemini_critic\`/\`gemini_reviewer\`, and \`grok_critic\`/\`grok_reviewer\` when the risk merits several lenses. Small or obvious tasks are often better handled directly, and model output remains evidence to synthesize rather than a vote.`,
+      `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is optional, non-binding, primary-lead-only counsel for a focused consequential uncertainty that direct evidence, Plan, reviewer, or peers cannot settle. It is not a supervisor, approver, or routine workflow/completion gate; consult again only when materially new evidence creates a different question. It remains available across controlled max lead switches, while native subagents and browse workers do not receive it.${opts.standInAvailable ? " Max stand_in uses Sol + Opus 5 + Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high; it never uses Gemini 3.1 Pro." : ""}${opts.agentToolsAvailable ? " Max first-mate replaces any Gemini 3.1 Pro model choice with the same Grok/high → Gemini 3.7 Flash/high fallback." : ""}${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}`,
     ].join("\n")
   }
   if (opts.profile === "fast") {
@@ -791,7 +797,12 @@ export type NativeAgentName =
 export function buildPeerAwarenessSummary(opts: {
   workerToolsAvailable: boolean
   standInAvailable: boolean
+  /** Browse-only worker availability. In standard launches this also defaults
+   *  the direct-browser prose for backwards compatibility. */
   browseAvailable: boolean
+  /** Direct browser MCP availability. Max can retain worker-browse even when
+   *  the browser extension/tool surface itself is unavailable. */
+  browserToolsAvailable?: boolean
   fleetAvailable?: boolean
   agentToolsAvailable?: boolean
   /** Which conditionally-emitted natives this launch wrote. `undefined` means
@@ -820,11 +831,12 @@ export function buildPeerAwarenessSummary(opts: {
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
+    const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
     return [
       "## Injected capabilities (summary)",
       "",
-      "Max launch profile. Native roles: `Explore`, `Plan`, `general-purpose`, `implementer`, `reviewer`, `brainstorm`, and `peer-review-coordinator`. Their configured models are the default best fit; override only after a concrete failure or mismatch. Max peer names are `sol_critic`, `luna_reviewer`, and catalog-present `opus_critic`, `gemini_critic`/`gemini_reviewer`, or `grok_critic`/`grok_reviewer`. Advisor is primary-lead-only and remains available across controlled max lead switches; native subagents and browse workers do not receive it. On every retained max path, replace Gemini 3.1 Pro with Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high.",
-      `\`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide code and web search.${opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` provides browser control.` : ""}${opts.workerToolsAvailable ? ` Browse-only worker dispatch is \`mcp__${key("workers")}__browse\`.` : ""}${opts.standInAvailable ? ` \`mcp__${key("decide")}__stand_in\` provides deterministic decision tiebreak.` : ""}${opts.fleetAvailable ? ` \`mcp__${key("fleet")}__*\` provides gated remote sessions.` : ""}${opts.agentToolsAvailable ? " First-mate remains available when its own gate passes." : ""}`,
+      "Max launch profile. The roster offers complementary capabilities: `Explore` for broad discovery, `brainstorm` for open choices, `Plan` for a separate planning view, `implementer` and `general-purpose` for execution, and `reviewer` for repository-aware verification. Small or obvious tasks can be handled directly; independent work can run in parallel. Configured models are the default best fit, and a fresh-context peer or `peer-review-coordinator` can reduce correlated blind spots when risk and uncertainty justify it. Model output is evidence to synthesize, not a vote. Advisor is optional, non-binding, and primary-lead-only counsel for a focused consequential uncertainty the normal evidence and roles cannot settle; it has no approval or workflow authority. The lead decides. On every retained max path, replace Gemini 3.1 Pro with Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high.",
+      `\`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide code and web search.${directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides browser control.` : ""}${opts.browseAvailable ? ` \`worker-browse\` dispatches the browse-only worker through \`mcp__${key("workers")}__browse\`.` : ""}${opts.standInAvailable ? ` \`mcp__${key("decide")}__stand_in\` provides deterministic decision tiebreak.` : ""}${opts.fleetAvailable ? ` \`mcp__${key("fleet")}__*\` provides gated remote sessions.` : ""}${opts.agentToolsAvailable ? " First-mate remains available when its own gate passes." : ""}`,
     ].join("\n")
   }
   if (opts.profile === "fast") {
