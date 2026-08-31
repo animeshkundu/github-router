@@ -49,7 +49,7 @@ describe("AnswerInbox", () => {
     const inbox = new AnswerInbox({ dir })
     // A prior drain renamed the inbox then died before consuming it.
     await fs.writeFile(
-      path.join(dir, "answers.jsonl.draining.9999.dead"),
+      path.join(dir, "answers.jsonl.draining.999999.dead"),
       `${JSON.stringify({ t: "m", requestId: "orphan-1", verdict: { decision: "approve" } })}\n`,
     )
     await inbox.enqueue({ modelAnswers: [{ requestId: "live-1", verdict: 1 }] })
@@ -107,7 +107,7 @@ describe("AnswerInbox", () => {
     // same orphan (→ double-apply); the atomic single-source rename-claim means
     // exactly one drainer claims it and the other gets ENOENT.
     await fs.writeFile(
-      path.join(dir, "answers.jsonl.draining.9999.dead"),
+      path.join(dir, "answers.jsonl.draining.999999.dead"),
       `${JSON.stringify({ t: "h", requestId: "orphan-1", choice: "merge" })}\n`,
     )
     const a = new AnswerInbox({ dir })
@@ -129,7 +129,7 @@ describe("AnswerInbox", () => {
     // leaves it discoverable), B's scan matched it and surfaced the SAME human
     // decision a second time — a double-apply of durable human-decision state.
     await fs.writeFile(
-      path.join(dir, "answers.jsonl.draining.9999.dead"),
+      path.join(dir, "answers.jsonl.draining.999999.dead"),
       `${JSON.stringify({ t: "h", requestId: "orphan-1", choice: "merge" })}\n`,
     )
     const a = new AnswerInbox({ dir })
@@ -149,7 +149,7 @@ describe("AnswerInbox", () => {
     // old code threw on any non-ENOENT rename error, failing the whole drain. The
     // claim-rename must retry the transient error and still claim the orphan.
     await fs.writeFile(
-      path.join(dir, "answers.jsonl.draining.9999.dead"),
+      path.join(dir, "answers.jsonl.draining.999999.dead"),
       `${JSON.stringify({ t: "h", requestId: "orphan-1", choice: "merge" })}\n`,
     )
     const inbox = new AnswerInbox({ dir })
@@ -169,7 +169,7 @@ describe("AnswerInbox", () => {
 
   test("a transient read error PRESERVES the orphan (never deletes an unread answer) (R3 #4)", async () => {
     await fs.writeFile(
-      path.join(dir, "answers.jsonl.draining.9999.dead"),
+      path.join(dir, "answers.jsonl.draining.999999.dead"),
       `${JSON.stringify({ t: "h", requestId: "keep-me", choice: "merge" })}\n`,
     )
     const inbox = new AnswerInbox({ dir })

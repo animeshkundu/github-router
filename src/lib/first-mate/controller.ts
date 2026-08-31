@@ -198,6 +198,8 @@ export interface AdvanceInput {
    * renew (single-driver / test callers).
    */
   renewLease?: () => Promise<boolean>
+  /** Max launch replacement for any persisted or submitted Gemini Pro model pin. */
+  maxProfileReviewModel?: "grok-4.6" | "gemini-3.7-flash"
 }
 
 export interface ModelAnswer {
@@ -917,6 +919,15 @@ function isApproveMergeChoice(choice: string): boolean {
   return normalized.includes("approve") || normalized === "merge"
 }
 
+function modelForAdvance(
+  chosen: string | undefined,
+  input: AdvanceInput,
+): string | undefined {
+  return chosen === "gemini-3.1-pro-preview"
+    ? input.maxProfileReviewModel
+    : chosen
+}
+
 async function applyModelAnswer(
   answer: ModelAnswer,
   units: UnitRow[],
@@ -924,7 +935,7 @@ async function applyModelAnswer(
   deps: ControllerDeps,
   applied: string[],
   needsHuman: QueuedRequest<HumanRequest>[],
-  renewLease?: () => Promise<boolean>,
+  input: AdvanceInput,
 ): Promise<void> {
   const target = findModelTarget(units, answer.requestId)
   if (target === undefined) {
@@ -968,7 +979,7 @@ async function applyModelAnswer(
           applied.push(`deferred build dispatch for ${unit.missionId}:${unitHandle(unit)}: concurrency cap or overlapping file scope with an active build`)
           return
         }
-        const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
+        const model = resolveCloudAgentModel(modelForAdvance(unit.model ?? mission.defaultModel, input))
         consola.debug(`first-mate: dispatching build task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
           deps.startTask(repo, {
@@ -977,7 +988,7 @@ async function applyModelAnswer(
             createPullRequest: true,
             idempotencyKey,
           }),
-          renewLease,
+          input.renewLease,
         )
         if (task) {
           unit.taskId = task.taskId
@@ -1016,7 +1027,7 @@ async function applyModelAnswer(
         // #1 — resolve the model BEFORE the persist inside dispatchWithOutbox
         // (see the approve branch above): a resolveCloudAgentModel throw must
         // leave no dangling dispatch intent.
-        const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
+        const model = resolveCloudAgentModel(modelForAdvance(unit.model ?? mission.defaultModel, input))
         const task = await dispatchWithOutbox(unit, deps, ({ idempotencyKey, promptTag }) =>
           deps.startTask(repo, {
             prompt: prompt + promptTag,
@@ -1024,7 +1035,7 @@ async function applyModelAnswer(
             createPullRequest: false,
             idempotencyKey,
           }),
-          renewLease,
+          input.renewLease,
         )
         if (task) {
           unit.taskId = task.taskId
@@ -1147,7 +1158,7 @@ async function applyModelAnswer(
         const mission = missions.find((entry) => entry.id === unit.missionId)
         let model: string | undefined
         try {
-          model = resolveCloudAgentModel(unit.model ?? mission?.defaultModel)
+          model = resolveCloudAgentModel(modelForAdvance(unit.model ?? mission?.defaultModel, input))
         } catch {
           model = undefined
         }
@@ -1331,9 +1342,9 @@ async function applySubmittedAnswers(
     // whole sweep. Record the failure in the audit trail and continue.
     try {
       if (answer.requestId.startsWith("decompose:")) {
-        await applyDecomposeAnswer(answer, missions, deps, applied)
+        await applyDecomposeAnswer(answer, missions, deps, applied, input)
       } else {
-        await applyModelAnswer(answer, units, missions, deps, applied, needsHuman, input.renewLease)
+        await applyModelAnswer(answer, units, missions, deps, applied, needsHuman, input)
       }
     } catch (err) {
       consola.warn(`first-mate: model answer ${answer.requestId} failed to apply:`, err)
@@ -1556,14 +1567,23 @@ async function applyDecomposeAnswer(
   missions: Mission[],
   deps: ControllerDeps,
   applied: string[],
+  input: AdvanceInput,
 ): Promise<void> {
   const missionId = answer.requestId.slice("decompose:".length)
   const mission = missions.find((m) => m.id === missionId)
   if (mission === undefined || mission.status !== "active") return
   const verdict = asRecord(answer.verdict) ?? {}
   const rawUnits = Array.isArray(verdict.units) ? verdict.units : []
+  const normalizedUnits = input.maxProfileReviewModel === undefined
+    ? rawUnits
+    : rawUnits.map((raw) => {
+        const unit = asRecord(raw)
+        return unit?.model === "gemini-3.1-pro-preview"
+          ? { ...unit, model: input.maxProfileReviewModel }
+          : raw
+      })
   const existing = await deps.loadAllUnits(mission.id)
-  const created = await addUnitsToMission(mission, rawUnits, deps, existing)
+  const created = await addUnitsToMission(mission, normalizedUnits, deps, existing)
   if (created > 0) applied.push(`decomposed ${missionId} into ${created} unit(s)`)
 }
 
@@ -2185,7 +2205,7 @@ async function executeAction(
   needsHuman: QueuedRequest<HumanRequest>[],
   applied: string[],
   order: number,
-  renewLease?: () => Promise<boolean>,
+  input: AdvanceInput,
 ): Promise<void> {
   void policy
   switch (action.kind) {
@@ -2193,7 +2213,7 @@ async function executeAction(
       return
     case "retry_plan": {
       const repo = agentRepo(unit.repo)
-      const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
+      const model = resolveCloudAgentModel(modelForAdvance(unit.model ?? mission.defaultModel, input))
       const dateStr = unit.artifactDateStr ?? artifactDate(Date.now())
       unit.artifactDateStr = dateStr
       // Consume the bounded retry BEFORE dispatchWithOutbox persists its intent,
@@ -2209,7 +2229,7 @@ async function executeAction(
             createPullRequest: false,
             idempotencyKey,
           }),
-        renewLease,
+        input.renewLease,
         (started) => {
           unit.provider = providerState(started.state, "queued")
           unit.phase = "plan"
@@ -2671,6 +2691,7 @@ async function dispatchUnit(
   unit: UnitRow,
   mission: Mission,
   deps: ControllerDeps,
+  input: AdvanceInput,
 ): Promise<void> {
   const repo = agentRepo(unit.repo)
   const actor = await deps.resolveAgentActor(repo, unit.agent)
@@ -2683,7 +2704,7 @@ async function dispatchUnit(
   // the dispatch intent, so a resolveCloudAgentModel throw (explicit-invalid
   // model + live catalog) leaves no dangling intent for the next wake to
   // misread as an interrupted dispatch / false orphan.
-  const model = resolveCloudAgentModel(unit.model ?? mission.defaultModel)
+  const model = resolveCloudAgentModel(modelForAdvance(unit.model ?? mission.defaultModel, input))
   consola.debug(`first-mate: dispatching plan task for ${unit.missionId}:${unitHandle(unit)} agent=${unit.agent}`)
   // Stamp the artifact date ONCE at plan time and persist it on the unit, so the
   // later build task (possibly a different calendar day) reuses the same
@@ -2718,7 +2739,7 @@ async function dispatchWave(
   maxInFlightPerProvider: number,
   deps: ControllerDeps,
   applied: string[],
-  renewLease?: () => Promise<boolean>,
+  input: AdvanceInput,
   countUnits?: UnitRow[],
 ): Promise<void> {
   // Per-provider in-flight counts are taken over ALL loaded units (when
@@ -2752,7 +2773,7 @@ async function dispatchWave(
     // lease was lost/stolen mid-sweep we are no longer the sole driver; STOP the
     // wave rather than perform an external side effect a second driver may also
     // perform. (Fencing rejects the ledger write; this guards the side effect.)
-    if (renewLease !== undefined && !(await renewLease())) {
+    if (input.renewLease !== undefined && !(await input.renewLease())) {
       applied.push("dispatch wave stopped: drive lease lost mid-sweep")
       break
     }
@@ -2761,7 +2782,7 @@ async function dispatchWave(
     // unit's intent pending on disk (recovery escalates it next wake) and must
     // not abort the wave for the other eligible units.
     try {
-      await dispatchUnit(unit, mission, deps)
+      await dispatchUnit(unit, mission, deps, input)
       counts.set(unit.agent, current + 1)
       await deps.upsertUnit(unit.repo, unit)
       applied.push(`dispatched ${unit.missionId}:${unitHandle(unit)} to ${unit.agent}`)
@@ -3234,7 +3255,7 @@ export async function advance(
           needsHuman,
           applied,
           requestOrder,
-          input.renewLease,
+          input,
         )
         await deps.upsertUnit(unit.repo, unit)
       } catch (err) {
@@ -3377,7 +3398,7 @@ export async function advance(
       maxInFlightPerProvider,
       deps,
       applied,
-      input.renewLease,
+      input,
       // Count per-provider in-flight over ALL loaded units so a mission-scoped
       // drive shares the global cap with every other mission's live tasks.
       units,

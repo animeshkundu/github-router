@@ -73,7 +73,18 @@ import {
 import {
   assertFastDispatchGuardInstalled,
 } from "./lib/orchestration/fast-dispatch-hook"
-import { ARTIFACT_REVIEW_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "./lib/injected-skills"
+import { buildMaxDispatchGuardHookCommand } from "./internal-max-dispatch-guard"
+import {
+  MAX_DISPATCH_TOOL_MATCHER,
+  assertMaxDispatchGuardInstalled,
+} from "./lib/max-dispatch-acl"
+import {
+  MAX_PROFILE_MODELS,
+  maxGeminiModel,
+  maxGrokModel,
+  maxOpusModel,
+} from "./lib/max-profile-contract"
+import { ARTIFACT_REVIEW_SKILL, injectedSkillsForLaunch, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
 import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
@@ -139,10 +150,12 @@ import {
 } from "./lib/server-setup"
 import {
   formatFastPrerequisiteFailure,
+  formatMaxPrerequisiteFailure,
   LUNA_DRIVER_ALIAS_ID,
   profileDescriptor,
   resolveLaunchProfile,
   validateFastProfilePrerequisites,
+  validateMaxProfileLaunch,
 } from "./lib/launch-profile"
 import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
 import { LAUNCH_SECRET_HEADER } from "./lib/messages-identity-preflight"
@@ -153,15 +166,6 @@ import {
   fastAdvisorClientEnabled,
   withFixedFastAdvisorArg,
 } from "./lib/fast-advisor-client"
-
-function isFirstMateSkillName(name: string): boolean {
-  return (
-    name === "gh-first-mate" ||
-    name === "gh-first-mate-scaffold" ||
-    name === "gh-first-mate-operate" ||
-    name === "gh-first-mate-conduct"
-  )
-}
 
 export const claudeArgs = {
   ...sharedServerArgs,
@@ -338,13 +342,22 @@ export const claude = defineCommand({
     const requestedLaunchProfileId = resolveLaunchProfile(args.model)
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
 
-    // Fast native agents depend on the generated MCP runtime and its mandatory
+    // Fast and max native agents depend on the generated MCP runtime and their mandatory
     // Task/Agent ACL hook. Refuse this combination before setup or any runtime
-    // artifact is written rather than silently launching a fast lead with no
-    // native roster enforcement.
-    if (requestedLaunchProfileId === "fast" && !codexMcpEnabled) {
+    // artifact is written rather than silently launching with no native roster enforcement.
+    if (requestedLaunchProfileId === "max" && ((args as Record<string, unknown>)["codex-cli"] as boolean | undefined)) {
       const message =
-        "github-router claude -m fast requires codex MCP wiring for its native roster and dispatch ACL; remove --no-codex-mcp or choose a standard model."
+        "Max profile uses its fixed HTTP MCP surface; --codex-cli is not supported in max profile."
+      process.stderr.write(`${message}\n`)
+      process.exit(1)
+    }
+    if (
+      (requestedLaunchProfileId === "fast" || requestedLaunchProfileId === "max")
+      && !codexMcpEnabled
+    ) {
+      const profileName = requestedLaunchProfileId === "fast" ? "fast" : "max"
+      const message =
+        `github-router claude -m ${profileName} requires codex MCP wiring for its native roster and dispatch ACL; remove --no-codex-mcp or choose a standard model.`
       process.stderr.write(`${message}\n`)
       process.exit(1)
     }
@@ -564,6 +577,12 @@ export const claude = defineCommand({
         const message = formatFastPrerequisiteFailure(prereqCheck.missing)
         await fastFatal(message)
       }
+    } else if (launchProfileId === "max") {
+      const prereqCheck = validateMaxProfileLaunch(state.models)
+      if (!prereqCheck.ok) {
+        const message = formatMaxPrerequisiteFailure(prereqCheck.missing)
+        await fastFatal(message)
+      }
     } else {
       // Standard profile behavior is unchanged. This branch intentionally keeps
       // all ordinary launches on the existing catalog/model flow.
@@ -705,7 +724,8 @@ export const claude = defineCommand({
     //   1. Decide between HTTP backend (always works, read-only personas)
     //      and the `--codex-cli` stdio backend (requires codex 0.129+,
     //      adds the implementer persona).
-    //   2. Probe the live Copilot catalog for gemini-3.1-pro-preview.
+    //   2. Resolve the profile's third-lab peer from the live Copilot catalog
+    //      (standard prefers Gemini Pro; max uses Grok/high then Gemini Flash/high).
     //   3. Generate a per-launch nonce, write the MCP config tempfile
     //      under PATHS.CLAUDE_RUNTIME_DIR with mode 0o600, AND write
     //      one .md subagent file per peer agent into ~/.claude/agents/
@@ -756,6 +776,15 @@ export const claude = defineCommand({
             planner: fastPlannerModel(),
             critic: fastCriticModel(),
           }
+        : launchProfileId === "max"
+          ? {
+              Explore: MAX_PROFILE_MODELS.luna,
+              Plan: MAX_PROFILE_MODELS.sol,
+              "general-purpose": MAX_PROFILE_MODELS.luna,
+              implementer: MAX_PROFILE_MODELS.gemini,
+              reviewer: maxGeminiModel() ?? maxGrokModel() ?? MAX_PROFILE_MODELS.grok,
+              brainstorm: maxGrokModel() ?? maxGeminiModel() ?? MAX_PROFILE_MODELS.grok,
+            }
         : {
             implementer: nativeSubagentModel(),
             "implementer-fast": implementerFastModel(),
@@ -799,21 +828,26 @@ export const claude = defineCommand({
         const requestedCli =
           ((args as Record<string, unknown>)["codex-cli"] as boolean | undefined) ?? false
         const isFastProfile = launchProfileId === "fast"
+        const isMaxProfile = launchProfileId === "max"
         if (isFastProfile && requestedCli) {
           process.stderr.write(
             "Fast profile uses its fixed HTTP MCP surface; ignoring --codex-cli.\n",
           )
         }
-        const backend = isFastProfile
+        const backend = isFastProfile || isMaxProfile
           ? "http"
           : resolveCodexCliBackend({
               requested: requestedCli,
               codexInfo: requestedCli ? getCodexVersion() : null,
             })
-        const geminiModelsAvailable = geminiAvailable()
+        const geminiModelsAvailable = isMaxProfile
+          ? maxGeminiModel() !== undefined
+          : geminiAvailable()
         if (!geminiModelsAvailable) {
           consola.info(
-            "gemini-3.1-pro-preview not found in your Copilot model catalog; gemini-critic persona will not be registered.",
+            isMaxProfile
+              ? "Neither Grok 4.6/high nor Gemini 3.7 Flash 1M/high is usable; max third-lab personas and stand_in will not be registered."
+              : "gemini-3.1-pro-preview not found in your Copilot model catalog; gemini-critic persona will not be registered.",
           )
         }
 
@@ -836,17 +870,29 @@ export const claude = defineCommand({
         // `fleet`/`first-mate`) are appended AFTER the filter and stay under
         // their own predicates regardless of profile, per plan section 6.
         const fastDescriptor = profileDescriptor(launchProfileId)
-        const baseGroups: Array<McpGroup> = ["peers", "search", "orchestrate"]
-        if (workerToolsEnabled()) baseGroups.push("workers")
+        const baseGroups: Array<McpGroup> = isMaxProfile
+          ? ["peers", "search"]
+          : ["peers", "search", "orchestrate"]
+        if (workerToolsEnabled() && !isMaxProfile) baseGroups.push("workers")
+        if (isMaxProfile && browseAgentEnabled()) baseGroups.push("workers")
         const enabledGroups: Array<McpGroup> = fastDescriptor.allowedGroups
           ? baseGroups.filter((g) => fastDescriptor.allowedGroups!.has(g))
           : baseGroups
-        if (!isFastProfile && standInToolEnabled()) enabledGroups.push("decide")
+        if (!isFastProfile && !isMaxProfile && standInToolEnabled()) enabledGroups.push("decide")
+        if (
+          isMaxProfile
+          && maxOpusModel() !== undefined
+          && standInToolEnabled({ maxProfile: true })
+        ) {
+          enabledGroups.push("decide")
+        }
         if (browserToolsEnabled() && (!fastDescriptor.allowedGroups || fastDescriptor.allowedGroups.has("browser"))) {
           enabledGroups.push("browser")
         }
-        if (!isFastProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
-        if (!isFastProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
+        if (!isFastProfile && !isMaxProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
+        if (!isFastProfile && !isMaxProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
+        if (isMaxProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
+        if (isMaxProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
         const { keys: groupKeys, skipped: skippedGroups } =
           await resolveGroupKeysFromMirror(enabledGroups)
 
@@ -868,10 +914,12 @@ export const claude = defineCommand({
           codexCli: backend === "cli",
           selfInvocation,
           geminiAvailable: geminiModelsAvailable,
-          geminiModel: resolveGeminiReviewModel(),
+          geminiModel: isMaxProfile
+            ? maxGeminiModel()
+            : resolveGeminiReviewModel(),
           groupKeys,
-          workerToolsAvailable: !isFastProfile && workerToolsEnabled(),
-          browseAvailable: !isFastProfile && browseAgentEnabled(),
+          workerToolsAvailable: !isFastProfile && !isMaxProfile && workerToolsEnabled(),
+          browseAvailable: isMaxProfile ? browseAgentEnabled() : (!isFastProfile && browseAgentEnabled()),
           nativeSubagentModel: nativeAgentModels.implementer,
           reviewerModel: nativeAgentModels.reviewer,
           reviewerFastModel: nativeAgentModels["reviewer-fast"],
@@ -899,9 +947,30 @@ export const claude = defineCommand({
                 plannerEffort: FAST_PLANNER_EFFORT,
                 criticEffort: FAST_CRITIC_EFFORT,
               }
-            : {}),
+            : isMaxProfile
+              ? {
+                  maxProfile: true,
+                  workerToolsAvailable: false,
+                  browseAvailable: browseAgentEnabled(),
+                  maxExploreModel: MAX_PROFILE_MODELS.luna,
+                  maxPlanModel: MAX_PROFILE_MODELS.sol,
+                  maxGeneralPurposeModel: MAX_PROFILE_MODELS.luna,
+                  maxImplementerModel: MAX_PROFILE_MODELS.gemini,
+                  maxReviewerModel: maxGeminiModel() ?? maxGrokModel() ?? MAX_PROFILE_MODELS.grok,
+                  maxBrainstormModel: maxGrokModel() ?? maxGeminiModel() ?? MAX_PROFILE_MODELS.grok,
+                  maxGeminiModel: maxGeminiModel(),
+                  maxGrokModel: maxGrokModel(),
+                  maxPeerModels: {
+                    sol: MAX_PROFILE_MODELS.sol,
+                    luna: MAX_PROFILE_MODELS.luna,
+                    opus: maxOpusModel(),
+                    gemini: maxGeminiModel(),
+                    grok: maxGrokModel(),
+                  },
+                }
+              : {}),
         })
-        if (isFastProfile) fastRuntimeCleanup = runtime.cleanup
+        if (isFastProfile || isMaxProfile) fastRuntimeCleanup = runtime.cleanup
         // Keyed launch registry entry for this session: the `/mcp` nonce
         // (already minted by `writePeerMcpRuntimeFiles`) plus a SEPARATE
         // `/v1/messages` identity-preflight secret, scoped to this launch's
@@ -918,7 +987,7 @@ export const claude = defineCommand({
           allowedGroups: fastDescriptor.allowedGroups,
           allowedPersonas: fastDescriptor.personaAllowlist,
         })
-        if (isFastProfile) fastLaunchId = launchEntry.launchId
+        if (isFastProfile || isMaxProfile) fastLaunchId = launchEntry.launchId
 
         // Delivered via `ANTHROPIC_CUSTOM_HEADERS` (an Anthropic SDK env var
         // Claude Code already forwards on every `/v1/messages` request) so
@@ -938,7 +1007,7 @@ export const claude = defineCommand({
         // the detached reviewer they spawn — inherit it.
         envVars.GH_ROUTER_HOOK_MCP_URL = serverUrl
         envVars.GH_ROUTER_HOOK_NONCE = runtime.nonce
-        onShutdown = isFastProfile
+        onShutdown = (isFastProfile || isMaxProfile)
           ? async (): Promise<void> => {
               try {
                 unregisterLaunch(launchEntry.launchId)
@@ -1040,6 +1109,24 @@ export const claude = defineCommand({
           }
           assertFastDispatchGuardInstalled(true, fastGuardInstalled)
           fastWiringComplete = true
+        } else if (isMaxProfile) {
+          let maxGuardInstalled = false
+          try {
+            const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+            const guardCommand = buildMaxDispatchGuardHookCommand(selfInvocation)
+            await injectStopHookIntoSettingsFile(
+              settingsPath,
+              guardCommand,
+              "PreToolUse",
+              10,
+              MAX_DISPATCH_TOOL_MATCHER,
+            )
+            maxGuardInstalled = true
+          } catch (err) {
+            consola.error(`Could not register the max native dispatch ACL hook: ${String(err)}`)
+          }
+          assertMaxDispatchGuardInstalled(true, maxGuardInstalled)
+          fastWiringComplete = true
         }
 
         const personaNames = runtime.personas.map((p) => p.agentName).join(", ")
@@ -1071,22 +1158,21 @@ export const claude = defineCommand({
         // The hooks scope themselves to the top-level session via the payload's
         // agent_type, so subagents/teammates are untouched.
         const sessionCwd = process.cwd()
-        // Fast profile hard-denies the worker/orchestrate surface (plan
-        // section 6: "no coordinator/workers/orchestrate/related skills or
-        // guards"): no injected worker/orchestration skill, no
-        // UserPromptSubmit worker steer, no worker PreToolUse guard,
-        // regardless of what `workerToolsEnabled()`'s catalog gate says.
-        const workerSkillsActive = workerToolsEnabled() && !isFastProfile
+        // Worker/orchestration skills and their prompt-submit steering belong
+        // only to the standard profile. Fast and max intentionally omit the
+        // slash commands even when the worker catalog gate is otherwise open.
+        const workerSkillsActive = workerToolsEnabled() && launchProfileId === "standard"
+        const skillsToWrite = injectedSkillsForLaunch({
+          profileId: launchProfileId,
+          workerSkillsActive,
+          firstMateEnabled: agentToolsEnabled(),
+        })
         let skillsWritten = 0
-        let skillsToWrite: typeof INJECTED_SKILLS = []
+        for (const s of skillsToWrite) {
+          const r = await writeInjectedSkill(s.name, s.md).catch(() => ({ written: false }))
+          if (r.written) skillsWritten++
+        }
         if (workerSkillsActive) {
-          skillsToWrite = INJECTED_SKILLS.filter(
-            (s) => !isFirstMateSkillName(s.name) || agentToolsEnabled(),
-          )
-          for (const s of skillsToWrite) {
-            const r = await writeInjectedSkill(s.name, s.md).catch(() => ({ written: false }))
-            if (r.written) skillsWritten++
-          }
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const cmd = buildPromptSubmitHookCommand(selfInvocation)
@@ -1137,7 +1223,8 @@ export const claude = defineCommand({
         } catch (err) {
           consola.warn(`Could not auto-approve injected tools: ${String(err)}`)
         }
-        if (workerSkillsActive) {
+        const workerGuardActive = workerSkillsActive || (isMaxProfile && browseAgentEnabled())
+        if (workerGuardActive) {
           // Workers non-blocking guard: a PreToolUse hook scoped (matcher) to the
           // active worker tools that DENIES a raw `mcp__<workersKey>__<mode>` call
           // from the main agent (redirecting it to the `worker-<mode>` background
@@ -1176,7 +1263,9 @@ export const claude = defineCommand({
             try {
               const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
               const workersKey = workersKeyOf(groupKeys)
-              const modes = activeDispatchModes({ browse: browseAgentEnabled() })
+              const modes = isMaxProfile
+                ? (["browse"] as const)
+                : activeDispatchModes({ browse: browseAgentEnabled() })
               const cmd = buildWorkerGuardHookCommand(
                 selfInvocation,
                 workersKey,
@@ -1188,12 +1277,12 @@ export const claude = defineCommand({
               consola.warn(`Could not register the workers PreToolUse guard hook: ${String(err)}`)
             }
           }
-          if (skillsWritten > 0) {
-            const skillNames = skillsToWrite.map((s) => `/${s.name}`).join(", ")
-            process.stderr.write(
-              `Injected skills (${skillsWritten}/${skillsToWrite.length}): ${skillNames}.\n`,
-            )
-          }
+        }
+        if (skillsWritten > 0) {
+          const skillNames = skillsToWrite.map((s) => `/${s.name}`).join(", ")
+          process.stderr.write(
+            `Injected skills (${skillsWritten}/${skillsToWrite.length}): ${skillNames}.\n`,
+          )
         }
 
         // In operator/`--agents` mode, keep local worker/orchestrate MCP tools
@@ -1308,7 +1397,7 @@ export const claude = defineCommand({
         // never runs an UNTRUSTED repo's scripts). `--trust-gate` records consent
         // for this repo; GH_ROUTER_ENABLE_STOP_GATE force-enables. The hook also
         // re-checks trust at runtime and scopes to the top-level session.
-        if (!isFastProfile && (args as Record<string, unknown>)["trust-gate"] === true) {
+        if (!isFastProfile && !isMaxProfile && (args as Record<string, unknown>)["trust-gate"] === true) {
           try {
             const root = await trustRepo(sessionCwd)
             process.stderr.write(
@@ -1318,7 +1407,7 @@ export const claude = defineCommand({
             consola.warn(`Could not record gate trust: ${String(err)}`)
           }
         }
-        const gateDisabled = isFastProfile || stopGateDisabled(args as Record<string, unknown>)
+        const gateDisabled = isFastProfile || isMaxProfile || stopGateDisabled(args as Record<string, unknown>)
         const forceEnabled = parseBoolEnv(process.env.GH_ROUTER_ENABLE_STOP_GATE) === true
         const includeTests = parseBoolEnv(process.env.GH_ROUTER_STOP_GATE_RUN_TESTS) === true
         const gateRoot = await repoRoot(sessionCwd).catch(() => sessionCwd)
@@ -1497,12 +1586,17 @@ export const claude = defineCommand({
         const peerSnippet = buildPeerAwarenessSnippet({
           codexCli: backend === "cli",
           geminiAvailable: geminiModelsAvailable,
-          geminiModel: resolveGeminiReviewModel(),
-          workerToolsAvailable: workerToolsEnabled(),
-          standInAvailable: standInToolEnabled(),
-          browseAvailable: browserToolsEnabled(),
-          compoundBrowseAvailable: browserCompoundToolsEnabled(),
-          powerBrowseAvailable: state.powerBrowseEnabled,
+          geminiModel: isMaxProfile
+            ? maxGeminiModel()
+            : resolveGeminiReviewModel(),
+          workerToolsAvailable: isMaxProfile ? false : workerToolsEnabled(),
+          standInAvailable: isMaxProfile
+            ? (maxOpusModel() !== undefined && standInToolEnabled({ maxProfile: true }))
+            : standInToolEnabled(),
+          browseAvailable: isMaxProfile ? browseAgentEnabled() : browserToolsEnabled(),
+          browserToolsAvailable: browserToolsEnabled(),
+          compoundBrowseAvailable: isMaxProfile ? false : browserCompoundToolsEnabled(),
+          powerBrowseAvailable: isMaxProfile ? false : state.powerBrowseEnabled,
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
           ...nativeAvailability,
@@ -1514,9 +1608,12 @@ export const claude = defineCommand({
         // (operating-defaults first, then this summary).
         peerAwarenessSnippet = peerSnippet
         peerAwarenessSummary = buildPeerAwarenessSummary({
-          workerToolsAvailable: workerToolsEnabled(),
-          standInAvailable: standInToolEnabled(),
-          browseAvailable: browserToolsEnabled(),
+          workerToolsAvailable: isMaxProfile ? false : workerToolsEnabled(),
+          standInAvailable: isMaxProfile
+            ? (maxOpusModel() !== undefined && standInToolEnabled({ maxProfile: true }))
+            : standInToolEnabled(),
+          browseAvailable: isMaxProfile ? browseAgentEnabled() : browserToolsEnabled(),
+          browserToolsAvailable: browserToolsEnabled(),
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
           ...nativeAvailability,
@@ -1558,13 +1655,14 @@ export const claude = defineCommand({
           )
         }
       } catch (err) {
-        if (launchProfileId === "fast") {
+        if (launchProfileId === "fast" || launchProfileId === "max") {
           if (fastLaunchId) unregisterLaunch(fastLaunchId)
           await disposeFastRuntime().catch(() => {})
           await server.close(true).catch(() => {})
           await baseShutdown().catch(() => {})
           resetFastRuntimeOwnership()
-          const message = `Fast profile wiring failed; refusing to launch an unguarded session: ${err instanceof Error ? err.message : String(err)}`
+          const profileLabel = launchProfileId === "fast" ? "Fast" : "Max"
+          const message = `${profileLabel} profile wiring failed; refusing to launch an unguarded session: ${err instanceof Error ? err.message : String(err)}`
           consola.error(message)
           process.stderr.write(`${message}\n`)
           process.exit(1)

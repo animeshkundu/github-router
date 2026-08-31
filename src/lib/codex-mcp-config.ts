@@ -13,12 +13,19 @@ import { oneMContextDisabled, withOneMSuffix } from "./one-m-context"
 import { PATHS, writeRuntimeFileSecure } from "./paths"
 import {
   buildAgentPrompt,
+  maxPersonasFor,
   personasFor,
   type PersonaSpec,
   GROUP_META,
   MCP_GROUPS,
   type McpGroup,
 } from "./peer-mcp-personas"
+import {
+  MAX_PROFILE_MODELS,
+  MAX_PROFILE_NATIVE_AGENT_NAMES,
+  MAX_PROFILE_NATIVE_EFFORTS,
+  MAX_PROFILE_NATIVE_MODELS,
+} from "./max-profile-contract"
 import { type Effort as SubagentEffort } from "./reasoning-effort"
 import {
   FAST_CRITIC_ALIAS_ID,
@@ -166,7 +173,33 @@ interface BuildOpts {
    *  emits the exact `Explore`/`implementer`/`reviewer`/`planner`/`critic` roster instead
    *  of reusing standard role bodies. Standard callers omit these fields. */
   fastProfile?: boolean
+  /** Max-profile role assignments. */
+  maxProfile?: boolean
+  maxExploreModel?: string
+  maxPlanModel?: string
+  maxGeneralPurposeModel?: string
+  maxImplementerModel?: string
+  maxReviewerModel?: string
+  maxBrainstormModel?: string
+  maxGeminiModel?: string
+  maxGrokModel?: string
+  maxPeerModels?: {
+    sol?: string
+    luna?: string
+    gemini?: string
+    grok?: string
+    opus?: string
+  }
+  maxExploreEffort?: SubagentEffort
+  maxPlanEffort?: SubagentEffort
+  maxGeneralPurposeEffort?: SubagentEffort
+  maxImplementerEffort?: SubagentEffort
+  maxReviewerEffort?: SubagentEffort
+  maxBrainstormEffort?: SubagentEffort
+  maxCoordinatorEffort?: SubagentEffort
+  maxPersonaNames?: ReadonlyArray<string>
   plannerModel?: string
+
   /** Fixed `effort:` frontmatter overrides. Absent keeps standard picker-driven
    *  behavior. */
   scoutEffort?: SubagentEffort
@@ -541,6 +574,158 @@ function decorateGuaranteedOneM(id: string): string {
   return `${id}[1m]`
 }
 
+/** Build the literal `-m max` native roster. Max shadows the client built-ins
+ * and every emitted role carries an explicit model and effort. */
+function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
+  const modelFor = (value: string | undefined, fallback: string): string =>
+    nonEmptyModel(value) ?? fallback
+  const exploreModel = modelFor(opts.maxExploreModel, MAX_PROFILE_NATIVE_MODELS.Explore)
+  const planModel = modelFor(opts.maxPlanModel, MAX_PROFILE_NATIVE_MODELS.Plan)
+  const generalModel = modelFor(
+    opts.maxGeneralPurposeModel,
+    MAX_PROFILE_NATIVE_MODELS["general-purpose"],
+  )
+  const implementerModel = modelFor(
+    opts.maxImplementerModel,
+    MAX_PROFILE_NATIVE_MODELS.implementer,
+  )
+  const reviewerModel = modelFor(
+    opts.maxReviewerModel,
+    modelFor(
+      opts.maxGeminiModel,
+      modelFor(opts.maxGrokModel, MAX_PROFILE_NATIVE_MODELS.reviewer),
+    ),
+  )
+  const brainstormModel = modelFor(
+    opts.maxBrainstormModel,
+    modelFor(
+      opts.maxGrokModel,
+      modelFor(opts.maxGeminiModel, MAX_PROFILE_NATIVE_MODELS.brainstorm),
+    ),
+  )
+  const peersKey = peersKeyOf(opts.groupKeys)
+  const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
+  const searchMcpServers = opts.serverUrl
+    ? {
+        [searchKey]: httpEntryFor(
+          opts.serverUrl,
+          "search",
+          opts.nonce,
+          opts.workspaceHeaderCmd,
+        ),
+      }
+    : undefined
+  const peersMcpServers = opts.serverUrl
+    ? {
+        [peersKey]: httpEntryFor(
+          opts.serverUrl,
+          "peers",
+          opts.nonce,
+          opts.workspaceHeaderCmd,
+        ),
+      }
+    : undefined
+  const oneM = (model: string): string =>
+    model === MAX_PROFILE_MODELS.grok ? model : decorateGuaranteedOneM(model)
+  const effort = (name: keyof typeof MAX_PROFILE_NATIVE_EFFORTS): SubagentEffort =>
+    MAX_PROFILE_NATIVE_EFFORTS[name]
+  const base = (name: string, model: string, roleEffort: SubagentEffort): PeerAgentDefinition => ({
+    description: `Max-profile ${name} subagent running ${model}. This model is the deliberate default for the role; use it first and override only after a concrete failure or task-model mismatch. Max dispatch strips Claude Code's required built-in model placeholder so the roster model remains authoritative; clients that can send catalog ids may override only to Luna, Gemini 3.7 Flash, or Grok 4.6.`,
+    prompt: `You are the max-profile ${name} subagent. Work from the supplied brief, verify against the actual repository, and return concrete evidence with file:line references. You do not have Advisor. Do not spawn further agents.`,
+    model: oneM(model),
+    effort: roleEffort,
+  })
+  const researchTools = ["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", `mcp__${searchKey}__*`]
+  const peerNames = opts.maxPersonaNames
+    ?? maxPersonasFor({
+      solModel: opts.maxPeerModels?.sol,
+      lunaModel: opts.maxPeerModels?.luna,
+      opusModel: opts.maxPeerModels?.opus,
+      geminiModel: opts.maxPeerModels?.gemini ?? opts.maxGeminiModel,
+      grokModel: opts.maxPeerModels?.grok ?? opts.maxGrokModel,
+    }).map((persona) => persona.toolNameHttp)
+  const peerList = peerNames.map((name) => `\`${name}\``).join(", ")
+  const out: PeerAgentDefinitions = {
+    Explore: {
+      ...base("Explore", exploreModel, opts.maxExploreEffort ?? effort("Explore")),
+      description: `Max-profile read-only exploration subagent running ${exploreModel}. Best suited to broad, multi-file discovery that should return conclusions and file:line evidence without filling the lead's context.`,
+      prompt: "Role: read-only repository exploration. Answer the supplied question with a concise evidence packet: conclusions, load-bearing file:line citations, relevant commands or sources checked, and explicit gaps. The caller retains planning and implementation. " + readOnlyToolSteer(),
+      tools: researchTools,
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    Plan: {
+      ...base("Plan", planModel, opts.maxPlanEffort ?? effort("Plan")),
+      description: `Max-profile plan consultant running ${planModel} at high effort. Best suited to non-trivial changes where sequencing, interfaces, migration risk, or explicit acceptance criteria benefit from a separate planning view.`,
+      prompt: "Role: implementation planning. Given the goal, constraints, and available evidence, return a coherent plan with affected files or symbols, important invariants and risks, acceptance criteria, and useful verification. Surface assumptions or missing decisions; the lead owns plan acceptance and execution. " + readOnlyToolSteer(),
+      tools: researchTools,
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    "general-purpose": {
+      ...base("general-purpose", generalModel, opts.maxGeneralPurposeEffort ?? effort("general-purpose")),
+      description: `Max-profile general-purpose execution subagent running ${generalModel}. Best suited to mixed or unusual work that does not fit the narrower discovery, planning, implementation, review, or ideation roles.`,
+      prompt: "Role: catch-all execution for the supplied bounded task. Deliver the requested outcome within its stated scope and return the files or artifacts changed, verification evidence, and unresolved risks. The lead owns integration and final decisions. " + fileToolSteer("builds, tests, and git"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    implementer: {
+      ...base("implementer", implementerModel, opts.maxImplementerEffort ?? effort("implementer")),
+      description: `Max-profile implementation subagent running ${implementerModel} at high effort. Best suited to a bounded coding change whose desired outcome and constraints are known but whose implementation still needs judgment.`,
+      prompt: "Role: coding implementation for a settled desired outcome. Make a coherent, scoped change consistent with repository conventions and acceptance criteria. Return the files changed, observable behavior, checks and results, and unresolved risks; surface material ambiguity rather than silently deciding product or architecture questions. " + fileToolSteer("builds, tests, and git"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    reviewer: {
+      ...base("reviewer", reviewerModel, opts.maxReviewerEffort ?? effort("reviewer")),
+      description: `Max-profile repository-aware verifier running ${reviewerModel}. Best suited to assessing an implementation or reproducing a failure when code execution and surrounding repository context matter.`,
+      prompt: "Role: independent repository-aware verification. Assess the supplied artifact against its intent and the actual repository or runtime state. Return verified or clearly plausible findings, severity, file:line evidence, concrete failure scenarios, checks run and results, and a go/no-go; distinguish no findings from checks not run. The lead owns remediation and approval. " + fileToolSteer("builds, tests, and reproductions"),
+      tools: researchTools,
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    brainstorm: {
+      ...base("brainstorm", brainstormModel, opts.maxBrainstormEffort ?? effort("brainstorm")),
+      description: `Max-profile divergent-options subagent running ${brainstormModel}. Best suited to an open decision where materially different repository-feasible approaches remain plausible.`,
+      prompt: "Role: divergent option generation. Return materially distinct, repository-feasible alternatives with trade-offs, assumptions, failure modes, and evidence that would discriminate among them. A recommendation is useful when the available evidence supports one; the lead owns the decision and planning. " + readOnlyToolSteer(),
+      tools: researchTools,
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    "peer-review-coordinator": {
+      description: `Max-profile peer-review coordinator running ${MAX_PROFILE_MODELS.luna} at maximum effort. Best suited to consequential plans or diffs where several independent, cross-family lenses are likely to add value beyond one review.`,
+      prompt: `Role: synthesize independent fresh-context review of the supplied artifact and constraints. Available peers: ${peerList || "(none)"}. Select a risk-proportionate set with distinct useful lenses, preserving independence and avoiding redundant same-model calls unless their scopes differ. Return deduplicated, severity-ranked findings with sources, file:line evidence where applicable, concrete failure scenarios, disagreements, confidence, and evidence gaps. Peer output is advisory; the lead owns go/no-go and remediation.`,
+      model: oneM(MAX_PROFILE_MODELS.luna),
+      effort: opts.maxCoordinatorEffort ?? effort("peer-review-coordinator"),
+      tools: [`mcp__${peersKey}__*`],
+      ...(peersMcpServers ? { mcpServers: peersMcpServers } : {}),
+    },
+  }
+  if (opts.browseAvailable && opts.groupKeys.workers) {
+    const workersKey = workersKeyOf(opts.groupKeys)
+    out["worker-browse"] = {
+      description: dispatcherDescription("browse"),
+      prompt: dispatcherPrompt("browse", workersKey),
+      model: oneM(MAX_PROFILE_MODELS.luna),
+      effort: "high",
+      tools: dispatcherTools("browse", workersKey),
+      ...(opts.serverUrl
+        ? {
+            mcpServers: {
+              [workersKey]: httpEntryFor(
+                opts.serverUrl,
+                "workers",
+                opts.nonce,
+                opts.workspaceHeaderCmd,
+              ),
+            },
+          }
+        : {}),
+    }
+  }
+  const roster = opts.nativeRoster == null
+    ? new Set<string>(MAX_PROFILE_NATIVE_AGENT_NAMES)
+    : opts.nativeRoster instanceof Set ? opts.nativeRoster : new Set(opts.nativeRoster)
+  for (const name of Object.keys(out)) {
+    if (name !== "worker-browse" && !roster.has(name)) delete out[name]
+  }
+  return out
+}
+
 /** Build the literal `-m fast` native roster. This is intentionally separate
  * from the standard definitions: the names overlap, but their role bodies,
  * fixed model assignments, and efforts are profile contracts. */
@@ -662,17 +847,16 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
 export function buildPeerAgentDefinitions(
   opts: BuildOpts,
 ): PeerAgentDefinitions {
+  if (opts.maxProfile) return buildMaxProfileAgentDefinitions(opts)
   if (opts.fastProfile) return buildFastProfileAgentDefinitions(opts)
 
   const out: PeerAgentDefinitions = {}
-  const personas = opts.fastProfile
-    ? []
-    : personasFor({
-        codexCli: opts.codexCli,
-        geminiAvailable: opts.geminiAvailable,
-        geminiModel: opts.geminiModel,
-        agentAllowlist: opts.personaAllowlist,
-      })
+  const personas = personasFor({
+    codexCli: opts.codexCli,
+    geminiAvailable: opts.geminiAvailable,
+    geminiModel: opts.geminiModel,
+    agentAllowlist: opts.personaAllowlist,
+  })
   const peersKey = peersKeyOf(opts.groupKeys)
   // Inline the `peers` HTTP server into each peer subagent's frontmatter so it
   // connects directly on spawn — Agent-tool subagents don't reliably inherit
@@ -1002,6 +1186,31 @@ interface WriteOpts {
   criticEffort?: SubagentEffort
   /** Resolved fast native critic model. */
   criticModel?: string
+  /** Max-profile role assignments. */
+  maxProfile?: boolean
+  maxExploreModel?: string
+  maxPlanModel?: string
+  maxGeneralPurposeModel?: string
+  maxImplementerModel?: string
+  maxReviewerModel?: string
+  maxBrainstormModel?: string
+  maxGeminiModel?: string
+  maxGrokModel?: string
+  maxPeerModels?: {
+    sol?: string
+    luna?: string
+    gemini?: string
+    grok?: string
+    opus?: string
+  }
+  maxExploreEffort?: SubagentEffort
+  maxPlanEffort?: SubagentEffort
+  maxGeneralPurposeEffort?: SubagentEffort
+  maxImplementerEffort?: SubagentEffort
+  maxReviewerEffort?: SubagentEffort
+  maxBrainstormEffort?: SubagentEffort
+  maxCoordinatorEffort?: SubagentEffort
+  maxPersonaNames?: ReadonlyArray<string>
   /** Extra subagent definitions to register alongside the peer/worker agents
    *  (written as `.md` files so they appear in the Task `subagent_type` enum).
    *  Used by `serve` to inject Claude Code's built-in subagents (Explore/Plan/
@@ -1545,6 +1754,24 @@ export async function writePeerMcpRuntimeFiles(
     plannerEffort: opts.plannerEffort,
     criticModel: opts.criticModel,
     criticEffort: opts.criticEffort,
+    maxProfile: opts.maxProfile,
+    maxExploreModel: opts.maxExploreModel,
+    maxPlanModel: opts.maxPlanModel,
+    maxGeneralPurposeModel: opts.maxGeneralPurposeModel,
+    maxImplementerModel: opts.maxImplementerModel,
+    maxReviewerModel: opts.maxReviewerModel,
+    maxBrainstormModel: opts.maxBrainstormModel,
+    maxGeminiModel: opts.maxGeminiModel,
+    maxGrokModel: opts.maxGrokModel,
+    maxExploreEffort: opts.maxExploreEffort,
+    maxPlanEffort: opts.maxPlanEffort,
+    maxGeneralPurposeEffort: opts.maxGeneralPurposeEffort,
+    maxImplementerEffort: opts.maxImplementerEffort,
+    maxReviewerEffort: opts.maxReviewerEffort,
+    maxBrainstormEffort: opts.maxBrainstormEffort,
+    maxCoordinatorEffort: opts.maxCoordinatorEffort,
+    maxPersonaNames: opts.maxPersonaNames,
+    maxPeerModels: opts.maxPeerModels,
     nonce,
     codexHome,
     serverUrl,
@@ -1590,14 +1817,22 @@ export async function writePeerMcpRuntimeFiles(
   const completeMdResult = mdResult
   if (!completeMdResult) throw new Error("peer MCP agent files were not generated")
 
-  const personas = opts.fastProfile
-    ? []
-    : personasFor({
-        codexCli: opts.codexCli,
-        geminiAvailable: opts.geminiAvailable,
-        geminiModel: opts.geminiModel,
-        agentAllowlist: opts.personaAllowlist,
+  const personas = opts.maxProfile
+    ? maxPersonasFor({
+        solModel: opts.maxPeerModels?.sol,
+        lunaModel: opts.maxPeerModels?.luna,
+        opusModel: opts.maxPeerModels?.opus,
+        geminiModel: opts.maxPeerModels?.gemini,
+        grokModel: opts.maxPeerModels?.grok,
       })
+    : opts.fastProfile
+      ? []
+      : personasFor({
+          codexCli: opts.codexCli,
+          geminiAvailable: opts.geminiAvailable,
+          geminiModel: opts.geminiModel,
+          agentAllowlist: opts.personaAllowlist,
+        })
 
   const cleanup = async (): Promise<void> => {
     await Promise.allSettled([

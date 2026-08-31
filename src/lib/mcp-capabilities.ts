@@ -22,6 +22,7 @@ import {
 import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
 import { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 import { ONE_M_TOKENS } from "./one-m-context"
+import { maxProReplacementModel } from "./max-profile-contract"
 import { fastEndpointForModel } from "./fast-endpoint"
 import {
   FAST_PROFILE_ADVISOR_EFFORT,
@@ -48,8 +49,9 @@ export const REVIEW_FAST_DEFAULT_MODEL = "gemini-3.7-flash"
  *   - an OpenAI frontier model (`gpt-5.6-sol`, else `gpt-5.5` — see
  *     `resolveOpenAiFrontier`)
  *   - `claude-opus-5`       (stand_in's Anthropic slot)
- *   - the preferred Gemini reviewer model (`gemini-3.1-pro-preview`, falling
- *     back to `gemini-3.7-flash` after the preview's 2026-09-01 removal)
+ *   - standard/BYO: the preferred Gemini reviewer model
+ *     (`gemini-3.1-pro-preview`, falling back to `gemini-3.7-flash`)
+ *   - max: Grok 4.6/high when usable, otherwise Gemini 3.7 Flash 1M/high
  *
  * If any one is missing, `stand_in` is dropped from `tools/list` AND
  * fails `tools/call` with -32601 (mirroring the `worker` capability's
@@ -139,7 +141,7 @@ export { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
  * just omit the `[1m]` bracket, and the agent would be budgeted at Claude Code's
  * 200K default with no signal that anything changed.
  */
-function firstPresentInCatalog(
+export function firstPresentInCatalog(
   chain: ReadonlyArray<string>,
   opts?: { requireToolCalls?: boolean, minContextTokens?: number },
 ): string | undefined {
@@ -175,13 +177,15 @@ export function resolveOpenAiFrontier(opts?: {
   return firstPresentInCatalog(OPENAI_FRONTIER_MODELS, opts)
 }
 
-export function standInToolEnabled(): boolean {
+export function standInToolEnabled(opts: { maxProfile?: boolean } = {}): boolean {
   const models = state.models?.data
   if (!models) return false
   const hasOpenAi = resolveOpenAiFrontier() != null
   const hasOpus = models.some((m) => m.id === "claude-opus-5")
-  const hasGeminiPro = geminiAvailable()
-  return hasOpenAi && hasOpus && hasGeminiPro
+  const hasThirdLab = opts.maxProfile
+    ? maxProReplacementModel() != null
+    : geminiAvailable()
+  return hasOpenAi && hasOpus && hasThirdLab
 }
 
 /** Model for the native subagent that wants the OpenAI frontier coder

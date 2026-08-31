@@ -15,10 +15,13 @@ import { state } from "~/lib/state"
 
 const savedModels = state.models
 const savedToken = state.githubAgentToken
+const savedFirstMateDir = process.env.GH_ROUTER_FIRST_MATE_DIR
 
 afterEach(() => {
   state.models = savedModels
   state.githubAgentToken = savedToken
+  if (savedFirstMateDir === undefined) delete process.env.GH_ROUTER_FIRST_MATE_DIR
+  else process.env.GH_ROUTER_FIRST_MATE_DIR = savedFirstMateDir
 })
 
 function startMissionTool() {

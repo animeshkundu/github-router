@@ -44,6 +44,7 @@ import { AnswerInbox } from "~/lib/first-mate/scheduler/answer-inbox"
 import { SchedulerLease, makeDriveGate } from "~/lib/first-mate/scheduler/lease"
 import { Tier1Shadow, fromModelRequest, isValidVerdictShape, shadowEnabled, tier1LiveEnabled } from "~/lib/first-mate/scheduler/shadow"
 import { resolveCloudAgentModel } from "~/lib/first-mate/task-model"
+import { maxProReplacementModel } from "~/lib/max-profile-contract"
 import { readStrategy, upsertStrategy } from "~/lib/first-mate/strategy-store"
 import type { RepoRef, StrategyRecord, UnitRow } from "~/lib/first-mate/types"
 import type { McpGroup, NonPersonaMcpTool } from "~/lib/peer-mcp-personas"
@@ -230,7 +231,11 @@ export function createFirstMateTools(
     toolNameHttp: string,
     description: string,
     inputSchema: Record<string, unknown>,
-    handler: (args: Record<string, unknown>, signal?: AbortSignal) => Promise<McpToolResult>,
+    handler: (
+      args: Record<string, unknown>,
+      signal?: AbortSignal,
+      ctx?: import("~/lib/peer-mcp-personas").McpToolCallContext,
+    ) => Promise<McpToolResult>,
   ): NonPersonaMcpTool {
     return {
       toolNameHttp,
@@ -238,7 +243,11 @@ export function createFirstMateTools(
       description,
       inputSchema,
       capability: "agents",
-      async handler(args: Record<string, unknown>, signal?: AbortSignal): Promise<McpToolResult> {
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+        ctx?: import("~/lib/peer-mcp-personas").McpToolCallContext,
+      ): Promise<McpToolResult> {
         if (!hasAgentToken()) {
           return errorResult(
             new FirstMateToolInputError(
@@ -248,7 +257,7 @@ export function createFirstMateTools(
           )
         }
         try {
-          return await handler(args, signal)
+          return await handler(args, signal, ctx)
         } catch (err) {
           return errorResult(err)
         }
@@ -273,7 +282,7 @@ export function createFirstMateTools(
         ),
         ci_required: boolProp("When true, refuse merge approval if the repository reports no CI for the PR head."),
       }, ["goal", "repos", "acceptance_criteria"]),
-      async (args) => {
+      async (args, _signal, ctx) => {
         const repos = requiredStringArray(args, "repos").map(parseRepoRef)
         const now = Date.now()
         const missionId = randomUUID()
@@ -282,7 +291,11 @@ export function createFirstMateTools(
         // where the operator supplied it rather than throwing every controller
         // wake at dispatch. Unspecified → gpt-5.6-sol default → resolves silently.
         const defaultModel = optionalString(args, "default_model")
-        resolveCloudAgentModel(defaultModel)
+        const effectiveDefaultModel = ctx?.profileId === "max"
+          && defaultModel === "gemini-3.1-pro-preview"
+          ? maxProReplacementModel()
+          : defaultModel
+        resolveCloudAgentModel(effectiveDefaultModel)
         const planGate = optionalPlanGate(args, "plan_gate")
         await upsertMission({
           id: missionId,
@@ -315,7 +328,7 @@ export function createFirstMateTools(
         base_ref: stringProp("Optional base branch name. Defaults to the repository default branch."),
         detection_overrides: anyProp("Optional object of detection overrides: tech_stack, primary_os, package_manager, *_command, ui_evidence_required."),
       }, ["repo"]),
-      async (args, signal) => {
+      async (args, signal, ctx) => {
         const input = parseScaffoldRepoArgs(args)
         const repo = parseRepoSlug(input.repo)
         // Enforced BEFORE any GitHub call: this tool creates branches, commits
@@ -335,7 +348,12 @@ export function createFirstMateTools(
           overrides: input.detection_overrides,
           signal,
         })
-        const desiredFiles = buildScaffoldFiles(scaffoldOpts)
+        const desiredFiles = buildScaffoldFiles({
+          ...scaffoldOpts,
+          ...(ctx?.profileId === "max"
+            ? { maxProfileReviewModel: maxProReplacementModel() }
+            : {}),
+        })
         const existingFiles = await readExistingScaffoldFiles(repo, baseBranch, desiredFiles.map((file) => file.path), signal)
         const mode: ScaffoldMode = input.mode ?? "add-missing-only"
         const plan = planScaffoldFiles({ mode, desired: desiredFiles, existing: existingFiles })
@@ -397,7 +415,7 @@ export function createFirstMateTools(
         mission_id: stringProp("Optional mission id to scope the drive to a single mission. Absent → global sweep across all missions."),
         include_all: boolProp("When true, include inactive missions in the board. Default returns active missions only and summarizes inactive counts."),
       }, []),
-      async (args) => {
+      async (args, _signal, ctx) => {
         const modelAnswers = optionalModelAnswers(args)
         const humanDecisions = optionalHumanDecisions(args)
         const advanceInput = {
@@ -408,6 +426,9 @@ export function createFirstMateTools(
           missionId: optionalString(args, "mission_id"),
           includeAll: optionalBoolean(args, "include_all") ?? false,
           answerQueue: answerInbox,
+          ...(ctx?.profileId === "max"
+            ? { maxProfileReviewModel: maxProReplacementModel() }
+            : {}),
           // When this MCP/heartbeat path is the drive holder it must apply the
           // SAME safety envelope as the daemon: fence every ledger write in the
           // sweep with the held lease token, and renew before each dispatch so a
@@ -422,7 +443,10 @@ export function createFirstMateTools(
             : {}),
         }
         let result = await advanceController(advanceInput)
-        const autoAnswers = await routeTier1AutoAnswers(result.needsModel)
+        const autoAnswers = await routeTier1AutoAnswers(
+          result.needsModel,
+          ctx?.profileId === "max",
+        )
         if (autoAnswers.length > 0 && result.drove !== false) {
           consola.info(`first-mate: Tier1 auto-applied ${autoAnswers.length} answer(s)`)
           result = await advanceController({
@@ -436,7 +460,9 @@ export function createFirstMateTools(
             void tier1Shadow.recordLeadOutcome(a.requestId, a.verdict).catch(() => {})
           }
           for (const r of result.needsModel) {
-            void tier1Shadow.observe(fromModelRequest(r)).catch(() => {})
+            void tier1Shadow.observe(fromModelRequest(r), {
+              maxProfile: ctx?.profileId === "max",
+            }).catch(() => {})
           }
         }
         return ok({
@@ -711,7 +737,7 @@ export function createFirstMateTools(
           ["title"],
         ),
       }, ["mission_id", "units"]),
-      async (args) => {
+      async (args, _signal, ctx) => {
         const missionId = requiredString(args, "mission_id")
         const missions = await deps.readMissions()
         const mission = missions.find((entry) => entry.id === missionId)
@@ -726,7 +752,20 @@ export function createFirstMateTools(
         if (units === undefined || units.length === 0) {
           return errorResult(new FirstMateToolInputError("INVALID_ARGUMENT", "arguments.units must contain at least one unit"))
         }
-        const created = await addUnitsToMission(mission, units, deps, existingUnits)
+        const replacement = ctx?.profileId === "max"
+          ? maxProReplacementModel()
+          : undefined
+        const normalizedUnits = replacement
+          ? units.map((unit) => unit.model === "gemini-3.1-pro-preview"
+            ? { ...unit, model: replacement }
+            : unit)
+          : units
+        const created = await addUnitsToMission(
+          mission,
+          normalizedUnits,
+          deps,
+          existingUnits,
+        )
         return ok({ missionId, added: created })
       },
     ),
@@ -795,11 +834,16 @@ export function createFirstMateTools(
 
 export const FIRST_MATE_TOOLS: ReadonlyArray<NonPersonaMcpTool> = createFirstMateTools()
 
-async function routeTier1AutoAnswers(requests: ModelRequest[]): Promise<ModelAnswer[]> {
+async function routeTier1AutoAnswers(
+  requests: ModelRequest[],
+  maxProfile = false,
+): Promise<ModelAnswer[]> {
   if (!tier1LiveEnabled()) return []
   const answers: ModelAnswer[] = []
   for (const request of requests) {
-    const decision = await tier1Shadow.route(fromModelRequest(request))
+    const decision = await tier1Shadow.route(fromModelRequest(request), {
+      maxProfile,
+    })
     if (!decision.autoAccept) continue
     if (!isValidVerdictShape(request.kind, decision.verdict)) continue
     consola.info(`first-mate: Tier1 auto-answer accepted for ${request.requestId} (${request.kind})`)

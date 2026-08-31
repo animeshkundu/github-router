@@ -804,18 +804,22 @@ function truncateTailToUnits(
  * Anthropic's own ADVISOR ("see the whole task + every tool call +
  * every result").
  */
-async function runAdvisor(
-  conversation: Array<AnyRecord>,
-  advisorModel: string,
-  advisorEffort: string,
-  signal?: AbortSignal,
+export function advisorSystemPrompt(
   advisorEscalated = false,
   fastProfile = false,
-): Promise<string> {
-  if (signal?.aborted) {
-    throw new Error("advisor call aborted before dispatch")
+  maxProfile = false,
+): string {
+  if (maxProfile) {
+    return (
+      "You are a non-binding consultant to the primary lead. The transcript is context for one "
+      + "focused consequential uncertainty, not an invitation to supervise the whole session. "
+      + "Offer a concise recommendation with its assumptions, material risks, credible alternatives, "
+      + "confidence, and any evidence gap that would change it. Cite relevant transcript evidence. "
+      + "Do not approve, veto, dictate, or take ownership; the lead weighs your advice against the "
+      + "user's intent and verified evidence."
+    )
   }
-  const advisorSystem =
+  return (
     "You are an expert advisor reviewing an in-progress Claude Code session. "
     + "The transcript below is the work-in-progress (turns numbered, with "
     + "tool calls and results inlined). Read carefully and provide concrete, "
@@ -825,22 +829,38 @@ async function runAdvisor(
     + "name the specific assumption or step to revisit. Aim for 2-5 paragraphs "
     + "of substantive guidance."
     + (fastProfile
-      ? " You are a non-binding consultant to the primary lead. Analyze the "
-        + "focused uncertainty that prompted this call and provide a recommendation, "
+      ? " You are a non-binding consultant to the primary lead. Address the "
+        + "focused uncertainty that prompted this call with a recommendation, "
         + "its assumptions, material risks, credible alternatives, confidence, and "
-        + "any evidence gap that should be resolved. Do not approve, veto, dictate, "
-        + "or take ownership of the workflow; the lead will weigh your advice against "
-        + "the user's intent and verified evidence."
+        + "any evidence gap that would change the recommendation. Do not approve, veto, dictate, "
+        + "or take ownership; the lead will weigh your advice against the user's intent "
+        + "and verified evidence."
       : "")
     // Only on the AUTOMATIC escalation, never on an operator pin that happens to
     // name the same model — see `AdvisorModelChoice.escalated`. The requesting
     // agent really is a lighter tier here, so it needs a decision rather than a
     // survey of options it is less equipped to choose between.
-    + (advisorEscalated && !fastProfile
+    + (advisorEscalated && !fastProfile && !maxProfile
       ? " The requesting agent is running a lighter, faster model than you. "
         + "Give a directive recommendation and commit to the decision rather "
         + "than laying out options for it to weigh."
       : "")
+  )
+}
+
+async function runAdvisor(
+  conversation: Array<AnyRecord>,
+  advisorModel: string,
+  advisorEffort: string,
+  signal?: AbortSignal,
+  advisorEscalated = false,
+  fastProfile = false,
+  maxProfile = false,
+): Promise<string> {
+  if (signal?.aborted) {
+    throw new Error("advisor call aborted before dispatch")
+  }
+  const advisorSystem = advisorSystemPrompt(advisorEscalated, fastProfile, maxProfile)
 
   const resolvedAdvisorModel = resolveModel(advisorModel)
 
@@ -1250,8 +1270,11 @@ export function buildAdvisorStream(opts: {
    *  clause in `runAdvisor`; never the model or transport choice. */
   advisorEscalated?: boolean
   /** True only for the authenticated fast lead. Selects the non-binding
-   * consultative prompt without changing transport or loop behavior. */
+   * consultant prompt without changing transport or loop behavior. */
   advisorFastProfile?: boolean
+  /** True only for the authenticated max lead. Uses the same non-binding
+   * consultant posture while retaining max's model and effort policy. */
+  advisorMaxProfile?: boolean
   externalAborter?: AbortController
   /**
    * Injectable continuation dispatcher for every turn AFTER the first.
@@ -1277,6 +1300,7 @@ export function buildAdvisorStream(opts: {
   const advisorEffort = opts.advisorEffort ?? ADVISOR_DEFAULT_EFFORT
   const advisorEscalated = opts.advisorEscalated ?? false
   const advisorFastProfile = opts.advisorFastProfile ?? false
+  const advisorMaxProfile = opts.advisorMaxProfile ?? false
   const continueTurn =
     opts.continueTurn
     ?? ((body: AnyRecord, signal: AbortSignal) =>
@@ -1723,6 +1747,7 @@ export function buildAdvisorStream(opts: {
                   aborter.signal,
                   advisorEscalated,
                   advisorFastProfile,
+                  advisorMaxProfile,
                 )
               } catch (err) {
                 // If the failure was the consumer-cancel abort, let the

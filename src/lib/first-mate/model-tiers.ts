@@ -1,3 +1,4 @@
+import { maxProReplacementModel } from "~/lib/max-profile-contract"
 import { state } from "~/lib/state"
 
 export type ModelTier = "T0" | "T1" | "T2"
@@ -32,6 +33,7 @@ const TIER_CHAINS = {
   T2: T2_MODEL_CHAIN,
 } as const
 
+
 const T0_FALLBACK_RE = /mini|flash|nano|haiku|small/i
 const MEMO_TTL_MS = 30_000
 
@@ -45,7 +47,11 @@ interface MemoEntry {
   value: string | undefined
 }
 
-const memo: Partial<Record<ModelTier, MemoEntry>> = {}
+export interface TierModelOptions {
+  maxProfile?: boolean
+}
+
+const memo: Partial<Record<`${ModelTier}:${"standard" | "max"}`, MemoEntry>> = {}
 
 function catalogIds(data: CatalogData | undefined): string[] {
   if (!data) return []
@@ -58,25 +64,45 @@ function catalogKey(ids: string[]): string {
   return ids.join("\u0000")
 }
 
-function resolveFromIds(tier: ModelTier, ids: string[]): string | undefined {
+function chainFor(tier: ModelTier, opts: TierModelOptions): ReadonlyArray<string> {
+  if (!opts.maxProfile || tier === "T0") return TIER_CHAINS[tier]
+  const replacement = maxProReplacementModel()
+  return TIER_CHAINS[tier].flatMap((model): string[] => {
+    if (model !== "gemini-3.1-pro-preview") return [model]
+    return replacement ? [replacement] : []
+  })
+}
+
+function resolveFromIds(
+  tier: ModelTier,
+  ids: string[],
+  opts: TierModelOptions,
+): string | undefined {
   if (ids.length === 0) return undefined
 
   const available = new Set(ids)
-  for (const model of TIER_CHAINS[tier]) {
+  for (const model of chainFor(tier, opts)) {
     if (available.has(model)) return model
   }
 
   if (tier === "T0") return ids.find((id) => T0_FALLBACK_RE.test(id))
+  if (opts.maxProfile) {
+    return ids.find((id) => id !== "gemini-3.1-pro-preview")
+  }
   return ids[0]
 }
 
-export function resolveTierModel(tier: ModelTier): string | undefined {
+export function resolveTierModel(
+  tier: ModelTier,
+  opts: TierModelOptions = {},
+): string | undefined {
   const data = state.models?.data
   const length = data?.length ?? 0
   const ids = catalogIds(data)
   const key = catalogKey(ids)
   const now = Date.now()
-  const cached = memo[tier]
+  const memoKey = `${tier}:${opts.maxProfile ? "max" : "standard"}` as const
+  const cached = memo[memoKey]
 
   if (
     cached &&
@@ -88,8 +114,8 @@ export function resolveTierModel(tier: ModelTier): string | undefined {
     return cached.value
   }
 
-  const value = resolveFromIds(tier, ids)
-  memo[tier] = {
+  const value = resolveFromIds(tier, ids, opts)
+  memo[memoKey] = {
     data,
     length,
     catalogKey: key,

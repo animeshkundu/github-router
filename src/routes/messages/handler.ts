@@ -35,7 +35,15 @@ import {
 } from "~/lib/thinking-history-repair"
 import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { preprocessFastRequest } from "~/lib/fast-request-preprocess"
+import { maxRequestError } from "~/lib/max-request-preprocess"
 import { FAST_PROFILE_ADVISOR_MODEL } from "~/lib/fast-profile-contract"
+import {
+  MAX_PROFILE_ADVISOR_INSTRUCTIONS,
+  maxAdvisorEffortForModel,
+  maxAdvisorModelFromPin,
+  maxAdvisorPinIsValid,
+  maxOpusModel,
+} from "~/lib/max-profile-contract"
 import { stripTrailingOneMSuffix } from "~/lib/model-suffix"
 import { salvageOversizedPrompt } from "~/lib/prompt-window-salvage"
 import {
@@ -406,13 +414,36 @@ export async function handleCompletion(c: Context) {
   const incomingBeta = c.req.header("anthropic-beta")
   const advisorRequested = isAdvisorRequested(incomingBeta)
   const fastProfileRequest = identity.launch?.profileId === "fast"
-  const fastSubagentRequest =
-    fastProfileRequest && Boolean(c.req.header("x-claude-code-agent-id"))
+  const maxProfileRequest = identity.launch?.profileId === "max"
+  const subagentRequest = Boolean(c.req.header("x-claude-code-agent-id"))
+  const fastSubagentRequest = fastProfileRequest && subagentRequest
+  const maxSubagentRequest = maxProfileRequest && subagentRequest
   const fastLeadAdvisor = fastProfileRequest && !fastSubagentRequest
-  const advisorEnabled = advisorRequested && !fastSubagentRequest
+  const maxLeadAdvisor = maxProfileRequest && !maxSubagentRequest
+  const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest
   const fastAdvisorEnabled = fastLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
-  const advisorBehaviorEnabled = fastLeadAdvisor ? fastAdvisorEnabled : advisorEnabled
+  const maxAdvisorEnabled = maxLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
+  const advisorBehaviorEnabled = fastLeadAdvisor ? fastAdvisorEnabled : maxLeadAdvisor ? maxAdvisorEnabled : advisorEnabled
   let fastAdvisorChoice: ReturnType<typeof resolveAdvisorModel> | undefined
+  let maxAdvisorChoice: { model: string; effort: string } | undefined
+  if (maxAdvisorEnabled) {
+    const requestedAdvisor = process.env.GH_ROUTER_ADVISOR_MODEL
+    if (!maxAdvisorPinIsValid(requestedAdvisor)) {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message: `Invalid GH_ROUTER_ADVISOR_MODEL ${JSON.stringify(requestedAdvisor)} for max profile; must be gpt-5.6-sol or claude-opus-5.`,
+          },
+        },
+        400,
+        { "x-should-retry": "false" },
+      )
+    }
+    const model = maxAdvisorModelFromPin(requestedAdvisor, maxOpusModel())
+    maxAdvisorChoice = { model, effort: maxAdvisorEffortForModel(model) }
+  }
   if (fastAdvisorEnabled) {
     const mismatch = fastAdvisorMetadataMismatch(rawBody)
 
@@ -447,11 +478,17 @@ export async function handleCompletion(c: Context) {
     }
   }
 
-  const fastPreprocess = preprocessFastRequest(rawBody, identity.launch)
+  const fastPreprocess = preprocessFastRequest(
+    rawBody,
+    identity.launch,
+    subagentRequest,
+  )
   if (fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
-    const message = fastPreprocess.rejectedAlias
-      ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m fast launch.`
-      : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m fast model set.`
+    const message = identity.launch?.profileId === "max"
+      ? (maxRequestError(fastPreprocess) ?? "Invalid max request")
+      : fastPreprocess.rejectedAlias
+        ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m fast launch.`
+        : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m fast model set.`
     return c.json(
       { type: "error", error: { type: "invalid_request_error", message } },
       400,
@@ -474,7 +511,7 @@ export async function handleCompletion(c: Context) {
   // so exposing Advisor there adds cost and conflicting authority without the
   // intended context. Strip both Claude Code's native typed tool and any
   // replay-injected proxy tool before routing.
-  if (fastSubagentRequest) {
+  if (fastSubagentRequest || maxSubagentRequest) {
     finalBody = stripAdvisorTool(finalBody)
   }
 
@@ -507,7 +544,11 @@ export async function handleCompletion(c: Context) {
     // avoid collision with any user MCP server's `advisor`.
     finalBody = injectAdvisorTool(
       finalBody,
-      fastLeadAdvisor ? FAST_ADVISOR_TOOL_INSTRUCTIONS : undefined,
+      fastLeadAdvisor
+        ? FAST_ADVISOR_TOOL_INSTRUCTIONS
+        : maxLeadAdvisor
+          ? MAX_PROFILE_ADVISOR_INSTRUCTIONS
+          : undefined,
     )
     consola.info(
       "ADVISOR enabled for this request — injecting __anthropic_advisor tool; will translate tool_use → server_tool_use{advisor} on the SSE stream",
@@ -599,14 +640,14 @@ export async function handleCompletion(c: Context) {
     const wantsStream = parsedBase?.stream === true
 
     if (
-      fastAdvisorEnabled
+      (fastAdvisorEnabled || maxAdvisorEnabled)
       && wantsStream
     ) {
       const initialConversation = Array.isArray(parsedBase!.messages)
         ? (parsedBase!.messages as Array<AnyRecord>)
         : []
       const parsedInitial = parseAnthropicRequest(parsedBase!, modelId!, selectedModel)
-      const fastAdvisorAborter = new AbortController()
+      const translatedAdvisorAborter = new AbortController()
       const firstResponse = await streamParsedRequestViaShim(
         parsedInitial,
         endpoint,
@@ -614,9 +655,9 @@ export async function handleCompletion(c: Context) {
           modelId: modelId!,
           model: selectedModel,
           routePath: c.req.path,
-          onCancel: () => fastAdvisorAborter.abort(),
+          onCancel: () => translatedAdvisorAborter.abort(),
         },
-        fastAdvisorAborter.signal,
+        translatedAdvisorAborter.signal,
       )
 
       logRequest(
@@ -632,7 +673,19 @@ export async function handleCompletion(c: Context) {
         startTime,
       )
 
-      const advisorChoice = fastAdvisorChoice!
+      const advisorChoice = maxAdvisorEnabled
+        ? {
+            model: maxAdvisorChoice!.model,
+            effort: maxAdvisorChoice!.effort,
+            escalated: false,
+            fastProfile: false,
+          }
+        : {
+            model: fastAdvisorChoice!.model,
+            effort: resolveAdvisorEffort(rawBody, fastAdvisorChoice!.model, true),
+            escalated: fastAdvisorChoice!.escalated,
+            fastProfile: true,
+          }
       return new Response(
         buildAdvisorStream({
           firstResponse,
@@ -644,11 +697,12 @@ export async function handleCompletion(c: Context) {
           requestHeaders: {},
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          // Policy follows authenticated fast launch identity, independently
-          // of lead-model selection. Fast Advisor identity itself is fixed.
-          advisorFastProfile: fastLeadAdvisor,
-          advisorEffort: resolveAdvisorEffort(rawBody, advisorChoice.model, true),
-          externalAborter: fastAdvisorAborter,
+          // Fast and max share the non-binding consultant posture while
+          // retaining their independent model, effort, and transport policies.
+          advisorFastProfile: advisorChoice.fastProfile,
+          advisorMaxProfile: maxAdvisorEnabled,
+          advisorEffort: advisorChoice.effort,
+          externalAborter: translatedAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {
             modelId: modelId!,
             model: selectedModel,
@@ -905,7 +959,9 @@ export async function handleCompletion(c: Context) {
       // allowlist; reading them would hand the advisor what the lead could do
       // instead of what the user picked.
       const advisorChoice = fastAdvisorChoice
-        ?? resolveAdvisorModel(originalModel, false)
+        ?? (maxAdvisorChoice
+          ? { model: maxAdvisorChoice.model, effort: maxAdvisorChoice.effort, escalated: false, fastProfile: false }
+          : resolveAdvisorModel(originalModel, false))
       return new Response(
         buildAdvisorStream({
           firstResponse: response,
@@ -915,11 +971,14 @@ export async function handleCompletion(c: Context) {
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
           advisorFastProfile: fastLeadAdvisor,
-          advisorEffort: resolveAdvisorEffort(
-            rawBody,
-            advisorChoice.model,
-            fastLeadAdvisor,
-          ),
+          advisorMaxProfile: maxAdvisorEnabled,
+          advisorEffort: maxAdvisorChoice
+            ? maxAdvisorChoice.effort
+            : resolveAdvisorEffort(
+                rawBody,
+                advisorChoice.model,
+                fastLeadAdvisor,
+              ),
           externalAborter: advisorAborter,
         }),
         {

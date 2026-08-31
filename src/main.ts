@@ -108,6 +108,8 @@ const main = defineCommand({
       import("./internal-worker-guard").then((m) => m.internalWorkerGuard),
     "internal-fast-dispatch-guard": () =>
       import("./internal-fast-dispatch-guard").then((m) => m.internalFastDispatchGuard),
+    "internal-max-dispatch-guard": () =>
+      import("./internal-max-dispatch-guard").then((m) => m.internalMaxDispatchGuard),
   },
 })
 

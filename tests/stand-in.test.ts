@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
-import { runStandIn, type ModelKey, type StandInResult, type Vote, type VoteFailure } from "~/lib/stand-in"
+import {
+  runStandIn,
+  standInModels,
+  type ModelKey,
+  type StandInResult,
+  type Vote,
+  type VoteFailure,
+} from "~/lib/stand-in"
 import { runStandInToolCall } from "~/lib/peer-mcp-personas"
 import { state } from "~/lib/state"
 
@@ -87,8 +94,10 @@ function voteJson(opts: {
 // fails → tolerate it" path; the retry-recover path is covered directly in
 // `tests/upstream-retry.test.ts`. Use a string to return that string as the
 // assistant text in the appropriate response shape.
-function mockThreePeers(queues: Record<ModelKey, Array<string | null>>) {
-  const consumed: Record<ModelKey, number> = {
+function mockThreePeers(
+  queues: Record<"gpt-5.6-sol" | "claude-opus-5" | "gemini-3.1-pro-preview", Array<string | null>>,
+) {
+  const consumed: Record<"gpt-5.6-sol" | "claude-opus-5" | "gemini-3.1-pro-preview", number> = {
     "gpt-5.6-sol": 0,
     "claude-opus-5": 0,
     "gemini-3.1-pro-preview": 0,
@@ -158,6 +167,53 @@ function mockThreePeers(queues: Record<ModelKey, Array<string | null>>) {
   return { consumed, bodies }
 }
 
+function maxCatalog(opts: { grok?: boolean } = {}) {
+  const models = [
+    {
+      id: "gpt-5.6-sol",
+      capabilities: { limits: { max_prompt_tokens: 1_000_000 } },
+      supported_endpoints: ["/responses"],
+    },
+    {
+      id: "claude-opus-5",
+      capabilities: { limits: { max_prompt_tokens: 1_000_000 } },
+      supported_endpoints: ["/v1/messages"],
+    },
+    {
+      id: "gemini-3.1-pro-preview",
+      capabilities: { limits: { max_prompt_tokens: 1_000_000 } },
+      supported_endpoints: ["/chat/completions"],
+    },
+    {
+      id: "gemini-3.7-flash",
+      capabilities: {
+        limits: {
+          max_context_window_tokens: 1_000_000,
+          max_prompt_tokens: 900_000,
+          max_output_tokens: 32_000,
+        },
+        supports: { tool_calls: true, reasoning_effort: ["low", "medium", "high"] },
+      },
+      supported_endpoints: ["/chat/completions"],
+    },
+  ]
+  if (opts.grok) {
+    models.push({
+      id: "grok-4.6",
+      capabilities: {
+        limits: {
+          max_context_window_tokens: 500_000,
+          max_prompt_tokens: 372_000,
+          max_output_tokens: 32_000,
+        },
+        supports: { tool_calls: true, reasoning_effort: ["low", "medium", "high"] },
+      },
+      supported_endpoints: ["/responses"],
+    })
+  }
+  return { object: "list" as const, data: models } as unknown as NonNullable<typeof state.models>
+}
+
 // Tiny default input — well under the 32KB pre-flight cap.
 const TINY_INPUT = {
   decision: "Which library should we use for date parsing?",
@@ -167,6 +223,109 @@ const TINY_INPUT = {
   ],
   context: "Greenfield TypeScript service; bundle size matters; no timezone-heavy logic yet.",
 }
+
+describe("max stand_in panel", () => {
+  test("prefers Grok 4.6/high and never selects Gemini Pro", () => {
+    state.models = maxCatalog({ grok: true })
+    expect(standInModels({ maxProfile: true })).toEqual([
+      expect.objectContaining({ key: "gpt-5.6-sol", model: "gpt-5.6-sol" }),
+      expect.objectContaining({ key: "claude-opus-5", model: "claude-opus-5" }),
+      expect.objectContaining({
+        key: "grok-4.6",
+        model: "grok-4.6",
+        endpoint: "/v1/responses",
+        effort: "high",
+      }),
+    ])
+  })
+
+  test("falls back to Gemini 3.7 Flash 1M/high and never selects Gemini Pro", () => {
+    state.models = maxCatalog()
+    expect(standInModels({ maxProfile: true })).toEqual([
+      expect.objectContaining({ key: "gpt-5.6-sol", model: "gpt-5.6-sol" }),
+      expect.objectContaining({ key: "claude-opus-5", model: "claude-opus-5" }),
+      expect.objectContaining({
+        key: "gemini-3.7-flash",
+        model: "gemini-3.7-flash",
+        endpoint: "/v1/chat/completions",
+        effort: "high",
+      }),
+    ])
+    expect(standInModels({ maxProfile: true }).map((entry) => entry.model))
+      .not.toContain("gemini-3.1-pro-preview")
+  })
+
+  test("standard panel remains Pro-preferred", () => {
+    state.models = maxCatalog({ grok: true })
+    expect(standInModels().map((entry) => entry.model)).toContain(
+      "gemini-3.1-pro-preview",
+    )
+  })
+
+  test("max tool boundary falls back to Gemini 3.7 Flash/high without Grok", async () => {
+    state.models = maxCatalog()
+    const requests: Array<Record<string, unknown>> = []
+    globalThis.fetch = mock(async (url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      requests.push(body)
+      const vote = voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })
+      if (String(url).includes("/v1/messages")) {
+        return new Response(JSON.stringify({
+          id: "m", type: "message", role: "assistant", model: "claude-opus-5",
+          content: [{ type: "text", text: vote }], stop_reason: "end_turn",
+        }), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      if (String(url).includes("/chat/completions")) {
+        return new Response(JSON.stringify({
+          id: "c", object: "chat.completion", created: 0, model: "gemini-3.7-flash",
+          choices: [{ index: 0, message: { role: "assistant", content: vote }, finish_reason: "stop", logprobs: null }],
+        }), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      return new Response(JSON.stringify({
+        id: "r", object: "response", status: "completed",
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: vote }] }],
+      }), { status: 200, headers: { "content-type": "application/json" } })
+    }) as unknown as typeof globalThis.fetch
+
+    const toolResult = await runStandInToolCall(TINY_INPUT, undefined, true)
+    const result = JSON.parse(toolResult.content[0]?.text ?? "{}") as StandInResult
+    expect(result.votes["gemini-3.7-flash"]).toBeDefined()
+    expect(result.votes["gemini-3.1-pro-preview"]).toBeUndefined()
+    const geminiRequest = requests.find((body) => body.model === "gemini-3.7-flash")
+    expect(geminiRequest).toBeDefined()
+    expect(geminiRequest?.reasoning_effort).toBe("high")
+  })
+
+  test("max tool boundary dispatches Grok at high and reports its real vote key", async () => {
+    state.models = maxCatalog({ grok: true })
+    const requests: Array<Record<string, unknown>> = []
+    globalThis.fetch = mock(async (url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      requests.push(body)
+      const vote = voteJson({ choice: "A", confidence: 0.9, reasoning: "A" })
+      if (String(url).includes("/v1/messages")) {
+        return new Response(JSON.stringify({
+          id: "m", type: "message", role: "assistant", model: "claude-opus-5",
+          content: [{ type: "text", text: vote }], stop_reason: "end_turn",
+        }), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      return new Response(JSON.stringify({
+        id: "r", object: "response", status: "completed",
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: vote }] }],
+      }), { status: 200, headers: { "content-type": "application/json" } })
+    }) as unknown as typeof globalThis.fetch
+
+    const toolResult = await runStandInToolCall(TINY_INPUT, undefined, true)
+    expect(toolResult.isError).toBeFalsy()
+    const result = JSON.parse(toolResult.content[0]?.text ?? "{}") as StandInResult
+    expect(result.verdict).toBe("consensus")
+    expect(result.votes["grok-4.6"]).toBeDefined()
+    expect(result.votes["gemini-3.1-pro-preview"]).toBeUndefined()
+    const grokRequest = requests.find((body) => body.model === "grok-4.6")
+    expect(grokRequest).toBeDefined()
+    expect((grokRequest?.reasoning as { effort?: string })?.effort).toBe("high")
+  })
+})
 
 // Helper to type-narrow vote-or-failure results in assertions.
 function asVote(v: Vote | VoteFailure): Vote {

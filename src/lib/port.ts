@@ -2,6 +2,7 @@ import consola from "consola"
 
 import { ONE_M_TOKENS, withOneMSuffixForLead } from "./one-m-context"
 import { FAST_PROFILE_MODELS } from "./fast-profile-contract"
+import { MAX_PROFILE_LEAD_MODEL } from "./max-profile-contract"
 import { state } from "./state"
 import { isClaudeModel } from "./anthropic-translate/classifier"
 import { resolveModel } from "./utils"
@@ -156,6 +157,9 @@ export function resolveLeadSlugArg(modelArg: string | undefined): string {
   if (!arg) return pickClaudeDefault()
   if (arg.toLowerCase() === "fast") {
     return withOneMSuffixForLead(FAST_LEAD_MODEL)
+  }
+  if (arg.toLowerCase() === "max") {
+    return withOneMSuffixForLead(MAX_PROFILE_LEAD_MODEL)
   }
   const opusFamilyShorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
   if (opusFamilyShorthand) return pickClaudeDefault(opusFamilyShorthand)

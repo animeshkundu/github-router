@@ -166,7 +166,7 @@ export interface NativeAgentAvailability {
    *  `worker-*`/`orchestrate` tools or skills, or `stand_in`, since none of
    *  those are registered in this profile regardless of catalog state.
    *  Absent/`"standard"` is today's catalog-driven full roster. */
-  profile?: "standard" | "fast"
+  profile?: "standard" | "fast" | "max"
   /** False when a fast launch disabled or failed its MCP/native runtime wiring.
    *  The fallback directive must not advertise agents/tools that do not exist. */
   fastRuntimeAvailable?: boolean
@@ -349,6 +349,12 @@ const FAST_OPERATING_DEFAULTS_TAIL =
 export function buildOperatingDefaultsDirective(
   opts: NativeAgentAvailability = {},
 ): string {
+  if (opts.profile === "max") {
+    return (
+      "## Operating defaults (apply when the user has not specified otherwise; the user's explicit direction and the domain's own standards always override)\n\n"
+      + "Max launch profile. The lead owns the outcome and may use the roster as a set of complementary capabilities, not a required sequence: direct tools suit narrow facts; `Explore` broad discovery; `brainstorm` open design choices; `Plan` changes where sequencing, interfaces, or acceptance criteria benefit from a separate view; `implementer` bounded coding; `general-purpose` mixed work; and `reviewer` repository-aware verification. Independent work can run in parallel when that improves context isolation or latency. A fresh-context peer from another model family can be useful where correlated blind spots matter and deterministic evidence does not settle the issue; `peer-review-coordinator` is available when the risk justifies several lenses. Small or obvious tasks are often better handled directly, and model output remains evidence to synthesize rather than a vote. Each role's configured model is the deliberate default for role fit and diversity; overrides are most useful after a concrete mismatch. On every retained max surface, Gemini 3.1 Pro is replaced by Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high. Advisor is optional, non-binding counsel for one focused consequential uncertainty that the normal evidence and roles cannot settle; it has no approval or workflow authority, and a further consultation is useful only when materially new evidence changes the question."
+    )
+  }
   if (opts.profile === "fast") {
     if (opts.fastRuntimeAvailable === false) {
       return (

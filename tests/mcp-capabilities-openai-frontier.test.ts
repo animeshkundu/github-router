@@ -118,6 +118,37 @@ test("standInToolEnabled keeps the Google slot on the Flash fallback", () => {
   expect(standInToolEnabled()).toBe(true)
 })
 
+test("max standInToolEnabled ignores Gemini Pro and prefers Grok/high or Flash 1M/high", () => {
+  const capable = (id: string, context: number, endpoint: string) => ({
+    ...entry(id, true),
+    supported_endpoints: [endpoint],
+    capabilities: {
+      ...entry(id, true).capabilities,
+      limits: {
+        max_context_window_tokens: context,
+        max_prompt_tokens: Math.max(1, context - 20_000),
+        max_output_tokens: 16_000,
+      },
+      supports: { tool_calls: true, reasoning_effort: ["medium", "high"] },
+    },
+  })
+  setCatalog([
+    capable("gpt-5.6-sol", 1_050_000, "/responses"),
+    capable("claude-opus-5", 1_000_000, "/v1/messages"),
+    capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions"),
+    capable("gemini-3.7-flash", 1_000_000, "/chat/completions"),
+    capable("grok-4.6", 500_000, "/responses"),
+  ])
+  expect(standInToolEnabled({ maxProfile: true })).toBe(true)
+
+  setCatalog([
+    capable("gpt-5.6-sol", 1_050_000, "/responses"),
+    capable("claude-opus-5", 1_000_000, "/v1/messages"),
+    capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions"),
+  ])
+  expect(standInToolEnabled({ maxProfile: true })).toBe(false)
+})
+
 test("standInToolEnabled fails closed when neither gpt-5.6-sol nor gpt-5.5 is present", () => {
   setCatalog([
     entry("gpt-5.4", true), // no OpenAI frontier model

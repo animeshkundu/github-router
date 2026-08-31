@@ -69,6 +69,26 @@ describe("buildScaffoldFiles", () => {
     ].sort())
   })
 
+  it("max scaffold replaces the reviewer Pro pin without changing standard", () => {
+    const standard = buildScaffoldFiles({ repoName: "test-repo" })
+    const maxGrok = buildScaffoldFiles({
+      repoName: "test-repo",
+      maxProfileReviewModel: "grok-4.6",
+    })
+    const maxGemini = buildScaffoldFiles({
+      repoName: "test-repo",
+      maxProfileReviewModel: "gemini-3.7-flash",
+    })
+    const reviewer = (files: ReturnType<typeof buildScaffoldFiles>) =>
+      files.find((file) => file.path === ".claude/agents/reviewer.md")!.content
+
+    expect(reviewer(standard)).toContain("model: gemini-3.1-pro-preview")
+    expect(reviewer(maxGrok)).toContain("model: grok-4.6")
+    expect(reviewer(maxGrok)).not.toContain("gemini-3.1-pro-preview")
+    expect(reviewer(maxGemini)).toContain("model: gemini-3.7-flash")
+    expect(reviewer(maxGemini)).not.toContain("gemini-3.1-pro-preview")
+  })
+
   it("copilot-setup-steps.yml has job named copilot-setup-steps", () => {
     const files = buildScaffoldFiles({ repoName: "test-repo" })
     const workflow = files.find((f) => f.path === ".github/workflows/copilot-setup-steps.yml")!

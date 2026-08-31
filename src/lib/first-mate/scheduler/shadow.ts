@@ -50,7 +50,10 @@ export interface Tier1Verdict {
   stakes: "low" | "high"
 }
 
-export type Tier1Judge = (req: ShadowJudgmentRequest) => Promise<Tier1Verdict | null>
+export type Tier1Judge = (
+  req: ShadowJudgmentRequest,
+  opts?: { maxProfile?: boolean },
+) => Promise<Tier1Verdict | null>
 
 export interface ShadowVerdictRecord extends Tier1Verdict {
   type: "shadow"
@@ -153,8 +156,8 @@ const SYSTEM_PROMPT =
   '"novelty": "known"|"novel", "stakes": "low"|"high"}. No prose, no markdown.'
 
 /** The real Tier1 judge: calls the mid model via the router's own endpoint. */
-export const defaultTier1Judge: Tier1Judge = async (req) => {
-  const model = resolveTierModel("T1")
+export const defaultTier1Judge: Tier1Judge = async (req, opts) => {
+  const model = resolveTierModel("T1", opts)
   if (!model) return null
   const user = JSON.stringify({
     kind: req.kind,
@@ -221,8 +224,11 @@ export class Tier1Shadow {
    * the record (tests) or undefined when the judge declined. This method only
    * records; {@link route} is the method that can return an auto-answer decision.
    */
-  async observe(req: ShadowJudgmentRequest): Promise<ShadowVerdictRecord | undefined> {
-    const verdict = await this.judge(req)
+  async observe(
+    req: ShadowJudgmentRequest,
+    opts: { maxProfile?: boolean } = {},
+  ): Promise<ShadowVerdictRecord | undefined> {
+    const verdict = await this.judge(req, opts)
     if (!verdict) return undefined
     const record: ShadowVerdictRecord = {
       type: "shadow",
@@ -231,7 +237,7 @@ export class Tier1Shadow {
       kind: req.kind,
       repo: req.repo ? `${req.repo.owner}/${req.repo.name}` : undefined,
       missionId: req.missionId,
-      tier1Model: resolveTierModel("T1"),
+      tier1Model: resolveTierModel("T1", opts),
       ...verdict,
     }
     await this.append(record)
@@ -247,8 +253,11 @@ export class Tier1Shadow {
    * Phase 3 — run the shadow judge (always logs) and return whether the verdict
    * may be AUTO-ACCEPTED live. Escalate-by-default via {@link decideRoute}.
    */
-  async route(req: ShadowJudgmentRequest): Promise<RouteDecision> {
-    const rec = await this.observe(req)
+  async route(
+    req: ShadowJudgmentRequest,
+    opts: { maxProfile?: boolean } = {},
+  ): Promise<RouteDecision> {
+    const rec = await this.observe(req, opts)
     const verdict: Tier1Verdict | null = rec
       ? {
           wouldVerdict: rec.wouldVerdict,

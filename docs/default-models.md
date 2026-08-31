@@ -2,6 +2,65 @@
 
 `github-router claude` defaults to `claude-opus-5`; `github-router codex` defaults to `gpt-5.6-sol`. Full model fallback and slug-translation behavior is implemented in `src/lib/port.ts` and `src/lib/utils.ts`.
 
+## Max launch profile (`-m max`)
+
+Only the trimmed raw alias `max` selects this profile. It starts on
+`gpt-5.6-sol[1m]` at high effort and accepts controlled lead switches only among
+Sol, Luna, Gemini 3.7 Flash, and Opus 5. Grok 4.6 is not a Max lead or picker
+row because its advertised context is below 1M.
+
+Max emits the native roles `Explore`, `Plan`, `general-purpose`, `implementer`,
+`reviewer`, `brainstorm`, and `peer-review-coordinator`. Their assignments are
+Luna/high, Sol/high, Luna/max, Gemini 3.7 Flash/high, Gemini 3.7 Flash/high with Grok fallback,
+Grok/medium with Gemini fallback, and Luna/max. Max peer MCP names are
+`sol_critic`, `luna_reviewer`, optional `opus_critic`, Gemini critic/reviewer,
+and Grok critic/reviewer when their catalog capabilities are usable.
+
+Claude Code's public Agent schema requires a built-in `sonnet|opus|haiku|fable`
+model value even for a custom agent whose frontmatter already pins its model.
+The Max PreToolUse guard treats those four values only as schema placeholders
+and strips them before dispatch, so the role's fixed frontmatter model wins.
+Clients able to send catalog ids may explicitly override only to Luna 1M,
+Gemini 3.7 Flash 1M, or bare Grok 4.6; Sol and Opus remain unavailable as native
+subagent overrides. Grok remains rejected for lead traffic, while authenticated
+max subagent requests may use it at their role effort. Max Advisor is optional,
+non-binding counsel for a focused consequential uncertainty that direct evidence,
+Plan, reviewer, or peers cannot settle. It is not a supervisor, approver, or
+routine pre-work/completion gate; the lead keeps decision ownership and consults
+again only when materially new evidence creates a different question.
+
+Max's injected guidance presents its tools and roles as complementary affordances,
+not a mandatory Explore → Plan → implement → review pipeline. It gives the lead
+scope, capability, and evidence hints while leaving the reasoning and tool sequence
+to the model. Hard constraints such as model allowlists, tool access, read-only
+roles, and profile boundaries stay in code. Small or obvious tasks may be handled
+directly; independent subagents and cross-family peers are useful when they improve
+context isolation, latency, or coverage of a consequential uncertainty. Success is
+measured by the resulting code, evidence, and checks, not by how many agents ran.
+
+On every retained max
+surface that would otherwise choose Gemini 3.1 Pro, max instead chooses Grok
+4.6/high when usable and falls back to Gemini 3.7 Flash 1M/high. This includes
+`stand_in` and first-mate model pins; persisted first-mate intent remains
+unchanged and the max replacement is derived again at dispatch. Standard and
+fast keep their existing resolvers. Injected max guidance treats each configured role model as the
+intentional default and tells the lead to override only after a concrete failure
+or task-model mismatch, never speculatively.
+
+Max exposes search, optional browser control, browse-only workers, optional
+stand-in, fleet, and first-mate surfaces. It never exposes orchestration or core
+worker modes, and it does not inject `/gh-research`, `/gh-orchestrate`,
+`/gh-floor-keeper`, or `/gh-worker`. First-mate operator skills remain conditional
+on the first-mate capability. Advisor is lead-only and defaults to Opus 5/high
+over native Messages; `GH_ROUTER_ADVISOR_MODEL=gpt-5.6-sol` selects Sol instead. Native
+subagents and browse workers do not receive Advisor. Max rejects `--codex-cli`,
+`--no-codex-mcp`, and arbitrary lead models before creating launch artifacts.
+
+The picker cache is restricted to Sol, Luna, Gemini 3.7 Flash, and Opus 5, with
+`[1m]` attached only when the live catalog advertises at least 1M context. The
+existing catalog-derived `CLAUDE_CODE_AUTO_COMPACT_WINDOW` formula remains the
+source of truth across every reachable Max `[1m]` model.
+
 ## Standard launch
 
 Plain `github-router claude` keeps the standard surface: Opus 5 lead, the full catalog-driven native roster, all normally gated MCP groups/personas, picker-controlled native effort, the standard Sol Advisor at xhigh with a high floor, and every existing hook/skill. Direct `-m gpt-5.6-luna` is also a standard launch. Fast behavior is never inferred from a resolved model id.

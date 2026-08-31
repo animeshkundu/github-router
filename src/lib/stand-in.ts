@@ -2,8 +2,10 @@
  * stand_in: 3-lab away-mode advisor.
  *
  * Polls gpt-5.6-sol xhigh (OpenAI) + claude-opus-5 xhigh (Anthropic) +
- * the preferred Gemini review model high (Google) across two structured voting
- * rounds and returns a ranked-choice verdict. Bounded to advisor:
+ * a third-lab model across two structured voting rounds and returns a
+ * ranked-choice verdict. Standard uses the preferred Gemini review model/high;
+ * max uses Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high.
+ * Bounded to advisor:
  * recommends, never decides — irreversible actions (push, delete, drop,
  * deploy) remain gated by the user-confirmation discipline in CLAUDE.md
  * "Executing actions with care".
@@ -26,6 +28,10 @@ import {
   resolveGeminiReviewModel,
   resolveOpenAiFrontier,
 } from "~/lib/mcp-capabilities"
+import {
+  MAX_PROFILE_MODELS,
+  maxProReplacementModel,
+} from "~/lib/max-profile-contract"
 import { dispatchModelCall } from "~/routes/mcp/handler"
 
 // ─── Public types ───────────────────────────────────────────────────
@@ -54,6 +60,15 @@ export type ModelKey =
   | "gpt-5.6-sol"
   | "claude-opus-5"
   | "gemini-3.1-pro-preview"
+  | "gemini-3.7-flash"
+  | "grok-4.6"
+
+export interface StandInRunOptions {
+  /** Bound max launches replace the standard Google slot with Grok 4.6/high
+   * when usable, otherwise exact Gemini 3.7 Flash 1M/high. Standard/BYO callers
+   * retain the Pro-preferred resolver. */
+  maxProfile?: boolean
+}
 
 export type Verdict =
   | "consensus"
@@ -93,7 +108,7 @@ export interface StandInResult {
   /** Aggregate confidence 0-1; mean of agreeing voters in the winning round. */
   confidence: number
   votes: Record<
-    ModelKey,
+    string,
     { round1: VoteResult; round2: VoteResult | null }
   >
   /** Brief explanation of the verdict (dissent rationale, missing gaps). */
@@ -113,10 +128,9 @@ interface ModelConfig {
  * The three frontier peers. Effort is FIXED per model — not caller-tunable.
  * The tool's purpose is "give me the best 3-lab judgment available";
  * exposing effort knobs would invite the caller to cheap out and would
- * muddy the consensus signal.
- *
- * gemini-3.1-pro-preview is pinned to `high` because the model rejects
- * `xhigh` at the wire with a Copilot 400. `high` is the realistic ceiling.
+ * muddy the consensus signal. Standard retains the Pro-preferred Google slot.
+ * Max replaces that slot with Grok 4.6/high, falling back only to Gemini 3.7
+ * Flash/high; neither max branch can select Gemini 3.1 Pro.
  */
 const STAND_IN_MODELS_BASE: ReadonlyArray<ModelConfig> = Object.freeze([
   { key: "gpt-5.6-sol",            model: "gpt-5.6-sol",            endpoint: "/v1/responses",        effort: "xhigh" },
@@ -124,7 +138,31 @@ const STAND_IN_MODELS_BASE: ReadonlyArray<ModelConfig> = Object.freeze([
   { key: "gemini-3.1-pro-preview", model: "gemini-3.1-pro-preview", endpoint: "/v1/chat/completions", effort: "high"  },
 ])
 
-export function standInModels(): ReadonlyArray<ModelConfig> {
+export function standInModels(
+  opts: StandInRunOptions = {},
+): ReadonlyArray<ModelConfig> {
+  if (opts.maxProfile) {
+    const replacement = maxProReplacementModel()
+    const grok = replacement === MAX_PROFILE_MODELS.grok
+    return STAND_IN_MODELS_BASE.map((config) =>
+      config.key === "gemini-3.1-pro-preview"
+        ? grok
+          ? {
+              ...config,
+              key: "grok-4.6",
+              model: replacement,
+              endpoint: "/v1/responses",
+              effort: "high",
+            }
+          : {
+              ...config,
+              key: "gemini-3.7-flash",
+              model: MAX_PROFILE_MODELS.gemini,
+              effort: "high",
+            }
+        : config,
+    )
+  }
   const geminiModel = resolveGeminiReviewModel()
   return STAND_IN_MODELS_BASE.map((config) =>
     config.key === "gemini-3.1-pro-preview"
@@ -191,13 +229,15 @@ const RETRY_PROMPT_SUFFIX = `\n\nYour previous response was not valid JSON match
 export async function runStandIn(
   input: StandInInput,
   signal?: AbortSignal,
+  opts: StandInRunOptions = {},
 ): Promise<StandInResult> {
+  const panel = standInModels(opts)
   const validIds = new Set(input.options.map((o) => o.id))
 
   // ── Round 1: blind parallel fan-out ──────────────────────────────
   const r1UserText = buildRound1UserText(input)
   const r1 = await Promise.all(
-    standInModels().map((cfg) =>
+    panel.map((cfg) =>
       callAndParse(cfg, SYSTEM_PROMPT_R1, r1UserText, validIds, signal),
     ),
   )
@@ -211,11 +251,11 @@ export async function runStandIn(
   // more actionable. Deterministic + code-driven; isError stays false. Only
   // genuine abstain-on-gap votes count (an `alternative` abstain is not a
   // context gap).
-  const nmiR1 = gapAbstainVerdict(successfulR1, r1, null)
+  const nmiR1 = gapAbstainVerdict(successfulR1, r1, null, panel)
   if (nmiR1) return nmiR1
 
   // Short-circuit consensus: 3/3 same non-null choice with mean confidence ≥ 0.8.
-  const r1Decision = aggregateVotes(successfulR1)
+  const r1Decision = aggregateVotes(successfulR1, panel.length)
   if (
     r1Decision.verdict === "consensus"
     && r1Decision.meanConfidence >= 0.8
@@ -225,11 +265,12 @@ export async function runStandIn(
         verdict: "consensus",
         recommendation: r1Decision.winner,
         confidence: round2(r1Decision.meanConfidence),
-        votes: voteRecord(r1, null),
+        votes: voteRecord(r1, null, panel),
         notes: `All three models picked ${r1Decision.winner} in round 1 with high confidence (skipped round 2).`,
       },
       r1,
       null,
+      panel,
     )
   }
 
@@ -241,18 +282,19 @@ export async function runStandIn(
         verdict: "no_consensus",
         recommendation: null,
         confidence: 0,
-        votes: voteRecord(r1, null),
+        votes: voteRecord(r1, null, panel),
         notes: `Only ${successfulR1.length} of 3 models returned a parseable round-1 vote; insufficient signal to run round 2.`,
       },
       r1,
       null,
+      panel,
     )
   }
 
   // ── Round 2: informed parallel fan-out ───────────────────────────
   const r2UserTextBase = buildRound2UserTextBase(input, r1)
   const r2 = await Promise.all(
-    standInModels().map((cfg) =>
+    panel.map((cfg) =>
       callAndParse(
         cfg,
         SYSTEM_PROMPT_R2,
@@ -270,29 +312,31 @@ export async function runStandIn(
         verdict: "no_consensus",
         recommendation: null,
         confidence: 0,
-        votes: voteRecord(r1, r2),
+        votes: voteRecord(r1, r2, panel),
         notes: `Only ${successfulR2.length} of 3 models returned a parseable round-2 vote; deferring to user.`,
       },
       r1,
       r2,
+      panel,
     )
   }
 
-  const nmiR2 = gapAbstainVerdict(successfulR2, r1, r2)
+  const nmiR2 = gapAbstainVerdict(successfulR2, r1, r2, panel)
   if (nmiR2) return nmiR2
 
-  const r2Decision = aggregateVotes(successfulR2)
+  const r2Decision = aggregateVotes(successfulR2, panel.length)
   if (r2Decision.verdict === "consensus") {
     return withDerivedNotes(
       {
         verdict: "consensus",
         recommendation: r2Decision.winner,
         confidence: round2(r2Decision.meanConfidence),
-        votes: voteRecord(r1, r2),
+        votes: voteRecord(r1, r2, panel),
         notes: `All three models picked ${r2Decision.winner} in round 2.`,
       },
       r1,
       r2,
+      panel,
     )
   }
   if (r2Decision.verdict === "majority") {
@@ -305,11 +349,12 @@ export async function runStandIn(
         verdict: "majority",
         recommendation: r2Decision.winner,
         confidence: round2(r2Decision.meanConfidence),
-        votes: voteRecord(r1, r2),
+        votes: voteRecord(r1, r2, panel),
         notes: `Majority (2 of 3) picked ${r2Decision.winner}. Dissent: ${dissenters}.`,
       },
       r1,
       r2,
+      panel,
     )
   }
 
@@ -319,11 +364,12 @@ export async function runStandIn(
       verdict: "no_consensus",
       recommendation: null,
       confidence: 0,
-      votes: voteRecord(r1, r2),
+      votes: voteRecord(r1, r2, panel),
       notes: `Models did not converge in round 2 (votes split). Defer to user.`,
     },
     r1,
     r2,
+    panel,
   )
 }
 
@@ -489,6 +535,7 @@ interface VoteAggregation {
 
 function aggregateVotes(
   results: ReadonlyArray<{ key: ModelKey; vote: Vote }>,
+  panelSize = 3,
 ): VoteAggregation {
   // Tally non-null choices; null votes (abstain / need_more_info) are
   // not counted toward any option but DO count as "not in the majority"
@@ -513,8 +560,7 @@ function aggregateVotes(
     }
   }
 
-  const total = standInModels().length // always 3
-  if (topChoice && topCount === total) {
+  if (topChoice && topCount === panelSize) {
     return {
       verdict: "consensus",
       winner: topChoice,
@@ -579,6 +625,7 @@ function gapAbstainVerdict(
   successful: ReadonlyArray<{ key: ModelKey; vote: Vote }>,
   r1: ReadonlyArray<CallResult>,
   r2: ReadonlyArray<CallResult> | null,
+  panel: ReadonlyArray<ModelConfig>,
 ): StandInResult | null {
   const gapVotes = successful.filter(
     (r) => r.vote.choice === null && r.vote.needMoreInfo,
@@ -587,7 +634,7 @@ function gapAbstainVerdict(
 
   const gaps = gapVotes.map((r) => `- ${r.key}: ${r.vote.needMoreInfo}`).join("\n")
   const header =
-    gapVotes.length === standInModels().length
+    gapVotes.length === panel.length
       ? "All three models reported they need more context to decide:"
       : `${gapVotes.length} of 3 models reported they need more context to decide:`
   return withDerivedNotes(
@@ -595,11 +642,12 @@ function gapAbstainVerdict(
       verdict: "need_more_info",
       recommendation: null,
       confidence: 0,
-      votes: voteRecord(r1, r2),
+      votes: voteRecord(r1, r2, panel),
       notes: `${header}\n${gaps}`,
     },
     r1,
     r2,
+    panel,
   )
 }
 
@@ -611,9 +659,10 @@ function gapAbstainVerdict(
 function freshestVotes(
   r1: ReadonlyArray<CallResult>,
   r2: ReadonlyArray<CallResult> | null,
+  panel: ReadonlyArray<ModelConfig>,
 ): Array<{ key: ModelKey; vote: Vote }> {
   const out: Array<{ key: ModelKey; vote: Vote }> = []
-  for (const cfg of standInModels()) {
+  for (const cfg of panel) {
     const r2Entry = r2?.find((r) => r.key === cfg.key)
     const r1Entry = r1.find((r) => r.key === cfg.key)
     const vote =
@@ -638,8 +687,9 @@ function withDerivedNotes(
   result: StandInResult,
   r1: ReadonlyArray<CallResult>,
   r2: ReadonlyArray<CallResult> | null,
+  panel: ReadonlyArray<ModelConfig>,
 ): StandInResult {
-  const fresh = freshestVotes(r1, r2)
+  const fresh = freshestVotes(r1, r2, panel)
   const extras: Array<string> = []
 
   const alts = fresh.filter((v) => v.vote.alternative)
@@ -668,9 +718,10 @@ function withDerivedNotes(
 function voteRecord(
   r1: ReadonlyArray<CallResult>,
   r2: ReadonlyArray<CallResult> | null,
+  panel: ReadonlyArray<ModelConfig>,
 ): StandInResult["votes"] {
   const record = {} as StandInResult["votes"]
-  for (const cfg of standInModels()) {
+  for (const cfg of panel) {
     const r1Entry = r1.find((r) => r.key === cfg.key)
     const r2Entry = r2?.find((r) => r.key === cfg.key) ?? null
     record[cfg.key] = {

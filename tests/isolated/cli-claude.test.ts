@@ -1587,6 +1587,53 @@ describe("claude command", () => {
       expect(args).toContain("--append-system-prompt")
     })
 
+    test("`-m max` configures max profile runtime options, groups, and fail-closed cleanup", async () => {
+      state.models = {
+        object: "list",
+        data: [
+          {
+            id: "gpt-5.6-sol",
+            capabilities: { limits: { max_context_window_tokens: 1_050_000, max_prompt_tokens: 900_000, max_output_tokens: 32_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "gpt-5.6-luna",
+            capabilities: { limits: { max_context_window_tokens: 1_050_000, max_prompt_tokens: 900_000, max_output_tokens: 32_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "claude-opus-5",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000, max_output_tokens: 32_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/v1/messages"],
+          },
+          {
+            id: "grok-4.6",
+            capabilities: { limits: { max_prompt_tokens: 372_000, max_output_tokens: 16_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "gemini-3.7-flash",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 900_000, max_output_tokens: 32_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
+            supported_endpoints: ["/chat/completions"],
+          },
+        ] as unknown as NonNullable<typeof state.models>["data"],
+      }
+      resolveGroupKeysFromMirrorMock.mockResolvedValue({
+        keys: { peers: "peers", search: "search" },
+        skipped: [],
+      })
+
+      const run = getRunFn()
+      await run({ args: { model: "max" } })
+
+      expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
+      const [, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
+      expect(opts.maxProfile).toBe(true)
+      expect(opts.workerToolsAvailable).toBe(false)
+      expect(opts.maxImplementerModel).toBe("gemini-3.7-flash")
+      expect(opts.maxPlanModel).toBe("gpt-5.6-sol")
+    })
+
     test("gemini availability is probed against state.models catalog", async () => {
       state.models = {
         data: [

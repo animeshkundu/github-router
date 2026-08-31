@@ -16,9 +16,14 @@ import {
   LUNA_HAIKU_ALIAS_ID,
   LUNA_REAL_MODEL_ID,
   LUNA_SONNET_ALIAS_ID,
+  MAX_LUNA_HIGH_ALIAS_ID,
   canonicalizeAliasModel,
   type LaunchProfileId,
 } from "./launch-profile"
+import {
+  MAX_PROFILE_MODELS,
+  maxOpusModel,
+} from "./max-profile-contract"
 import { catalogAdvertises1M, oneMContextDisabled, withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
 import {
   BUDGET_SMALL_FAST_CATALOG_ID,
@@ -752,6 +757,23 @@ export function nativeSelectableModelsInCatalog(): Array<{
   }))
 }
 
+const MAX_NATIVE_MODELS: ReadonlyArray<{ id: string; displayName: string }> = [
+  { id: MAX_PROFILE_MODELS.sol, displayName: "GPT-5.6 Sol" },
+  { id: MAX_PROFILE_MODELS.luna, displayName: "GPT-5.6 Luna" },
+  { id: MAX_PROFILE_MODELS.gemini, displayName: "Gemini 3.7 Flash" },
+  { id: MAX_PROFILE_MODELS.opus, displayName: "Claude Opus 5" },
+]
+
+export function maxSelectableModelsInCatalog(): Array<{ id: string; display_name: string }> {
+  return MAX_NATIVE_MODELS
+    .filter((model) => state.models?.data.some((entry) => entry.id === model.id))
+    .map((model) => ({ id: withOneMSuffix(model.id), display_name: model.displayName }))
+}
+
+export function maxModelRowsInCatalog(): Array<{ id: string; display_name: string }> {
+  return maxSelectableModelsInCatalog()
+}
+
 /**
  * Pre-seed Claude Code's gateway-model discovery cache so the non-Claude
  * models appear as selectable picker rows WITHOUT the network fetch.
@@ -896,6 +918,10 @@ function oneMSuffixForAlias(aliasId: string): string {
   return catalogAdvertises1M(LUNA_REAL_MODEL_ID) ? `${aliasId}[1m]` : aliasId
 }
 
+function oneMSuffixForMaxModel(id: string): string {
+  return withOneMSuffix(id)
+}
+
 export function getClaudeCodeEnvVars(
   serverUrl: string,
   model?: string,
@@ -1000,10 +1026,13 @@ export function getClaudeCodeEnvVars(
   // ANTHROPIC_SMALL_FAST_MODEL pass-through documented in launch.ts's
   // STRIPPED_PARENT_ENV_KEYS comment.
   const isFastProfile = launchProfileId === "fast"
+  const isMaxProfile = launchProfileId === "max"
 
   const smallFastModel =
-    isFastProfile
-      ? LUNA_HAIKU_ALIAS_ID
+    isMaxProfile
+      ? MAX_LUNA_HIGH_ALIAS_ID
+      : isFastProfile
+        ? LUNA_HAIKU_ALIAS_ID
       : isBudgetClaudeLead(model)
         && (state.models?.data?.some((m) => m.id === BUDGET_SMALL_FAST_CATALOG_ID)
           ?? false)
@@ -1018,7 +1047,7 @@ export function getClaudeCodeEnvVars(
     // strips the alias for the outbound Copilot call; this decoration is
     // purely Claude Code's LOCAL context-accounting signal.
     vars.ANTHROPIC_SMALL_FAST_MODEL =
-      isFastProfile
+      isFastProfile || isMaxProfile
         ? oneMSuffixForAlias(smallFastModel)
         : smallFastModel
   }
@@ -1093,7 +1122,24 @@ export function getClaudeCodeEnvVars(
     vars[modelKey] = oneMSuffixForAlias(aliasId)
     if (process.env[nameKey] === undefined) vars[nameKey] = displayName
   }
-  if (isFastProfile) {
+  if (isMaxProfile) {
+    const seedMaxRow = (modelKey: string, nameKey: string, id: string): void => {
+      if (process.env[modelKey] !== undefined) return
+      vars[modelKey] = oneMSuffixForMaxModel(id)
+      if (process.env[nameKey] === undefined) vars[nameKey] = id
+    }
+    seedMaxRow("ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", MAX_PROFILE_MODELS.luna)
+    seedMaxRow("ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", MAX_PROFILE_MODELS.luna)
+    if (maxOpusModel()) {
+      seedMaxRow("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", MAX_PROFILE_MODELS.opus)
+    }
+    if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION === undefined) {
+      vars.ANTHROPIC_CUSTOM_MODEL_OPTION = oneMSuffixForMaxModel(MAX_PROFILE_MODELS.sol)
+      if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
+        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-5.6 Sol"
+      }
+    }
+  } else if (isFastProfile) {
     seedFastAliasTierRow(
       "ANTHROPIC_DEFAULT_SONNET_MODEL",
       "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
@@ -1139,11 +1185,13 @@ export function getClaudeCodeEnvVars(
       smallFastModel,
     )
   }
-  seedTierRow(
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
-    "claude-opus-5",
-  )
+  if (!isMaxProfile) {
+    seedTierRow(
+      "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+      "claude-opus-5",
+    )
+  }
 
   // Plan-mode (v2) Phase-2 "Plan" agent parallelism. Claude Code's
   // getPlanModeV2AgentCount() (verified verbatim in the claude v2.1.158
@@ -1238,7 +1286,9 @@ export function getClaudeCodeEnvVars(
   // cache seed actually landed, so we never turn on a feature with nothing
   // to show. When no target is in the catalog we clear any prior seed so a
   // user-pinned discovery flag can't surface stale rows.
-  const nativeModels = nativeSelectableModelsInCatalog()
+  const nativeModels = isMaxProfile
+    ? maxSelectableModelsInCatalog()
+    : nativeSelectableModelsInCatalog()
   if (nativeModels.length > 0) {
     const seeded = seedGatewayModelCache(serverUrl, nativeModels)
     if (
@@ -1275,7 +1325,7 @@ export function getClaudeCodeEnvVars(
   // suffix-aware `/config` parser — it is `parseInt`-based, so "1m" parses to
   // 1 and is then floored to 100,000, which would compact a 1M session every
   // ~52K tokens. Pinned by a regression test.
-  applyAutoCompactWindow(vars)
+  applyAutoCompactWindow(vars, launchProfileId)
 
   // Prepend the toolbelt bin dir to the spawned agent's PATH so it can
   // call rg/fd/jq/sd/sg/yq directly. Uses the parent's existing PATH
@@ -1330,7 +1380,7 @@ function catalogEntryForSeededModel(value: string): Model | undefined {
  *
  * Presence-guarded on the parent env, symmetric with every other guard here.
  */
-function applyAutoCompactWindow(vars: Record<string, string>): void {
+function applyAutoCompactWindow(vars: Record<string, string>, launchProfileId: LaunchProfileId): void {
   if (process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW !== undefined) return
 
   let tightestWindow: number | undefined
@@ -1366,7 +1416,10 @@ function applyAutoCompactWindow(vars: Record<string, string>): void {
   // they have no dedicated ANTHROPIC_DEFAULT_* env. Ignoring them makes a
   // standard Opus launch derive 828600, then overflow after `/model` switches
   // to Luna whose 922K prompt ceiling requires 816700.
-  for (const model of nativeSelectableModelsInCatalog()) consider(model.id)
+  const gatewayModels = launchProfileId === "max"
+    ? maxSelectableModelsInCatalog()
+    : nativeSelectableModelsInCatalog()
+  for (const model of gatewayModels) consider(model.id)
 
   if (tightestWindow === undefined) return
   vars.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(tightestWindow)

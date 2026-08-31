@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { ARTIFACT_REVIEW_SKILL, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, INJECTED_SKILLS, writeInjectedSkill } from "../src/lib/injected-skills"
+import { ARTIFACT_REVIEW_SKILL, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, INJECTED_SKILLS, injectedSkillsForLaunch, writeInjectedSkill } from "../src/lib/injected-skills"
 import { CONDENSED_OPERATING_SEQUENCE, DEFINITION_OF_GREATNESS } from "../src/lib/first-mate/operating-protocol"
 
 function frontmatterFor(md: string): string {
@@ -47,6 +47,62 @@ describe("INJECTED_SKILLS", () => {
       expect(description).not.toMatch(/^(?:I|You)\s/)
       expect(description).toMatch(/use when|use whenever|when the user|before/i)
     }
+  })
+
+  test("selects router-owned skills only for standard launches", () => {
+    const standard = injectedSkillsForLaunch({
+      profileId: "standard",
+      workerSkillsActive: true,
+      firstMateEnabled: false,
+    })
+    expect(standard.map((skill) => skill.name)).toEqual([
+      "gh-research",
+      "gh-orchestrate",
+      "gh-floor-keeper",
+      "gh-worker",
+    ])
+
+    const standardWithFirstMate = injectedSkillsForLaunch({
+      profileId: "standard",
+      workerSkillsActive: true,
+      firstMateEnabled: true,
+    })
+    expect(standardWithFirstMate).toEqual(INJECTED_SKILLS)
+
+    expect(injectedSkillsForLaunch({
+      profileId: "fast",
+      workerSkillsActive: true,
+      firstMateEnabled: true,
+    })).toEqual([])
+
+    const max = injectedSkillsForLaunch({
+      profileId: "max",
+      workerSkillsActive: true,
+      firstMateEnabled: true,
+    })
+    expect(max.map((skill) => skill.name)).toEqual([
+      "gh-first-mate",
+      "gh-first-mate-scaffold",
+      "gh-first-mate-operate",
+      "gh-first-mate-conduct",
+    ])
+    expect(max.map((skill) => skill.name)).not.toEqual(expect.arrayContaining([
+      "gh-research",
+      "gh-orchestrate",
+      "gh-floor-keeper",
+      "gh-worker",
+    ]))
+    expect(injectedSkillsForLaunch({
+      profileId: "max",
+      workerSkillsActive: true,
+      firstMateEnabled: false,
+    })).toEqual([])
+
+    expect(injectedSkillsForLaunch({
+      profileId: "standard",
+      workerSkillsActive: false,
+      firstMateEnabled: true,
+    })).toEqual([])
   })
 })
 

@@ -91,6 +91,46 @@ test("resolveTierModel picks preferred and falls through chains", () => {
   expect(resolveTierModel("T2")).toBe("catalog-first")
 })
 
+test("max tier resolution excludes Gemini Pro in favor of Grok then Flash", () => {
+  const capable = (id: string, context: number, endpoint: string) => ({
+    id,
+    capabilities: {
+      limits: {
+        max_context_window_tokens: context,
+        max_prompt_tokens: Math.max(1, context - 20_000),
+        max_output_tokens: 16_000,
+      },
+      supports: { tool_calls: true, reasoning_effort: ["medium", "high"] },
+    },
+    supported_endpoints: [endpoint],
+  })
+  state.models = {
+    object: "list",
+    data: [
+      capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions"),
+      capable("gemini-3.7-flash", 1_000_000, "/chat/completions"),
+      capable("grok-4.6", 500_000, "/responses"),
+    ],
+  } as unknown as ModelCatalog
+  expect(resolveTierModel("T1")).toBe("gemini-3.1-pro-preview")
+  expect(resolveTierModel("T1", { maxProfile: true })).toBe("grok-4.6")
+  expect(resolveTierModel("T2", { maxProfile: true })).toBe("grok-4.6")
+
+  state.models = {
+    object: "list",
+    data: [
+      capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions"),
+      capable("gemini-3.7-flash", 1_000_000, "/chat/completions"),
+    ],
+  } as unknown as ModelCatalog
+  expect(resolveTierModel("T1", { maxProfile: true })).toBe("gemini-3.7-flash")
+  expect(resolveTierModel("T2", { maxProfile: true })).toBe("gemini-3.7-flash")
+
+  setModels(["gemini-3.1-pro-preview"])
+  expect(resolveTierModel("T1", { maxProfile: true })).toBeUndefined()
+  expect(resolveTierModel("T2", { maxProfile: true })).toBeUndefined()
+})
+
 test("resolveTierModel falls back to a mini/flash T0 catalog id", () => {
   setModels(["claude-sonnet", "vendor-flash-fast", "gpt-5.5"])
   expect(resolveTierModel("T0")).toBe("vendor-flash-fast")
