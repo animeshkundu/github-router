@@ -27,9 +27,10 @@ export interface FastRequestPreprocessResult {
 export function preprocessFastRequest(
   rawBody: string,
   launch: LaunchRegistryEntry | undefined,
+  subagentRequest = false,
 ): FastRequestPreprocessResult {
   if (launch?.profileId === "max") {
-    return preprocessMaxRequest(rawBody, launch)
+    return preprocessMaxRequest(rawBody, launch, subagentRequest)
   }
   let parsed: AnyRecord
   try {

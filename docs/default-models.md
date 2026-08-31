@@ -16,6 +16,15 @@ Grok/medium with Gemini fallback, and Luna/max. Max peer MCP names are
 `sol_critic`, `luna_reviewer`, optional `opus_critic`, Gemini critic/reviewer,
 and Grok critic/reviewer when their catalog capabilities are usable.
 
+Claude Code's public Agent schema requires a built-in `sonnet|opus|haiku|fable`
+model value even for a custom agent whose frontmatter already pins its model.
+The Max PreToolUse guard treats those four values only as schema placeholders
+and strips them before dispatch, so the role's fixed frontmatter model wins.
+Clients able to send catalog ids may explicitly override only to Luna 1M,
+Gemini 3.7 Flash 1M, or bare Grok 4.6; Sol and Opus remain unavailable as native
+subagent overrides. Grok remains rejected for lead traffic, while authenticated
+max subagent requests may use it at medium effort.
+
 Max exposes search, optional browser control, browse-only workers, optional
 stand-in, fleet, and first-mate surfaces. It never exposes orchestration or core
 worker modes. Advisor is lead-only and defaults to Opus 5/high over native

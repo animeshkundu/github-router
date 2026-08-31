@@ -7,7 +7,10 @@ import {
   resolveModelAlias,
   resolveLaunchProfile,
 } from "../src/lib/launch-profile"
-import { decideMaxDispatchGuard } from "../src/lib/max-dispatch-acl"
+import {
+  MAX_AGENT_SCHEMA_MODEL_ALIASES,
+  decideMaxDispatchGuard,
+} from "../src/lib/max-dispatch-acl"
 import {
   MAX_PROFILE_MODELS,
   formatMaxPrerequisiteFailure,
@@ -85,6 +88,24 @@ describe("max profile contract", () => {
     expect(formatMaxPrerequisiteFailure(failure.missing)).toContain("gpt-5.6-sol")
   })
 
+  test("shared native-model defaults match emitted frontmatter", () => {
+    const agents = buildPeerAgentDefinitions({
+      codexCli: false,
+      geminiAvailable: true,
+      maxProfile: true,
+      groupKeys: { peers: "peers", search: "search", workers: "workers" },
+      nonce: "0".repeat(64),
+      codexHome: "/tmp/codex",
+    })
+    expect(agents.Explore?.model).toBe("gpt-5.6-luna[1m]")
+    expect(agents.Plan?.model).toBe("gpt-5.6-sol[1m]")
+    expect(agents["general-purpose"]?.model).toBe("gpt-5.6-luna[1m]")
+    expect(agents.implementer?.model).toBe("gemini-3.7-flash[1m]")
+    expect(agents.reviewer?.model).toBe("gemini-3.7-flash[1m]")
+    expect(agents.brainstorm?.model).toBe("grok-4.6")
+    expect(agents["peer-review-coordinator"]?.model).toBe("gpt-5.6-luna[1m]")
+  })
+
   test("emits the exact max native roster and explicit model efforts", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
@@ -115,9 +136,89 @@ describe("max profile contract", () => {
     expect(agents["worker-browse"]).toBeUndefined()
   })
 
-  test("max dispatch ACL rejects Sol and unknown model overrides", () => {
+  test("public Agent schema placeholders reach every max role through frontmatter", () => {
+    const roles = [
+      "Explore",
+      "Plan",
+      "general-purpose",
+      "implementer",
+      "reviewer",
+      "brainstorm",
+      "peer-review-coordinator",
+    ]
+    for (const role of roles) {
+      for (const schemaModel of MAX_AGENT_SCHEMA_MODEL_ALIASES) {
+        const decision = decideMaxDispatchGuard({
+          tool_name: "Agent",
+          tool_input: {
+            subagent_type: role,
+            prompt: "smoke test",
+            model: schemaModel,
+          },
+        })
+        expect(decision.allowed).toBe(true)
+        expect(decision.updatedInput).toEqual({
+          subagent_type: role,
+          prompt: "smoke test",
+        })
+      }
+    }
+  })
+
+  test("normalizes schema placeholder spelling before removing it", () => {
+    for (const modelAlias of [" Opus ", "FABLE", "haiku[1m]"]) {
+      const decision = decideMaxDispatchGuard({
+        tool_name: "Agent",
+        tool_input: {
+          subagent_type: "implementer",
+          prompt: "smoke test",
+          model: modelAlias,
+        },
+      })
+      expect(decision.allowed).toBe(true)
+      expect(decision.updatedInput).toEqual({
+        subagent_type: "implementer",
+        prompt: "smoke test",
+      })
+    }
+  })
+
+  test("schema placeholders validate effort against the target frontmatter model", () => {
+    const planRole = decideMaxDispatchGuard({
+      tool_name: "Agent",
+      tool_input: { subagent_type: "Plan", model: "sonnet", effort: "high" },
+    })
+    expect(planRole.allowed).toBe(true)
+    expect(planRole.updatedInput).toEqual({
+      subagent_type: "Plan",
+      effort: "high",
+    })
+    expect(decideMaxDispatchGuard({
+      tool_name: "Agent",
+      tool_input: { subagent_type: "Plan", model: "sonnet", effort: "low" },
+    }).allowed).toBe(false)
+
+    const geminiRole = decideMaxDispatchGuard({
+      tool_name: "Agent",
+      tool_input: { subagent_type: "implementer", model: "fable", effort: "xhigh" },
+    })
+    expect(geminiRole.allowed).toBe(false)
+
+    const lunaRole = decideMaxDispatchGuard({
+      tool_name: "Agent",
+      tool_input: { subagent_type: "general-purpose", model: "fable", effort: "max" },
+    })
+    expect(lunaRole.allowed).toBe(true)
+    expect(lunaRole.updatedInput).toEqual({
+      subagent_type: "general-purpose",
+      effort: "max",
+    })
+  })
+
+  test("max dispatch ACL preserves allowed catalog overrides and rejects Sol", () => {
     const allowed = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-5.6-luna[1m]" } }))
     expect(allowed.allowed).toBe(true)
+    expect(allowed.updatedInput?.model).toBe("gpt-5.6-luna[1m]")
     const denied = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-5.6-sol[1m]" } }))
     expect(denied.allowed).toBe(false)
   })
@@ -145,11 +246,14 @@ describe("max profile contract", () => {
     expect(allowedLead.modified).toBe(true)
     expect(allowedLead.rejectedModel).toBeUndefined()
 
-    const disallowedLead = preprocessMaxRequest(
-      JSON.stringify({ model: "grok-4.6", messages: [] }),
-      launch,
-    )
+    const grokBody = JSON.stringify({ model: "grok-4.6", messages: [] })
+    const disallowedLead = preprocessMaxRequest(grokBody, launch)
     expect(disallowedLead.rejectedModel).toBe("grok-4.6")
+
+    const allowedSubagent = preprocessMaxRequest(grokBody, launch, true)
+    expect(allowedSubagent.rejectedModel).toBeUndefined()
+    expect(allowedSubagent.modified).toBe(true)
+    expect(JSON.parse(allowedSubagent.body).output_config.effort).toBe("medium")
   })
 
   test("validates max advisor pins strictly", () => {

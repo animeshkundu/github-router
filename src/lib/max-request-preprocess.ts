@@ -60,6 +60,7 @@ function setEffort(body: AnyRecord, effort: Effort): void {
 export function preprocessMaxRequest(
   rawBody: string,
   launch: LaunchRegistryEntry | undefined,
+  subagentRequest = false,
 ): MaxRequestPreprocessResult {
   let parsed: AnyRecord
   try {
@@ -86,7 +87,13 @@ export function preprocessMaxRequest(
     return { body: JSON.stringify(parsed), originalModel, modified: true }
   }
 
-  if (!allowedModel(base)) {
+  // Grok is never a max lead because its catalog window is below 1M, but it is
+  // an allowed max native subagent model (the default brainstorm assignment).
+  // The launch nonce/secret already authenticated this as a bound max request;
+  // the client-supplied Agent header only narrows that trusted launch policy to
+  // the native-subagent set, where Grok is explicitly allowed.
+  const allowedSubagentModel = subagentRequest && base === "grok-4.6"
+  if (!allowedModel(base) && !allowedSubagentModel) {
     return {
       body: rawBody,
       originalModel,
@@ -95,7 +102,7 @@ export function preprocessMaxRequest(
     }
   }
 
-  const effort = MAX_MODEL_EFFORTS[base]
+  const effort = allowedSubagentModel ? "medium" : MAX_MODEL_EFFORTS[base]
   if (!effort) {
     return {
       body: rawBody,

@@ -478,7 +478,11 @@ export async function handleCompletion(c: Context) {
     }
   }
 
-  const fastPreprocess = preprocessFastRequest(rawBody, identity.launch)
+  const fastPreprocess = preprocessFastRequest(
+    rawBody,
+    identity.launch,
+    subagentRequest,
+  )
   if (fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
     const message = identity.launch?.profileId === "max"
       ? (maxRequestError(fastPreprocess) ?? "Invalid max request")

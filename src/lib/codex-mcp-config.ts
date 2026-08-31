@@ -24,6 +24,7 @@ import {
   MAX_PROFILE_MODELS,
   MAX_PROFILE_NATIVE_AGENT_NAMES,
   MAX_PROFILE_NATIVE_EFFORTS,
+  MAX_PROFILE_NATIVE_MODELS,
 } from "./max-profile-contract"
 import { type Effort as SubagentEffort } from "./reasoning-effort"
 import {
@@ -578,12 +579,30 @@ function decorateGuaranteedOneM(id: string): string {
 function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
   const modelFor = (value: string | undefined, fallback: string): string =>
     nonEmptyModel(value) ?? fallback
-  const exploreModel = modelFor(opts.maxExploreModel, MAX_PROFILE_MODELS.luna)
-  const planModel = modelFor(opts.maxPlanModel, MAX_PROFILE_MODELS.sol)
-  const generalModel = modelFor(opts.maxGeneralPurposeModel, MAX_PROFILE_MODELS.luna)
-  const implementerModel = modelFor(opts.maxImplementerModel, MAX_PROFILE_MODELS.gemini)
-  const reviewerModel = modelFor(opts.maxReviewerModel, modelFor(opts.maxGeminiModel, modelFor(opts.maxGrokModel, MAX_PROFILE_MODELS.grok)))
-  const brainstormModel = modelFor(opts.maxBrainstormModel, modelFor(opts.maxGrokModel, modelFor(opts.maxGeminiModel, MAX_PROFILE_MODELS.grok)))
+  const exploreModel = modelFor(opts.maxExploreModel, MAX_PROFILE_NATIVE_MODELS.Explore)
+  const planModel = modelFor(opts.maxPlanModel, MAX_PROFILE_NATIVE_MODELS.Plan)
+  const generalModel = modelFor(
+    opts.maxGeneralPurposeModel,
+    MAX_PROFILE_NATIVE_MODELS["general-purpose"],
+  )
+  const implementerModel = modelFor(
+    opts.maxImplementerModel,
+    MAX_PROFILE_NATIVE_MODELS.implementer,
+  )
+  const reviewerModel = modelFor(
+    opts.maxReviewerModel,
+    modelFor(
+      opts.maxGeminiModel,
+      modelFor(opts.maxGrokModel, MAX_PROFILE_NATIVE_MODELS.reviewer),
+    ),
+  )
+  const brainstormModel = modelFor(
+    opts.maxBrainstormModel,
+    modelFor(
+      opts.maxGrokModel,
+      modelFor(opts.maxGeminiModel, MAX_PROFILE_NATIVE_MODELS.brainstorm),
+    ),
+  )
   const peersKey = peersKeyOf(opts.groupKeys)
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
   const mcpServers = opts.serverUrl
@@ -597,7 +616,7 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
   const effort = (name: keyof typeof MAX_PROFILE_NATIVE_EFFORTS): SubagentEffort =>
     MAX_PROFILE_NATIVE_EFFORTS[name]
   const base = (name: string, model: string, roleEffort: SubagentEffort): PeerAgentDefinition => ({
-    description: `Max-profile ${name} subagent running ${model}. Model is fixed by the max roster and may be overridden only to an allowed max model at spawn.`,
+    description: `Max-profile ${name} subagent running ${model}. Max dispatch strips Claude Code's required built-in model placeholder so this roster model remains authoritative; clients that can send catalog ids may override only to Luna, Gemini 3.7 Flash, or Grok 4.6.`,
     prompt: `You are the max-profile ${name} subagent. Work from the supplied brief, verify against the actual repository, and return concrete evidence with file:line references. You do not have Advisor. Do not spawn further agents.`,
     model: oneM(model),
     effort: roleEffort,

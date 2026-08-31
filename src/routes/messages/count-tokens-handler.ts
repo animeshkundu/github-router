@@ -79,7 +79,12 @@ export async function handleCountTokens(c: Context) {
     return identityPreflightErrorResponse(c, identity.reason, c.req.path)
   }
   const rawBody = await c.req.text()
-  const fastPreprocess = preprocessFastRequest(rawBody, identity.launch)
+  const subagentRequest = Boolean(c.req.header("x-claude-code-agent-id"))
+  const fastPreprocess = preprocessFastRequest(
+    rawBody,
+    identity.launch,
+    subagentRequest,
+  )
   if (fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
     const message = identity.launch?.profileId === "max"
       ? (maxRequestError(fastPreprocess) ?? "Invalid max request")

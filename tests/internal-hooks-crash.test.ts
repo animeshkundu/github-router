@@ -95,6 +95,10 @@ const CASES: ReadonlyArray<{ cmd: string; label: string; stdin: string }> = [
   // internal-fast-dispatch-guard: a denied native call must emit its JSON
   // decision and still drain/exit cleanly through the fallback launcher.
   { cmd: "internal-fast-dispatch-guard", label: "denied-subagent", stdin: JSON.stringify({ tool_name: "Task", tool_input: { subagent_type: "planner" }, agent_type: "reviewer" }) },
+  // internal-max-dispatch-guard: the public Agent schema requires a built-in
+  // model alias. The hook must strip that placeholder and emit an allow rewrite
+  // so the custom role's frontmatter model can take effect.
+  { cmd: "internal-max-dispatch-guard", label: "schema-model-placeholder", stdin: JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "implementer", prompt: "smoke", model: "fable" } }) },
 ]
 
 describe("internal hook subcommands: Windows libuv teardown regression", () => {
@@ -121,6 +125,17 @@ describe("internal hook subcommands: Windows libuv teardown regression", () => {
       // A fast-return hook path must exit 0 (UserPromptSubmit/Stop never block
       // on these inputs; a non-zero here is the regression).
       expect(res.status).toBe(0)
+      if (c.cmd === "internal-max-dispatch-guard") {
+        const jsonLine = (res.stdout ?? "").split(/\r?\n/).find((line) =>
+          line.startsWith("{\"hookSpecificOutput\"")
+        )
+        const output = JSON.parse(jsonLine ?? "{}")
+        expect(output.hookSpecificOutput?.permissionDecision).toBe("allow")
+        expect(output.hookSpecificOutput?.updatedInput).toEqual({
+          subagent_type: "implementer",
+          prompt: "smoke",
+        })
+      }
     }, SPAWN_TEST_TIMEOUT_MS)
   }
 })

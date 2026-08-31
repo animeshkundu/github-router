@@ -49,6 +49,19 @@ export const MAX_PROFILE_NATIVE_EFFORTS = Object.freeze({
   "peer-review-coordinator": "max",
 } as const satisfies Record<MaxProfileNativeAgentName, Effort>)
 
+/** Default model family behind each native role's frontmatter. The optional
+ * Grok brainstorm path may fall back to Gemini, whose allowed effort ladder is
+ * identical for the values accepted by the max dispatch guard. */
+export const MAX_PROFILE_NATIVE_MODELS = Object.freeze({
+  Explore: MAX_PROFILE_MODELS.luna,
+  Plan: MAX_PROFILE_MODELS.sol,
+  "general-purpose": MAX_PROFILE_MODELS.luna,
+  implementer: MAX_PROFILE_MODELS.gemini,
+  reviewer: MAX_PROFILE_MODELS.gemini,
+  brainstorm: MAX_PROFILE_MODELS.grok,
+  "peer-review-coordinator": MAX_PROFILE_MODELS.luna,
+} as const satisfies Record<MaxProfileNativeAgentName, string>)
+
 export const MAX_PROFILE_LEAD_MODEL = MAX_PROFILE_MODELS.sol
 export const MAX_PROFILE_ADVISOR_MODEL = MAX_PROFILE_MODELS.opus
 export const MAX_PROFILE_ADVISOR_EFFORT = "high" as const

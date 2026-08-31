@@ -1,4 +1,8 @@
-import { MAX_PROFILE_NATIVE_AGENT_NAMES } from "./max-profile-contract"
+import {
+  MAX_PROFILE_NATIVE_AGENT_NAMES,
+  MAX_PROFILE_NATIVE_MODELS,
+  type MaxProfileNativeAgentName,
+} from "./max-profile-contract"
 import type { Effort } from "./reasoning-effort"
 
 export const MAX_DISPATCH_TOOL_MATCHER = "^(Task|Agent)$"
@@ -25,6 +29,30 @@ export function assertMaxDispatchGuardInstalled(
 }
 
 const MAX_ALLOWED_MODEL_BASES = new Set(["gpt-5.6-luna", "gemini-3.7-flash", "grok-4.6"])
+
+/**
+ * Claude Code's public Agent schema currently requires one of these built-in
+ * model aliases even when the selected custom agent already owns its model in
+ * frontmatter. They are transport placeholders in max, not model overrides.
+ * Strip them so the role's catalog-validated max model remains authoritative.
+ * Case and a trailing `[1m]` are ignored deliberately: neither can turn a
+ * client-owned placeholder into an Opus override in the closed max roster.
+ */
+export const MAX_AGENT_SCHEMA_MODEL_ALIASES = Object.freeze([
+  "sonnet",
+  "opus",
+  "haiku",
+  "fable",
+] as const)
+
+const MAX_AGENT_SCHEMA_MODEL_ALIAS_SET = new Set<string>(
+  MAX_AGENT_SCHEMA_MODEL_ALIASES,
+)
+
+function isMaxAgentSchemaModelAlias(model: unknown): boolean {
+  if (typeof model !== "string") return false
+  return MAX_AGENT_SCHEMA_MODEL_ALIAS_SET.has(baseModel(model.trim()).toLowerCase())
+}
 
 export interface MaxDispatchDecision {
   allowed: boolean
@@ -65,20 +93,25 @@ export function normalizeMaxDispatchEffort(
 ): Effort | undefined {
   if (effort === undefined || effort === null) return undefined
   if (typeof effort !== "string") return undefined
-  const allowed: ReadonlyArray<Effort> = model === "grok-4.6"
-    ? ["low", "medium", "high"]
-    : model === "gemini-3.7-flash"
-      ? ["low", "medium", "high"]
-      : ["none", "low", "medium", "high", "xhigh", "max"]
+  const allowed: ReadonlyArray<Effort> = model === "gpt-5.6-sol"
+    ? ["high", "xhigh", "max"]
+    : model === "gpt-5.6-luna"
+      ? ["none", "low", "medium", "high", "xhigh", "max"]
+      : model === "grok-4.6" || model === "gemini-3.7-flash"
+        // The optional reviewer/brainstorm fallback swaps these two models;
+        // their max-profile effort intersection is deliberately identical.
+        ? ["low", "medium", "high"]
+        : []
   if (allowed.includes(effort as Effort)) return effort as Effort
   return undefined
 }
 
 /**
- * Native max Task/Agent ACL. Role frontmatter owns the fixed model; callers may
- * choose only a supported Luna, Gemini, or Grok target and a live-ladder effort.
- * Sol/Opus/Codex/unknown/private aliases are rejected. The lead may target any
- * emitted max role; role-to-role edges are intentionally unrestricted here.
+ * Native max Task/Agent ACL. Role frontmatter owns the fixed model. Required
+ * public-schema aliases are stripped as transport placeholders; a client that
+ * can express custom ids may override only to Luna, Gemini, or Grok with a
+ * live-ladder effort. Sol/Codex/unknown/private ids are rejected. The lead may
+ * target any emitted max role; role-to-role edges are unrestricted here.
  */
 export function decideMaxDispatchGuard(stdin: string | unknown): MaxDispatchDecision {
   let parsed: unknown
@@ -105,18 +138,20 @@ export function decideMaxDispatchGuard(stdin: string | unknown): MaxDispatchDeci
   if (!target || !MAX_NATIVE_AGENT_SET.has(target)) {
     return { allowed: false, reason: `max dispatch denied: target must be one of ${MAX_PROFILE_NATIVE_AGENT_NAMES.join(", ")}`, verdict: "deny" }
   }
+  const nativeTarget = target as MaxProfileNativeAgentName
   const modelValue = toolInput.model
-  const normalizedModel = modelValue === undefined
+  const schemaAlias = isMaxAgentSchemaModelAlias(modelValue)
+  const normalizedModel = modelValue === undefined || schemaAlias
     ? undefined
     : normalizeMaxDispatchModel(modelValue)
-  if (modelValue !== undefined && !normalizedModel) {
-    return { allowed: false, reason: "max dispatch denied: model must be Luna[1m], Gemini 3.7 Flash[1m], or bare Grok 4.6", target, verdict: "deny" }
+  if (modelValue !== undefined && !schemaAlias && !normalizedModel) {
+    return { allowed: false, reason: "max dispatch denied: model must be a Claude Code Agent schema alias, Luna[1m], Gemini 3.7 Flash[1m], or bare Grok 4.6", target, verdict: "deny" }
   }
   const requestedEffort = toolInput.thinking ?? toolInput.effort
-  const effort = normalizeMaxDispatchEffort(
-    baseModel(normalizedModel ?? "gpt-5.6-luna"),
-    requestedEffort,
-  )
+  const effectiveModel = normalizedModel
+    ? baseModel(normalizedModel)
+    : MAX_PROFILE_NATIVE_MODELS[nativeTarget]
+  const effort = normalizeMaxDispatchEffort(effectiveModel, requestedEffort)
   if ((toolInput.thinking !== undefined || toolInput.effort !== undefined) && !effort) {
     return { allowed: false, reason: "max dispatch denied: reasoning override is not supported by the selected model", target, verdict: "deny" }
   }
