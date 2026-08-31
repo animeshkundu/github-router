@@ -619,19 +619,11 @@ export function buildPeerAwarenessSnippet(opts: {
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
   groupKeys?: Partial<Record<McpGroup, string>>
-  /** `"fast"` for the fast launch profile: a hard roster RESTRICTION, not a
-   *  catalog-availability signal — every other `*Available` flag on this
-   *  launch is ignored in favor of a short, self-contained fast-profile
-   *  rendering that names only `Explore`/`implementer`/`reviewer`/`planner`/
-   *  `critic`, `oracle`, and the `peers`/`search` MCP groups. It must never
-   *  name standard-only `implementer-fast`/`reviewer-fast`/`brainstorm`/
-   *  `scribe`/`general-purpose-fast`, `peer-review-coordinator`, `workers`/
-   *  `orchestrate` tools or skills, or `stand_in` — none of those are
-   *  registered in this profile regardless of catalog state. Same field
-   *  name/values as `NativeAgentAvailability.profile` in
-   *  claude-md-injection.ts (deliberately) so a caller can spread ONE
-   *  `nativeAvailability`-shaped object into both builders without a
-   *  field-name translation layer. Absent/`"standard"` is today's behavior. */
+  /** Launch-profile surface selector. Fast is a hard roster restriction that
+   *  renders only its fixed native roles, Oracle, and search. Max renders only
+   *  its own native/peer roster and gated retained groups. Absent/`"standard"`
+   *  preserves the full standard surface. Same field as
+   *  `NativeAgentAvailability.profile` in claude-md-injection.ts. */
   profile?: "standard" | "fast" | "max"
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
@@ -647,8 +639,8 @@ export function buildPeerAwarenessSnippet(opts: {
     return [
       "## Peer review and advisor",
       "",
-      `Max launch profile. Max-native roles are \`Explore\`, \`Plan\`, \`general-purpose\`, \`implementer\`, \`reviewer\`, \`brainstorm\`, and \`peer-review-coordinator\`. The coordinator fans out to max-profile \`sol_critic\`, \`luna_reviewer\`, and the catalog-present \`opus_critic\`, \`gemini_critic\`/\`gemini_reviewer\`, and \`grok_critic\`/\`grok_reviewer\`.`,
-      `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is primary-lead-only and transcript-aware; it remains available across controlled max lead switches, while native subagents and browse workers do not receive it.${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}`,
+      `Max launch profile. Max-native roles are \`Explore\`, \`Plan\`, \`general-purpose\`, \`implementer\`, \`reviewer\`, \`brainstorm\`, and \`peer-review-coordinator\`. Their frontmatter models are intentional defaults chosen for role fit, quality, latency, and cross-lab diversity; use them first and override only after a concrete failure or mismatch, and only within the max allowlist. The coordinator fans out to max-profile \`sol_critic\`, \`luna_reviewer\`, and the catalog-present \`opus_critic\`, \`gemini_critic\`/\`gemini_reviewer\`, and \`grok_critic\`/\`grok_reviewer\`.`,
+      `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is primary-lead-only and transcript-aware; it remains available across controlled max lead switches, while native subagents and browse workers do not receive it.${opts.standInAvailable ? " Max stand_in uses Sol + Opus 5 + Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high; it never uses Gemini 3.1 Pro." : ""}${opts.agentToolsAvailable ? " Max first-mate replaces any Gemini 3.1 Pro model choice with the same Grok/high → Gemini 3.7 Flash/high fallback." : ""}${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}`,
     ].join("\n")
   }
   if (opts.profile === "fast") {
@@ -831,7 +823,7 @@ export function buildPeerAwarenessSummary(opts: {
     return [
       "## Injected capabilities (summary)",
       "",
-      "Max launch profile. Native roles: `Explore`, `Plan`, `general-purpose`, `implementer`, `reviewer`, `brainstorm`, and `peer-review-coordinator`. Max peer names are `sol_critic`, `luna_reviewer`, and catalog-present `opus_critic`, `gemini_critic`/`gemini_reviewer`, or `grok_critic`/`grok_reviewer`. Advisor is primary-lead-only and remains available across controlled max lead switches; native subagents and browse workers do not receive it.",
+      "Max launch profile. Native roles: `Explore`, `Plan`, `general-purpose`, `implementer`, `reviewer`, `brainstorm`, and `peer-review-coordinator`. Their configured models are the default best fit; override only after a concrete failure or mismatch. Max peer names are `sol_critic`, `luna_reviewer`, and catalog-present `opus_critic`, `gemini_critic`/`gemini_reviewer`, or `grok_critic`/`grok_reviewer`. Advisor is primary-lead-only and remains available across controlled max lead switches; native subagents and browse workers do not receive it. On every retained max path, replace Gemini 3.1 Pro with Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high.",
       `\`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide code and web search.${opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` provides browser control.` : ""}${opts.workerToolsAvailable ? ` Browse-only worker dispatch is \`mcp__${key("workers")}__browse\`.` : ""}${opts.standInAvailable ? ` \`mcp__${key("decide")}__stand_in\` provides deterministic decision tiebreak.` : ""}${opts.fleetAvailable ? ` \`mcp__${key("fleet")}__*\` provides gated remote sessions.` : ""}${opts.agentToolsAvailable ? " First-mate remains available when its own gate passes." : ""}`,
     ].join("\n")
   }
@@ -1236,9 +1228,12 @@ export interface NonPersonaMcpTool {
 export type WorkspaceSource = "argument" | "session" | "absent"
 
 /** Per-call context the MCP boundary threads into a tool handler alongside the
- *  raw arguments. Optional so the many handlers that ignore it stay two-arg. */
+ *  raw arguments. Optional so the many handlers that ignore it stay two-arg.
+ *  `profileId` lets retained max tools apply max-only model policy without
+ *  changing standard/BYO behavior. */
 export interface McpToolCallContext {
   workspaceSource: WorkspaceSource
+  profileId?: "standard" | "fast" | "max"
 }
 
 const WEB_SEARCH_DESCRIPTION =
@@ -2648,7 +2643,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       description:
         "Three-lab away-mode decision tiebreak advisor for moments when the "
         + "user is unavailable and the agent is stuck between two or more concrete "
-        + "options. It polls gpt-5.6-sol, Opus 4.7, and gemini-3.1-pro-preview across "
+        + "options. It polls gpt-5.6-sol, Opus 5, and gemini-3.1-pro-preview across "
         + "blind and informed voting rounds, then returns a ranked-choice verdict "
         + "such as consensus, majority, no_consensus, or need_more_info. Use when "
         + "work would otherwise halt on a bounded choice the user would normally "
@@ -2719,11 +2714,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       async handler(
         args: Record<string, unknown>,
         signal?: AbortSignal,
+        ctx?: McpToolCallContext,
       ): Promise<{
         content: Array<{ type: "text"; text: string }>
         isError?: boolean
       }> {
-        return runStandInToolCall(args, signal)
+        return runStandInToolCall(args, signal, ctx?.profileId === "max")
       },
     },
     ...ARTIFACT_TOOLS,
@@ -3238,6 +3234,7 @@ async function runBrowseToolCall(
 export async function runStandInToolCall(
   args: Record<string, unknown>,
   signal?: AbortSignal,
+  maxProfile = false,
 ): Promise<{
   content: Array<{ type: "text"; text: string }>
   isError?: boolean
@@ -3333,7 +3330,7 @@ export async function runStandInToolCall(
   }
 
   const input: StandInInput = { decision, options, context }
-  const result = await runStandIn(input, signal)
+  const result = await runStandIn(input, signal, { maxProfile })
   return {
     content: [{ type: "text", text: JSON.stringify(result) }],
   }

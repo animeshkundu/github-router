@@ -501,7 +501,7 @@ Probe ids in `scripts/probe-copilot-compat.sh`; matrix rows in `docs/copilot-com
 
 ## `stand_in` tool (away-mode advisor)
 
-`stand_in` is a server-side, code-driven consensus advisor for **decision tiebreak when the user is unavailable**. Polls all three frontier peers - gpt-5.6-sol xhigh (OpenAI, with gpt-5.5 fallback), claude-opus-5 xhigh (Anthropic), gemini-3.1-pro-preview high (Google) - across two structured voting rounds and returns a ranked-choice verdict with per-model reasoning. Implementation lives at `src/lib/stand-in.ts`; the MCP tool entry and gate are in `src/lib/peer-mcp-personas.ts` / `src/routes/mcp/handler.ts` (`standInToolEnabled`).
+`stand_in` is a server-side, code-driven consensus advisor for **decision tiebreak when the user is unavailable**. Standard/BYO launches poll all three frontier peers - gpt-5.6-sol xhigh (OpenAI, with gpt-5.5 fallback), claude-opus-5 xhigh (Anthropic), and the Pro-preferred Gemini resolver at high (Google) - across two structured voting rounds. Bound max launches replace the Google slot with Grok 4.6/high when usable, otherwise Gemini 3.7 Flash 1M/high; max never selects Gemini 3.1 Pro. The tool returns a ranked-choice verdict with per-model reasoning. Implementation lives at `src/lib/stand-in.ts`; the MCP tool entry and gate are in `src/lib/peer-mcp-personas.ts` / `src/routes/mcp/handler.ts` (`standInToolEnabled`).
 
 ### Scope: advisor, not decider
 
@@ -568,7 +568,7 @@ The auto-invocation description on the `stand_in` tool entry is deliberately nar
 
 ### Catalog gating (`capability: "stand_in"`)
 
-The MCP handler drops `stand_in` from `tools/list` AND fails-fast on `tools/call` with -32601 when any of the three required models is missing from Copilot's live catalog (`standInToolEnabled` in `src/routes/mcp/handler.ts`). The Anthropic-slot check requires `claude-opus-5`, whose single-segment slug exactly matches the catalog id. The gemini check shares the same regex as `geminiAvailable()` so a GA slug rename (`gemini-3.1-pro-preview` → `gemini-3.1-pro`) auto-resolves through both gates.
+The MCP handler drops `stand_in` from `tools/list` AND fails-fast on `tools/call` with -32601 when any required panel slot is missing from Copilot's live catalog (`standInToolEnabled` in `src/lib/mcp-capabilities.ts`). The Anthropic slot requires `claude-opus-5`, whose single-segment slug exactly matches the catalog id. Standard/BYO uses the Pro-preferred Gemini resolver, including its GA-rename handling. Max instead requires its explicit third-lab replacement chain: Grok 4.6 with high effort when usable, otherwise Gemini 3.7 Flash with a 1M window and high effort. Gemini 3.1 Pro never satisfies or runs the max slot.
 
 ### Slot accounting & pre-flight cap
 

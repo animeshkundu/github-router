@@ -733,7 +733,8 @@ export const claude = defineCommand({
     //   1. Decide between HTTP backend (always works, read-only personas)
     //      and the `--codex-cli` stdio backend (requires codex 0.129+,
     //      adds the implementer persona).
-    //   2. Probe the live Copilot catalog for gemini-3.1-pro-preview.
+    //   2. Resolve the profile's third-lab peer from the live Copilot catalog
+    //      (standard prefers Gemini Pro; max uses Grok/high then Gemini Flash/high).
     //   3. Generate a per-launch nonce, write the MCP config tempfile
     //      under PATHS.CLAUDE_RUNTIME_DIR with mode 0o600, AND write
     //      one .md subagent file per peer agent into ~/.claude/agents/
@@ -848,10 +849,14 @@ export const claude = defineCommand({
               requested: requestedCli,
               codexInfo: requestedCli ? getCodexVersion() : null,
             })
-        const geminiModelsAvailable = geminiAvailable()
+        const geminiModelsAvailable = isMaxProfile
+          ? maxGeminiModel() !== undefined
+          : geminiAvailable()
         if (!geminiModelsAvailable) {
           consola.info(
-            "gemini-3.1-pro-preview not found in your Copilot model catalog; gemini-critic persona will not be registered.",
+            isMaxProfile
+              ? "Neither Grok 4.6/high nor Gemini 3.7 Flash 1M/high is usable; max third-lab personas and stand_in will not be registered."
+              : "gemini-3.1-pro-preview not found in your Copilot model catalog; gemini-critic persona will not be registered.",
           )
         }
 
@@ -883,7 +888,11 @@ export const claude = defineCommand({
           ? baseGroups.filter((g) => fastDescriptor.allowedGroups!.has(g))
           : baseGroups
         if (!isFastProfile && !isMaxProfile && standInToolEnabled()) enabledGroups.push("decide")
-        if (isMaxProfile && maxOpusModel() !== undefined && maxGeminiModel() !== undefined && standInToolEnabled()) {
+        if (
+          isMaxProfile
+          && maxOpusModel() !== undefined
+          && standInToolEnabled({ maxProfile: true })
+        ) {
           enabledGroups.push("decide")
         }
         if (browserToolsEnabled() && (!fastDescriptor.allowedGroups || fastDescriptor.allowedGroups.has("browser"))) {
@@ -914,7 +923,9 @@ export const claude = defineCommand({
           codexCli: backend === "cli",
           selfInvocation,
           geminiAvailable: geminiModelsAvailable,
-          geminiModel: resolveGeminiReviewModel(),
+          geminiModel: isMaxProfile
+            ? maxGeminiModel()
+            : resolveGeminiReviewModel(),
           groupKeys,
           workerToolsAvailable: !isFastProfile && !isMaxProfile && workerToolsEnabled(),
           browseAvailable: isMaxProfile ? browseAgentEnabled() : (!isFastProfile && browseAgentEnabled()),
@@ -1582,10 +1593,12 @@ export const claude = defineCommand({
         const peerSnippet = buildPeerAwarenessSnippet({
           codexCli: backend === "cli",
           geminiAvailable: geminiModelsAvailable,
-          geminiModel: resolveGeminiReviewModel(),
+          geminiModel: isMaxProfile
+            ? maxGeminiModel()
+            : resolveGeminiReviewModel(),
           workerToolsAvailable: isMaxProfile ? false : workerToolsEnabled(),
           standInAvailable: isMaxProfile
-            ? (maxOpusModel() !== undefined && maxGeminiModel() !== undefined && standInToolEnabled())
+            ? (maxOpusModel() !== undefined && standInToolEnabled({ maxProfile: true }))
             : standInToolEnabled(),
           browseAvailable: isMaxProfile ? browseAgentEnabled() : browserToolsEnabled(),
           compoundBrowseAvailable: isMaxProfile ? false : browserCompoundToolsEnabled(),
@@ -1603,7 +1616,7 @@ export const claude = defineCommand({
         peerAwarenessSummary = buildPeerAwarenessSummary({
           workerToolsAvailable: isMaxProfile ? false : workerToolsEnabled(),
           standInAvailable: isMaxProfile
-            ? (maxOpusModel() !== undefined && maxGeminiModel() !== undefined && standInToolEnabled())
+            ? (maxOpusModel() !== undefined && standInToolEnabled({ maxProfile: true }))
             : standInToolEnabled(),
           browseAvailable: isMaxProfile ? browseAgentEnabled() : browserToolsEnabled(),
           fleetAvailable: fleetToolsEnabled(),

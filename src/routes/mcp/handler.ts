@@ -332,7 +332,10 @@ function oracleToolEntry(): ToolEntry {
 function maxToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   if (tool.capability === "worker") return false
   if (tool.capability === "browse_agent") return browseAgentEnabled()
-  if (tool.capability === "stand_in") return standInToolEnabled() && maxOpusModel() !== undefined
+  if (tool.capability === "stand_in") {
+    return standInToolEnabled({ maxProfile: true })
+      && maxOpusModel() !== undefined
+  }
   if (tool.capability === "browser") return browserToolsEnabled()
   if (tool.capability === "browser_compound") return browserToolsEnabled() && browserCompoundToolsEnabled()
   if (tool.capability === "browser_power") return browserToolsEnabled() && browserPowerToolsEnabled()
@@ -396,7 +399,13 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry): Array<ToolEn
       }))
     const nonPersonaEntries = NON_PERSONA_MCP_TOOLS
       .filter((tool) => maxAllowsTool(scope, launch, { group: tool.group, name: tool.toolNameHttp, tool }))
-      .map((tool) => ({ name: tool.toolNameHttp, description: tool.description, inputSchema: tool.inputSchema }))
+      .map((tool) => ({
+        name: tool.toolNameHttp,
+        description: tool.toolNameHttp === "stand_in"
+          ? "Three-lab away-mode decision tiebreak for bounded choices while the user is unavailable. The max panel is Sol, Opus 5, and Grok 4.6 at high effort when available, otherwise Gemini 3.7 Flash 1M at high. It recommends but never executes; destructive actions still require the user."
+          : tool.description,
+        inputSchema: tool.inputSchema,
+      }))
     return [...personaEntries, ...nonPersonaEntries]
   }
   if (launch.profileId === "fast") {
@@ -877,8 +886,8 @@ function jsonPathPreflightCap(body: JsonRpcRequest, scope: McpScope, launch: Lau
  * the `stand_in` orchestrator in `src/lib/stand-in.ts` — can reuse the
  * same per-endpoint request shaping without re-implementing it. The
  * stand_in tool needs to drive its own per-round system prompts across
- * three concrete models (gpt-5.6-sol, claude-opus-5, gemini-3.1-pro-preview),
- * each on a different endpoint; doing that with a `PersonaSpec` would
+ * three concrete models on provider-specific endpoints; doing that with a
+ * `PersonaSpec` would
  * require either inventing throwaway personas per round or duplicating
  * the dispatch switch.
  *
@@ -1312,7 +1321,7 @@ async function handleToolsCall(
   if (
     nonPersonaTool
     && nonPersonaTool.capability === "stand_in"
-    && !standInToolEnabled()
+    && !standInToolEnabled({ maxProfile: launch.profileId === "max" })
   ) {
     return rpcError(
       body.id,
@@ -1587,7 +1596,10 @@ async function handleToolsCall(
           aborter?.signal,
           personaImages,
         )
-      : await nonPersonaTool!.handler(args, aborter?.signal, { workspaceSource })
+      : await nonPersonaTool!.handler(args, aborter?.signal, {
+          workspaceSource,
+          profileId: launch.profileId,
+        })
     logTelemetry({
       name: telemetryName,
       model: telemetryModel,

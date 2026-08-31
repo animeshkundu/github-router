@@ -23,7 +23,14 @@ and strips them before dispatch, so the role's fixed frontmatter model wins.
 Clients able to send catalog ids may explicitly override only to Luna 1M,
 Gemini 3.7 Flash 1M, or bare Grok 4.6; Sol and Opus remain unavailable as native
 subagent overrides. Grok remains rejected for lead traffic, while authenticated
-max subagent requests may use it at medium effort.
+max subagent requests may use it at their role effort. On every retained max
+surface that would otherwise choose Gemini 3.1 Pro, max instead chooses Grok
+4.6/high when usable and falls back to Gemini 3.7 Flash 1M/high. This includes
+`stand_in` and first-mate model pins; persisted first-mate intent remains
+unchanged and the max replacement is derived again at dispatch. Standard and
+fast keep their existing resolvers. Injected max guidance treats each configured role model as the
+intentional default and tells the lead to override only after a concrete failure
+or task-model mismatch, never speculatively.
 
 Max exposes search, optional browser control, browse-only workers, optional
 stand-in, fleet, and first-mate surfaces. It never exposes orchestration or core

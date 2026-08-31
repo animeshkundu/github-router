@@ -1058,6 +1058,16 @@ const FAST_PROFILE_FORBIDDEN_NAMES = [
   "gh-first-mate",
 ] as const
 
+test("profile:'max' steers to role defaults and excludes Gemini Pro", () => {
+  const directive = buildOperatingDefaultsDirective({ profile: "max" })
+  expect(directive).toContain("configured model is the deliberate default")
+  expect(directive).toContain("override only after a concrete failure")
+  expect(directive).toContain("Grok 4.6/high")
+  expect(directive).toContain("Gemini 3.7 Flash 1M/high")
+  expect(directive).toContain("Gemini 3.1 Pro")
+  expect(directive).toContain("is replaced")
+})
+
 test("profile:'fast' names exactly the fast roster and never a removed native/tool/skill (drift guard)", () => {
   const directive = buildOperatingDefaultsDirective({
     profile: "fast",

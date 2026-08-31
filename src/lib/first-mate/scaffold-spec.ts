@@ -37,6 +37,9 @@ export type ScaffoldFinalDestination = "github-pages" | "npm" | "pypi" | "crates
 
 export interface ScaffoldOpts {
   repoName: string
+  /** Max launch replaces any Gemini Pro scaffold role with Grok/high or
+   * Gemini 3.7 Flash/high. Standard scaffolds retain their established models. */
+  maxProfileReviewModel?: "grok-4.6" | "gemini-3.7-flash"
   repoDescription?: string
   defaultBranch?: string
   techStack?: string
@@ -103,7 +106,7 @@ export function buildScaffoldFiles(opts: ScaffoldOpts): ScaffoldFile[] {
   const normalized = normalizeScaffoldOpts(opts)
   const guidance = buildGuidance(normalized)
   const roleAgents = ROLE_AGENT_NAMES.flatMap((role) => {
-    const content = buildRoleAgent(role)
+    const content = buildRoleAgent(role, normalized.maxProfileReviewModel)
     return [
       { path: `.github/agents/${role}.md`, content },
       { path: `.claude/agents/${role}.md`, content },
@@ -277,9 +280,14 @@ function splitTopLevelSections(markdown: string): Array<{ heading: string; text:
   return sections
 }
 
-function normalizeScaffoldOpts(opts: ScaffoldOpts): Required<ScaffoldOpts> {
+type NormalizedScaffoldOpts = Omit<Required<ScaffoldOpts>, "maxProfileReviewModel"> & {
+  maxProfileReviewModel?: "grok-4.6" | "gemini-3.7-flash"
+}
+
+function normalizeScaffoldOpts(opts: ScaffoldOpts): NormalizedScaffoldOpts {
   return {
     repoName: opts.repoName.trim() || "this repository",
+    maxProfileReviewModel: opts.maxProfileReviewModel,
     repoDescription: opts.repoDescription?.trim() || "<!-- TODO: describe the product, users, jobs-to-be-done, and explicit non-goals. -->",
     defaultBranch: opts.defaultBranch?.trim() || "<!-- TODO: confirm the default branch. -->",
     techStack: opts.techStack?.trim() || "<!-- TODO: fill in languages, frameworks, package managers, services, and runtime versions. -->",
@@ -295,7 +303,7 @@ function normalizeScaffoldOpts(opts: ScaffoldOpts): Required<ScaffoldOpts> {
   }
 }
 
-function buildGuidance(opts: Required<ScaffoldOpts>): string {
+function buildGuidance(opts: NormalizedScaffoldOpts): string {
   const commandBlock = commandLines(opts.commands)
   const primaryOs = opts.ci.primaryOs || "<!-- TODO: choose the primary supported OS. -->"
   const ciMatrix = opts.ci.matrix.length > 0 ? opts.ci.matrix.join(", ") : "<!-- TODO: define CI OS matrix. -->"
@@ -418,7 +426,10 @@ function commandOrTodo(command: string | undefined, todo: string): string {
   return command === undefined || command.trim() === "" ? `<!-- TODO: ${todo}. -->` : `\`${command}\``
 }
 
-function buildRoleAgent(role: (typeof ROLE_AGENT_NAMES)[number]): string {
+function buildRoleAgent(
+  role: (typeof ROLE_AGENT_NAMES)[number],
+  maxProfileReviewModel?: "grok-4.6" | "gemini-3.7-flash",
+): string {
   const specs: Record<(typeof ROLE_AGENT_NAMES)[number], {
     description: string
     purpose: string
@@ -453,7 +464,7 @@ function buildRoleAgent(role: (typeof ROLE_AGENT_NAMES)[number]): string {
       method: ["Read the diff and surrounding code, not only summaries.", "Verify the change against acceptance criteria, ADRs, and the DoD gate.", "Look for realistic failure modes: error paths, races, security, data loss, portability, resource leaks.", "Cite every finding with file:line and a minimal suggested fix."],
       quality: ["Do not invent issues to look thorough; silence on clean code is valid.", "Reject missing tests for changed behavior.", "Treat flaky or failing CI as a blocker until root-caused."],
       output: ["Summary: clean | N findings | blocking", "Findings in severity order", "Each finding: severity, file:line, issue, suggested fix", "Verification gaps"],
-      model: "gemini-3.1-pro-preview",
+      model: maxProfileReviewModel ?? "gemini-3.1-pro-preview",
     },
     researcher: {
       description: "Investigate code, docs, history, and external sources; return cited, actionable findings without editing implementation.",
@@ -547,7 +558,7 @@ Am I still acting as the ${role} for this scoped task, with evidence for every c
 `
 }
 
-function buildTestInstructions(opts: Required<ScaffoldOpts>): string {
+function buildTestInstructions(opts: NormalizedScaffoldOpts): string {
   return `---
 applyTo: "${opts.tests.glob ?? "**/*.{test,spec}.*"}"
 ---
@@ -565,7 +576,7 @@ Command: ${commandOrTodo(opts.commands.test, "record test command")}
 `
 }
 
-function buildCopilotSetupWorkflow(opts: Required<ScaffoldOpts>): string {
+function buildCopilotSetupWorkflow(opts: NormalizedScaffoldOpts): string {
   const setupSteps = setupStepsFor(opts)
   return `on:
   workflow_dispatch: {}
@@ -580,7 +591,7 @@ ${setupSteps}
 `
 }
 
-function buildCiWorkflow(opts: Required<ScaffoldOpts>): string {
+function buildCiWorkflow(opts: NormalizedScaffoldOpts): string {
   const osList = opts.ci.matrix.length > 0 ? opts.ci.matrix : [...DEFAULT_CI_MATRIX]
   const commands = [opts.commands.build, opts.commands.typecheck, opts.commands.lint, opts.commands.test]
     .filter((command): command is string => command !== undefined && command.trim() !== "")
@@ -616,7 +627,7 @@ ${runLines}
 `
 }
 
-function setupStepsFor(opts: Required<ScaffoldOpts>): string {
+function setupStepsFor(opts: NormalizedScaffoldOpts): string {
   const pm = opts.packageManager
   if (pm === "bun") {
     return `      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2
@@ -715,7 +726,7 @@ const UPLOAD_PAGES_SHA = "56afc609e74202658d3ffba0e8f6dda462b719fa"
 const DEPLOY_PAGES_SHA = "decdde0ac072f6f71b3a7fa0b3c73a7a62cc8a28"
 const UPLOAD_ARTIFACT_SHA = "65462800fd760344b1a7b4382951275a0abb4808"
 
-function buildPagesWorkflow(opts: Required<ScaffoldOpts>): string {
+function buildPagesWorkflow(opts: NormalizedScaffoldOpts): string {
   const branch = opts.defaultBranch.startsWith("<!--") ? "main # TODO: confirm the default branch" : opts.defaultBranch
   return `name: Pages
 
@@ -761,7 +772,7 @@ jobs:
 `
 }
 
-function codeqlLanguages(opts: Required<ScaffoldOpts>): string {
+function codeqlLanguages(opts: NormalizedScaffoldOpts): string {
   const stack = opts.techStack.toLowerCase()
   const languages: string[] = []
   if (/javascript|typescript|node|react|vue|svelte/.test(stack)) languages.push("javascript-typescript")
@@ -771,7 +782,7 @@ function codeqlLanguages(opts: Required<ScaffoldOpts>): string {
   return languages.length > 0 ? languages.join(", ") : "javascript-typescript # TODO: confirm CodeQL language"
 }
 
-function buildCodeqlWorkflow(opts: Required<ScaffoldOpts>): string {
+function buildCodeqlWorkflow(opts: NormalizedScaffoldOpts): string {
   return `name: CodeQL
 
 on:
@@ -803,7 +814,7 @@ jobs:
 `
 }
 
-function dependabotEcosystem(opts: Required<ScaffoldOpts>): string {
+function dependabotEcosystem(opts: NormalizedScaffoldOpts): string {
   if (["npm", "bun", "pnpm", "yarn"].includes(opts.packageManager)) return "npm"
   if (opts.finalDestination === "pypi") return "pip"
   if (opts.finalDestination === "crates") return "cargo"
@@ -812,7 +823,7 @@ function dependabotEcosystem(opts: Required<ScaffoldOpts>): string {
   return "<!-- TODO: choose a supported package ecosystem -->"
 }
 
-function buildDependabot(opts: Required<ScaffoldOpts>): string {
+function buildDependabot(opts: NormalizedScaffoldOpts): string {
   return `version: 2
 updates:
   - package-ecosystem: "${dependabotEcosystem(opts)}"
@@ -826,7 +837,7 @@ updates:
 `
 }
 
-function releaseType(opts: Required<ScaffoldOpts>): string {
+function releaseType(opts: NormalizedScaffoldOpts): string {
   if (opts.finalDestination === "pypi") return "python"
   if (opts.finalDestination === "crates") return "rust"
   if (opts.finalDestination === "go-proxy") return "go"
@@ -834,7 +845,7 @@ function releaseType(opts: Required<ScaffoldOpts>): string {
   return "simple"
 }
 
-function buildReleaseWorkflow(opts: Required<ScaffoldOpts>): string {
+function buildReleaseWorkflow(opts: NormalizedScaffoldOpts): string {
   return `name: Release
 
 on:
@@ -859,7 +870,7 @@ jobs:
 `
 }
 
-function apiCompatibilitySteps(opts: Required<ScaffoldOpts>): string {
+function apiCompatibilitySteps(opts: NormalizedScaffoldOpts): string {
   if (opts.finalDestination === "crates") {
     return `      - name: Check Rust API compatibility
         run: |
@@ -878,7 +889,7 @@ function apiCompatibilitySteps(opts: Required<ScaffoldOpts>): string {
         run: echo "TODO: wire the ecosystem's breaking-change checker when this repository exposes a stable public API"`
 }
 
-function buildMaintainabilityWorkflow(opts: Required<ScaffoldOpts>): string {
+function buildMaintainabilityWorkflow(opts: NormalizedScaffoldOpts): string {
   const exampleCommand = opts.commands.test ?? "echo \"TODO: execute every documented example or doctest in CI\""
   return `name: Maintainability
 
@@ -907,7 +918,7 @@ ${apiCompatibilitySteps(opts)}
 `
 }
 
-function buildPublishWorkflow(opts: Required<ScaffoldOpts>): string {
+function buildPublishWorkflow(opts: NormalizedScaffoldOpts): string {
   const common = `name: Publish\n\non:\n  release:\n    types: [published]\n\npermissions:\n  contents: read\n\n`
   if (opts.finalDestination === "npm") return `${common}jobs:\n  npm:\n    runs-on: ubuntu-latest\n    environment: npm\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - name: Set up Node for OIDC trusted publishing\n        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4\n        with:\n          node-version: 22\n          registry-url: https://registry.npmjs.org\n      - run: npm ci\n      - run: npm pack\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-path: '*.tgz'\n      - run: npm publish --provenance --access public *.tgz\n`
   if (opts.finalDestination === "pypi") return `${common}jobs:\n  pypi:\n    runs-on: ubuntu-latest\n    environment: pypi\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/checkout@${CHECKOUT_SHA} # v4\n      - run: python -m pip install --upgrade build\n      - run: python -m build\n      - uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0\n      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2\n        with:\n          subject-path: dist/*\n`
@@ -916,7 +927,7 @@ function buildPublishWorkflow(opts: Required<ScaffoldOpts>): string {
   return `${common}jobs:\n  destination-note:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo "TODO: ${opts.finalDestination === "go-proxy" ? "Go modules publish through signed SemVer tags and proxy.golang.org; no registry upload is required" : opts.finalDestination === "github-pages" ? "Pages deployment is handled by pages.yml; no package registry applies" : opts.finalDestination === "actions-marketplace" ? "complete Marketplace listing and maintain the floating major tag; no OIDC registry exists" : opts.finalDestination === "vscode-marketplace" ? "VS Code Marketplace does not support OIDC; require explicit human approval before configuring its PAT-based publish exception" : "resolve the final destination before enabling publication"}."\n`
 }
 
-function buildMediaWorkflow(opts: Required<ScaffoldOpts>): string {
+function buildMediaWorkflow(opts: NormalizedScaffoldOpts): string {
   const install = opts.commands.install ?? "echo \"TODO: record the install command\""
   const HAS_PW = "${{ hashFiles('**/playwright.config.*') != '' }}"
   const NO_PW = "${{ hashFiles('**/playwright.config.*') == '' }}"
@@ -997,7 +1008,7 @@ function buildSecurityTxt(): string {
   return `Contact: <!-- TODO: security disclosure email or HTTPS form -->\nExpires: <!-- TODO: RFC 3339 date less than one year from publication -->\nCanonical: <!-- TODO: absolute /.well-known/security.txt URL -->\nPolicy: <!-- TODO: absolute SECURITY.md or security-policy URL -->\nPreferred-Languages: en\n`
 }
 
-function buildSecurityPolicy(opts: Required<ScaffoldOpts>): string {
+function buildSecurityPolicy(opts: NormalizedScaffoldOpts): string {
   return `# Security policy
 
 ## Supported versions
@@ -1018,7 +1029,7 @@ These are response targets, not a promise that every report can be fixed within 
 `
 }
 
-function buildContributing(opts: Required<ScaffoldOpts>): string {
+function buildContributing(opts: NormalizedScaffoldOpts): string {
   return `# Contributing
 
 ## Set up
@@ -1125,14 +1136,14 @@ function buildIssueTemplateConfig(): string {
   return `blank_issues_enabled: false\ncontact_links:\n  - name: Security vulnerability\n    url: <!-- TODO: GitHub private vulnerability reporting URL -->\n    about: Report security issues privately; do not open a public issue.\n  - name: Support\n    url: <!-- TODO: discussions or support URL -->\n    about: Ask usage questions and get help.\n`
 }
 
-function preferredRunner(opts: Required<ScaffoldOpts>): string {
+function preferredRunner(opts: NormalizedScaffoldOpts): string {
   const primary = opts.ci.primaryOs?.toLowerCase() ?? ""
   if (primary.includes("windows")) return "windows-latest"
   if (primary.includes("mac")) return "macos-latest"
   return "ubuntu-latest"
 }
 
-function buildPullRequestTemplate(opts: Required<ScaffoldOpts>): string {
+function buildPullRequestTemplate(opts: NormalizedScaffoldOpts): string {
   return `## Summary
 
 Describe the change and why it matters.
@@ -1219,7 +1230,7 @@ Link related issues, PRs, plans, research, or ADRs.
 `
 }
 
-function buildAdrIndex(opts: Required<ScaffoldOpts>): string {
+function buildAdrIndex(opts: NormalizedScaffoldOpts): string {
   return `# 0001. Record architecture decisions
 
 ## Status
@@ -1476,7 +1487,7 @@ ${CONDENSED_OPERATING_SEQUENCE}
 `
 }
 
-function buildLearnings(opts: Required<ScaffoldOpts>): string {
+function buildLearnings(opts: NormalizedScaffoldOpts): string {
   return `# Learnings
 
 Record durable project learnings here so future work can avoid rediscovering them.

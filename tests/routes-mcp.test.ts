@@ -1501,6 +1501,95 @@ describe("/mcp tools/call routing", () => {
 })
 
 describe("/mcp stand_in tool", () => {
+  const MAX_NONCE = "a".repeat(64)
+  let maxLaunchId: string | undefined
+
+  afterEach(() => {
+    if (maxLaunchId) unregisterLaunch(maxLaunchId)
+    maxLaunchId = undefined
+  })
+
+  test("bound max call advertises and dispatches Grok/high instead of Gemini Pro", async () => {
+    const capable = (
+      id: string,
+      context: number,
+      endpoint: string,
+      vendor: string,
+    ) => ({
+      ...fakeModel(id, [endpoint]),
+      vendor,
+      capabilities: {
+        ...fakeModel(id, [endpoint]).capabilities,
+        limits: {
+          max_context_window_tokens: context,
+          max_prompt_tokens: Math.max(1, context - 20_000),
+          max_output_tokens: 16_000,
+        },
+        supports: {
+          tool_calls: true,
+          reasoning_effort: ["medium", "high", "xhigh"],
+          ...(id === "claude-opus-5" ? { adaptive_thinking: true } : {}),
+        },
+      },
+    })
+    state.models = {
+      object: "list",
+      data: [
+        capable("gpt-5.6-sol", 1_050_000, "/responses", "openai"),
+        capable("claude-opus-5", 1_000_000, "/v1/messages", "anthropic"),
+        capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions", "google"),
+        capable("gemini-3.7-flash", 1_000_000, "/chat/completions", "google"),
+        capable("grok-4.6", 500_000, "/responses", "xai"),
+      ] as never,
+    }
+    maxLaunchId = registerLaunch({
+      profileId: "max",
+      nonce: MAX_NONCE,
+      secret: "max-secret",
+      allowedGroups: new Set(["decide"]),
+      allowedPersonas: new Set(),
+    }).launchId
+
+    const listed = await rpc(
+      { jsonrpc: "2.0", id: 3999, method: "tools/list" },
+      { auth: `Bearer ${MAX_NONCE}` },
+    )
+    const standIn = (listed.json.result as { tools: Array<{ name: string; description: string }> })
+      .tools.find((tool) => tool.name === "stand_in")
+    expect(standIn?.description).toContain("Grok 4.6 at high")
+    expect(standIn?.description).not.toContain("gemini-3.1-pro-preview")
+
+    const requests: Array<Record<string, unknown>> = []
+    globalThis.fetch = mock(async (url, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+      requests.push(body)
+      const vote = VOTE_A_HIGH
+      if (String(url).includes("/v1/messages")) {
+        return new Response(JSON.stringify({
+          id: "m", type: "message", role: "assistant", model: "claude-opus-5",
+          content: [{ type: "text", text: vote }], stop_reason: "end_turn",
+        }), { status: 200, headers: { "content-type": "application/json" } })
+      }
+      return new Response(JSON.stringify({
+        id: "r", object: "response", status: "completed",
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: vote }] }],
+      }), { status: 200, headers: { "content-type": "application/json" } })
+    }) as unknown as typeof globalThis.fetch
+
+    const called = await rpc({
+      jsonrpc: "2.0",
+      id: 4000,
+      method: "tools/call",
+      params: { name: "stand_in", arguments: TINY_INPUT },
+    }, { auth: `Bearer ${MAX_NONCE}` })
+    const result = called.json.result as { content: Array<{ text: string }> }
+    const parsed = JSON.parse(result.content[0].text) as { votes: Record<string, unknown> }
+    expect(parsed.votes["grok-4.6"]).toBeDefined()
+    expect(parsed.votes["gemini-3.1-pro-preview"]).toBeUndefined()
+    expect(requests.some((body) => body.model === "gemini-3.1-pro-preview")).toBe(false)
+    expect((requests.find((body) => body.model === "grok-4.6")?.reasoning as { effort?: string })?.effort).toBe("high")
+  })
+
   // ──────────────────────────────────────────────────────────────────
   // Helper: mock all three peer upstreams in one fetch shim. Routes by
   // URL to the appropriate response shape (Responses / Messages / Chat

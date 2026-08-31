@@ -94,7 +94,7 @@ export function maxAdvisorModelFromPinStrict(pinned: string | undefined, opusMod
 export function maxStandInAvailable(): boolean {
   return usableSol(catalogModel(MAX_PROFILE_MODELS.sol))
     && maxOpusModel() !== undefined
-    && maxGeminiModel() !== undefined
+    && (maxGrokHighModel() !== undefined || maxGeminiModel() !== undefined)
 }
 export function maxAdvisorEffortForModel(_model: string): Effort {
   return MAX_PROFILE_ADVISOR_EFFORT
@@ -304,7 +304,11 @@ export function validateMaxProfilePrerequisites(
       gemini: geminiUsable ? gemini : undefined,
       grok: grokUsable ? grok : undefined,
       opus: opus && !missing.some((entry) => entry.startsWith(`${MAX_PROFILE_MODELS.opus}:`)) ? opus : undefined,
-      thirdLab: geminiUsable ? "gemini" : undefined,
+      thirdLab: grokUsable && supportsEffort(grok, "high")
+        ? "grok"
+        : geminiUsable
+          ? "gemini"
+          : undefined,
     },
   }
 }
@@ -355,6 +359,24 @@ export function maxGeminiModel(): string | undefined {
 export function maxGrokModel(): string | undefined {
   const model = catalogModel(MAX_PROFILE_MODELS.grok)
   return model && usableGrok(model) ? model.id : undefined
+}
+
+/** Grok replacement for max-profile surfaces that require high effort. */
+export function maxGrokHighModel(): string | undefined {
+  const model = catalogModel(MAX_PROFILE_MODELS.grok)
+  return model && usableGrok(model) && supportsEffort(model, "high")
+    ? model.id
+    : undefined
+}
+
+/** Max-only replacement for any standard Gemini Pro assignment. */
+export function maxProReplacementModel():
+  | typeof MAX_PROFILE_MODELS.grok
+  | typeof MAX_PROFILE_MODELS.gemini
+  | undefined {
+  if (maxGrokHighModel()) return MAX_PROFILE_MODELS.grok
+  if (maxGeminiModel()) return MAX_PROFILE_MODELS.gemini
+  return undefined
 }
 
 export function maxOpusModel(): string | undefined {
