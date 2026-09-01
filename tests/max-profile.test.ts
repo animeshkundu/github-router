@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
 
 import {
   MAX_LUNA_HIGH_ALIAS_ID,
@@ -12,6 +12,7 @@ import {
   decideMaxDispatchGuard,
 } from "../src/lib/max-dispatch-acl"
 import { BROWSE_DEFAULT_MODEL } from "../src/lib/worker-agent/engine"
+import { state } from "../src/lib/state"
 import { advisorSystemPrompt } from "../src/services/advisor/advisor"
 import {
   MAX_PROFILE_ADVISOR_INSTRUCTIONS,
@@ -19,11 +20,13 @@ import {
   formatMaxPrerequisiteFailure,
   maxAdvisorModelFromPin,
   maxAdvisorPinIsValid,
+  maxReviewerModel,
   validateMaxProfilePrerequisites,
 } from "../src/lib/max-profile-contract"
 import { buildPeerAgentDefinitions } from "../src/lib/codex-mcp-config"
 import { buildPeerAwarenessSummary, buildPeerAwarenessSnippet } from "../src/lib/peer-mcp-personas"
 import { preprocessMaxRequest } from "../src/lib/max-request-preprocess"
+import { buildMaxDispatchGuardHookCommand } from "../src/internal-max-dispatch-guard"
 
 const model = (id: string, options: {
   context?: number
@@ -59,6 +62,12 @@ const model = (id: string, options: {
   },
 })
 
+const savedModels = state.models
+
+afterEach(() => {
+  state.models = savedModels
+})
+
 const catalog = {
   object: "list" as const,
   data: [
@@ -91,6 +100,27 @@ describe("max profile contract", () => {
     expect(formatMaxPrerequisiteFailure(failure.missing)).toContain("gpt-5.6-sol")
   })
 
+  test("resolves Max reviewer to Grok/high or Luna 1M/max from capabilities", () => {
+    state.models = catalog as never
+    expect(maxReviewerModel()).toBe("grok-4.6")
+
+    state.models = {
+      ...catalog,
+      data: catalog.data.map((entry) => entry.id === "grok-4.6"
+        ? model("grok-4.6", { context: 500_000, prompt: 372_000, output: 16_000, efforts: ["medium"], endpoints: ["/responses"] })
+        : entry),
+    } as never
+    expect(maxReviewerModel()).toBe("gpt-5.6-luna")
+
+    state.models = {
+      ...catalog,
+      data: catalog.data.map((entry) => entry.id === "grok-4.6"
+        ? model("grok-4.6", { context: 500_000, prompt: 100_000, output: 16_000, efforts: ["medium", "high"], endpoints: ["/responses"] })
+        : entry),
+    } as never
+    expect(maxReviewerModel()).toBe("gpt-5.6-luna")
+  })
+
   test("shared native-model defaults match emitted frontmatter", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
@@ -104,7 +134,7 @@ describe("max profile contract", () => {
     expect(agents.Plan?.model).toBe("gpt-5.6-sol[1m]")
     expect(agents["general-purpose"]?.model).toBe("gpt-5.6-luna[1m]")
     expect(agents.implementer?.model).toBe("gemini-3.7-flash[1m]")
-    expect(agents.reviewer?.model).toBe("gemini-3.7-flash[1m]")
+    expect(agents.reviewer?.model).toBe("grok-4.6")
     expect(agents.brainstorm?.model).toBe("grok-4.6")
     expect(agents["peer-review-coordinator"]?.model).toBe("gpt-5.6-luna[1m]")
   })
@@ -161,6 +191,9 @@ describe("max profile contract", () => {
     ]
     for (const role of roles) {
       for (const schemaModel of MAX_AGENT_SCHEMA_MODEL_ALIASES) {
+        const reviewerFallback = role === "reviewer"
+          ? { reviewerModel: "gpt-5.6-luna", reviewerEffort: "max" as const }
+          : undefined
         const decision = decideMaxDispatchGuard({
           tool_name: "Agent",
           tool_input: {
@@ -168,11 +201,12 @@ describe("max profile contract", () => {
             prompt: "smoke test",
             model: schemaModel,
           },
-        })
+        }, reviewerFallback)
         expect(decision.allowed).toBe(true)
         expect(decision.updatedInput).toEqual({
           subagent_type: role,
           prompt: "smoke test",
+          ...(role === "reviewer" ? { effort: "max" } : {}),
         })
       }
     }
@@ -278,10 +312,33 @@ describe("max profile contract", () => {
     })
   })
 
-  test("max dispatch ACL preserves allowed catalog overrides and rejects Sol", () => {
+  test("persists the resolved reviewer model and effort in the Max hook command", () => {
+    expect(buildMaxDispatchGuardHookCommand(
+      { execPath: "/usr/bin/node", scriptPath: "/app/main.js" },
+      { reviewerModel: "gpt-5.6-luna", reviewerEffort: "max" },
+    )).toBe(
+      '"/usr/bin/node" "/app/main.js" internal-max-dispatch-guard --reviewerModel "gpt-5.6-luna" --reviewerEffort max',
+    )
+  })
+
+  test("max dispatch ACL preserves allowed catalog overrides and pins the resolved reviewer fallback effort", () => {
     const allowed = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-5.6-luna[1m]" } }))
     expect(allowed.allowed).toBe(true)
     expect(allowed.updatedInput?.model).toBe("gpt-5.6-luna[1m]")
+
+    const fallback = decideMaxDispatchGuard(
+      { tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "fable" } },
+      { reviewerModel: "gpt-5.6-luna", reviewerEffort: "max" },
+    )
+    expect(fallback.allowed).toBe(true)
+    expect(fallback.updatedInput).toEqual({ subagent_type: "reviewer", effort: "max" })
+
+    const grok = decideMaxDispatchGuard(
+      { tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "fable" } },
+      { reviewerModel: "grok-4.6", reviewerEffort: "high" },
+    )
+    expect(grok.updatedInput).toEqual({ subagent_type: "reviewer", effort: "high" })
+
     const denied = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-5.6-sol[1m]" } }))
     expect(denied.allowed).toBe(false)
   })
@@ -316,7 +373,14 @@ describe("max profile contract", () => {
     const allowedSubagent = preprocessMaxRequest(grokBody, launch, true)
     expect(allowedSubagent.rejectedModel).toBeUndefined()
     expect(allowedSubagent.modified).toBe(true)
-    expect(JSON.parse(allowedSubagent.body).output_config.effort).toBe("medium")
+    expect(JSON.parse(allowedSubagent.body).output_config.effort).toBe("high")
+
+    const lunaReviewer = preprocessMaxRequest(
+      JSON.stringify({ model: "gpt-5.6-luna[1m]", messages: [] }),
+      launch,
+      true,
+    )
+    expect(JSON.parse(lunaReviewer.body).output_config.effort).toBe("max")
   })
 
   test("keeps Max Advisor optional, non-binding, and out of routine workflow gates", () => {

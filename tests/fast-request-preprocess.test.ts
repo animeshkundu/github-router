@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test"
 
 import { preprocessFastRequest } from "../src/lib/fast-request-preprocess"
-import { FAST_CRITIC_ALIAS_ID } from "../src/lib/launch-profile"
+import {
+  FAST_CRITIC_ALIAS_ID,
+  LUNA_IMPLEMENTER_ALIAS_ID,
+} from "../src/lib/launch-profile"
 import type { LaunchRegistryEntry } from "../src/lib/state"
 
 const fastLaunch: LaunchRegistryEntry = {
@@ -38,11 +41,13 @@ describe("fast request preprocessing", () => {
     expect(parsed.thinking).toEqual({ type: "adaptive" })
   })
 
-  test("preserves the fast critic's medium effort through alias canonicalization", () => {
-    const result = preprocessFastRequest(body(`${FAST_CRITIC_ALIAS_ID}[1m]`), fastLaunch)
-    const parsed = JSON.parse(result.body)
-    expect(parsed.model).toBe("gemini-3.7-flash[1m]")
-    expect(parsed.output_config.effort).toBe("medium")
+  test("rejects aliases for retired Fast roles even on an authenticated Fast launch", () => {
+    for (const retired of [FAST_CRITIC_ALIAS_ID, LUNA_IMPLEMENTER_ALIAS_ID]) {
+      const result = preprocessFastRequest(body(`${retired}[1m]`), fastLaunch)
+      expect(result.retiredAlias).toBe(`${retired}[1m]`)
+      expect(result.rejectedAlias).toBeUndefined()
+      expect(result.modified).toBe(false)
+    }
   })
 
   test("forces bare fast role models and rejects every other model", () => {

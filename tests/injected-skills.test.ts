@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { ARTIFACT_REVIEW_SKILL, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, INJECTED_SKILLS, injectedSkillsForLaunch, writeInjectedSkill } from "../src/lib/injected-skills"
+import { ARTIFACT_REVIEW_SKILL, buildArtifactReviewSkill, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, INJECTED_SKILLS, injectedSkillsForLaunch, writeInjectedSkill } from "../src/lib/injected-skills"
 import { CONDENSED_OPERATING_SEQUENCE, DEFINITION_OF_GREATNESS } from "../src/lib/first-mate/operating-protocol"
 
 function frontmatterFor(md: string): string {
@@ -176,6 +176,14 @@ describe("ARTIFACT_REVIEW_SKILL (tab-gated, not in INJECTED_SKILLS)", () => {
         "mcp__peers__artifact_poll",
       ]).toContain(t)
     }
+  })
+
+  test("buildArtifactReviewSkill uses custom peersKey correctly", () => {
+    const custom = buildArtifactReviewSkill("gh-router-peers-2")
+    expect(custom.name).toBe("gh-artifact-review")
+    expect(custom.md).toContain("mcp__gh-router-peers-2__artifact_open")
+    expect(custom.md).toContain("mcp__gh-router-peers-2__artifact_await")
+    expect(custom.md).not.toContain("mcp__peers__artifact_")
   })
 })
 

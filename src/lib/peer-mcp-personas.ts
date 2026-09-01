@@ -606,6 +606,8 @@ export function buildPeerAwarenessSnippet(opts: {
   powerBrowseAvailable?: boolean
   fleetAvailable?: boolean
   agentToolsAvailable?: boolean
+  /** Whether the ai-or-die Artifact review tools are enabled for this launch. */
+  artifactToolsAvailable?: boolean
   /** Whether `scout` resolved a cheap-tier model and was therefore emitted.
    *  Unlike the other natives it is dropped rather than downgraded to the lead's
    *  model, so naming it unconditionally here would advertise an agent that is
@@ -634,6 +636,7 @@ export function buildPeerAwarenessSnippet(opts: {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
     const searchKey = key("search")
+    const peersKey = key("peers")
     const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
     const browserClause = directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""
     const workerClause = opts.browseAvailable
@@ -642,23 +645,36 @@ export function buildPeerAwarenessSnippet(opts: {
     const decideClause = opts.standInAvailable ? ` \`mcp__${key("decide")}__stand_in\` provides deterministic three-lab decision tiebreak.` : ""
     const fleetClause = opts.fleetAvailable ? ` \`mcp__${key("fleet")}__*\` provides gated remote session control.` : ""
     const agentsClause = opts.agentToolsAvailable ? " `/gh-first-mate` remains available when its own gate passes." : ""
+    const artifactClause = opts.artifactToolsAvailable
+      ? ` \`mcp__${peersKey}__artifact_*\` provides human review in the artifact panel with auto-open on plan completion.`
+      : ""
     return [
       "## Peer review and advisor",
       "",
       `Max launch profile. The native roster is a menu of complementary capabilities rather than a required workflow: \`Explore\` for broad discovery, \`brainstorm\` for open design choices, \`Plan\` when sequencing or acceptance criteria benefit from a separate view, \`implementer\` for bounded coding, \`general-purpose\` for mixed work, and \`reviewer\` for repository-aware verification. Their frontmatter models are intentional defaults chosen for role fit and cross-lab diversity; overrides are most useful after a concrete mismatch and remain within the max allowlist. Independent work can run in parallel when it improves context isolation or latency. Fresh-context peers can reduce correlated blind spots where deterministic evidence does not settle the issue; \`peer-review-coordinator\` can combine max-profile \`sol_critic\`, \`luna_reviewer\`, and catalog-present \`opus_critic\`, \`gemini_critic\`/\`gemini_reviewer\`, and \`grok_critic\`/\`grok_reviewer\` when the risk merits several lenses. Small or obvious tasks are often better handled directly, and model output remains evidence to synthesize rather than a vote.`,
-      `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is optional, non-binding, primary-lead-only counsel for a focused consequential uncertainty that direct evidence, Plan, reviewer, or peers cannot settle. It is not a supervisor, approver, or routine workflow/completion gate; consult again only when materially new evidence creates a different question. It remains available across controlled max lead switches, while native subagents and browse workers do not receive it.${opts.standInAvailable ? " Max stand_in uses Sol + Opus 5 + Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high; it never uses Gemini 3.1 Pro." : ""}${opts.agentToolsAvailable ? " Max first-mate replaces any Gemini 3.1 Pro model choice with the same Grok/high → Gemini 3.7 Flash/high fallback." : ""}${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}`,
+      `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is optional, non-binding, primary-lead-only counsel for a focused consequential uncertainty that direct evidence, Plan, reviewer, or peers cannot settle. It is not a supervisor, approver, or routine workflow/completion gate; consult again only when materially new evidence creates a different question. It remains available across controlled max lead switches, while native subagents and browse workers do not receive it.${opts.standInAvailable ? " Max stand_in uses Sol + Opus 5 + Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high; it never uses Gemini 3.1 Pro." : ""}${opts.agentToolsAvailable ? " Max first-mate replaces any Gemini 3.1 Pro model choice with the same Grok/high → Gemini 3.7 Flash/high fallback." : ""}${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
     ].join("\n")
   }
   if (opts.profile === "fast") {
     const fastPeersKey = key("peers")
     const fastSearchKey = key("search")
+    const fastBrowserKey = key("browser")
+    const fastWorkersKey = key("workers")
+    const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
+    const browserClause = directBrowserAvailable ? ` \`mcp__${fastBrowserKey}__*\` is the opt-in browser surface.` : ""
+    const workerBrowseClause = opts.browseAvailable
+      ? ` \`worker-browse\` runs delegated browsing tasks through \`mcp__${fastWorkersKey}__browse\`.`
+      : ""
+    const artifactClause = opts.artifactToolsAvailable
+      ? ` \`mcp__${fastPeersKey}__artifact_*\` provides artifact review with auto-open on plan completion.`
+      : ""
     return [
       "## Peer review and advisor",
       "",
-      `This is the fast launch profile. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for consequential unresolved uncertainty or a genuinely stuck path, not routine progress, waiting, verification, approval, or completion. \`mcp__${fastPeersKey}__oracle\` is exact Opus 5 (1M/high), a stateless last-resort consultant available to the lead, reviewer, and planner.`,
+      `This is the fast launch profile. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for consequential unresolved uncertainty, conflicting evidence, or a genuinely stuck path, not routine progress, waiting, verification, or completion. \`mcp__${fastPeersKey}__oracle\` is exact Opus 5 (1M/high), a stateless last-resort consultant available to the lead and \`Plan\` when required; \`reviewer\` and other subagents cannot call Oracle.`,
       "",
-      `\`mcp__${fastSearchKey}__code\` is semantic-first code search and \`mcp__${fastSearchKey}__web\` surfaces citable sources. Native Task roster: \`Explore\` (broad discovery), \`implementer\` (mechanical implementation), \`reviewer\` (repo-aware verification/reproduction), \`planner\` (Sol plan consultant/approver after Luna's draft), and \`critic\` (fresh-context cross-lab review). Before implementation obtain planner approval; before declaring done run relevant tests and ask reviewer to verify.${opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` is the opt-in browser surface.` : ""}`,
-      "Native delegation is ACL-scoped: the lead may invoke all five; planner may invoke reviewer, Explore, and critic; implementer may invoke reviewer and critic; reviewer, Explore, and critic cannot invoke native subagents.",
+      `\`mcp__${fastSearchKey}__code\` is semantic-first code search and \`mcp__${fastSearchKey}__web\` surfaces citable sources. Native Task roster: \`Explore\` (broad discovery), \`Plan\` (sequencing, interfaces, migration risk, acceptance criteria), \`general-purpose\` (mixed execution), \`implementer\` (bounded coding), and \`reviewer\` (repo-aware verification/reproduction). \`Plan\` is an advisory planning capability, not an approval gate. Verify claims with concrete repository evidence and tests before declaring done.${browserClause}${workerBrowseClause}${artifactClause}`,
+      "Native delegation is ACL-scoped: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
     ].join("\n")
   }
   const peersKey = key("peers")
@@ -805,6 +821,8 @@ export function buildPeerAwarenessSummary(opts: {
   browserToolsAvailable?: boolean
   fleetAvailable?: boolean
   agentToolsAvailable?: boolean
+  /** Whether the ai-or-die Artifact review tools are enabled for this launch. */
+  artifactToolsAvailable?: boolean
   /** Which conditionally-emitted natives this launch wrote. `undefined` means
    *  available, matching `buildPeerAwarenessSnippet`. Load-bearing here for the
    *  same reason it is there and in the operating-defaults directive: `scout`,
@@ -836,16 +854,19 @@ export function buildPeerAwarenessSummary(opts: {
       "## Injected capabilities (summary)",
       "",
       "Max launch profile. The roster offers complementary capabilities: `Explore` for broad discovery, `brainstorm` for open choices, `Plan` for a separate planning view, `implementer` and `general-purpose` for execution, and `reviewer` for repository-aware verification. Small or obvious tasks can be handled directly; independent work can run in parallel. Configured models are the default best fit, and a fresh-context peer or `peer-review-coordinator` can reduce correlated blind spots when risk and uncertainty justify it. Model output is evidence to synthesize, not a vote. Advisor is optional, non-binding, and primary-lead-only counsel for a focused consequential uncertainty the normal evidence and roles cannot settle; it has no approval or workflow authority. The lead decides. On every retained max path, replace Gemini 3.1 Pro with Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high.",
-      `\`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide code and web search.${directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides browser control.` : ""}${opts.browseAvailable ? ` \`worker-browse\` dispatches the browse-only worker through \`mcp__${key("workers")}__browse\`.` : ""}${opts.standInAvailable ? ` \`mcp__${key("decide")}__stand_in\` provides deterministic decision tiebreak.` : ""}${opts.fleetAvailable ? ` \`mcp__${key("fleet")}__*\` provides gated remote sessions.` : ""}${opts.agentToolsAvailable ? " First-mate remains available when its own gate passes." : ""}`,
+      `\`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide code and web search.${directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides browser control.` : ""}${opts.browseAvailable ? ` \`worker-browse\` dispatches the browse-only worker through \`mcp__${key("workers")}__browse\`.` : ""}${opts.standInAvailable ? ` \`mcp__${key("decide")}__stand_in\` provides deterministic decision tiebreak.` : ""}${opts.fleetAvailable ? ` \`mcp__${key("fleet")}__*\` provides gated remote sessions.` : ""}${opts.agentToolsAvailable ? " First-mate remains available when its own gate passes." : ""}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
     ].join("\n")
   }
   if (opts.profile === "fast") {
+    const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
+    const browserClause = directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""
+    const workerBrowseClause = opts.browseAvailable ? ` \`worker-browse\` runs delegated browsing tasks through \`mcp__${key("workers")}__browse\`.` : ""
     return [
       "## Injected capabilities (summary)",
       "",
-      "Fast launch profile. Task roster: `Explore`, `implementer`, `reviewer`, `planner`, `critic`. Luna investigates and drafts; `planner` must approve before implementation. Before declaring done, run relevant tests and ask `reviewer` to verify.",
-      "Native delegation is ACL-scoped: the lead may invoke all five; `planner` may invoke `reviewer`, `Explore`, and `critic`; `implementer` may invoke `reviewer` and `critic`; `reviewer`, `Explore`, and `critic` cannot invoke native subagents.",
-      `Advisor is optional, non-binding, transcript-aware, and lead-only; use it for consequential unresolved uncertainty, not routine progress or workflow gates. \`mcp__${key("peers")}__oracle\` is exact Opus 5 (1M/high), stateless and last resort for the lead, reviewer, and planner. \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${opts.browseAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""}`,
+      "Fast launch profile. Task roster: `Explore`, `Plan`, `general-purpose`, `implementer`, `reviewer`. `Plan` is an advisory planning capability, not an approval gate. Verify claims with concrete repository evidence and tests before declaring done.",
+      "Native delegation is ACL-scoped: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
+      `Advisor is optional, non-binding, transcript-aware, and lead-only; use it for consequential unresolved uncertainty, not routine progress or workflow gates. \`mcp__${key("peers")}__oracle\` is exact Opus 5 (1M/high), stateless and last resort for the lead and \`Plan\`. \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
     ].join("\n")
   }
   const renderNative = (name: NativeAgentName): string => {

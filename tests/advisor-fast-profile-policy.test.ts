@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
 import {
-  LUNA_IMPLEMENTER_ALIAS_ID,
   LUNA_SCOUT_ALIAS_ID,
 } from "~/lib/launch-profile"
 import {
@@ -269,11 +268,11 @@ describe("fast Advisor request policy", () => {
     }) as unknown as typeof fetch
 
     for (const [agentId, model] of [
-      ["scout", LUNA_SCOUT_ALIAS_ID],
-      ["implementer", LUNA_IMPLEMENTER_ALIAS_ID],
+      ["Explore", LUNA_SCOUT_ALIAS_ID],
+      ["Plan", "gpt-5.6-sol"],
+      ["general-purpose", "gpt-5.6-luna"],
+      ["implementer", "gemini-3.7-flash"],
       ["reviewer", "grok-4.6"],
-      ["planner", "gpt-5.6-sol"],
-      ["critic", "gemini-3.7-flash"],
     ] as const) {
       const response = await server.request("/v1/messages", {
         method: "POST",

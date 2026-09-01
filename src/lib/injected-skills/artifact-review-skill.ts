@@ -1,6 +1,10 @@
-export const ARTIFACT_REVIEW_SKILL = {
-  name: "gh-artifact-review",
-  md: `---
+import type { InjectedSkill } from "./index"
+
+export function buildArtifactReviewSkill(peersKey = "peers"): InjectedSkill {
+  const toolPrefix = `mcp__${peersKey}__artifact_`
+  return {
+    name: "gh-artifact-review",
+    md: `---
 name: gh-artifact-review
 description: Reviews plans and artifacts in the ai-or-die panel. Defaults to authoring a self-contained HTML artifact (rich, annotatable, optionally interactive) and opening THAT for the human, then drains feedback with artifact_await, revises, and ends the loop. Use when running inside an ai-or-die tab and there is a plan, comparison, diagram, table, diff, or report the user should see before proceeding.
 user-invocable: true
@@ -8,7 +12,7 @@ user-invocable: true
 
 # gh-artifact-review: human review in the ai-or-die panel
 
-Use this when you finish a plan or produce something a user should review and you are inside an ai-or-die tab (the \`mcp__peers__artifact_*\` tools drive a live panel). The human can click any block or select text to attach a comment, and can click declarative action controls you emit — both come back to you as typed events.
+Use this when you finish a plan or produce something a user should review and you are inside an ai-or-die tab (the \`${toolPrefix}*\` tools drive a live panel). The human can click any block or select text to attach a comment, and can click declarative action controls you emit — both come back to you as typed events.
 
 ## Default: present HTML, not raw markdown
 
@@ -36,21 +40,21 @@ Artifacts stay portable (they must render identically opened standalone), so do 
 
 ## Loop
 
-1. Open: \`mcp__peers__artifact_open\` with the absolute path of the \`.html\` (or the file). Pass \`mode:"interactive"\` when the HTML carries \`data-aod-*\` action controls (below). Relay the returned \`viewUrl\` and tell the user to review in the panel.
-2. Drain: \`mcp__peers__artifact_await\`. It long-holds for the human's next events and returns \`{events, status, cursor}\`. **Pass the returned \`cursor\` on your next call** so you only receive newer events; if \`events\` is empty, call again with that cursor.
+1. Open: \`${toolPrefix}open\` with the absolute path of the \`.html\` (or the file). Pass \`mode:"interactive"\` when the HTML carries \`data-aod-*\` action controls (below). Relay the returned \`viewUrl\` and tell the user to review in the panel.
+2. Drain: \`${toolPrefix}await\`. It long-holds for the human's next events and returns \`{events, status, cursor}\`. **Pass the returned \`cursor\` on your next call** so you only receive newer events; if \`events\` is empty, call again with that cursor.
 3. Act on each event by \`kind\`:
    - \`comment\` — a free-text note anchored to the artifact (\`selector\`, quoted \`text\`, \`sourceLine\`); apply the requested change at that exact spot.
    - \`action\` — the human clicked a control you emitted (\`action\` verb, \`elementId\`, optional \`value\`; a multi-select submit arrives as one action carrying the selected set). Do what the verb means (approve a step, choose an option, apply a toggle set).
-4. Reply: \`mcp__peers__artifact_reply\` with a concise summary of what you changed. Optionally \`mcp__peers__artifact_update({file})\` or \`({html})\` to replace the artifact content in place, or \`mcp__peers__artifact_refresh\` to reload it from disk.
-5. Repeat 2-4 until the user is satisfied; then \`mcp__peers__artifact_end\`. Use \`mcp__peers__artifact_dismiss\` to hide the panel while keeping the review alive (queued feedback preserved) if the user wants it out of the way without ending.
+4. Reply: \`${toolPrefix}reply\` with a concise summary of what you changed. Optionally \`${toolPrefix}update({file})\` or \`({html})\` to replace the artifact content in place, or \`${toolPrefix}refresh\` to reload it from disk.
+5. Repeat 2-4 until the user is satisfied; then \`${toolPrefix}end\`. Use \`${toolPrefix}dismiss\` to hide the panel while keeping the review alive (queued feedback preserved) if the user wants it out of the way without ending.
 
 ### Push arrival (you do not have to be polling)
 
-When you are idle at the prompt, panel feedback can arrive on its own as a new turn (the tab injects it). Structured actions that answer a pending decision are routed to you directly. Either way, the durable record is the \`artifact_await\` drain, so when in doubt call \`artifact_await\` (with your last cursor) to reconcile — it replays anything you missed.
+When you are idle at the prompt, panel feedback can arrive on its own as a new turn (the tab injects it). Structured actions that answer a pending decision are routed to you directly. Either way, the durable record is the \`${toolPrefix}await\` drain, so when in doubt call \`${toolPrefix}await\` (with your last cursor) to reconcile — it replays anything you missed.
 
 ### \`artifact_poll\` (frozen legacy)
 
-\`mcp__peers__artifact_poll\` still resolves for back-compat but returns the OLD payload (human comments only, no structured actions). Prefer \`artifact_await\`.
+\`${toolPrefix}poll\` still resolves for back-compat but returns the OLD payload (human comments only, no structured actions). Prefer \`${toolPrefix}await\`.
 
 ## Interactive controls (data-aod-* authoring)
 
@@ -68,4 +72,7 @@ To let the human act on the artifact (not just comment), emit declarative contro
 - If a tool errors (e.g. \`NOT_IN_AIORDIE_TAB\`, \`UNREACHABLE\`, \`INVALID_REQUEST\`), report the code/message verbatim; do not claim the panel opened.
 - The panel is a review surface, not an approver: outward/irreversible actions still need explicit user confirmation.
 `,
-} as const
+  }
+}
+
+export const ARTIFACT_REVIEW_SKILL = buildArtifactReviewSkill()

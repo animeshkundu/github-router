@@ -13,23 +13,31 @@ import {
   type FastProfileNativeAgentName,
 } from "./fast-profile-contract"
 
+export const FAST_BROWSE_DISPATCH_AGENT = "worker-browse" as const
+
 export const FAST_NATIVE_AGENT_NAMES = FAST_PROFILE_NATIVE_AGENT_NAMES
 
 export type FastNativeAgentName = FastProfileNativeAgentName
 
-const FAST_NATIVE_AGENT_SET = new Set<string>(FAST_NATIVE_AGENT_NAMES)
+export type FastDispatchTargetName = FastNativeAgentName | typeof FAST_BROWSE_DISPATCH_AGENT
+export type FastDispatchCallerName = FastNativeAgentName | typeof FAST_BROWSE_DISPATCH_AGENT
+
+export const FAST_NATIVE_AGENT_SET = new Set<string>(FAST_NATIVE_AGENT_NAMES)
 
 /** Frozen authority graph: each key is a caller and each value its targets. */
 export const FAST_DISPATCH_GRAPH: Readonly<
-  Record<FastNativeAgentName, ReadonlySet<FastNativeAgentName>>
+  Record<FastDispatchCallerName, ReadonlySet<FastDispatchTargetName>>
 > = Object.freeze({
-  Explore: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.Explore),
-  implementer: new Set<FastNativeAgentName>(
+  Explore: new Set<FastDispatchTargetName>(FAST_PROFILE_DELEGATION_GRAPH.Explore),
+  Plan: new Set<FastDispatchTargetName>(FAST_PROFILE_DELEGATION_GRAPH.Plan),
+  "general-purpose": new Set<FastDispatchTargetName>(
+    FAST_PROFILE_DELEGATION_GRAPH["general-purpose"],
+  ),
+  implementer: new Set<FastDispatchTargetName>(
     FAST_PROFILE_DELEGATION_GRAPH.implementer,
   ),
-  reviewer: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.reviewer),
-  planner: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.planner),
-  critic: new Set<FastNativeAgentName>(FAST_PROFILE_DELEGATION_GRAPH.critic),
+  reviewer: new Set<FastDispatchTargetName>(FAST_PROFILE_DELEGATION_GRAPH.reviewer),
+  "worker-browse": new Set<FastDispatchTargetName>([]),
 })
 
 /** The hook matcher is intentionally limited to native dispatch tool names. */
@@ -46,11 +54,18 @@ interface DispatchPayload {
   parentToolUseId?: unknown
 }
 
+export interface FastDispatchGuardOptions {
+  /** Optional restriction on allowed target subagents (e.g. from launch profile or hook CLI). */
+  allowedTargets?: ReadonlySet<string> | ReadonlyArray<string>
+  /** Whether worker-browse is permitted as a target for the lead. */
+  allowBrowse?: boolean
+}
+
 export interface FastDispatchGuardResult {
   allowed: boolean
   reason?: string
-  caller?: FastNativeAgentName | "lead"
-  target?: FastNativeAgentName
+  caller?: FastDispatchCallerName | "lead"
+  target?: FastDispatchTargetName
   /** Cloned Agent/Task input with a caller model override removed. */
   updatedInput?: Record<string, unknown>
   verdict: "allow-non-dispatch" | "allow" | "deny"
@@ -85,11 +100,40 @@ function resolveAliasedString(
 
 function deny(
   reason: string,
-  target?: FastNativeAgentName,
-  caller?: FastNativeAgentName | "lead",
+  target?: FastDispatchTargetName,
+  caller?: FastDispatchCallerName | "lead",
 ): FastDispatchGuardResult {
   return { allowed: false, reason, target, caller, verdict: "deny" }
 }
+
+/**
+ * Continuation / reattachment target selectors that must be rejected on Fast dispatch.
+ * Any non-null value in tool_input fails closed to prevent bypassing role edges.
+ */
+const CONTINUATION_FIELDS: ReadonlyArray<string> = [
+  "resume",
+  "resume_session",
+  "resumeSession",
+  "resume_agent_id",
+  "resumeAgentId",
+  "continuation",
+  "continue",
+  "continue_session",
+  "continueSession",
+  "agent_id",
+  "agentId",
+  "session_id",
+  "sessionId",
+  "thread_id",
+  "threadId",
+  "task_id",
+  "taskId",
+  "target_agent_id",
+  "targetAgentId",
+  "reattach",
+  "reattach_session",
+  "reattachSession",
+]
 
 /**
  * Evaluate one raw Claude Code PreToolUse payload.
@@ -98,7 +142,10 @@ function deny(
  * ordinary-tool hook therefore passes through, while a recognized Task/Agent
  * dispatch fails closed on malformed input or identity.
  */
-export function decideFastDispatchGuard(stdin: string | unknown): FastDispatchGuardResult {
+export function decideFastDispatchGuard(
+  stdin: string | unknown,
+  opts?: FastDispatchGuardOptions,
+): FastDispatchGuardResult {
   let parsed: unknown
   try {
     parsed = typeof stdin === "string" ? JSON.parse(stdin) : stdin
@@ -121,8 +168,20 @@ export function decideFastDispatchGuard(stdin: string | unknown): FastDispatchGu
   if (!payload.tool_input || typeof payload.tool_input !== "object" || Array.isArray(payload.tool_input)) {
     return deny(`fast dispatch denied: ${toolName} payload has malformed tool_input`)
   }
+  const toolInput = payload.tool_input as Record<string, unknown>
+
+  // Reject non-null continuation / reattachment / agent-id target selectors that could bypass role edges
+  for (const field of CONTINUATION_FIELDS) {
+    if (hasOwn(toolInput, field)) {
+      const val = toolInput[field]
+      if (val !== undefined && val !== null && val !== false) {
+        return deny(`fast dispatch denied: ${toolName} continuation/reattachment (${field}) is not permitted in fast profile`)
+      }
+    }
+  }
+
   const targetResult = resolveAliasedString(
-    payload.tool_input as Record<string, unknown>,
+    toolInput,
     ["subagent_type", "subagentType"],
   )
   if (targetResult.malformed) {
@@ -132,13 +191,21 @@ export function decideFastDispatchGuard(stdin: string | unknown): FastDispatchGu
     return deny(`fast dispatch denied: ${toolName} target aliases conflict`)
   }
   const targetValue = targetResult.value
-  if (!targetValue || !FAST_NATIVE_AGENT_SET.has(targetValue)) {
+
+  const effectiveAllowedTargets = opts?.allowedTargets
+    ? new Set(opts.allowedTargets)
+    : new Set<string>([
+        ...FAST_NATIVE_AGENT_NAMES,
+        ...(opts?.allowBrowse ? [FAST_BROWSE_DISPATCH_AGENT] : []),
+      ])
+
+  if (!targetValue || !effectiveAllowedTargets.has(targetValue)) {
     return deny(
-      `fast dispatch denied: ${toolName} target must be one of ${FAST_NATIVE_AGENT_NAMES.join(", ")}`,
+      `fast dispatch denied: ${toolName} target must be one of ${[...effectiveAllowedTargets].join(", ")}`,
     )
   }
-  const target = targetValue as FastNativeAgentName
-  const toolInput = payload.tool_input as Record<string, unknown>
+  const target = targetValue as FastDispatchTargetName
+
   // Invocation-level `model` outranks custom-agent frontmatter in Claude Code.
   // The fast profile promises fixed role models, so allowed dispatches must
   // remove that one caller-owned field while preserving every other input.
@@ -189,11 +256,17 @@ export function decideFastDispatchGuard(stdin: string | unknown): FastDispatchGu
       verdict: "allow",
     }
   }
-  if (!FAST_NATIVE_AGENT_SET.has(callerTypeValue)) {
+
+  const validCallers = new Set<string>([
+    ...FAST_NATIVE_AGENT_NAMES,
+    FAST_BROWSE_DISPATCH_AGENT,
+  ])
+
+  if (!validCallers.has(callerTypeValue)) {
     return deny(`fast dispatch denied: unknown caller role ${JSON.stringify(callerTypeValue)}`, target)
   }
-  const caller = callerTypeValue as FastNativeAgentName
-  const allowedTargets = FAST_DISPATCH_GRAPH[caller]
+  const caller = callerTypeValue as FastDispatchCallerName
+  const allowedTargets = FAST_DISPATCH_GRAPH[caller] ?? new Set<FastDispatchTargetName>()
   if (!allowedTargets.has(target)) {
     return deny(`fast dispatch denied: ${caller} cannot invoke ${target}`, target, caller)
   }

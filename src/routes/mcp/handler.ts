@@ -316,7 +316,7 @@ function oracleToolEntry(): ToolEntry {
   return {
     name: "oracle",
     description:
-      "Fast-profile last-resort guidance from exact Opus 5 (1M context) at high effort. Stateless and tool-less: pass complete context plus one precise query only after the primary Luna path, Advisor, and the relevant reviewer/planner path remain stuck. It can advise or request missing information; it cannot inspect the repo, execute, merge, or authorize actions.",
+      "Fast-profile last-resort guidance from exact Opus 5 (1M context) at high effort. Available only to the lead and Plan: pass complete context plus one precise consequential question when repository evidence cannot settle it. It is stateless and tool-less; it cannot inspect the repo, execute, merge, or authorize actions.",
     inputSchema: {
       type: "object",
       required: ["query", "context"],
@@ -345,12 +345,14 @@ function maxToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   return true
 }
 
-type MaxProjectionItem = {
+type ProfileProjectionItem = {
   group: McpGroup
   name: string
   persona?: PersonaSpec
   tool?: NonPersonaMcpTool
 }
+
+type MaxProjectionItem = ProfileProjectionItem
 
 /**
  * One max-profile projection predicate for both tools/list and tools/call.
@@ -376,6 +378,36 @@ function maxAllowsTool(
   if (item.tool.group === "orchestrate") return false
   if (item.tool.group === "workers" && item.tool.toolNameHttp !== "browse") return false
   return maxToolIsEnabled(item.tool)
+}
+
+function fastToolIsEnabled(tool: NonPersonaMcpTool): boolean {
+  if (tool.group === "search") return true
+  if (tool.group === "peers") {
+    return tool.capability === "artifact" && artifactToolsEnabled()
+  }
+  if (tool.group === "workers") {
+    return tool.toolNameHttp === "browse"
+      && tool.capability === "browse_agent"
+      && browseAgentEnabled()
+  }
+  if (tool.group !== "browser") return false
+  if (!browserToolsEnabled()) return false
+  if (tool.capability === "browser_compound") return browserCompoundToolsEnabled()
+  if (tool.capability === "browser_power") return browserPowerToolsEnabled()
+  return tool.capability === "browser"
+}
+
+/** Shared Fast projection for list and call, including non-persona dispatch kind. */
+function fastAllowsTool(
+  scope: McpScope,
+  launch: LaunchRegistryEntry,
+  item: ProfileProjectionItem,
+): boolean {
+  if (launch.profileId !== "fast") return true
+  if (scope !== "all" && item.group !== scope) return false
+  if (!launch.allowedGroups?.has(item.group)) return false
+  if (item.persona) return false
+  return item.tool !== undefined && fastToolIsEnabled(item.tool)
 }
 
 function toolEntries(scope: McpScope, launch: LaunchRegistryEntry): Array<ToolEntry> {
@@ -419,15 +451,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry): Array<ToolEn
       entries.push(oracleToolEntry())
     }
     for (const tool of NON_PERSONA_MCP_TOOLS) {
-      if (scope !== "all" && tool.group !== scope) continue
-      if (!launch.allowedGroups?.has(tool.group)) continue
-      if (tool.group === "search") {
-        entries.push({ name: tool.toolNameHttp, description: tool.description, inputSchema: tool.inputSchema })
-        continue
-      }
-      if (tool.group !== "browser" || !browserToolsEnabled()) continue
-      if (tool.capability === "browser_compound" && !browserCompoundToolsEnabled()) continue
-      if (tool.capability === "browser_power" && !browserPowerToolsEnabled()) continue
+      if (!fastAllowsTool(scope, launch, { group: tool.group, name: tool.toolNameHttp, tool })) continue
       entries.push({ name: tool.toolNameHttp, description: tool.description, inputSchema: tool.inputSchema })
     }
     return entries
@@ -1155,6 +1179,19 @@ async function handleToolsCall(
         ? maxAllowsTool(scope, launch, { group: maxTool.group, name, tool: maxTool })
         : false
     if (!maxAllowed) {
+      return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
+    }
+  }
+
+  if (launch.profileId === "fast" && name !== "oracle") {
+    const fastPersona = activePersonas(launch).find((persona) => persona.toolNameHttp === name)
+    const fastTool = NON_PERSONA_MCP_TOOLS.find((tool) => tool.toolNameHttp === name)
+    const fastAllowed = fastPersona
+      ? fastAllowsTool(scope, launch, { group: "peers", name, persona: fastPersona })
+      : fastTool
+        ? fastAllowsTool(scope, launch, { group: fastTool.group, name, tool: fastTool })
+        : false
+    if (!fastAllowed) {
       return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
     }
   }

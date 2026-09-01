@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import {
+  FAST_BROWSE_DISPATCH_AGENT,
   FAST_DISPATCH_GRAPH,
   FAST_DISPATCH_TOOL_MATCHER,
   FAST_NATIVE_AGENT_NAMES,
@@ -19,11 +20,11 @@ const dispatch = (target: string, caller?: string, extra?: Record<string, unknow
     ...extra,
   })
 
-function expectAllowed(stdin: string): void {
-  expect(decideFastDispatchGuard(stdin).allowed).toBe(true)
+function expectAllowed(stdin: string, opts?: Parameters<typeof decideFastDispatchGuard>[1]): void {
+  expect(decideFastDispatchGuard(stdin, opts).allowed).toBe(true)
 }
-function expectDenied(stdin: string): void {
-  const result = decideFastDispatchGuard(stdin)
+function expectDenied(stdin: string, opts?: Parameters<typeof decideFastDispatchGuard>[1]): void {
+  const result = decideFastDispatchGuard(stdin, opts)
   expect(result.allowed).toBe(false)
   expect(result.verdict).toBe("deny")
   expect(result.reason).toBeString()
@@ -43,36 +44,60 @@ describe("fast native dispatch ACL", () => {
     for (const target of roles) expectAllowed(dispatch(target, undefined, { agent_type: null, agent_id: null }))
   })
 
-  test("planner and implementer follow the exact graph", () => {
+  test("Plan, implementer, and general-purpose follow the exact graph", () => {
     for (const target of roles) {
-      const plannerAllowed = FAST_DISPATCH_GRAPH.planner.has(target)
+      const planAllowed = FAST_DISPATCH_GRAPH.Plan.has(target)
       const implementerAllowed = FAST_DISPATCH_GRAPH.implementer.has(target)
-      if (plannerAllowed) expectAllowed(dispatch(target, "planner"))
-      else expectDenied(dispatch(target, "planner"))
+      const gpAllowed = FAST_DISPATCH_GRAPH["general-purpose"].has(target)
+      if (planAllowed) expectAllowed(dispatch(target, "Plan"))
+      else expectDenied(dispatch(target, "Plan"))
       if (implementerAllowed) expectAllowed(dispatch(target, "implementer"))
       else expectDenied(dispatch(target, "implementer"))
+      if (gpAllowed) expectAllowed(dispatch(target, "general-purpose"))
+      else expectDenied(dispatch(target, "general-purpose"))
     }
   })
 
-  test("reviewer, Explore, and critic cannot dispatch any native role", () => {
-    for (const caller of ["reviewer", "Explore", "critic"]) {
+  test("reviewer, Explore, and worker-browse cannot dispatch any native role", () => {
+    for (const caller of ["reviewer", "Explore", "worker-browse"]) {
       for (const target of roles) expectDenied(dispatch(target, caller))
     }
   })
 
   test("supports Task and snake/camel target aliases, but rejects conflicts", () => {
-    expectAllowed(payload({ tool_name: "Task", tool_input: { subagent_type: "critic" }, agent_type: "implementer" }))
-    expectAllowed(payload({ tool_name: "Agent", tool_input: { subagentType: "critic" }, agentType: "implementer" }))
-    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic", subagentType: "Explore" } }))
+    expectAllowed(payload({ tool_name: "Task", tool_input: { subagent_type: "reviewer" }, agent_type: "implementer" }))
+    expectAllowed(payload({ tool_name: "Agent", tool_input: { subagentType: "reviewer" }, agentType: "implementer" }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", subagentType: "Explore" } }))
     expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: 42 } }))
   })
 
+  test("rejects continuation, resume, and agent-id target selectors", () => {
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", resume: "sess-123" } }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", resumeSession: "sess-123" } }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", agent_id: "agent-123" } }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", continuation: true } }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", continueSession: "sess-123" } }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", targetAgentId: "target-123" } }))
+  })
+
+  test("supports optional worker-browse conditional target", () => {
+    expectDenied(dispatch(FAST_BROWSE_DISPATCH_AGENT))
+    expectAllowed(dispatch(FAST_BROWSE_DISPATCH_AGENT), { allowBrowse: true })
+    expectDenied(dispatch(FAST_BROWSE_DISPATCH_AGENT, "Plan"), { allowBrowse: true })
+    expectDenied(dispatch(FAST_BROWSE_DISPATCH_AGENT, "implementer"), { allowBrowse: true })
+  })
+
+  test("supports allowedTargets restriction option", () => {
+    expectAllowed(dispatch("Explore"), { allowedTargets: ["Explore", "Plan"] })
+    expectDenied(dispatch("reviewer"), { allowedTargets: ["Explore", "Plan"] })
+  })
+
   test("unknown, id-only, parent-only, and malformed identities deny dispatch", () => {
-    expectDenied(dispatch("critic", "custom-agent"))
-    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic" }, agent_id: "id" }))
-    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic" }, parent_tool_use_id: "parent" }))
-    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic" }, agent_type: 42 }))
-    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic" }, agent_type: "implementer", agentType: "planner" }))
+    expectDenied(dispatch("reviewer", "custom-agent"))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer" }, agent_id: "id" }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer" }, parent_tool_use_id: "parent" }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer" }, agent_type: 42 }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer" }, agent_type: "implementer", agentType: "Plan" }))
   })
 
   test("malformed dispatch payloads fail closed while valid lead markers pass", () => {
@@ -80,8 +105,8 @@ describe("fast native dispatch ACL", () => {
       expectDenied(input)
     }
     expectDenied(JSON.stringify({ tool_name: "Task" }))
-    expectAllowed(payload({ tool_name: "Agent", tool_input: { subagent_type: "critic" }, agent_type: null, agent_id: null }))
-    expectAllowed(payload({ tool_name: "Task", tool_input: { subagent_type: "critic" }, parent_tool_use_id: null }))
+    expectAllowed(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer" }, agent_type: null, agent_id: null }))
+    expectAllowed(payload({ tool_name: "Task", tool_input: { subagent_type: "reviewer" }, parent_tool_use_id: null }))
   })
 
   test("the recognized dispatch path ignores unrelated ordinary tool names", () => {
@@ -91,18 +116,18 @@ describe("fast native dispatch ACL", () => {
   test("nested identity-shaped fields do not grant a caller role", () => {
     expectAllowed(payload({
       tool_name: "Agent",
-      tool_input: { subagent_type: "critic", agent_type: "reviewer" },
+      tool_input: { subagent_type: "reviewer", agent_type: "reviewer" },
     }))
     expectDenied(payload({
       tool_name: "Agent",
-      tool_input: { subagent_type: "critic" },
+      tool_input: { subagent_type: "reviewer" },
       agent_type: "reviewer",
     }))
   })
 
   test("allowed dispatch clones input and removes only the model override", () => {
     const originalInput = {
-      subagent_type: "planner",
+      subagent_type: "Plan",
       prompt: "review this",
       model: "sonnet",
       isolation: "worktree",
@@ -114,7 +139,7 @@ describe("fast native dispatch ACL", () => {
     }
     const decision = decideFastDispatchGuard(hook)
     expect(decision.updatedInput).toEqual({
-      subagent_type: "planner",
+      subagent_type: "Plan",
       prompt: "review this",
       isolation: "worktree",
       future: { keep: true },

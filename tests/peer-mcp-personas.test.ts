@@ -1136,34 +1136,38 @@ describe("fastProfile rendering (buildPeerAwarenessSnippet / buildPeerAwarenessS
 
   test("snippet names only the final fast roles, Advisor, Oracle, search, and opt-in browser", () => {
     const snippet = buildPeerAwarenessSnippet(FAST_OPTS)
-    for (const present of ["`Explore`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
+    for (const present of ["`Explore`", "`Plan`", "`general-purpose`", "`implementer`", "`reviewer`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
       expect(snippet).toContain(present)
     }
     expect(snippet).not.toContain("`scout`")
+    expect(snippet).not.toContain("`planner`")
+    expect(snippet).not.toContain("`critic`")
     expect(snippet).toContain("lead-only")
-    expect(snippet).toContain("available to the lead, reviewer, and planner")
+    expect(snippet).toContain("available to the lead and `Plan`")
     for (const removed of [
       "gemini_critic", "codex_critic", "codex_reviewer", "opus_critic",
       "gemini_reviewer", "peer-review-coordinator", "worker-explore",
       "worker-implement", "worker-review", "worker-plan", "worker-test",
-      "worker-browse", "stand_in", "`implementer-fast`", "`reviewer-fast`",
-      "`brainstorm`", "`scribe`", "`general-purpose-fast`", "mcp__workers__",
+      "stand_in", "`implementer-fast`", "`reviewer-fast`",
+      "`brainstorm`", "`scribe`", "`general-purpose-fast`",
       "mcp__orchestrate__", "mcp__fleet__", "mcp__decide__",
     ]) expect(snippet).not.toContain(removed)
   })
 
   test("summary names only the final fast surface", () => {
     const summary = buildPeerAwarenessSummary(FAST_OPTS)
-    for (const present of ["`Explore`", "`implementer`", "`reviewer`", "`planner`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
+    for (const present of ["`Explore`", "`Plan`", "`general-purpose`", "`implementer`", "`reviewer`", "Advisor", "oracle", "mcp__search__", "mcp__browser__"]) {
       expect(summary).toContain(present)
     }
     expect(summary).not.toContain("`scout`")
+    expect(summary).not.toContain("`planner`")
+    expect(summary).not.toContain("`critic`")
     expect(summary).toContain("lead-only")
     for (const removed of [
       "gemini_critic", "peer-review-coordinator", "worker-*", "stand_in",
       "`implementer-fast`", "`reviewer-fast`", "`brainstorm`", "`scribe`",
-      "`general-purpose-fast`", "mcp__workers__", "mcp__orchestrate__",
-      "mcp__fleet__", "mcp__decide__",
+      "`general-purpose-fast`",
+      "mcp__orchestrate__", "mcp__fleet__", "mcp__decide__",
     ]) expect(summary).not.toContain(removed)
   })
 

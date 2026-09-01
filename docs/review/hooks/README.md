@@ -13,7 +13,7 @@ Two rules, from the approved review plan:
 
 ## The 8 hooks
 
-Fast launches add one separate hook, `PreToolUse` matching `^(Task|Agent)$`, which enforces only the fast native delegation graph. It is registered after fast runtime generation and its installation is fatal for fast launches; standard launches do not register it. The hook uses a compiled policy and synchronous stdin parsing, so it is not a shell sandbox: Bash remains governed by each native role's toolset and the hook only controls in-session Task/Agent ACL edges.
+Fast launches add a required `PreToolUse` hook matching `^(Task|Agent)$` for the balanced native delegation graph and, when browse is available, the existing browse-only worker guard. Inside an ai-or-die tab they also receive the top-level Artifact `PostToolUse(ExitPlanMode)` auto-open hook. Standard launches do not receive the Fast ACL. The ACL uses compiled policy and synchronous stdin parsing; Bash remains governed by each role's toolset and the hook controls only in-session Task/Agent edges.
 
 All are registered in `src/claude.ts` into `<CLAUDE_CONFIG_DIR>/settings.json` via `injectStopHookIntoSettingsFile` (`src/lib/orchestration/stop-gate-hook.ts:656`). All key off the same discriminator, the `agent_type`/`agent_id` fields Claude Code sets only inside a subagent context, but in two different ways:
 

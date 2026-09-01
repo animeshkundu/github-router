@@ -20,7 +20,7 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  * opted-in `browser`/`fleet`/`first-mate`/`decide` groups under their own
  * predicates). `"fast"` is the deliberately lean `-m fast` profile: a
  * `gpt-5.6-luna` lead, exactly five native agents, the fast-only Oracle,
- * and only the `peers`/`search` plus independently opted-in `browser` MCP groups.
+ * Artifact/search tools, and optional direct-browser plus browse-worker groups.
  *
  * Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
  * from the resolved lead model id — so `-m gpt-5.6-luna` (a direct pin of
@@ -61,17 +61,17 @@ export const STANDARD_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
- * The `-m fast` roster: exactly five native agents (`Explore`, `implementer`,
- * `reviewer`, `planner`, `critic`), the fast-only `oracle` peer tool, no coordinator,
- * and only `peers`/`search` plus the ordinary opt-in `browser` group.
- * `workers`/`orchestrate`/`decide`/`fleet`/`first-mate` are hard denies even
- * when their independent standard-profile gates pass.
+ * The `-m fast` roster: exactly five native agents (`Explore`, `Plan`,
+ * `general-purpose`, `implementer`, `reviewer`), the fast-only `oracle` peer
+ * tool, no coordinator, and `peers`/`search` plus optional browser and
+ * browse-only worker groups. Core workers, `orchestrate`, `decide`, `fleet`,
+ * and `first-mate` remain hard denies even when their standard gates pass.
  */
 export const FAST_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "fast",
   nativeRoster: new Set(FAST_PROFILE_NATIVE_AGENT_NAMES),
   personaAllowlist: new Set(["oracle"]),
-  allowedGroups: new Set(["peers", "search", "browser"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser"]),
   hasCoordinator: false,
 })
 
@@ -141,15 +141,14 @@ export { formatMaxPrerequisiteFailure, MAX_REQUIRED_CONTEXT_TOKENS, MAX_PROFILE_
  */
 export const LUNA_DRIVER_ALIAS_ID = "gh-router-luna-driver-max"
 
-/** Fast native-agent alias ids preserve role-specific effort provenance until
- *  the authenticated request boundary. They both canonicalize to Luna, but the
- *  Explore is fixed high while the implementer is fixed max. */
+/** Fast Explore alias preserves its high-effort provenance until the
+ * authenticated request boundary. Bare Luna remains the max-effort lead and
+ * `general-purpose` model. */
 export const LUNA_SCOUT_ALIAS_ID = "gh-router-luna-scout-high"
-export const LUNA_IMPLEMENTER_ALIAS_ID = "gh-router-luna-implementer-max"
 
-/** Fast-profile critic alias. It preserves Gemini's fixed medium effort until
- * the authenticated request boundary; bare Gemini remains high for the lead
- * and Advisor traffic. */
+/** Retired Fast aliases remain recognizable only so old running clients fail
+ * with an explicit stale-alias error instead of silently changing semantics. */
+export const LUNA_IMPLEMENTER_ALIAS_ID = "gh-router-luna-implementer-max"
 export const FAST_CRITIC_ALIAS_ID = "gh-router-fast-critic-medium"
 
 export const LUNA_SONNET_ALIAS_ID = "gh-router-luna-sonnet-xhigh"
@@ -218,6 +217,11 @@ export interface ModelAliasDescriptor {
  * `/v1/messages` identity preflight), after the effort default has already
  * been read off the alias.
  */
+const RETIRED_FAST_ALIAS_IDS = new Set([
+  LUNA_IMPLEMENTER_ALIAS_ID,
+  FAST_CRITIC_ALIAS_ID,
+])
+
 const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   [
     LUNA_DRIVER_ALIAS_ID,
@@ -234,14 +238,6 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   [
     LUNA_SCOUT_ALIAS_ID,
     { aliasId: LUNA_SCOUT_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "high" },
-  ],
-  [
-    LUNA_IMPLEMENTER_ALIAS_ID,
-    { aliasId: LUNA_IMPLEMENTER_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "max" },
-  ],
-  [
-    FAST_CRITIC_ALIAS_ID,
-    { aliasId: FAST_CRITIC_ALIAS_ID, realModel: FAST_PROFILE_MODELS.critic, absentEffortDefault: "medium" },
   ],
   [
     LUNA_SONNET_ALIAS_ID,
@@ -263,6 +259,10 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
 export function resolveModelAlias(id: string): ModelAliasDescriptor | undefined {
   const { base } = stripTrailingOneMSuffix(id)
   return MODEL_ALIAS_TABLE.get(base)
+}
+
+export function isRetiredFastModelAlias(id: string): boolean {
+  return RETIRED_FAST_ALIAS_IDS.has(stripTrailingOneMSuffix(id).base)
 }
 
 /**
@@ -361,11 +361,10 @@ function hasPromptAtLeast(model: Model | undefined, tokens: number): boolean {
  * than silently substituting or dropping an agent.
  *
  * Checks, per the fast-launch-profile design:
- *   - Luna lead/Explore/implementer: tool calls, >=1M, high+max, Responses.
- *   - Sol planner: tool calls, >=1M, high, Responses.
+ *   - Luna lead/Explore/general-purpose: tool calls, >=1M, high+max, Responses.
+ *   - Sol Plan: tool calls, >=1M, high, Responses.
  *   - Grok reviewer: tool calls, medium, Responses, usable prompt metadata.
- *   - Gemini Advisor: >=1M, high, chat-completions.
- *   - Gemini critic: tool calls, >=1M, medium, chat-completions.
+ *   - Gemini implementer/Advisor: tool calls, >=1M, high, chat-completions.
  *   - Opus Oracle: exact Opus 5, >=1M, adaptive/high, Messages, prompt metadata.
  *
  * Pure over the passed-in catalog snapshot so it's unit-testable without
@@ -392,21 +391,21 @@ export function validateFastProfilePrerequisites(
     }
   }
 
-  const sol = findModel(catalog, FAST_PROFILE_MODELS.planner)
+  const sol = findModel(catalog, FAST_PROFILE_MODELS.plan)
   if (!sol) {
-    missing.push(`${FAST_PROFILE_MODELS.planner}: absent from the live catalog`)
+    missing.push(`${FAST_PROFILE_MODELS.plan}: absent from the live catalog`)
   } else {
     if (!hasToolCalls(sol)) {
-      missing.push(`${FAST_PROFILE_MODELS.planner}: does not advertise tool_calls`)
+      missing.push(`${FAST_PROFILE_MODELS.plan}: does not advertise tool_calls`)
     }
     if (!hasContextAtLeast(sol, FAST_REQUIRED_CONTEXT_TOKENS)) {
-      missing.push(`${FAST_PROFILE_MODELS.planner}: advertised context window is below 1M`)
+      missing.push(`${FAST_PROFILE_MODELS.plan}: advertised context window is below 1M`)
     }
     if (!supportsEffort(sol, "high")) {
-      missing.push(`${FAST_PROFILE_MODELS.planner}: does not advertise a "high" reasoning effort`)
+      missing.push(`${FAST_PROFILE_MODELS.plan}: does not advertise a "high" reasoning effort`)
     }
     if (!supportsEndpoint(sol, "responses")) {
-      missing.push(`${FAST_PROFILE_MODELS.planner}: does not advertise a supported Responses endpoint`)
+      missing.push(`${FAST_PROFILE_MODELS.plan}: does not advertise a supported Responses endpoint`)
     }
   }
 
@@ -430,21 +429,18 @@ export function validateFastProfilePrerequisites(
     }
   }
 
-  const gemini = findModel(catalog, FAST_PROFILE_MODELS.critic)
+  const gemini = findModel(catalog, FAST_PROFILE_MODELS.advisor)
   if (!gemini) {
-    missing.push(`${FAST_PROFILE_MODELS.critic}: absent from the live catalog`)
+    missing.push(`${FAST_PROFILE_MODELS.advisor}: absent from the live catalog`)
   } else {
     if (!hasToolCalls(gemini)) {
-      missing.push(`${FAST_PROFILE_MODELS.critic}: does not advertise tool_calls for the native critic`)
+      missing.push(`${FAST_PROFILE_MODELS.advisor}: does not advertise tool_calls`)
     }
     if (!hasContextAtLeast(gemini, FAST_REQUIRED_CONTEXT_TOKENS)) {
-      missing.push(`${FAST_PROFILE_MODELS.critic}: advertised context window is below 1M`)
+      missing.push(`${FAST_PROFILE_MODELS.advisor}: advertised context window is below 1M`)
     }
     if (!supportsEffort(gemini, "high")) {
-      missing.push(`${FAST_PROFILE_MODELS.critic}: does not advertise a "high" reasoning effort for Advisor`)
-    }
-    if (!supportsEffort(gemini, "medium")) {
-      missing.push(`${FAST_PROFILE_MODELS.critic}: does not advertise a "medium" reasoning effort for the native critic`)
+      missing.push(`${FAST_PROFILE_MODELS.advisor}: does not advertise a "high" reasoning effort`)
     }
     // Reuse the canonical catalog endpoint resolver. Copilot's live catalog
     // uses bare `/chat/completions`, while fixtures and older snapshots may use
@@ -452,7 +448,7 @@ export function validateFastProfilePrerequisites(
     // fully-capable live catalog fail the whole launch.
     if (!supportsEndpoint(gemini, "chat")) {
       missing.push(
-        `${FAST_PROFILE_MODELS.critic}: does not advertise a supported chat-completions endpoint`,
+        `${FAST_PROFILE_MODELS.advisor}: does not advertise a supported chat-completions endpoint`,
       )
     }
   }

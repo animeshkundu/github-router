@@ -57,7 +57,7 @@ export const MAX_PROFILE_NATIVE_MODELS = Object.freeze({
   Plan: MAX_PROFILE_MODELS.sol,
   "general-purpose": MAX_PROFILE_MODELS.luna,
   implementer: MAX_PROFILE_MODELS.gemini,
-  reviewer: MAX_PROFILE_MODELS.gemini,
+  reviewer: MAX_PROFILE_MODELS.grok,
   brainstorm: MAX_PROFILE_MODELS.grok,
   "peer-review-coordinator": MAX_PROFILE_MODELS.luna,
 } as const satisfies Record<MaxProfileNativeAgentName, string>)
@@ -226,6 +226,14 @@ function usableGrok(model: Model | undefined): boolean {
   )
 }
 
+function usableGrokReviewer(model: Model | undefined): boolean {
+  return Boolean(
+    usableGrok(model)
+    && supportsEffort(model, "high")
+    && (model?.capabilities?.limits?.max_prompt_tokens ?? 0) >= 200_000,
+  )
+}
+
 /**
  * Validate the fixed prerequisites for the raw `-m max` launch.
  *
@@ -371,9 +379,7 @@ export function maxGrokModel(): string | undefined {
 /** Grok replacement for max-profile surfaces that require high effort. */
 export function maxGrokHighModel(): string | undefined {
   const model = catalogModel(MAX_PROFILE_MODELS.grok)
-  return model && usableGrok(model) && supportsEffort(model, "high")
-    ? model.id
-    : undefined
+  return model && usableGrokReviewer(model) ? model.id : undefined
 }
 
 /** Max-only replacement for any standard Gemini Pro assignment. */
@@ -395,6 +401,24 @@ export function maxOpusModel(): string | undefined {
     && hasUsableLimits(model)
     ? model.id
     : undefined
+}
+
+export function maxLunaMaxModel(): string | undefined {
+  const model = catalogModel(MAX_PROFILE_MODELS.luna)
+  return model
+    && hasToolCalls(model)
+    && hasContextAtLeast(model, ONE_M_TOKENS)
+    && supportsEffort(model, "max")
+    && supportsEndpoint(model, "responses")
+    && hasUsableLimits(model)
+    ? model.id
+    : undefined
+}
+
+export function maxReviewerModel(): string | undefined {
+  const grok = maxGrokHighModel()
+  if (grok) return grok
+  return maxLunaMaxModel()
 }
 
 export function maxCatalogModel(id: string): Model | undefined {

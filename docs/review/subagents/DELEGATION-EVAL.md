@@ -34,14 +34,14 @@ Every run receives a fresh copy of `tests/fixtures/delegation-repo`, initialized
 
 The battery contains multiple independently worded instances in six strata:
 
-1. cheap or mechanical implementation, testing the `implementer-fast` boundary;
-2. complex implementation, predetermined to require full `implementer`;
-3. specialist work for `scout`, `reviewer`, `brainstorm`, or `scribe`;
+1. cheap or mechanical implementation, testing the `implementer-fast` / `implementer` / `general-purpose` / `general-purpose-fast` boundary;
+2. complex implementation, testing `implementer` and `Plan` / `planner`;
+3. specialist work for `scout`, `Explore`, `reviewer`, `reviewer-fast`, `brainstorm`, `Plan`/`planner`, `peer-review-coordinator`, or `scribe`;
 4. ambiguous boundary work with more than one defensible route;
 5. negative controls where direct action is correct;
 6. parallel fan-out with several independent tracks.
 
-Prompts do not name agents. Each positive instance declares an **acceptable set**, not a single label. The `implementer-fast` boundary intentionally scores the new role by its treatment name; baseline `generic` calls remain visible in raw results but do not receive routing credit for a role the baseline roster does not yet expose. The checked-in battery is the denominator. Prompts or acceptable sets must not be edited after live results are inspected without declaring a new eval version.
+Prompts do not name agents. Each positive instance declares an **acceptable set**, not a single label. Acceptable sets include both standard profile roles (`implementer`, `implementer-fast`, `reviewer`, `reviewer-fast`, `scout`, `scribe`, `brainstorm`, `general-purpose-fast`) and profile-specialized roles for Fast and Max (`Explore`, `Plan`/`planner`, `general-purpose`, `implementer`, `reviewer`, `peer-review-coordinator`). In Fast mode, only lead and Plan can call Oracle when required; reviewer, Explore, and implementer cannot. The checked-in battery is the denominator. Prompts or acceptable sets must not be edited after live results are inspected without declaring a new eval version. All non-zero exits and timeouts (excluding the harness's intentional `killedAfterTask` short-circuit) are strictly excluded from behavioral evaluation denominators so crashes never contaminate delegation ratios.
 
 ## Signal and cost bound
 

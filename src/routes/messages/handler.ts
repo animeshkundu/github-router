@@ -483,12 +483,14 @@ export async function handleCompletion(c: Context) {
     identity.launch,
     subagentRequest,
   )
-  if (fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
-    const message = identity.launch?.profileId === "max"
-      ? (maxRequestError(fastPreprocess) ?? "Invalid max request")
-      : fastPreprocess.rejectedAlias
-        ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m fast launch.`
-        : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m fast model set.`
+  if (fastPreprocess.retiredAlias || fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
+    const message = fastPreprocess.retiredAlias
+      ? `Router-owned model alias ${JSON.stringify(fastPreprocess.retiredAlias)} belongs to a retired Fast role and is no longer valid. Relaunch or select a current Fast role.`
+      : identity.launch?.profileId === "max"
+        ? (maxRequestError(fastPreprocess) ?? "Invalid max request")
+        : fastPreprocess.rejectedAlias
+          ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m fast launch.`
+          : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m fast model set.`
     return c.json(
       { type: "error", error: { type: "invalid_request_error", message } },
       400,

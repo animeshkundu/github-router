@@ -59,6 +59,12 @@ function isMaxAgentSchemaModelAlias(model: unknown): boolean {
   return MAX_AGENT_SCHEMA_MODEL_ALIAS_SET.has(baseModel(model.trim()).toLowerCase())
 }
 
+export interface MaxDispatchGuardOptions {
+  /** Catalog-resolved reviewer model for this launch (Grok/high or Luna/max). */
+  reviewerModel?: string
+  reviewerEffort?: Extract<Effort, "high" | "max">
+}
+
 export interface MaxDispatchDecision {
   allowed: boolean
   reason?: string
@@ -118,7 +124,10 @@ export function normalizeMaxDispatchEffort(
  * live-ladder effort. Sol/Codex/unknown/private ids are rejected. The lead may
  * target any emitted max role; role-to-role edges are unrestricted here.
  */
-export function decideMaxDispatchGuard(stdin: string | unknown): MaxDispatchDecision {
+export function decideMaxDispatchGuard(
+  stdin: string | unknown,
+  opts: MaxDispatchGuardOptions = {},
+): MaxDispatchDecision {
   let parsed: unknown
   try {
     parsed = typeof stdin === "string" ? JSON.parse(stdin) : stdin
@@ -159,27 +168,34 @@ export function decideMaxDispatchGuard(stdin: string | unknown): MaxDispatchDeci
       // Keep this aligned with BROWSE_DEFAULT_MODEL. Importing worker-agent/engine
       // here would pull the worker runtime into the small hook bundle.
       ? "gpt-5.6-luna"
-      : MAX_PROFILE_NATIVE_MODELS[nativeTarget]
+      : nativeTarget === "reviewer" && opts.reviewerModel
+        ? baseModel(opts.reviewerModel)
+        : MAX_PROFILE_NATIVE_MODELS[nativeTarget]
   const effort = normalizeMaxDispatchEffort(effectiveModel, requestedEffort)
   if ((toolInput.thinking !== undefined || toolInput.effort !== undefined) && !effort) {
     return { allowed: false, reason: "max dispatch denied: reasoning override is not supported by the selected model", target, verdict: "deny" }
   }
+  const fixedReviewerEffort = nativeTarget === "reviewer"
+    && !normalizedModel
+    && opts.reviewerModel
+    ? opts.reviewerEffort ?? (baseModel(opts.reviewerModel) === "gpt-5.6-luna" ? "max" : "high")
+    : undefined
+  const effectiveEffort = fixedReviewerEffort ?? effort
   const updatedInput = { ...toolInput }
   if (normalizedModel) updatedInput.model = normalizedModel
   else delete updatedInput.model
-  if (effort) {
+  if (effectiveEffort) {
     // Claude Code's native Agent payload uses `model` and `effort`; preserve
-    // the field it sent rather than inventing a `thinking` key that the
-    // dispatcher schema may ignore. This rewrite is only a normalization of
-    // the selected model/effort, not a change to the profile's role defaults.
-    if (toolInput.thinking !== undefined) updatedInput.thinking = effort
-    else updatedInput.effort = effort
+    // an explicit field when possible, and emit the catalog-resolved reviewer
+    // fallback effort so Luna cannot inherit Grok's high frontmatter default.
+    if (toolInput.thinking !== undefined) updatedInput.thinking = effectiveEffort
+    else updatedInput.effort = effectiveEffort
   }
   if (toolInput.thinking !== undefined && toolInput.effort !== undefined) {
     delete updatedInput.effort
   }
   if (toolInput.model === undefined && normalizedModel === undefined) delete updatedInput.model
-  return { allowed: true, target, effort, updatedInput, verdict: "allow" }
+  return { allowed: true, target, effort: effectiveEffort, updatedInput, verdict: "allow" }
 }
 
 export function maxDispatchAllowOutput(updatedInput: Record<string, unknown>): string {

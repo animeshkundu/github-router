@@ -22,8 +22,21 @@ export const internalMaxDispatchGuard = defineCommand({
     name: "internal-max-dispatch-guard",
     description: "Internal: PreToolUse guard enforcing the max-profile native Task/Agent policy.",
   },
-  run() {
-    const decision = decideMaxDispatchGuard(readStdinSync())
+  args: {
+    reviewerModel: {
+      type: "string",
+      description: "Catalog-resolved Max reviewer model for this launch.",
+    },
+    reviewerEffort: {
+      type: "string",
+      description: "Fixed Max reviewer effort for this launch.",
+    },
+  },
+  run({ args }) {
+    const decision = decideMaxDispatchGuard(readStdinSync(), {
+      reviewerModel: args.reviewerModel,
+      reviewerEffort: args.reviewerEffort === "max" ? "max" : "high",
+    })
     if (!decision.allowed && decision.reason) {
       process.stdout.write(maxDispatchDenyOutput(decision.reason))
     } else if (decision.verdict === "allow" && decision.updatedInput) {
@@ -33,6 +46,15 @@ export const internalMaxDispatchGuard = defineCommand({
   },
 })
 
-export function buildMaxDispatchGuardHookCommand(invocation: SelfInvocation): string {
-  return buildSelfCommand(invocation, "internal-max-dispatch-guard")
+export function buildMaxDispatchGuardHookCommand(
+  invocation: SelfInvocation,
+  opts: { reviewerModel?: string; reviewerEffort?: "high" | "max" } = {},
+): string {
+  const flags: string[] = []
+  if (opts.reviewerModel) flags.push(`--reviewerModel "${opts.reviewerModel}"`)
+  if (opts.reviewerEffort) flags.push(`--reviewerEffort ${opts.reviewerEffort}`)
+  return buildSelfCommand(
+    invocation,
+    ["internal-max-dispatch-guard", ...flags].join(" "),
+  )
 }
