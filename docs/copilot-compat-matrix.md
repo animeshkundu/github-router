@@ -292,6 +292,15 @@ depend on, asserted by an executable check rather than assumed.
 | --- | --- | --- |
 | `api.githubcopilot.com` ALPN when the client offers `["h2","http/1.1"]` | ✅ selects `h2` | `bun run check:alpn` with `GH_ROUTER_UPSTREAM_ALLOW_H2=1` |
 | `api.githubcopilot.com` ALPN when the client offers `["http/1.1"]` only | ✅ selects `http/1.1` | `bun run check:alpn` (default) |
+| Catalog model advertises only `ws:/responses` | ❌ no HTTP endpoint selected; the current router does not implement CAPI model WebSockets | `tests/copilot-endpoint.test.ts` (`ws:/responses` is not an HTTP `/responses` match) |
+
+`ws:/responses` is a transport capability, not an alias for the HTTP `/responses`
+endpoint. The router intentionally exact-matches its supported HTTP paths and keeps
+HTTP/SSE as the model-transport default. This is deliberate: the CAPI WebSocket
+handshake, limits, and server-side lifecycle are not fully specified publicly, and
+an HTTP fallback cannot be added without first implementing and validating that
+transport. See [`copilot-cli-vscode-websocket-protocol.md`](research/copilot-cli-vscode-websocket-protocol.md)
+for the source investigation and deferred-adoption criteria.
 
 Both measured 2026-08-07 on Node v26.7.0 (built-in undici 8.9.0, OpenSSL 3.5.7).
 
