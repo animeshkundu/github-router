@@ -7,11 +7,20 @@ import {
   buildFastDispatchGuardHookCommand,
   installFastDispatchGuard,
 } from "~/lib/orchestration/fast-dispatch-hook"
+import { buildFastDispatchGuardHookCommand as buildGuardDirectCommand } from "~/internal-fast-dispatch-guard"
 
 describe("fast dispatch hook wiring", () => {
   test("builds the stable internal hook command and anchored matcher", () => {
     expect(buildFastDispatchGuardHookCommand({ execPath: "/usr/bin/node", scriptPath: "/app/main.js" })).toBe(
       '"/usr/bin/node" "/app/main.js" internal-fast-dispatch-guard',
+    )
+    expect(
+      buildGuardDirectCommand(
+        { execPath: "/usr/bin/node", scriptPath: "/app/main.js" },
+        { allowBrowse: true, allowedTargets: ["Explore", "Plan", "worker-browse"] },
+      ),
+    ).toBe(
+      '"/usr/bin/node" "/app/main.js" internal-fast-dispatch-guard --allowBrowse --allowedTargets "Explore,Plan,worker-browse"',
     )
     expect(new RegExp(FAST_DISPATCH_GUARD_MATCHER).test("Task")).toBe(true)
     expect(new RegExp(FAST_DISPATCH_GUARD_MATCHER).test("Agent")).toBe(true)

@@ -87,12 +87,12 @@ export function preprocessMaxRequest(
     return { body: JSON.stringify(parsed), originalModel, modified: true }
   }
 
-  // Grok is never a max lead because its catalog window is below 1M, but it is
-  // an allowed max native subagent model (the default brainstorm assignment).
-  // The launch nonce/secret already authenticated this as a bound max request;
-  // the client-supplied Agent header only narrows that trusted launch policy to
-  // the native-subagent set, where Grok is explicitly allowed.
-  const allowedSubagentModel = subagentRequest && base === "grok-4.6"
+  // Grok is never a max lead because its catalog window is below 1M, while
+  // Luna is both a lead and the capability-safe Max reviewer fallback. Bound
+  // native-subagent traffic receives the role-specific Grok/high or Luna/max
+  // default; lead traffic remains caller-controlled with a high default.
+  const allowedSubagentModel = subagentRequest
+    && (base === "grok-4.6" || base === "gpt-5.6-luna")
   if (!allowedModel(base) && !allowedSubagentModel) {
     return {
       body: rawBody,
@@ -102,7 +102,9 @@ export function preprocessMaxRequest(
     }
   }
 
-  const effort = allowedSubagentModel ? "medium" : MAX_MODEL_EFFORTS[base]
+  const effort = allowedSubagentModel
+    ? base === "gpt-5.6-luna" ? "max" : "high"
+    : MAX_MODEL_EFFORTS[base]
   if (!effort) {
     return {
       body: rawBody,

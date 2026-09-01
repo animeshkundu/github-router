@@ -160,7 +160,7 @@ export interface NativeAgentAvailability {
    *  hard restriction (not a catalog-availability signal, unlike every
    *  `*Available` flag above). When set, `buildNativeReachClauses` and
    *  `buildOperatingDefaultsDirective` return a short, self-contained
-   *  rendering naming only `Explore`/`implementer`/`reviewer`/`planner`/`critic`,
+   *  rendering naming only `Explore`/`Plan`/`general-purpose`/`implementer`/`reviewer`,
    *  Advisor, and Oracle — it must never name the standard-only `*-fast`/
    *  `brainstorm`/`scribe`/`general-purpose-fast`, `peer-review-coordinator`,
    *  `worker-*`/`orchestrate` tools or skills, or `stand_in`, since none of
@@ -170,6 +170,15 @@ export interface NativeAgentAvailability {
   /** False when a fast launch disabled or failed its MCP/native runtime wiring.
    *  The fallback directive must not advertise agents/tools that do not exist. */
   fastRuntimeAvailable?: boolean
+  browseAvailable?: boolean
+  browserToolsAvailable?: boolean
+  workerToolsAvailable?: boolean
+  standInAvailable?: boolean
+  fleetAvailable?: boolean
+  agentToolsAvailable?: boolean
+  artifactAvailable?: boolean
+  groupKeys?: Partial<Record<string, string>>
+  peersKey?: string
 }
 
 /** Oxford-comma join: "a", "a and b", "a, b, and c". */
@@ -199,11 +208,11 @@ function joinClauses(parts: ReadonlyArray<string>): string {
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
   if (opts.profile === "fast") {
     return joinClauses([
-      "`Explore` to find or understand something in the repo",
-      "`implementer` for approved mechanical coding changes",
+      "`Explore` for broad discovery and repo investigation",
+      "`Plan` for non-trivial sequencing, interfaces, migration risk, or acceptance criteria",
+      "`general-purpose` for mixed execution tasks",
+      "`implementer` for bounded coding changes",
       "`reviewer` for repository-aware verification, reproduction, and root-causing",
-      "`planner` as the Sol plan consultant and approver after Luna has drafted with evidence",
-      "`critic` for a fresh-context cross-lab challenge to a plan, design, diff, or decision",
     ])
   }
   const clauses: Array<string> = []
@@ -328,31 +337,18 @@ const OPERATING_DEFAULTS_TAIL =
  * generation and `buildPeerAwarenessSnippet`, so the three surfaces cannot
  * disagree about which agents exist.
  */
-/**
- * Fast-profile-only operating-defaults body. Self-contained (does not share
- * text with `OPERATING_DEFAULTS_TAIL`) because that tail names
- * `codex_critic`/`codex_reviewer`/`gemini_reviewer`/`opus_critic`/
- * `peer-review-coordinator` and `worker-*` agents, none of which the fast
- * profile registers — reusing it and trying to string-surgery those names
- * out would be far more fragile than a short, purpose-written paragraph.
- * Keeps the same "why delegate" and "why adversarial review" reasoning the
- * standard tail carries, scaled to the fast profile's actual roster.
- */
-const FAST_OPERATING_DEFAULTS_TAIL =
-  "context free to reason and collaborate with the user. Delegate only when work is wide or slow; do trivial and surgical work directly. "
-  + "Luna investigates and drafts. The lead must give `planner` a handcrafted evidence packet and must not implement until `planner` returns `APPROVE`. "
-  + "Advisor is an optional, non-binding, lead-only transcript-aware sounding board for consequential unresolved uncertainty, conflicting evidence, or a genuinely stuck path; never use it for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. "
-  + "`oracle` is exact Opus 5 (1M/high), stateless and last resort after the normal paths remain stuck. "
-  + "Before declaring work done, run the relevant build/tests and ask `reviewer` for repository-aware verification. "
-  + "Verify claims, report uncertainty, and stop named teammates when finished."
-
 export function buildOperatingDefaultsDirective(
   opts: NativeAgentAvailability = {},
 ): string {
   if (opts.profile === "max") {
+    const peersKey = opts.peersKey ?? opts.groupKeys?.peers ?? "peers"
+    const artifactClause = opts.artifactAvailable
+      ? ` Live human review is available in the artifact panel via \`mcp__${peersKey}__artifact_*\`.`
+      : ""
     return (
       "## Operating defaults (apply when the user has not specified otherwise; the user's explicit direction and the domain's own standards always override)\n\n"
-      + "Max launch profile. The lead owns the outcome and may use the roster as a set of complementary capabilities, not a required sequence: direct tools suit narrow facts; `Explore` broad discovery; `brainstorm` open design choices; `Plan` changes where sequencing, interfaces, or acceptance criteria benefit from a separate view; `implementer` bounded coding; `general-purpose` mixed work; and `reviewer` repository-aware verification. Independent work can run in parallel when that improves context isolation or latency. A fresh-context peer from another model family can be useful where correlated blind spots matter and deterministic evidence does not settle the issue; `peer-review-coordinator` is available when the risk justifies several lenses. Small or obvious tasks are often better handled directly, and model output remains evidence to synthesize rather than a vote. Each role's configured model is the deliberate default for role fit and diversity; overrides are most useful after a concrete mismatch. On every retained max surface, Gemini 3.1 Pro is replaced by Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high. Advisor is optional, non-binding counsel for one focused consequential uncertainty that the normal evidence and roles cannot settle; it has no approval or workflow authority, and a further consultation is useful only when materially new evidence changes the question."
+      + "Max launch profile. The lead owns the outcome and may use the roster as a set of complementary capabilities, not a required sequence: direct tools suit narrow facts; `Explore` broad discovery; `brainstorm` open design choices; `Plan` changes where sequencing, interfaces, or acceptance criteria benefit from a separate view; `implementer` bounded coding; `general-purpose` mixed work; and `reviewer` (Grok 4.6/high with Luna 1M/max fallback) repository-aware verification. Independent work can run in parallel when that improves context isolation or latency. A fresh-context peer from another model family can be useful where correlated blind spots matter and deterministic evidence does not settle the issue; `peer-review-coordinator` is available when the risk justifies several lenses. Small or obvious tasks are often better handled directly, and model output remains evidence to synthesize rather than a vote. Each role's configured model is the deliberate default for role fit and diversity; overrides are most useful after a concrete mismatch. On every retained max surface, Gemini 3.1 Pro is replaced by Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high. Advisor is optional, non-binding counsel for one focused consequential uncertainty that the normal evidence and roles cannot settle; it has no approval or workflow authority, and a further consultation is useful only when materially new evidence changes the question."
+      + artifactClause
     )
   }
   if (opts.profile === "fast") {
@@ -360,17 +356,34 @@ export function buildOperatingDefaultsDirective(
       return (
         "## Operating defaults (apply when the user has not specified otherwise; the "
         + "user's explicit direction and the domain's own standards always override)\n\n"
-        + "Fast profile runtime wiring is unavailable, so no injected Task roster, search, or Oracle is available. Work directly, use only tools actually listed in this session, verify with the repository's relevant build/tests before declaring done, report uncertainty, and do not invent unavailable capabilities."
+        + "Fast profile runtime wiring is unavailable. Work directly, use only tools actually listed in this session, verify with the repository's relevant build/tests before declaring done, report uncertainty, and do not invent unavailable capabilities."
       )
     }
+    const peersKey = opts.peersKey ?? opts.groupKeys?.peers ?? "peers"
+    const searchKey = opts.groupKeys?.search ?? "search"
+    const browserKey = opts.groupKeys?.browser ?? "browser"
+    const workersKey = opts.groupKeys?.workers ?? "workers"
+    const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
+    const browserClause = directBrowserAvailable ? ` \`mcp__${browserKey}__*\` provides direct browser control.` : ""
+    const workerBrowseClause = opts.browseAvailable
+      ? ` \`worker-browse\` runs delegated autonomous browsing tasks through \`mcp__${workersKey}__browse\`.`
+      : ""
+    const artifactClause = opts.artifactAvailable
+      ? ` \`mcp__${peersKey}__artifact_*\` provides human review in the artifact panel with auto-open on plan completion.`
+      : ""
+
     return (
       "## Operating defaults (apply when the user has not specified otherwise; the "
       + "user's explicit direction and the domain's own standards always override)\n\n"
-      + "Orchestrate. Delegate research, implementation, and review to the right "
-      + "subagent. Reach for "
+      + "Fast launch profile. The lead coordinates execution across specialized native roles: "
       + buildNativeReachClauses(opts)
-      + "; Task subagents run in parallel. That keeps your own "
-      + FAST_OPERATING_DEFAULTS_TAIL
+      + ". `Plan` is an advisory planning capability for nontrivial sequencing, interfaces, migration risk, or acceptance criteria, not an approval gate. "
+      + "Delegate only when work is wide, slow, or benefits from context isolation; do trivial, surgical, and narrow work directly. "
+      + "Independent Task subagents may run in parallel. Delegation graph: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
+      + "Advisor is an optional, non-binding, lead-only transcript-aware sounding board for consequential unresolved uncertainty, conflicting evidence, or a genuinely stuck path; never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
+      + `\`mcp__${peersKey}__oracle\` is exact Opus 5 (1M/high), a stateless last-resort consultant available to the lead and \`Plan\` when required; \`reviewer\` and other subagents cannot call Oracle. `
+      + `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable sources.${browserClause}${workerBrowseClause}${artifactClause}\n\n`
+      + "Verify claims with concrete repository evidence and tests before declaring work done. Stop named teammates when finished."
     )
   }
   return (
@@ -392,23 +405,7 @@ export function buildOperatingDefaultsDirective(
  *  a thin catalog. */
 export const OPERATING_DEFAULTS_DIRECTIVE = buildOperatingDefaultsDirective()
 
-/**
- * Condensed digest of OPERATING_DEFAULTS_DIRECTIVE for the spawned session's
- * system prompt (--append-system-prompt). The FULL directive is prepended to
- * the mirrored CLAUDE.md (read by the main agent and descendants); this digest
- * keeps both behavioral directives at top salience without duplicating the full
- * ~310-token block in the context window every turn. Points to the full copy.
- *
- * The unverifiable-claim rule is here rather than in CLAUDE.md alone because it
- * fires at a moment that suppresses lookups: an agent racing to deliver a
- * recommendation is precisely the one that will not stop to consult its project
- * instructions, which is how the check got crowded out in the first place. It
- * also closes a hole in the rule above it, which only covers claims that direct
- * evidence CAN settle. The roster of critics, the lens-to-artifact match, and
- * the reasoning stay in the directive; the always-resident copy carries only
- * the trigger and the ritual exclusion.
- */
-export const OPERATING_DEFAULTS_DIGEST =
+const STANDARD_OPERATING_DEFAULTS_DIGEST =
   "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
   + "Delegate when the work is WIDE (many files or sources to sweep) or SLOW and you need only the "
   + "conclusion, to protect the main thread's finite context and keep it free for reasoning and "
@@ -432,6 +429,45 @@ export const OPERATING_DEFAULTS_DIGEST =
   + "The agent roster, the tool surface, and the reasoning behind these defaults are in your "
   + "CLAUDE.md project instructions. Read them when choosing HOW to work; the rules above apply "
   + "without a lookup."
+
+export function buildOperatingDefaultsDigest(
+  opts: { profile?: "standard" | "fast" | "max" } = {},
+): string {
+  if (opts.profile === "max") {
+    return (
+      "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
+      + "Max launch profile. The lead owns the outcome and may use the roster as complementary capabilities: direct tools for narrow facts, `Explore` for broad discovery, `brainstorm` for open choices, `Plan` for a separate planning view, `implementer` and `general-purpose` for execution, and `reviewer` (Grok 4.6/high with Luna 1M/max fallback) for repository-aware verification. Delegate when work is wide or slow to protect the main thread's finite context; do trivial and surgical work directly. Prefer parallel delegation for independent work. Stop named teammates when finished.\n\n"
+      + "Verify claims against real evidence: run the code, check outputs and test results. Model output is evidence to synthesize rather than a vote. A fresh-context peer or `peer-review-coordinator` can reduce correlated blind spots on consequential decisions where judgment remains after direct evidence is in.\n\n"
+      + "Advisor is optional, non-binding, primary-lead-only counsel for focused consequential uncertainty that direct evidence, Plan, reviewer, or peers cannot settle. It has no approval or workflow authority."
+    )
+  }
+  if (opts.profile === "fast") {
+    return (
+      "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
+      + "Fast launch profile. The lead coordinates execution across `Explore` (broad discovery), `Plan` (sequencing, interfaces, migration risk, acceptance criteria), `general-purpose` (mixed execution), `implementer` (bounded coding), and `reviewer` (repository-aware verification). `Plan` is an advisory planning capability, not an approval gate. Delegate when work is wide or slow to protect main-thread context; do trivial and surgical work directly. Independent subagents may run in parallel. Stop named teammates when finished.\n\n"
+      + "Verify claims against real evidence: run relevant commands and tests. Advisor is optional, non-binding, transcript-aware, and lead-only for consequential unresolved uncertainty, not routine progress or workflow gates. `oracle` (Opus 5 1M/high) is a stateless last resort for the lead and `Plan` when normal paths remain stuck."
+    )
+  }
+  return STANDARD_OPERATING_DEFAULTS_DIGEST
+}
+
+/**
+ * Condensed digest of OPERATING_DEFAULTS_DIRECTIVE for the spawned session's
+ * system prompt (--append-system-prompt). The FULL directive is prepended to
+ * the mirrored CLAUDE.md (read by the main agent and descendants); this digest
+ * keeps both behavioral directives at top salience without duplicating the full
+ * ~310-token block in the context window every turn. Points to the full copy.
+ *
+ * The unverifiable-claim rule is here rather than in CLAUDE.md alone because it
+ * fires at a moment that suppresses lookups: an agent racing to deliver a
+ * recommendation is precisely the one that will not stop to consult its project
+ * instructions, which is how the check got crowded out in the first place. It
+ * also closes a hole in the rule above it, which only covers claims that direct
+ * evidence CAN settle. The roster of critics, the lens-to-artifact match, and
+ * the reasoning stay in the directive; the always-resident copy carries only
+ * the trigger and the ritual exclusion.
+ */
+export const OPERATING_DEFAULTS_DIGEST = STANDARD_OPERATING_DEFAULTS_DIGEST
 
 /**
  * Skip the helper if the user's `~/.claude/CLAUDE.md` (or, equivalently,

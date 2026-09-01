@@ -8,6 +8,7 @@ import {
   LUNA_SONNET_ALIAS_ID,
   canonicalizeAliasModel,
   formatFastPrerequisiteFailure,
+  isRetiredFastModelAlias,
   resolveEffortWithAliasDefault,
   resolveLaunchProfile,
   resolveModelAlias,
@@ -94,8 +95,9 @@ describe("launch profile selection", () => {
 describe("Luna aliases", () => {
   test("canonicalize to Luna while retaining distinct defaults", () => {
     expect(resolveModelAlias(`${LUNA_DRIVER_ALIAS_ID}[1m]`)?.absentEffortDefault).toBe("max")
-    expect(resolveModelAlias(`${FAST_CRITIC_ALIAS_ID}[1m]`)?.absentEffortDefault).toBe("medium")
-    expect(canonicalizeAliasModel(`${FAST_CRITIC_ALIAS_ID}[1m]`)).toBe("gemini-3.7-flash[1m]")
+    expect(resolveModelAlias(`${FAST_CRITIC_ALIAS_ID}[1m]`)).toBeUndefined()
+    expect(isRetiredFastModelAlias(`${FAST_CRITIC_ALIAS_ID}[1m]`)).toBe(true)
+    expect(canonicalizeAliasModel(`${FAST_CRITIC_ALIAS_ID}[1m]`)).toBe(`${FAST_CRITIC_ALIAS_ID}[1m]`)
     expect(resolveModelAlias(LUNA_SONNET_ALIAS_ID)?.absentEffortDefault).toBe("xhigh")
     expect(resolveModelAlias(LUNA_HAIKU_ALIAS_ID)?.absentEffortDefault).toBe("high")
     expect(canonicalizeAliasModel(`${LUNA_SONNET_ALIAS_ID}[1m]`)).toBe(`${LUNA_REAL_MODEL_ID}[1m]`)

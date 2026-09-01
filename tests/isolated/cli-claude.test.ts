@@ -244,16 +244,17 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // is selected; stubbed here so the static import graph resolves for
   // every other test in this file too).
   fastScoutModel: mock(() => "gpt-5.6-luna"),
-  fastImplementerModel: mock(() => "gpt-5.6-luna"),
+  fastPlanModel: mock(() => "gpt-5.6-sol"),
+  fastGeneralPurposeModel: mock(() => "gpt-5.6-luna"),
+  fastImplementerModel: mock(() => "gemini-3.7-flash"),
   fastReviewerModel: mock(() => "grok-4.6"),
-  fastPlannerModel: mock(() => "gpt-5.6-sol"),
-  fastCriticModel: mock(() => "gemini-3.7-flash"),
+  fastAdvisorModel: mock(() => "gemini-3.7-flash"),
   fastOracleModel: mock(() => "claude-opus-5"),
-  FAST_SCOUT_EFFORT: "high",
-  FAST_CRITIC_EFFORT: "medium",
-  FAST_IMPLEMENTER_EFFORT: "max",
+  FAST_EXPLORE_EFFORT: "high",
+  FAST_PLAN_EFFORT: "high",
+  FAST_GENERAL_PURPOSE_EFFORT: "max",
+  FAST_IMPLEMENTER_EFFORT: "high",
   FAST_REVIEWER_EFFORT: "medium",
-  FAST_PLANNER_EFFORT: "high",
   // stand-in.ts (pulled in transitively via handler.ts) imports this;
   // stub it so the module mock doesn't break that import.
   resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),
@@ -278,6 +279,10 @@ mock.module("~/lib/claude-md-injection", () => ({
   // claude.ts leads the --append-system-prompt with this digest; a stub with
   // a recognizable marker keeps the value assertion meaningful.
   OPERATING_DEFAULTS_DIGEST: "## Operating defaults (test digest; see CLAUDE.md)",
+  buildOperatingDefaultsDigest: mock(
+    (opts: Record<string, unknown> = {}) =>
+      `## Operating defaults (test digest; profile=${String(opts.profile ?? "standard")})`,
+  ),
   OPERATING_DEFAULTS_DIRECTIVE: "## Operating defaults (test full directive)",
   // claude.ts builds the directive per-launch so it never names a native that
   // this launch dropped. The stub echoes the availability it was handed, which
@@ -1215,25 +1220,25 @@ describe("claude command", () => {
       expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
       const [, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
       // Hard roster/persona/coordinator restriction per FAST_PROFILE.
-      expect(opts.nativeRoster).toEqual(new Set(["Explore", "implementer", "reviewer", "planner", "critic"]))
+      expect(opts.nativeRoster).toEqual(new Set(["Explore", "Plan", "general-purpose", "implementer", "reviewer"]))
       expect(opts.personaAllowlist).toBeUndefined()
       expect(opts.includeCoordinator).toBe(false)
       expect(opts.fastProfile).toBe(true)
       expect(opts.workerToolsAvailable).toBe(false)
       expect(opts.browseAvailable).toBe(false)
-      expect(opts.scoutModel).toBe("gpt-5.6-luna")
-      expect(opts.nativeSubagentModel).toBe("gpt-5.6-luna")
-      expect(opts.reviewerModel).toBe("grok-4.6")
-      expect(opts.plannerModel).toBe("gpt-5.6-sol")
-      expect(opts.criticModel).toBe("gemini-3.7-flash")
-      expect(opts.criticEffort).toBe("medium")
+      expect(opts.fastExploreModel).toBe("gpt-5.6-luna")
+      expect(opts.fastPlanModel).toBe("gpt-5.6-sol")
+      expect(opts.fastGeneralPurposeModel).toBe("gpt-5.6-luna")
+      expect(opts.fastImplementerModel).toBe("gemini-3.7-flash")
+      expect(opts.fastReviewerModel).toBe("grok-4.6")
+      expect(opts.plannerModel).toBeUndefined()
+      expect(opts.criticModel).toBeUndefined()
       expect(opts.brainstormModel).toBeUndefined()
       expect(opts.scribeModel).toBeUndefined()
       expect(opts.generalPurposeFastModel).toBeUndefined()
-      expect(opts.scoutEffort).toBe("high")
-      expect(opts.implementerEffort).toBe("max")
-      expect(opts.reviewerEffort).toBe("medium")
-      expect(opts.plannerEffort).toBe("high")
+      expect(opts.scoutEffort).toBeUndefined()
+      expect(opts.implementerEffort).toBeUndefined()
+      expect(opts.reviewerEffort).toBeUndefined()
 
       // Fast keeps proxy MCPs out of the persistent mirror. The lead gets the
       // runtime config, while reviewer/planner/Explore receive only their inline

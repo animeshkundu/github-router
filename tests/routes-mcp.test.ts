@@ -3290,7 +3290,7 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       profileId: "fast",
       nonce: FAST_NONCE,
       secret: "fast-launch-secret",
-      allowedGroups: new Set(["peers", "search", "browser"]),
+      allowedGroups: new Set(["peers", "search", "workers", "browser"]),
       allowedPersonas: new Set(["oracle"]),
     }).launchId
   })
@@ -3355,7 +3355,7 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
     expect((json.error as { code: number }).code).toBe(-32601)
   })
 
-  test("tools/call rejects a tool outside allowedGroups with -32601, even when the URL scope matches the tool's own group", async () => {
+  test("tools/call rejects a core worker with -32601 even though Fast allows the browse-only workers group", async () => {
     const { json } = await scopedRpc(
       "workers",
       {
@@ -3369,7 +3369,7 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
     expect((json.error as { code: number }).code).toBe(-32601)
   })
 
-  test("tools/list on the scoped /mcp/workers endpoint returns an empty tool list for a launch whose allowedGroups excludes workers", async () => {
+  test("tools/list on /mcp/workers contains no core workers when browse is unavailable", async () => {
     const { status, json } = await scopedRpc(
       "workers",
       { jsonrpc: "2.0", id: 4, method: "tools/list" },
@@ -3378,6 +3378,66 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
     expect(status).toBe(200)
     const tools = (json.result as { tools: Array<{ name: string }> }).tools
     expect(tools).toEqual([])
+  })
+
+  test("Fast lists and dispatches Artifact as a non-persona tool when the tab gate is enabled", async () => {
+    process.env.AIORDIE_BASE_URL = "https://ai.example"
+    process.env.AIORDIE_TOKEN = "artifact-token"
+    process.env.AIORDIE_SESSION_ID = "session-1"
+    const calls: string[] = []
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      calls.push(input.toString())
+      return Response.json({
+        ok: true,
+        status: "open",
+        visibility: "visible",
+        viewUrl: "https://ai.example/artifact/session-1/view",
+        panelUrl: "https://ai.example/panel/session-1",
+      })
+    }) as unknown as typeof fetch
+
+    const listed = await scopedRpc(
+      "peers",
+      { jsonrpc: "2.0", id: 41, method: "tools/list" },
+      { auth: `Bearer ${FAST_NONCE}` },
+    )
+    const names = (listed.json.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name)
+    expect(names).toContain("artifact_refresh")
+
+    const called = await scopedRpc(
+      "peers",
+      {
+        jsonrpc: "2.0",
+        id: 42,
+        method: "tools/call",
+        params: { name: "artifact_refresh", arguments: {} },
+      },
+      { auth: `Bearer ${FAST_NONCE}` },
+    )
+    expect(called.json.error).toBeUndefined()
+    expect(calls).toEqual(["https://ai.example/api/artifact/session-1/refresh"])
+  })
+
+  test("Fast hides Artifact symmetrically when the tab gate is disabled", async () => {
+    const listed = await scopedRpc(
+      "peers",
+      { jsonrpc: "2.0", id: 43, method: "tools/list" },
+      { auth: `Bearer ${FAST_NONCE}` },
+    )
+    const names = (listed.json.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name)
+    expect(names).not.toContain("artifact_refresh")
+
+    const called = await scopedRpc(
+      "peers",
+      {
+        jsonrpc: "2.0",
+        id: 44,
+        method: "tools/call",
+        params: { name: "artifact_refresh", arguments: {} },
+      },
+      { auth: `Bearer ${FAST_NONCE}` },
+    )
+    expect((called.json.error as { code: number }).code).toBe(-32601)
   })
 
   test("the standard (unrestricted) launch nonce is completely unaffected — full persona list still returned", async () => {

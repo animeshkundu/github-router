@@ -31,6 +31,7 @@ import {
   BROWSE_DEFAULT_MODEL,
   DEFAULT_MODEL_CHAIN,
 } from "../../src/lib/worker-agent/engine"
+import { registerLaunch, unregisterLaunch } from "../../src/lib/launch-registry"
 import { state } from "../../src/lib/state"
 import type { ModelsResponse } from "../../src/services/copilot/get-models"
 import {
@@ -83,6 +84,7 @@ mock.module("~/lib/browser-mcp/browser-detect", () => ({
 const PROXY_PORT = 18801
 const PROXY_HOST = `127.0.0.1:${PROXY_PORT}`
 const NONCE = "0123456789abcdef".repeat(4)
+const FAST_NONCE = "fedcba9876543210".repeat(4)
 const AUTH_HEADER = `Bearer ${NONCE}`
 
 const fakeModel = (id: string, endpoints: Array<string>) => ({
@@ -126,21 +128,21 @@ let savedBrowseEnabled: boolean
 let savedEnvBrowseFlag: string | undefined
 let savedEnvDisableWorker: string | undefined
 
-function buildReq(body: unknown, urlPath = "/") {
+function buildReq(body: unknown, urlPath = "/", authorization = AUTH_HEADER) {
   return new Request(`http://${PROXY_HOST}${urlPath}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: AUTH_HEADER,
+      authorization,
       host: PROXY_HOST,
     },
     body: JSON.stringify(body),
   })
 }
 
-async function rpc(body: unknown, urlPath = "/") {
+async function rpc(body: unknown, urlPath = "/", authorization = AUTH_HEADER) {
   const { mcpRoutes } = await import("../../src/routes/mcp/route")
-  const res = await mcpRoutes.request(buildReq(body, urlPath))
+  const res = await mcpRoutes.request(buildReq(body, urlPath, authorization))
   return { status: res.status, json: (await res.json()) as Record<string, unknown> }
 }
 
@@ -225,6 +227,52 @@ describe("browse tool gate (browseAgentEnabled)", () => {
     expect(err?.message).toMatch(/unknown tool/i)
     // The gated call must not have dispatched to the engine.
     expect(runWorkerAgentCalls.length).toBe(0)
+  })
+
+  test("Fast exposes only browse from the workers group when the browse gate passes", async () => {
+    const launch = registerLaunch({
+      profileId: "fast",
+      nonce: FAST_NONCE,
+      secret: "fast-secret",
+      allowedGroups: new Set(["peers", "search", "workers", "browser"]),
+      allowedPersonas: new Set(["oracle"]),
+    })
+    try {
+      const listed = await rpc(
+        { jsonrpc: "2.0", id: 21, method: "tools/list" },
+        "/workers",
+        `Bearer ${FAST_NONCE}`,
+      )
+      const names = (listed.json.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name)
+      expect(names).toEqual(["browse"])
+
+      const core = await rpc(
+        {
+          jsonrpc: "2.0",
+          id: 22,
+          method: "tools/call",
+          params: { name: "explore", arguments: { prompt: "read" } },
+        },
+        "/workers",
+        `Bearer ${FAST_NONCE}`,
+      )
+      expect((core.json.error as { code: number }).code).toBe(-32601)
+
+      const browse = await rpc(
+        {
+          jsonrpc: "2.0",
+          id: 23,
+          method: "tools/call",
+          params: { name: "browse", arguments: { task: "open example.com" } },
+        },
+        "/workers",
+        `Bearer ${FAST_NONCE}`,
+      )
+      expect(browse.json.error).toBeUndefined()
+      expect(runWorkerAgentCalls).toHaveLength(1)
+    } finally {
+      unregisterLaunch(launch.launchId)
+    }
   })
 })
 

@@ -31,8 +31,26 @@ export const internalFastDispatchGuard = defineCommand({
     description:
       "Internal: PreToolUse guard enforcing the fast-profile native Task/Agent ACL.",
   },
-  run() {
-    const decision = decideFastDispatchGuard(readStdinSync())
+  args: {
+    allowBrowse: {
+      type: "boolean",
+      description: "Whether worker-browse is allowed as a target.",
+      default: false,
+    },
+    allowedTargets: {
+      type: "string",
+      description: "Comma-separated list of allowed target subagents.",
+    },
+  },
+  run({ args }) {
+    const allowedTargets = args.allowedTargets
+      ? args.allowedTargets.split(",").map((s) => s.trim()).filter(Boolean)
+      : undefined
+    const allowBrowse = args.allowBrowse === true || (allowedTargets ? allowedTargets.includes("worker-browse") : false)
+    const decision = decideFastDispatchGuard(readStdinSync(), {
+      allowedTargets,
+      allowBrowse,
+    })
     if (!decision.allowed && decision.reason) {
       process.stdout.write(fastDispatchDenyOutput(decision.reason))
     } else if (decision.verdict === "allow" && decision.updatedInput) {
@@ -45,6 +63,15 @@ export const internalFastDispatchGuard = defineCommand({
 })
 
 /** Build the persisted command for the fast-profile PreToolUse hook. */
-export function buildFastDispatchGuardHookCommand(invocation: SelfInvocation): string {
-  return buildSelfCommand(invocation, "internal-fast-dispatch-guard")
+export function buildFastDispatchGuardHookCommand(
+  invocation: SelfInvocation,
+  opts?: { allowBrowse?: boolean; allowedTargets?: ReadonlyArray<string> },
+): string {
+  const flags: string[] = []
+  if (opts?.allowBrowse) flags.push("--allowBrowse")
+  if (opts?.allowedTargets && opts.allowedTargets.length > 0) {
+    flags.push(`--allowedTargets "${opts.allowedTargets.join(",")}"`)
+  }
+  const args = ["internal-fast-dispatch-guard", ...flags].join(" ")
+  return buildSelfCommand(invocation, args)
 }

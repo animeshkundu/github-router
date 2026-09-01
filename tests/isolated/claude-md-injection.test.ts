@@ -25,6 +25,7 @@ const {
   OPERATING_DEFAULTS_DIRECTIVE,
   OPERATING_DEFAULTS_DIGEST,
   buildOperatingDefaultsDirective,
+  buildOperatingDefaultsDigest,
   findMarkerBlocks,
   __testExports,
 } = await import("../../src/lib/claude-md-injection")
@@ -1033,31 +1034,6 @@ test("budgetLead does not name reviewer-fast when it was dropped", () => {
 // signal — `profile: "fast"` must override every other flag rather than
 // merge with it, and the rendered prose must never name an agent, MCP tool,
 // or skill this profile does not register.
-const FAST_PROFILE_FORBIDDEN_NAMES = [
-  "`implementer-fast`",
-  "`reviewer-fast`",
-  "`brainstorm`",
-  "`scribe`",
-  "`general-purpose-fast`",
-  "peer-review-coordinator",
-  "worker-explore",
-  "worker-implement",
-  "worker-review",
-  "worker-plan",
-  "worker-test",
-  "worker-browse",
-  "codex_critic",
-  "codex_reviewer",
-  "opus_critic",
-  "gemini_reviewer",
-  "stand_in",
-  "mcp__workers__",
-  "mcp__orchestrate__",
-  "gh-orchestrate",
-  "gh-floor-keeper",
-  "gh-first-mate",
-] as const
-
 test("profile:'max' steers to role defaults and excludes Gemini Pro", () => {
   const directive = buildOperatingDefaultsDirective({ profile: "max" })
   expect(directive).toContain("set of complementary capabilities, not a required sequence")
@@ -1088,15 +1064,38 @@ test("profile:'fast' names exactly the fast roster and never a removed native/to
   })
   expect(directive).toContain("`Explore`")
   expect(directive).not.toContain("`scout`")
+  expect(directive).toContain("`Plan`")
+  expect(directive).not.toContain("`planner`")
+  expect(directive).toContain("`general-purpose`")
   expect(directive).toContain("`implementer`")
   expect(directive).toContain("`reviewer`")
-  expect(directive).toContain("`planner`")
-  expect(directive).toContain("`critic`")
+  expect(directive).not.toContain("`critic`")
   expect(directive).toContain("Advisor")
   expect(directive).toContain("lead-only")
   expect(directive).toContain("never use it for routine progress")
-  expect(directive).toContain("`oracle`")
-  for (const forbidden of FAST_PROFILE_FORBIDDEN_NAMES) {
+  expect(directive).toContain("oracle")
+  for (const forbidden of [
+    "`implementer-fast`",
+    "`reviewer-fast`",
+    "`brainstorm`",
+    "`scribe`",
+    "`general-purpose-fast`",
+    "peer-review-coordinator",
+    "worker-explore",
+    "worker-implement",
+    "worker-review",
+    "worker-plan",
+    "worker-test",
+    "codex_critic",
+    "codex_reviewer",
+    "opus_critic",
+    "gemini_reviewer",
+    "stand_in",
+    "mcp__orchestrate__",
+    "gh-orchestrate",
+    "gh-floor-keeper",
+    "gh-first-mate",
+  ]) {
     expect(directive).not.toContain(forbidden)
   }
 })
@@ -1107,7 +1106,7 @@ test("profile:'fast' with unavailable runtime does not advertise absent agents o
     fastRuntimeAvailable: false,
   })
   expect(directive).toContain("runtime wiring is unavailable")
-  for (const absent of ["`planner`", "`reviewer`", "`oracle`", "`Explore`", "`implementer`"]) {
+  for (const absent of ["`Plan`", "`planner`", "`reviewer`", "`oracle`", "`Explore`", "`implementer`", "`critic`", "`general-purpose`"]) {
     expect(directive).not.toContain(absent)
   }
 })
@@ -1128,4 +1127,27 @@ test("profile:'standard' (explicit) is byte-identical to omitting profile", () =
   const implicit = buildOperatingDefaultsDirective({ budgetLead: true })
   const explicit = buildOperatingDefaultsDirective({ budgetLead: true, profile: "standard" })
   expect(explicit).toBe(implicit)
+})
+
+test("buildOperatingDefaultsDigest provides profile-specific summaries while standard matches export", () => {
+  expect(buildOperatingDefaultsDigest()).toBe(OPERATING_DEFAULTS_DIGEST)
+  expect(buildOperatingDefaultsDigest({ profile: "standard" })).toBe(OPERATING_DEFAULTS_DIGEST)
+
+  const fastDigest = buildOperatingDefaultsDigest({ profile: "fast" })
+  expect(fastDigest).toContain("Fast launch profile")
+  expect(fastDigest).toContain("`Explore`")
+  expect(fastDigest).toContain("`Plan`")
+  expect(fastDigest).toContain("`general-purpose`")
+  expect(fastDigest).toContain("`implementer`")
+  expect(fastDigest).toContain("`reviewer`")
+  expect(fastDigest).toContain("not an approval gate")
+  expect(fastDigest).toContain("`oracle`")
+  expect(fastDigest).not.toContain("`planner`")
+  expect(fastDigest).not.toContain("`critic`")
+
+  const maxDigest = buildOperatingDefaultsDigest({ profile: "max" })
+  expect(maxDigest).toContain("Max launch profile")
+  expect(maxDigest).toContain("The lead owns the outcome")
+  expect(maxDigest).toContain("Grok 4.6/high with Luna 1M/max fallback")
+  expect(maxDigest).toContain("Advisor is optional, non-binding")
 })

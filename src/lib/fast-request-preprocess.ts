@@ -1,6 +1,7 @@
 import {
   canonicalizeAliasModel,
   isMaxModelAlias,
+  isRetiredFastModelAlias,
   resolveModelAlias,
 } from "./launch-profile"
 import { preprocessMaxRequest } from "./max-request-preprocess"
@@ -16,6 +17,7 @@ export interface FastRequestPreprocessResult {
   originalModel?: string
   modified: boolean
   rejectedAlias?: string
+  retiredAlias?: string
   rejectedModel?: string
 }
 
@@ -41,6 +43,9 @@ export function preprocessFastRequest(
   const originalModel = typeof parsed.model === "string" ? parsed.model : undefined
   if (!originalModel) return { body: rawBody, modified: false }
 
+  if (isRetiredFastModelAlias(originalModel)) {
+    return { body: rawBody, originalModel, modified: false, retiredAlias: originalModel }
+  }
   const alias = resolveModelAlias(originalModel)
   if (alias && (launch?.profileId !== "fast" || isMaxModelAlias(originalModel))) {
     return { body: rawBody, originalModel, modified: false, rejectedAlias: originalModel }

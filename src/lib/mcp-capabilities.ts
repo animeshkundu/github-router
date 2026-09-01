@@ -26,6 +26,7 @@ import { maxProReplacementModel } from "./max-profile-contract"
 import { fastEndpointForModel } from "./fast-endpoint"
 import {
   FAST_PROFILE_ADVISOR_EFFORT,
+  FAST_PROFILE_MODELS,
   FAST_PROFILE_NATIVE_EFFORTS,
   FAST_PROFILE_NATIVE_MODELS,
   FAST_PROFILE_ORACLE_EFFORT,
@@ -370,19 +371,21 @@ export function generalPurposeFastModel(): string | undefined {
  *
  * These are deliberately separate from the standard resolvers above. The fast
  * profile is a hard, single-entry, no-fallback assignment: `Explore` and
- * `implementer` pin to Luna, `reviewer` pins to Grok, and `planner` pins to
- * Sol. Retuning a standard resolver must never move a fast role silently.
+ * `general-purpose` pin to Luna, `Plan` pins to Sol, `implementer` pins to
+ * Gemini 3.7 Flash, and `reviewer` pins to Grok 4.6. Retuning a standard
+ * resolver must never move a fast role silently.
  */
 
 export const FAST_EXPLORE_MODEL = FAST_PROFILE_NATIVE_MODELS.Explore
 /** @deprecated Fast `scout` was renamed to capitalized `Explore`. */
 export const FAST_SCOUT_MODEL = FAST_EXPLORE_MODEL
+export const FAST_PLAN_MODEL = FAST_PROFILE_NATIVE_MODELS.Plan
+export const FAST_GENERAL_PURPOSE_MODEL = FAST_PROFILE_NATIVE_MODELS["general-purpose"]
 export const FAST_IMPLEMENTER_MODEL = FAST_PROFILE_NATIVE_MODELS.implementer
 /** Grok 4.6 advertises 500K total context / 372K max prompt, so it remains bare
  *  and is gated by max_prompt_tokens rather than the 1M floor. */
 export const FAST_REVIEWER_MODEL = FAST_PROFILE_NATIVE_MODELS.reviewer
-export const FAST_PLANNER_MODEL = FAST_PROFILE_NATIVE_MODELS.planner
-export const FAST_CRITIC_MODEL = FAST_PROFILE_NATIVE_MODELS.critic
+export const FAST_ADVISOR_MODEL = FAST_PROFILE_MODELS.advisor
 export const FAST_ORACLE_MODEL = FAST_PROFILE_ORACLE_MODEL
 
 /** Shared with startup validation so the reviewer resolver and fast launch
@@ -393,10 +396,10 @@ export { FAST_REVIEWER_MIN_PROMPT_TOKENS } from "./launch-profile"
 export const FAST_EXPLORE_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.Explore
 /** @deprecated Fast `scout` was renamed to capitalized `Explore`. */
 export const FAST_SCOUT_EFFORT = FAST_EXPLORE_EFFORT
+export const FAST_PLAN_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.Plan
+export const FAST_GENERAL_PURPOSE_EFFORT = FAST_PROFILE_NATIVE_EFFORTS["general-purpose"]
 export const FAST_IMPLEMENTER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.implementer
 export const FAST_REVIEWER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.reviewer
-export const FAST_PLANNER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.planner
-export const FAST_CRITIC_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.critic
 export const FAST_ORACLE_EFFORT = FAST_PROFILE_ORACLE_EFFORT
 export const FAST_ADVISOR_EFFORT = FAST_PROFILE_ADVISOR_EFFORT
 
@@ -407,6 +410,33 @@ export function fastScoutModel(): string | undefined {
   )
   if (!id) return undefined
   const found = state.models?.data.find((m) => m.id === id)
+  const efforts = found?.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_EXPLORE_EFFORT)) return undefined
+  return found && fastEndpointForModel(found) === "responses" ? id : undefined
+}
+
+export function fastPlanModel(): string | undefined {
+  const id = firstPresentInCatalog(
+    [FAST_PLAN_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+  if (!id) return undefined
+  const found = state.models?.data.find((m) => m.id === id)
+  const efforts = found?.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_PLAN_EFFORT)) return undefined
+  if (!found || fastEndpointForModel(found) !== "responses") return undefined
+  return id
+}
+
+export function fastGeneralPurposeModel(): string | undefined {
+  const id = firstPresentInCatalog(
+    [FAST_GENERAL_PURPOSE_MODEL],
+    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
+  )
+  if (!id) return undefined
+  const found = state.models?.data.find((m) => m.id === id)
+  const efforts = found?.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_GENERAL_PURPOSE_EFFORT)) return undefined
   return found && fastEndpointForModel(found) === "responses" ? id : undefined
 }
 
@@ -417,20 +447,9 @@ export function fastImplementerModel(): string | undefined {
   )
   if (!id) return undefined
   const found = state.models?.data.find((m) => m.id === id)
-  return found && fastEndpointForModel(found) === "responses" ? id : undefined
-}
-
-export function fastPlannerModel(): string | undefined {
-  const id = firstPresentInCatalog(
-    [FAST_PLANNER_MODEL],
-    { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
-  )
-  if (!id) return undefined
-  const found = state.models?.data.find((m) => m.id === id)
   const efforts = found?.capabilities?.supports?.reasoning_effort
-  if (!Array.isArray(efforts) || !efforts.includes(FAST_PLANNER_EFFORT)) return undefined
-  if (!found || fastEndpointForModel(found) !== "responses") return undefined
-  return id
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_IMPLEMENTER_EFFORT)) return undefined
+  return found && fastEndpointForModel(found) === "chat" ? id : undefined
 }
 
 /** Gate Grok on the prompt limit that actually constrains pasted review input. */
@@ -448,17 +467,15 @@ export function fastReviewerModel(): string | undefined {
   return FAST_REVIEWER_MODEL
 }
 
-/** Exact Gemini 3.7 Flash only: the fast native critic has no fallback.
- * Unlike the fast Advisor, it needs tool calls and a medium effort choice. */
-export function fastCriticModel(): string | undefined {
-  const found = state.models?.data.find((m) => m.id === FAST_CRITIC_MODEL)
+/** Dedicated Gemini 3.7 Flash Advisor check. */
+export function fastAdvisorModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === FAST_ADVISOR_MODEL)
   if (!found) return undefined
-  if (found.capabilities?.supports?.tool_calls !== true) return undefined
   if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < ONE_M_TOKENS) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
-  if (!Array.isArray(efforts) || !efforts.includes(FAST_CRITIC_EFFORT)) return undefined
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_ADVISOR_EFFORT)) return undefined
   if (fastEndpointForModel(found) !== "chat") return undefined
-  return FAST_CRITIC_MODEL
+  return FAST_ADVISOR_MODEL
 }
 
 /** Exact Opus 5 only: the fast Oracle never inherits standard opus_critic's

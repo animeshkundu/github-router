@@ -233,20 +233,23 @@ declare -a PROBE_REGISTRY=(
   "shim_thinking_effort_gpt55|exploratory|thinking.budget_tokens on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message"
   "shim_parallel_tool_emit_gpt55|exploratory|prompt asks gpt-5.5 /responses shim for two tool calls: 200 + tool_use block(s); asserts >=1 because parallel emission is model-nondeterministic"
 
-  # ===== Fast-launch-profile model shapes (Luna / Gemini 3.7 Flash / Grok 4.6) =====
-  # These probe the live upstream request shapes the fast launch profile design
-  # depends on (docs/default-models.md "Fast launch profile"). The native
-  # profile surface and its in-session dispatch ACL are separate local policy
+  # ===== Fast-launch-profile and Max-profile model shapes =====
+  # These probe the live upstream request shapes the fast and max profile designs
+  # depend on (docs/default-models.md). The native
+  # profile surfaces and in-session dispatch ACLs are separate local policy
   # layers, but the model+endpoint+effort shapes below are ordinary
   # Copilot passthrough/shim contracts and are testable against today's proxy.
   "fast_luna_responses_reasoning_high|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's Explore assignment)"
-  "fast_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the fast profile's implementer assignment; 'max' is the top of Luna's none..max ladder)"
-  "fast_sol_responses_reasoning_high|exploratory|gpt-5.6-sol on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's planner assignment)"
+  "fast_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the fast profile's general-purpose assignment; 'max' is the top of Luna's none..max ladder)"
+  "fast_sol_responses_reasoning_high|exploratory|gpt-5.6-sol on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's Plan assignment)"
   "fast_opus5_messages_reasoning_high|exploratory|claude-opus-5 on /v1/messages accepts tools[] + adaptive thinking + high effort (the fast profile's Oracle assignment)"
-  "fast_gemini37flash_messages_tool_use|exploratory|gemini-3.7-flash on /v1/messages translation shim accepts a tool-use request (the fast profile's critic path)"
-  "fast_gemini37flash_chat_reasoning_high|exploratory|gemini-3.7-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (the fast profile's Advisor assignment)"
-  "fast_gemini37flash_chat_reasoning_medium|exploratory|gemini-3.7-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'medium' (the fast profile's native critic assignment)"
+  "fast_gemini37flash_messages_reasoning_high|exploratory|gemini-3.7-flash on /v1/messages translation shim with high reasoning effort (the fast profile's native implementer path)"
+  "fast_gemini37flash_messages_tool_use|exploratory|gemini-3.7-flash on /v1/messages translation shim accepts a tool-use request (the fast profile's implementer tool path)"
+  "fast_gemini37flash_chat_reasoning_high|exploratory|gemini-3.7-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (the fast profile's Advisor assignment and native implementer shape)"
+  "fast_gemini37flash_chat_reasoning_medium|exploratory|gemini-3.7-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'medium' (historical: former fast native critic assignment)"
   "fast_grok46_responses_reasoning_medium|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'medium'} (the fast profile's reviewer assignment)"
+  "max_grok46_responses_reasoning_high|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the max profile's reviewer assignment)"
+  "max_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the max profile's reviewer fallback assignment)"
   "shim_grok46_messages|exploratory|grok-4.6 on /v1/messages (→ /responses shim, generic supported_endpoints routing — no shim code change needed): 200 + well-formed Anthropic message (the translated Grok lead path)"
   "shim_grok46_messages_tool_use|exploratory|grok-4.6 on /v1/messages with forced tool_choice (→ /responses shim): 200 + tool_use block with non-empty input (the translated Grok tool path)"
 )
@@ -1488,11 +1491,23 @@ probe_fast_opus5_messages_reasoning_high() {
   assert_status 200
 }
 
+probe_fast_gemini37flash_messages_reasoning_high() {
+  # Fast implementer uses Gemini 3.7 Flash via the /v1/messages translation shim at high effort.
+  do_request POST /v1/messages '{
+    "model": "gemini-3.7-flash",
+    "max_tokens": 128,
+    "output_config": {"effort": "high"},
+    "messages": [{"role":"user","content":"Reply with the single word: ok"}]
+  }'
+  assert_status 200 && assert_anthropic_message
+}
+
 probe_fast_gemini37flash_messages_tool_use() {
-  # The critic reaches Gemini through the /v1/messages translation shim.
+  # The native implementer reaches Gemini through the /v1/messages translation shim with tools.
   do_request POST /v1/messages '{
     "model": "gemini-3.7-flash",
     "max_tokens": 50,
+    "output_config": {"effort": "high"},
     "messages": [{"role":"user","content":"Use the echo tool with text ok."}],
     "tools": [{"name":"echo","description":"echo the input","input_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
     "tool_choice": {"type":"tool","name":"echo"}
@@ -1517,7 +1532,7 @@ probe_fast_luna_responses_reasoning_high() {
 }
 
 probe_fast_sol_responses_reasoning_high() {
-  # gpt-5.6-sol is the fast profile's planner assignment at high effort.
+  # gpt-5.6-sol is the fast profile's Plan assignment at high effort.
   do_request POST /v1/responses '{
     "model": "gpt-5.6-sol",
     "input": "reply with the literal string ok",
@@ -1531,7 +1546,7 @@ probe_fast_sol_responses_reasoning_high() {
 
 probe_fast_luna_responses_reasoning_max() {
   # gpt-5.6-luna at reasoning.effort:"max" — the fast profile's
-  # implementer assignment (the top of Luna's none..max ladder).
+  # general-purpose assignment (the top of Luna's none..max ladder).
   do_request POST /v1/responses '{
     "model": "gpt-5.6-luna",
     "input": "reply with the literal string ok",
@@ -1545,9 +1560,8 @@ probe_fast_luna_responses_reasoning_max() {
 
 probe_fast_gemini37flash_chat_reasoning_high() {
   # gemini-3.7-flash on /v1/chat/completions at reasoning_effort:"high" — the
-  # fast profile's gemini-critic persona (defaultEffort: high) and its
-  # designed Advisor target. Same shape as the worker_gemini_tools_reasoning
-  # probe above (chat-style nested {function:{...}} tools[]), different model.
+  # fast profile's native implementer shape and Advisor target. Same shape as the
+  # worker_gemini_tools_reasoning probe above (chat-style nested {function:{...}} tools[]).
   do_request POST /v1/chat/completions '{
     "model": "gemini-3.7-flash",
     "messages": [{"role":"user","content":"reply with the literal string ok"}],
@@ -1560,8 +1574,7 @@ probe_fast_gemini37flash_chat_reasoning_high() {
 }
 
 probe_fast_gemini37flash_chat_reasoning_medium() {
-  # gemini-3.7-flash at medium effort is the native fast critic's exact
-  # assignment. Advisor separately uses the high-effort shape above.
+  # gemini-3.7-flash at medium effort (historical: former fast native critic assignment).
   do_request POST /v1/chat/completions '{
     "model": "gemini-3.7-flash",
     "messages": [{"role":"user","content":"reply with the literal string ok"}],
@@ -1585,6 +1598,34 @@ probe_fast_grok46_responses_reasoning_medium() {
     "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
     "tool_choice": "auto",
     "reasoning": {"effort":"medium"},
+    "max_output_tokens": 50
+  }'
+  assert_status 200
+}
+
+probe_max_grok46_responses_reasoning_high() {
+  # grok-4.6 on /v1/responses at reasoning.effort:"high" — the max
+  # profile's reviewer assignment.
+  do_request POST /v1/responses '{
+    "model": "grok-4.6",
+    "input": "reply with the literal string ok",
+    "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+    "tool_choice": "auto",
+    "reasoning": {"effort":"high"},
+    "max_output_tokens": 50
+  }'
+  assert_status 200
+}
+
+probe_max_luna_responses_reasoning_max() {
+  # gpt-5.6-luna at reasoning.effort:"max" on /v1/responses — the max
+  # profile's reviewer fallback assignment.
+  do_request POST /v1/responses '{
+    "model": "gpt-5.6-luna",
+    "input": "reply with the literal string ok",
+    "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
+    "tool_choice": "auto",
+    "reasoning": {"effort":"max"},
     "max_output_tokens": 50
   }'
   assert_status 200

@@ -15,7 +15,7 @@ import { ORCHESTRATE_SKILL } from "./orchestrate-skill"
 import { RESEARCH_SKILL } from "./research-skill"
 import { WORKER_SKILL } from "./worker-skill"
 
-export { ARTIFACT_REVIEW_SKILL } from "./artifact-review-skill"
+export { ARTIFACT_REVIEW_SKILL, buildArtifactReviewSkill } from "./artifact-review-skill"
 export { FIRST_MATE_CONDUCT_SKILL } from "./first-mate-conduct-skill"
 export { FIRST_MATE_OPERATE_SKILL } from "./first-mate-operate-skill"
 export { FIRST_MATE_SETUP_SKILL } from "~/lib/injected-skills/first-mate-setup-skill"

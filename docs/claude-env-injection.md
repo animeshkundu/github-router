@@ -76,6 +76,8 @@ in [`anthropic-translation-shim.md`](anthropic-translation-shim.md).
 **Fast profile.** The seeded gateway rows are now exactly `gpt-5.6-sol`,
 `gpt-5.6-luna`, `gemini-3.7-flash`, and `grok-4.6`, gated on the live catalog.
 The cache-read-vs-fetch asymmetry, presence guard, and version-coupling caveat are
-unchanged. The literal raw `-m fast` profile additionally seeds private Luna
-role aliases for fixed effort; those aliases are accepted only on an
-authenticated fast request and never reach Copilot. See [`default-models.md`](default-models.md).
+unchanged. The literal raw `-m fast` profile additionally uses private Luna
+aliases where the same catalog model needs different fixed efforts (lead/general-purpose
+max versus Explore high); those aliases are accepted only on an authenticated Fast
+request and never reach Copilot. Retired role aliases are rejected. See
+[`default-models.md`](default-models.md).

@@ -83,8 +83,9 @@ import {
   maxGeminiModel,
   maxGrokModel,
   maxOpusModel,
+  maxReviewerModel as resolveMaxReviewerModel,
 } from "./lib/max-profile-contract"
-import { ARTIFACT_REVIEW_SKILL, injectedSkillsForLaunch, writeInjectedSkill } from "./lib/injected-skills"
+import { buildArtifactReviewSkill, injectedSkillsForLaunch, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
 import { parseBoolEnv } from "./lib/exec"
 import nodePath from "node:path"
@@ -98,7 +99,7 @@ import {
   type NativeAgentName,
 } from "./lib/peer-mcp-personas"
 import { injectAttributionSuppressionIntoSettingsFile } from "./lib/attribution-settings"
-import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, buildOperatingDefaultsDirective, type NativeAgentAvailability, OPERATING_DEFAULTS_DIGEST, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
+import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, buildOperatingDefaultsDigest, buildOperatingDefaultsDirective, type NativeAgentAvailability, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
@@ -131,16 +132,12 @@ import {
   standInToolEnabled,
   workerToolsEnabled,
   fastScoutModel,
+  fastPlanModel,
+  fastGeneralPurposeModel,
   fastImplementerModel,
   fastReviewerModel,
-  fastPlannerModel,
-  fastCriticModel,
+  fastAdvisorModel,
   fastOracleModel,
-  FAST_SCOUT_EFFORT,
-  FAST_CRITIC_EFFORT,
-  FAST_IMPLEMENTER_EFFORT,
-  FAST_REVIEWER_EFFORT,
-  FAST_PLANNER_EFFORT,
 } from "./lib/mcp-capabilities"
 import {
   getClaudeCodeEnvVars,
@@ -757,24 +754,29 @@ export const claude = defineCommand({
     // off (then only the operating-defaults directive is injected).
     let peerAwarenessSnippet: string | undefined
     let peerAwarenessSummary: string | undefined
+    let operatingGroupKeys: Partial<Record<McpGroup, string>> = {}
     let fastWiringComplete = launchProfileId !== "fast"
+    const browseAgentAvailable = browseAgentEnabled()
+    const directBrowserAvailable = browserToolsEnabled()
+    const artifactAvailable = artifactToolsEnabled()
+    const resolvedMaxReviewerModel = launchProfileId === "max"
+      ? resolveMaxReviewerModel()
+      : undefined
     // Three of them are dropped rather than downgraded when their chain misses,
     // and a prompt naming a dropped agent sends the lead at something absent
     // from the Task `subagent_type` enum.
-    // Fast profile uses its own single-entry, no-fallback resolvers (pinned
-    // to the exact roster: Explore/implementer -> Luna, reviewer -> Grok 4.6,
-    // planner -> Sol) instead of the standard chains, and registers none of
-    // the standard-only brainstorm/scribe/*-fast/catch-all roles. The
-    // launch already failed above (`validateFastProfilePrerequisites`) if
-    // the fast roster's models aren't live, so these always resolve here.
+    // Restricted profiles use exact, catalog-validated role resolvers rather
+    // than the standard fallback chains. The launch prerequisite checks above
+    // guarantee every mandatory Fast role resolves; Max reviewer alone has the
+    // explicit Grok/high -> Luna 1M/max fallback chosen once per launch.
     const nativeAgentModels: Partial<Record<NativeAgentName, string | undefined>> =
       launchProfileId === "fast"
         ? {
             Explore: fastScoutModel(),
+            Plan: fastPlanModel(),
+            "general-purpose": fastGeneralPurposeModel(),
             implementer: fastImplementerModel(),
             reviewer: fastReviewerModel(),
-            planner: fastPlannerModel(),
-            critic: fastCriticModel(),
           }
         : launchProfileId === "max"
           ? {
@@ -782,7 +784,7 @@ export const claude = defineCommand({
               Plan: MAX_PROFILE_MODELS.sol,
               "general-purpose": MAX_PROFILE_MODELS.luna,
               implementer: MAX_PROFILE_MODELS.gemini,
-              reviewer: maxGeminiModel() ?? maxGrokModel() ?? MAX_PROFILE_MODELS.grok,
+              reviewer: resolvedMaxReviewerModel,
               brainstorm: maxGrokModel() ?? maxGeminiModel() ?? MAX_PROFILE_MODELS.grok,
             }
         : {
@@ -870,11 +872,11 @@ export const claude = defineCommand({
         // `fleet`/`first-mate`) are appended AFTER the filter and stay under
         // their own predicates regardless of profile, per plan section 6.
         const fastDescriptor = profileDescriptor(launchProfileId)
-        const baseGroups: Array<McpGroup> = isMaxProfile
+        const baseGroups: Array<McpGroup> = isFastProfile || isMaxProfile
           ? ["peers", "search"]
           : ["peers", "search", "orchestrate"]
-        if (workerToolsEnabled() && !isMaxProfile) baseGroups.push("workers")
-        if (isMaxProfile && browseAgentEnabled()) baseGroups.push("workers")
+        if (workerToolsEnabled() && !isFastProfile && !isMaxProfile) baseGroups.push("workers")
+        if ((isFastProfile || isMaxProfile) && browseAgentAvailable) baseGroups.push("workers")
         const enabledGroups: Array<McpGroup> = fastDescriptor.allowedGroups
           ? baseGroups.filter((g) => fastDescriptor.allowedGroups!.has(g))
           : baseGroups
@@ -886,7 +888,7 @@ export const claude = defineCommand({
         ) {
           enabledGroups.push("decide")
         }
-        if (browserToolsEnabled() && (!fastDescriptor.allowedGroups || fastDescriptor.allowedGroups.has("browser"))) {
+        if (directBrowserAvailable && (!fastDescriptor.allowedGroups || fastDescriptor.allowedGroups.has("browser"))) {
           enabledGroups.push("browser")
         }
         if (!isFastProfile && !isMaxProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
@@ -895,6 +897,7 @@ export const claude = defineCommand({
         if (isMaxProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
         const { keys: groupKeys, skipped: skippedGroups } =
           await resolveGroupKeysFromMirror(enabledGroups)
+        operatingGroupKeys = groupKeys
 
         // Fast profile: hard-restrict the emitted native roster + persona
         // set + coordinator, and pin the three fast natives' reasoning
@@ -907,8 +910,11 @@ export const claude = defineCommand({
         // so no worker-* .md (and no injected worker/orchestration skill or
         // guard, both gated on this same flag below) survives the profile
         // restriction even if the catalog gate would otherwise pass.
-        if (isFastProfile && (fastOracleModel() == null || fastCriticModel() == null)) {
-          throw new Error("fast profile prerequisite drift: exact Oracle or critic model no longer resolves")
+        if (
+          isFastProfile
+          && (fastOracleModel() == null || fastAdvisorModel() == null || nativeAgentModels.implementer == null)
+        ) {
+          throw new Error("fast profile prerequisite drift: exact Oracle, Advisor, or implementer model no longer resolves")
         }
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
           codexCli: backend === "cli",
@@ -919,7 +925,7 @@ export const claude = defineCommand({
             : resolveGeminiReviewModel(),
           groupKeys,
           workerToolsAvailable: !isFastProfile && !isMaxProfile && workerToolsEnabled(),
-          browseAvailable: isMaxProfile ? browseAgentEnabled() : (!isFastProfile && browseAgentEnabled()),
+          browseAvailable: browseAgentAvailable,
           nativeSubagentModel: nativeAgentModels.implementer,
           reviewerModel: nativeAgentModels.reviewer,
           reviewerFastModel: nativeAgentModels["reviewer-fast"],
@@ -939,24 +945,23 @@ export const claude = defineCommand({
           ...(isFastProfile
             ? {
                 fastProfile: true,
-                plannerModel: nativeAgentModels.planner,
-                criticModel: nativeAgentModels.critic,
-                scoutEffort: FAST_SCOUT_EFFORT,
-                implementerEffort: FAST_IMPLEMENTER_EFFORT,
-                reviewerEffort: FAST_REVIEWER_EFFORT,
-                plannerEffort: FAST_PLANNER_EFFORT,
-                criticEffort: FAST_CRITIC_EFFORT,
+                fastExploreModel: nativeAgentModels.Explore,
+                fastPlanModel: nativeAgentModels.Plan,
+                fastGeneralPurposeModel: nativeAgentModels["general-purpose"],
+                fastImplementerModel: nativeAgentModels.implementer,
+                fastReviewerModel: nativeAgentModels.reviewer,
               }
             : isMaxProfile
               ? {
                   maxProfile: true,
                   workerToolsAvailable: false,
-                  browseAvailable: browseAgentEnabled(),
+                  browseAvailable: browseAgentAvailable,
                   maxExploreModel: MAX_PROFILE_MODELS.luna,
                   maxPlanModel: MAX_PROFILE_MODELS.sol,
                   maxGeneralPurposeModel: MAX_PROFILE_MODELS.luna,
                   maxImplementerModel: MAX_PROFILE_MODELS.gemini,
-                  maxReviewerModel: maxGeminiModel() ?? maxGrokModel() ?? MAX_PROFILE_MODELS.grok,
+                  maxReviewerModel: resolvedMaxReviewerModel,
+                  maxReviewerEffort: resolvedMaxReviewerModel === MAX_PROFILE_MODELS.luna ? "max" : "high",
                   maxBrainstormModel: maxGrokModel() ?? maxGeminiModel() ?? MAX_PROFILE_MODELS.grok,
                   maxGeminiModel: maxGeminiModel(),
                   maxGrokModel: maxGrokModel(),
@@ -1040,12 +1045,12 @@ export const claude = defineCommand({
         // at least the parent session retains the peer tools (subagents
         // remain blind in that case, by design — explicit branch, not
         // silent precedence).
-        // Fast is deliberately different: the parent receives peers/search
-        // through --mcp-config, while only reviewer/planner receive an inline
-        // peers entry and scout/planner receive inline search. Do NOT persist
-        // the proxy MCPs into the shared mirror for this profile: an
-        // implementer with omitted `tools:` inherits persistent-scope MCPs,
-        // which would otherwise expose Oracle despite the role contract.
+        // Fast is deliberately different: the parent receives its enabled
+        // groups through --mcp-config, while each native gets only its inline
+        // role-scoped servers (`Plan` alone receives peers/Oracle; read/search
+        // roles receive search; worker-browse receives workers). Do NOT persist
+        // proxy MCPs into the shared mirror for this profile: execution roles
+        // with inherited tools would otherwise receive Oracle or Artifact tools.
         let subagentVisibility: string
         let injected: Awaited<ReturnType<typeof injectPeerMcpIntoMirror>> | undefined
         if (isFastProfile) {
@@ -1095,7 +1100,13 @@ export const claude = defineCommand({
           let fastGuardInstalled = false
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            const guardCommand = buildFastDispatchGuardHookCommand(selfInvocation)
+            const guardCommand = buildFastDispatchGuardHookCommand(selfInvocation, {
+              allowBrowse: browseAgentAvailable,
+              allowedTargets: [
+                ...(fastDescriptor.nativeRoster ?? []),
+                ...(browseAgentAvailable ? ["worker-browse"] : []),
+              ],
+            })
             await injectStopHookIntoSettingsFile(
               settingsPath,
               guardCommand,
@@ -1113,7 +1124,10 @@ export const claude = defineCommand({
           let maxGuardInstalled = false
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
-            const guardCommand = buildMaxDispatchGuardHookCommand(selfInvocation)
+            const guardCommand = buildMaxDispatchGuardHookCommand(selfInvocation, {
+              reviewerModel: resolvedMaxReviewerModel,
+              reviewerEffort: resolvedMaxReviewerModel === MAX_PROFILE_MODELS.luna ? "max" : "high",
+            })
             await injectStopHookIntoSettingsFile(
               settingsPath,
               guardCommand,
@@ -1223,7 +1237,7 @@ export const claude = defineCommand({
         } catch (err) {
           consola.warn(`Could not auto-approve injected tools: ${String(err)}`)
         }
-        const workerGuardActive = workerSkillsActive || (isMaxProfile && browseAgentEnabled())
+        const workerGuardActive = workerSkillsActive || ((isFastProfile || isMaxProfile) && browseAgentAvailable)
         if (workerGuardActive) {
           // Workers non-blocking guard: a PreToolUse hook scoped (matcher) to the
           // active worker tools that DENIES a raw `mcp__<workersKey>__<mode>` call
@@ -1246,7 +1260,8 @@ export const claude = defineCommand({
           // raw `mcp__workers__*` escape hatch on demand (e.g. for guaranteed
           // structured-arg fidelity, or when a blocking call is acceptable) — so
           // the worker-* agents COMPLEMENT rather than hard-replace the raw tools.
-          if (!injected?.ok) {
+          const dispatcherCanReachWorkers = isFastProfile || injected?.ok === true
+          if (!dispatcherCanReachWorkers) {
             consola.warn(
               "Workers non-blocking guard NOT registered: subagent MCP injection "
                 + "fell back to parent-only (--mcp-config), so worker-* dispatchers "
@@ -1263,9 +1278,9 @@ export const claude = defineCommand({
             try {
               const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
               const workersKey = workersKeyOf(groupKeys)
-              const modes = isMaxProfile
+              const modes = isFastProfile || isMaxProfile
                 ? (["browse"] as const)
-                : activeDispatchModes({ browse: browseAgentEnabled() })
+                : activeDispatchModes({ browse: browseAgentAvailable })
               const cmd = buildWorkerGuardHookCommand(
                 selfInvocation,
                 workersKey,
@@ -1357,8 +1372,9 @@ export const claude = defineCommand({
         // to open plans there by default. Skill is written here (not in
         // INJECTED_SKILLS) so it only appears inside a tab; the CLAUDE.md
         // directive reaches descendants. Both best-effort.
-        if (artifactToolsEnabled()) {
-          await writeInjectedSkill(ARTIFACT_REVIEW_SKILL.name, ARTIFACT_REVIEW_SKILL.md)
+        if (artifactAvailable) {
+          const artifactReviewSkill = buildArtifactReviewSkill(groupKeys.peers)
+          await writeInjectedSkill(artifactReviewSkill.name, artifactReviewSkill.md)
             .catch(() => ({ written: false }))
           try {
             await prependArtifactPanelDirectiveToMirroredClaudeMd(groupKeys.peers)
@@ -1369,7 +1385,7 @@ export const claude = defineCommand({
           // file (AIORDIE_TOKEN is stripped from the child env, and argv leaks to
           // ps), then register a PostToolUse(ExitPlanMode) hook so the finalized
           // plan opens in the panel without the model calling artifact_open.
-          if (!isFastProfile) try {
+          try {
             await writeArtifactCredsToMirror(shouldUseInsecureTls(process.env.AIORDIE_BASE_URL ?? ""))
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const cmd = buildArtifactOpenHookCommand(selfInvocation)
@@ -1593,12 +1609,13 @@ export const claude = defineCommand({
           standInAvailable: isMaxProfile
             ? (maxOpusModel() !== undefined && standInToolEnabled({ maxProfile: true }))
             : standInToolEnabled(),
-          browseAvailable: isMaxProfile ? browseAgentEnabled() : browserToolsEnabled(),
-          browserToolsAvailable: browserToolsEnabled(),
+          browseAvailable: browseAgentAvailable,
+          browserToolsAvailable: directBrowserAvailable,
           compoundBrowseAvailable: isMaxProfile ? false : browserCompoundToolsEnabled(),
           powerBrowseAvailable: isMaxProfile ? false : state.powerBrowseEnabled,
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
+          artifactToolsAvailable: artifactAvailable,
           ...nativeAvailability,
           profile: launchProfileId,
           groupKeys,
@@ -1612,10 +1629,11 @@ export const claude = defineCommand({
           standInAvailable: isMaxProfile
             ? (maxOpusModel() !== undefined && standInToolEnabled({ maxProfile: true }))
             : standInToolEnabled(),
-          browseAvailable: isMaxProfile ? browseAgentEnabled() : browserToolsEnabled(),
-          browserToolsAvailable: browserToolsEnabled(),
+          browseAvailable: browseAgentAvailable,
+          browserToolsAvailable: directBrowserAvailable,
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
+          artifactToolsAvailable: artifactAvailable,
           ...nativeAvailability,
           profile: launchProfileId,
           nativeAgentModels,
@@ -1694,17 +1712,23 @@ export const claude = defineCommand({
     // If the CLAUDE.md append happened to fail, the agent still has every tool's
     // own description in tools/list (the real routing signal); it just loses this
     // higher-level overview.
+    const operatingDefaultsDigest = buildOperatingDefaultsDigest({ profile: launchProfileId })
     extraArgs.push(
       "--append-system-prompt",
       peerAwarenessSnippet && peerAwarenessSummary
-        ? `${OPERATING_DEFAULTS_DIGEST}\n\n${peerAwarenessSummary}`
-        : OPERATING_DEFAULTS_DIGEST,
+        ? `${operatingDefaultsDigest}\n\n${peerAwarenessSummary}`
+        : operatingDefaultsDigest,
     )
     try {
       await prependOperatingDefaultsToMirroredClaudeMd(
         buildOperatingDefaultsDirective({
           ...nativeAvailability,
           fastRuntimeAvailable: fastWiringComplete,
+          browseAvailable: browseAgentAvailable,
+          browserToolsAvailable: directBrowserAvailable,
+          artifactAvailable,
+          groupKeys: operatingGroupKeys,
+          peersKey: operatingGroupKeys.peers,
         }),
       )
     } catch (err) {

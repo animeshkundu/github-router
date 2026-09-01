@@ -433,10 +433,12 @@ honestly rather than papered over:
 
 > **Fast profile (shipped).** The picker inventory is exactly `gpt-5.6-sol` /
 > `gpt-5.6-luna` / `gemini-3.7-flash` / `grok-4.6`, gated on the live catalog.
-> A literal `-m fast` launch starts on Luna, fixes native role efforts, and keeps
-> its optional primary-lead-only Advisor on Gemini 3.7 Flash after `/model`
-> switches to any fixed fast row. The fixed endpoint contract is Responses for
-> Luna, Sol, and Grok; Chat Completions for Gemini; native Messages for Opus.
+> A literal `-m fast` launch starts on Luna and fixes the native roster to
+> Explore (Luna/high), Plan (Sol/high), general-purpose (Luna/max), implementer
+> (Gemini/high), and reviewer (Grok/medium), plus gated worker-browse. Its optional
+> primary-lead-only Advisor stays on Gemini 3.7 Flash after `/model` switches to
+> any fixed fast row. The fixed endpoint contract is Responses for Luna, Sol, and
+> Grok; Chat Completions for Gemini; native Messages for Opus.
 > Non-Claude Advisor continuations return through the selected lead's same endpoint;
 > Task subagents still have Advisor stripped. Standard launches, including direct `-m gpt-5.6-luna`, retain their
 > standard surface and catalog-derived routing. See [`default-models.md`](default-models.md)

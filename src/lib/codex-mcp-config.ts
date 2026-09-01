@@ -4,7 +4,13 @@ import path from "node:path"
 
 import consola from "consola"
 
-import { FAST_PROFILE_NATIVE_AGENT_NAMES } from "./fast-profile-contract"
+import {
+  FAST_PROFILE_MODELS,
+  FAST_PROFILE_NATIVE_AGENT_NAMES,
+  FAST_PROFILE_NATIVE_EFFORTS,
+  FAST_PROFILE_NATIVE_MODELS,
+} from "./fast-profile-contract"
+import { LUNA_SCOUT_ALIAS_ID } from "./launch-profile"
 
 import { type SelfInvocation } from "./hook-launcher/self-invocation"
 import { buildCodexProviderConfigFlags } from "./launch"
@@ -27,11 +33,6 @@ import {
   MAX_PROFILE_NATIVE_MODELS,
 } from "./max-profile-contract"
 import { type Effort as SubagentEffort } from "./reasoning-effort"
-import {
-  FAST_CRITIC_ALIAS_ID,
-  LUNA_IMPLEMENTER_ALIAS_ID,
-  LUNA_SCOUT_ALIAS_ID,
-} from "./launch-profile"
 import {
   activeDispatchModes,
   dispatcherAgentName,
@@ -165,14 +166,17 @@ interface BuildOpts {
    *  Absent → unrestricted (today's full persona set). */
   personaAllowlist?: ReadonlySet<string> | ReadonlyArray<string>
   /** Whether to emit the `peer-review-coordinator` meta-subagent. Default
-   *  true (today's behavior). A profile with too narrow a persona roster
-   *  for fan-out coordination to make sense (e.g. the fast profile, which
-   *  registers only `gemini-critic`) should pass `false`. */
+   * true. Restricted profiles without the peer-review suite pass `false`. */
   includeCoordinator?: boolean
   /** Fast-profile role assignments. When present, the explicit fast branch
-   *  emits the exact `Explore`/`implementer`/`reviewer`/`planner`/`critic` roster instead
-   *  of reusing standard role bodies. Standard callers omit these fields. */
+   *  emits the exact `Explore`/`Plan`/`general-purpose`/`implementer`/`reviewer` roster
+   *  plus optional `worker-browse` instead of reusing standard role bodies. Standard callers omit these fields. */
   fastProfile?: boolean
+  fastExploreModel?: string
+  fastPlanModel?: string
+  fastGeneralPurposeModel?: string
+  fastImplementerModel?: string
+  fastReviewerModel?: string
   /** Max-profile role assignments. */
   maxProfile?: boolean
   maxExploreModel?: string
@@ -198,17 +202,12 @@ interface BuildOpts {
   maxBrainstormEffort?: SubagentEffort
   maxCoordinatorEffort?: SubagentEffort
   maxPersonaNames?: ReadonlyArray<string>
-  plannerModel?: string
 
   /** Fixed `effort:` frontmatter overrides. Absent keeps standard picker-driven
    *  behavior. */
   scoutEffort?: SubagentEffort
   implementerEffort?: SubagentEffort
   reviewerEffort?: SubagentEffort
-  plannerEffort?: SubagentEffort
-  criticEffort?: SubagentEffort
-  /** Resolved fast native critic model. */
-  criticModel?: string
   /** Compatibility fields for the original fast-profile implementation. */
   implementerFastEffort?: SubagentEffort
   reviewerFastEffort?: SubagentEffort
@@ -308,8 +307,8 @@ export interface PeerAgentDefinition {
    *  Claude Code session's effort picker for this subagent only (documented
    *  Claude Code subagent frontmatter behavior). Absent → the subagent
    *  follows the session's picker, which is the standard-profile default for
-   *  every native today. The fast profile fixes effort on all five of its role
-   *  definitions (`Explore`, `implementer`, `reviewer`, `planner`, `critic`). */
+   * every native today. The fast profile fixes effort on `Explore`, `Plan`,
+   * `general-purpose`, `implementer`, and `reviewer`. */
   effort?: SubagentEffort
   tools?: ReadonlyArray<string>
   /** Inline MCP servers scoped to this subagent, emitted into its `.md`
@@ -476,6 +475,7 @@ export const BUILTIN_SUBAGENT_DEFINITIONS: PeerAgentDefinitions = {
  */
 export const ALL_NATIVE_AGENT_NAMES = [
   "implementer",
+  "Plan",
   "planner",
   "reviewer",
   "reviewer-fast",
@@ -484,6 +484,7 @@ export const ALL_NATIVE_AGENT_NAMES = [
   "Explore",
   "scribe",
   "implementer-fast",
+  "general-purpose",
   "general-purpose-fast",
   "critic",
 ] as const
@@ -591,10 +592,7 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
   )
   const reviewerModel = modelFor(
     opts.maxReviewerModel,
-    modelFor(
-      opts.maxGeminiModel,
-      modelFor(opts.maxGrokModel, MAX_PROFILE_NATIVE_MODELS.reviewer),
-    ),
+    MAX_PROFILE_NATIVE_MODELS.reviewer,
   )
   const brainstormModel = modelFor(
     opts.maxBrainstormModel,
@@ -730,107 +728,143 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
  * from the standard definitions: the names overlap, but their role bodies,
  * fixed model assignments, and efforts are profile contracts. */
 function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
-  const scoutModel = nonEmptyModel(opts.scoutModel)
-  const implementerModel = nonEmptyModel(opts.nativeSubagentModel)
-  const reviewerModel = nonEmptyModel(opts.reviewerModel)
-  const plannerModel = nonEmptyModel(opts.plannerModel)
-  const criticModel = nonEmptyModel(opts.criticModel)
-  if (!scoutModel || !implementerModel || !reviewerModel || !plannerModel || !criticModel) {
-    throw new Error("fast profile requires resolved Explore, implementer, reviewer, planner, and critic models")
-  }
+  const modelFor = (value: string | undefined, fallback: string): string =>
+    nonEmptyModel(value) ?? fallback
+  const exploreModel = modelFor(opts.fastExploreModel, FAST_PROFILE_NATIVE_MODELS.Explore)
+  const planModel = modelFor(opts.fastPlanModel, FAST_PROFILE_NATIVE_MODELS.Plan)
+  const generalModel = modelFor(
+    opts.fastGeneralPurposeModel,
+    FAST_PROFILE_NATIVE_MODELS["general-purpose"],
+  )
+  const implementerModel = modelFor(
+    opts.fastImplementerModel,
+    FAST_PROFILE_NATIVE_MODELS.implementer,
+  )
+  const reviewerModel = modelFor(
+    opts.fastReviewerModel,
+    FAST_PROFILE_NATIVE_MODELS.reviewer,
+  )
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
   const peersKey = peersKeyOf(opts.groupKeys)
-  const searchMcp: { mcpServers?: Record<string, HttpMcpEntry> } = opts.serverUrl
-    ? { mcpServers: { [searchKey]: httpEntryFor(opts.serverUrl, "search", opts.nonce, opts.workspaceHeaderCmd) } }
-    : {}
-  const peersMcp: { mcpServers?: Record<string, HttpMcpEntry> } = opts.serverUrl && opts.groupKeys.peers
-    ? { mcpServers: { [peersKey]: httpEntryFor(opts.serverUrl, "peers", opts.nonce, opts.workspaceHeaderCmd) } }
-    : {}
+  const searchMcpServers = opts.serverUrl
+    ? {
+        [searchKey]: httpEntryFor(
+          opts.serverUrl,
+          "search",
+          opts.nonce,
+          opts.workspaceHeaderCmd,
+        ),
+      }
+    : undefined
+  const peersMcpServers = opts.serverUrl && opts.groupKeys.peers
+    ? {
+        [peersKey]: httpEntryFor(
+          opts.serverUrl,
+          "peers",
+          opts.nonce,
+          opts.workspaceHeaderCmd,
+        ),
+      }
+    : undefined
+
   const oracleTool = opts.groupKeys.peers ? `mcp__${peersKey}__oracle` : undefined
-  const readSearchTools = ["Read", "Grep", "Glob", "Bash"]
-  const scoutTools = [...readSearchTools, `mcp__${searchKey}__*`]
-  const reviewerTools = [...scoutTools, ...(oracleTool ? [oracleTool] : [])]
-  const plannerTools = [
+  const readSearchTools = ["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", `mcp__${searchKey}__*`]
+  const planTools = [
     ...readSearchTools,
-    "WebFetch",
-    "WebSearch",
-    `mcp__${searchKey}__*`,
     ...(oracleTool ? [oracleTool] : []),
-    // Claude Code 2.1.246 exposes the native dispatcher as `Agent`; the
-    // historical `Task` spelling remains accepted by the policy hook for
-    // older clients but is not emitted as a frontmatter capability.
     "Agent",
   ]
+  const oneM = (model: string): string =>
+    model === FAST_PROFILE_MODELS.grok ? model : decorateGuaranteedOneM(model)
+  const effort = (name: keyof typeof FAST_PROFILE_NATIVE_EFFORTS): SubagentEffort =>
+    FAST_PROFILE_NATIVE_EFFORTS[name]
 
-  const reviewerPrompt =
-    "You are the fast profile's repository-aware reviewer. Verify what is actually true by reading the code and running the relevant build, tests, or end-to-end reproduction. Find root causes rather than symptoms. Do not modify production code. Report severity-ranked findings with `file:line` evidence and a clear go/no-go. You do not have Advisor; independently reach your verdict from repository evidence. Use Oracle only as a last resort for one precise unresolved question after your own investigation. "
-    + fileToolSteer("builds and reproductions")
-    + " Do not spawn further agents."
-  const criticPrompt =
-    "You are the fast profile's fresh-context cross-lab critic. Assess the supplied plan, design, diff, or decision against its stated constraints. Look for overlooked failure modes, unsupported assumptions, and simpler safer alternatives. Do not modify files, run mutating commands, or spawn agents. Return concise severity-ranked findings with `file:line` evidence where applicable. "
-    + readOnlyToolSteer()
   const out: PeerAgentDefinitions = {
     Explore: {
-      description: `Read-only exploration subagent running ${scoutModel}. Use for broad repository discovery before the lead drafts a plan; return conclusions with file:line evidence, not file dumps.`,
+      description: `Fast-profile read-only exploration subagent running ${exploreModel}. Use for broad repository discovery; return conclusions with file:line evidence, not file dumps.`,
       prompt:
-        "Investigate the repository read-only. Cast a wide net, then return a concise evidence packet for the lead: conclusions, load-bearing `file:line` citations, commands checked, and explicit gaps. Do not plan, edit, or spawn agents. "
+        "You are the fast-profile read-only exploration subagent. Investigate the repository to answer the question: cast a wide net, then return a concise evidence packet with file:line citations and checked commands. Do not plan, edit, or spawn agents. "
         + readOnlyToolSteer(),
-      tools: scoutTools,
+      tools: readSearchTools,
       model: decorateGuaranteedOneM(LUNA_SCOUT_ALIAS_ID),
-      effort: opts.scoutEffort ?? "high",
-      ...searchMcp,
+      effort: effort("Explore"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    Plan: {
+      description: `Fast-profile plan architect running ${planModel} at high effort. Best suited to non-trivial changes where sequencing, interfaces, or verification benefit from a separate planning view.`,
+      prompt:
+        "You are the fast-profile planning subagent. Given the goal, constraints, and available evidence, return an ordered implementation plan with affected files, invariants, risks, acceptance criteria, and verification. You do not have Advisor. Use Oracle only when one precise consequential uncertainty remains after your own investigation and available repository evidence cannot settle it. The Task/Agent capability is restricted by the fast in-session ACL: you may invoke only `Explore` or `reviewer`; do not invoke any other role. "
+        + readOnlyToolSteer(),
+      tools: planTools,
+      model: oneM(planModel),
+      effort: effort("Plan"),
+      mcpServers: {
+        ...(searchMcpServers ?? {}),
+        ...(peersMcpServers ?? {}),
+      },
+    },
+    "general-purpose": {
+      description: `Fast-profile general-purpose execution subagent running ${generalModel} at maximum effort. Best suited to mixed or multi-step execution tasks that do not fit narrower roles.`,
+      prompt:
+        "You are the fast-profile general-purpose execution subagent. Work out what the task requires and deliver the outcome end to end using dedicated file tools, builds, tests, and git. For verification, you may invoke only `reviewer`. The lead owns final integration. "
+        + fileToolSteer("builds, tests, and git"),
+      model: oneM(generalModel),
+      effort: effort("general-purpose"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     implementer: {
-      description: `Implementation subagent running ${implementerModel}. Use for well-specified mechanical changes after the plan is approved; implement and verify end to end in its own context.`,
+      description: `Fast-profile implementation subagent running ${implementerModel} at high effort. Best suited to bounded coding changes consistent with repository conventions.`,
       prompt:
-        "Implement the approved, well-specified change surgically. Match surrounding style, minimize unrelated churn, use dedicated file tools, and run the relevant build/tests. For verification, you may invoke only the fast-profile `reviewer` or `critic` native subagent; do not invoke any other role or redesign the plan. Report changes, verification, and unresolved risk. "
-        + fileToolSteer("builds"),
-      model: decorateGuaranteedOneM(LUNA_IMPLEMENTER_ALIAS_ID),
-      effort: opts.implementerEffort ?? "max",
+        "You are the fast-profile implementation subagent. Implement the change surgically, matching surrounding code style, minimizing unrelated churn, and running builds/tests. For verification, you may invoke only `reviewer`; do not invoke any other role. Report exact changes and risks. "
+        + fileToolSteer("builds, tests, and git"),
+      model: oneM(implementerModel),
+      effort: effort("implementer"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description: `Repository-aware reviewer running ${reviewerModel} at medium effort. Use after implementation or for failures that need reproduction, runtime checks, or repository context.`,
-      prompt: reviewerPrompt,
-      model: reviewerModel,
-      effort: opts.reviewerEffort ?? "medium",
-      tools: reviewerTools,
-      mcpServers: {
-        ...(searchMcp.mcpServers ?? {}),
-        ...(peersMcp.mcpServers ?? {}),
-      },
-    },
-    critic: {
-      description: `Fresh-context cross-lab critic running ${criticModel} at medium effort. Use to challenge a plan, design, diff, or decision against its stated constraints and expose overlooked failure modes.`,
-      prompt: criticPrompt,
-      model: decorateGuaranteedOneM(FAST_CRITIC_ALIAS_ID),
-      effort: opts.criticEffort ?? "medium",
-      tools: scoutTools,
-      ...searchMcp,
-    },
-    planner: {
-      description: `Plan consultant and approver running ${plannerModel}. Invoke only after Luna has done the repository legwork and drafted a plan; pass a handcrafted evidence packet and the complete draft. The lead must not implement until this agent returns APPROVE.`,
+      description: `Fast-profile repository-aware reviewer running ${reviewerModel} at medium effort. Use for independent verification, test authoring, failure reproduction, or runtime checks.`,
       prompt:
-        "You are the fast profile's final plan consultant and approver, not a first-pass planner. The caller must provide the user goal, acceptance criteria, repository/domain constraints, Luna's `file:line` and command/test evidence, the complete draft plan, settled decisions, and one focused review question. Selectively verify disputed citations or narrow evidence gaps with read/search tools, but do not repeat broad discovery, edit files, or execute the plan. Return exactly one leading verdict: `APPROVE`, `REVISE`, or `NEED_MORE_CONTEXT`. APPROVE only when the plan is safe, ordered, complete, and verifiable. REVISE must give concrete corrections. NEED_MORE_CONTEXT must name the exact evidence Luna should collect. You do not have Advisor; independently reach your verdict from the evidence packet and selective verification. Use Oracle only as a last resort for one precise unresolved question after your own review. The Task/Agent capability is restricted by the fast in-session ACL: you may invoke only `reviewer`, `Explore`, or `critic`; do not invoke any other role. Bash is for evidence commands only; this is not a shell sandbox. "
-        + readOnlyToolSteer(),
-      tools: plannerTools,
-      model: decorateGuaranteedOneM(plannerModel),
-      effort: opts.plannerEffort ?? "high",
-      mcpServers: {
-        ...(searchMcp.mcpServers ?? {}),
-        ...(peersMcp.mcpServers ?? {}),
-      },
+        "You are the fast-profile repository-aware reviewer. Verify what is actually true by reading code and running builds, tests, or reproductions. Report severity-ranked findings with `file:line` evidence and a clear go/no-go. You do not have Advisor. "
+        + fileToolSteer("builds, tests, and reproductions")
+        + " Do not spawn further agents.",
+      model: oneM(reviewerModel),
+      effort: effort("reviewer"),
+      tools: readSearchTools,
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
   }
+
+  if (opts.browseAvailable && opts.groupKeys.workers) {
+    const workersKey = workersKeyOf(opts.groupKeys)
+    out["worker-browse"] = {
+      description: dispatcherDescription("browse"),
+      prompt: dispatcherPrompt("browse", workersKey),
+      model: oneM(FAST_PROFILE_MODELS.luna),
+      effort: "high",
+      tools: dispatcherTools("browse", workersKey),
+      ...(opts.serverUrl
+        ? {
+            mcpServers: {
+              [workersKey]: httpEntryFor(
+                opts.serverUrl,
+                "workers",
+                opts.nonce,
+                opts.workspaceHeaderCmd,
+              ),
+            },
+          }
+        : {}),
+    }
+  }
+
   const roster = opts.nativeRoster == null
-    ? new Set(FAST_PROFILE_NATIVE_AGENT_NAMES)
+    ? new Set<string>(FAST_PROFILE_NATIVE_AGENT_NAMES)
     : opts.nativeRoster instanceof Set
       ? opts.nativeRoster
       : new Set(opts.nativeRoster)
-  if (roster) {
-    for (const name of Object.keys(out)) {
-      if (!roster.has(name)) delete out[name]
-    }
+  for (const name of Object.keys(out)) {
+    if (name !== "worker-browse" && !roster.has(name)) delete out[name]
   }
   return out
 }
@@ -1179,13 +1213,13 @@ interface WriteOpts {
   implementerFastEffort?: SubagentEffort
   reviewerFastEffort?: SubagentEffort
   fastProfile?: boolean
-  plannerModel?: string
+  fastExploreModel?: string
+  fastPlanModel?: string
+  fastGeneralPurposeModel?: string
+  fastImplementerModel?: string
+  fastReviewerModel?: string
   implementerEffort?: SubagentEffort
   reviewerEffort?: SubagentEffort
-  plannerEffort?: SubagentEffort
-  criticEffort?: SubagentEffort
-  /** Resolved fast native critic model. */
-  criticModel?: string
   /** Max-profile role assignments. */
   maxProfile?: boolean
   maxExploreModel?: string
@@ -1741,6 +1775,11 @@ export async function writePeerMcpRuntimeFiles(
     scribeModel: opts.scribeModel,
     implementerFastModel: opts.implementerFastModel,
     generalPurposeFastModel: opts.generalPurposeFastModel,
+    fastExploreModel: opts.fastExploreModel,
+    fastPlanModel: opts.fastPlanModel,
+    fastGeneralPurposeModel: opts.fastGeneralPurposeModel,
+    fastImplementerModel: opts.fastImplementerModel,
+    fastReviewerModel: opts.fastReviewerModel,
     nativeRoster: opts.nativeRoster,
     personaAllowlist: opts.personaAllowlist,
     includeCoordinator: opts.includeCoordinator,
@@ -1748,12 +1787,8 @@ export async function writePeerMcpRuntimeFiles(
     implementerFastEffort: opts.implementerFastEffort,
     reviewerFastEffort: opts.reviewerFastEffort,
     fastProfile: opts.fastProfile,
-    plannerModel: opts.plannerModel,
     implementerEffort: opts.implementerEffort,
     reviewerEffort: opts.reviewerEffort,
-    plannerEffort: opts.plannerEffort,
-    criticModel: opts.criticModel,
-    criticEffort: opts.criticEffort,
     maxProfile: opts.maxProfile,
     maxExploreModel: opts.maxExploreModel,
     maxPlanModel: opts.maxPlanModel,
