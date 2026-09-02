@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prompt and token caching research: VS Code, Copilot CLI, and github-router</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --muted: #5b667a;
+      --line: #d9dfeb;
+      --panel: #f6f8fc;
+      --panel-strong: #edf2fa;
+      --accent: #315ee7;
+      --accent-soft: #e9efff;
+      --good: #13795b;
+      --good-soft: #e8f7f0;
+      --warn: #9a5b00;
+      --warn-soft: #fff4df;
+      --bad: #a33b43;
+      --bad-soft: #fff0f1;
+      --shadow: 0 8px 24px rgba(31, 48, 87, .08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #fff;
+      color: var(--ink);
+      font: 15px/1.58 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1240px; margin: 0 auto; padding: 42px 28px 80px; }
+    h1, h2, h3 { line-height: 1.2; letter-spacing: -.018em; }
+    h1 { font-size: clamp(30px, 4vw, 48px); max-width: 930px; margin: 0 0 14px; }
+    h2 { font-size: 27px; margin: 48px 0 16px; padding-top: 10px; border-top: 1px solid var(--line); }
+    h3 { font-size: 19px; margin: 28px 0 9px; }
+    p { max-width: 1000px; margin: 9px 0; }
+    a { color: #244fc9; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    code { font-size: .92em; background: var(--panel-strong); border-radius: 4px; padding: 1px 4px; }
+    pre { overflow-x: auto; background: #111827; color: #e9eef8; border-radius: 9px; padding: 16px 18px; line-height: 1.48; }
+    .kicker { color: var(--accent); font-weight: 750; text-transform: uppercase; letter-spacing: .11em; font-size: 12px; }
+    .subtitle { color: var(--muted); font-size: 18px; max-width: 900px; }
+    .meta { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--muted); font-size: 13px; margin-top: 20px; }
+    .hero { background: linear-gradient(135deg, #f8faff 0%, #eef3ff 100%); border: 1px solid #d6e0ff; border-radius: 18px; padding: 30px; box-shadow: var(--shadow); }
+    .verdict { margin-top: 22px; border-left: 5px solid var(--accent); background: #fff; padding: 17px 20px; border-radius: 8px; max-width: 1000px; }
+    .verdict strong { color: #1e43ae; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 22px 0; }
+    .card { border: 1px solid var(--line); border-radius: 12px; padding: 17px; background: var(--panel); }
+    .card h3 { margin-top: 0; }
+    .card p { color: var(--muted); font-size: 14px; }
+    .tag { display: inline-block; border-radius: 999px; padding: 2px 9px; font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .verified { color: var(--good); background: var(--good-soft); }
+    .inferred { color: var(--warn); background: var(--warn-soft); }
+    .unknown { color: var(--bad); background: var(--bad-soft); }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 11px; margin: 14px 0 22px; box-shadow: 0 3px 12px rgba(31, 48, 87, .04); }
+    table { border-collapse: collapse; width: 100%; min-width: 760px; background: #fff; }
+    th, td { text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); padding: 12px 13px; }
+    th { background: var(--panel-strong); font-size: 13px; color: #293752; position: sticky; top: 0; z-index: 1; }
+    tr:last-child td { border-bottom: 0; }
+    td:first-child { font-weight: 650; }
+    .small { font-size: 13px; color: var(--muted); }
+    .note { border: 1px solid #d5e0f5; background: var(--accent-soft); border-radius: 9px; padding: 13px 15px; margin: 15px 0; }
+    .caution { border-color: #f1d49d; background: var(--warn-soft); }
+    .source-list { columns: 2 360px; column-gap: 35px; }
+    .source-list li { break-inside: avoid; margin: 7px 0; }
+    .source-list ul { margin-top: 6px; }
+    ol.priority { counter-reset: item; list-style: none; padding: 0; max-width: 1050px; }
+    ol.priority > li { counter-increment: item; position: relative; padding: 16px 18px 16px 64px; margin: 12px 0; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); }
+    ol.priority > li::before { content: counter(item); position: absolute; left: 18px; top: 17px; width: 29px; height: 29px; display: grid; place-items: center; border-radius: 50%; color: #fff; background: var(--accent); font-weight: 800; }
+    ol.priority h3 { margin: 0 0 5px; }
+    ul { max-width: 1050px; }
+    li { margin: 5px 0; }
+    .footer { margin-top: 52px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+    @media (max-width: 820px) {
+      main { padding: 28px 16px 60px; }
+      .hero { padding: 22px 18px; }
+      .cards { grid-template-columns: 1fr; }
+      h2 { margin-top: 36px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <div class="kicker">Research report · safe follow-up applied</div>
+    <h1>Prompt and token caching across VS Code Copilot, Copilot CLI, and github-router</h1>
+    <p class="subtitle">A source-first comparison of provider-side prefix reuse, cache-control and breakpoints, prompt construction, session persistence, compaction, model gates, and observability.</p>
+    <div class="meta">
+      <span>Lookup date: 2026-09-01</span>
+      <span>Router baseline: commit <code>8253216</code>, package <code>0.3.303</code>; follow-up package <code>0.3.304</code></span>
+      <span>Conclusion: research complete; bounded, non-policy improvements applied</span>
+    </div>
+    <div class="verdict"><strong>Headline:</strong> The clients implement caching at three different layers. VS Code has the clearest public request pipeline: rolling Anthropic breakpoints, model-gated Responses breakpoints, an optional Responses cache key, and a Cache Explorer fed by provider-reported usage. Copilot CLI's executable is closed, so its current request builder cannot be verified from the public CLI repository; its public SDK, documentation, changelog, and issues prove durable local session state and cache accounting, but not durable provider KV-cache state. github-router already has a more deliberate split than either a blanket marker policy or no policy: it preserves public caller controls, adds explicit caching only for discrete reusable-prefix Responses calls, and leaves growing conversations provider-managed after a measured regression. The remaining optimization work should be evidence-driven, catalog-aware, and conservative about rewriting history bytes.</div>
+  </section>
+
+  <h2>1. What “caching” means here</h2>
+  <div class="cards">
+    <article class="card">
+      <h3>Prefix hygiene</h3>
+      <p>The client decides the exact order and bytes of tools, instructions, history, and the current turn. A change early in that rendered request can make later content ineligible for reuse.</p>
+      <span class="tag verified">client-controlled</span>
+    </article>
+    <article class="card">
+      <h3>Provider prompt cache</h3>
+      <p>The model service reuses a matching prefix or a marked cache boundary. Cache markers and provider-facing keys are request controls, not local copies of model KV state.</p>
+      <span class="tag verified">provider-owned</span>
+    </article>
+    <article class="card">
+      <h3>Local session state</h3>
+      <p>Transcripts, tool results, plans, checkpoints, model identifiers, and expiration hints can survive a restart. Reconstructing the prompt is not proof that the provider cache is warm.</p>
+      <span class="tag verified">persisted separately</span>
+    </article>
+  </div>
+  <p>The comparison below keeps these mechanisms separate. A lower latency measurement alone is not a cache hit. The strongest evidence is a provider-reported cached-token counter or billing signal, paired with a captured request showing the relevant transformation.</p>
+
+  <h2>2. Version pins and evidence grades</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Subject</th><th>Pin used for source review</th><th>What can be claimed</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>github-router</td>
+          <td>Commit <code>8253216</code>, pre-follow-up tree; package version <code>0.3.303</code> (follow-up is documented below)</td>
+          <td>Local source and tests are directly inspectable. The current repository has a dedicated <a href="../../docs/prompt-caching.md">prompt-caching design and probe document</a>.</td>
+        </tr>
+        <tr>
+          <td>VS Code stable</td>
+          <td>Release <a href="https://github.com/microsoft/vscode/tree/1.135.0">1.135.0</a>, commit <code>08d4889f9ec4a1685d257b9b95de036c8e1ce1e5</code></td>
+          <td>Reproducible released source. The former <code>microsoft/vscode-copilot-chat</code> repository is archived and development moved into VS Code.</td>
+        </tr>
+        <tr>
+          <td>VS Code public tip</td>
+          <td>Commit <a href="https://github.com/microsoft/vscode/commit/eb84d8148027eb14978437cab306074c5be3cac2"><code>eb84d8148027eb14978437cab306074c5be3cac2</code></a>, package version <code>1.137.0</code> at lookup time</td>
+          <td>Latest public source inspected for changes after 1.135.0. Its commit timestamp is 2026-09-01 UTC, so the stable tag remains the release pin for reproducible behavior.</td>
+        </tr>
+        <tr>
+          <td>Copilot CLI stable</td>
+          <td>Release <a href="https://github.com/github/copilot-cli/releases/tag/v1.0.82">v1.0.82</a>, commit <code>024bf28728f3cc82365e0143f44d071ebafbce4d</code></td>
+          <td>The public repository contains documentation, changelog, installer, and metadata only. No CLI request-builder source is published there.</td>
+        </tr>
+        <tr>
+          <td>Copilot CLI prerelease</td>
+          <td><a href="https://github.com/github/copilot-cli/releases/tag/v1.0.83-0">v1.0.83-0</a>, commit <code>be82101e70f0253b57519bebb9cc9d0f6dfb2ed2</code></td>
+          <td>Latest public prerelease notes were checked. They do not describe a prompt-cache change. The installed local executable was older, <code>1.0.74</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note"><strong>Evidence grading:</strong> “Verified” below means a source file, test, or official documentation directly supports the statement. “Issue-reported” means a reproducible report or measurement exists but no current implementation or maintainer confirmation was found. “Unverified” means the public material does not establish the behavior and it should be measured rather than assumed.</div>
+
+  <h2>3. VS Code Copilot: the public implementation</h2>
+  <h3>3.1 Rolling breakpoints are an explicit prompt-shape strategy</h3>
+  <p><a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/extension/intents/node/cacheBreakpoints.ts"><code>cacheBreakpoints.ts</code></a> defines <code>MaxCacheBreakpoints = 4</code> and <code>addCacheBreakpoints(messages, apiType)</code>. It first removes markers unsupported by the selected API, then scans from the newest messages backward. It prefers recent tool results, the current user content, and assistant messages without tool calls, with a fallback scan of leading system and user content.</p>
+  <ul>
+    <li>For <code>responses</code>, assistant messages are not marked. Supported content includes text, image, document, and opaque <code>input_text</code>, <code>input_image</code>, and <code>input_file</code> blocks.</li>
+    <li>For other API types, assistant content can be marked and the accepted opaque types are the Chat/Anthropic-shaped variants.</li>
+    <li>The source comment explicitly says a new turn generally incurs a miss because prior content moves relative to the current user boundary, while an agentic tool loop can hit on the prior tool result.</li>
+  </ul>
+  <p>This function prepares provider markers. It does not itself create or persist model state.</p>
+
+  <h3>3.2 Anthropic Messages: four rolling markers, with a gated one-hour TTL</h3>
+  <p>In <a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/platform/endpoint/node/messagesApi.ts"><code>messagesApi.ts</code></a>, <code>createMessagesRequestBody</code> clears old marker fields, converts raw messages, and then calls:</p>
+  <ul>
+    <li><code>addToolsAndSystemCacheControl</code>: marks the last non-deferred tool and final system block.</li>
+    <li><code>addMessagesApiCacheControl</code>: marks the last cacheable block in each of the two most recent cacheable messages.</li>
+  </ul>
+  <p>The combined policy can use up to four <code>{ type: "ephemeral" }</code> markers. The normal TTL is the provider default. An extended <code>{ type: "ephemeral", ttl: "1h" }</code> is selected only when the model, experiment, location, and non-subagent gates pass. The source specifically excludes short-lived subagent calls from the extended TTL. The internal marker is <code>CacheType = 'ephemeral'</code>; the built-in Anthropic converter translates the internal <code>cache_control</code> data part, while a July 2026 fix makes unsupported BYOK providers fail closed rather than leaking the sentinel upstream.</p>
+  <p><span class="tag verified">Verified source</span> The exact implementation does not claim that an Anthropic cache survives a process restart. It only controls the request markers and reads returned usage.</p>
+
+  <h3>3.3 OpenAI Responses: explicit mode, optional key, and compaction</h3>
+  <p><a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/platform/endpoint/node/responsesApi.ts"><code>responsesApi.ts</code></a> emits <code>prompt_cache_options</code> when the model supports the capability. The current capability helper <a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/platform/endpoint/common/chatModelCapabilities.ts#L333-L340"><code>modelSupportCacheBreakPoints</code></a> returns true for the GPT-5.6 family. Depending on the experiment and marker support, the mode is <code>explicit</code> or <code>implicit</code>. Raw markers become <code>prompt_cache_breakpoint: { mode: "explicit" }</code> on the preceding supported content block.</p>
+  <p>When the cache-key experiment is enabled and a conversation ID exists, the body also receives:</p>
+  <pre>body.prompt_cache_key = `${options.conversationId}:${endpoint.family}`</pre>
+  <p>The same builder sends <code>store: false</code>. A cache key is therefore an association/control value, not evidence that provider KV state is stored in the local session or guaranteed to survive a restart.</p>
+  <p>Responses context management is separately requested at <code>Math.floor(endpoint.modelMaxPromptTokens * 0.9)</code>, with a 50,000-token fallback. The returned encrypted compaction item and <code>previous_response_id</code> are round-tripped by the Responses converter. This is a provider/API continuation protocol, not the same thing as a local summary.</p>
+
+  <h3>3.4 Prompt construction deliberately moves drift toward the tail</h3>
+  <p>In <a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/extension/prompts/node/agent/agentPrompt.tsx"><code>agentPrompt.tsx</code></a>, the first-turn customizations index is snapshotted and reused. If it changes, the live value is rendered as a drift block in the latest user message instead of rewriting the system prompt. The comment explicitly identifies this as protection for the system-prompt cache.</p>
+  <p>The Copilot CLI prompt adapter in <a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/extension/prompts/node/agent/copilotCLIPrompt.tsx"><code>copilotCLIPrompt.tsx</code></a> puts the user request first, then conditionally appends reminder, attachment, edited-file context, and a repeated query tag. Its comment says frozen content should be used when available, but the shown resolver renders current request variables and edited-file events. Resource elements are gathered through <code>Promise.all</code> and appended into a shared array. The source excerpt does not establish a deterministic completion-order guarantee for multiple resources. This is a stability risk to validate, not proof that every live request is unstable.</p>
+
+  <h3>3.5 Diagnostics and local persistence are separate from the provider cache</h3>
+  <p>Cache Explorer is read-only. It compares adjacent recorded model turns, displays provider-reported <code>inputTokens</code> and <code>cachedTokens</code>, calculates a cache percentage, and diffs system, tools, request options, and messages to locate the first likely divergence. It does not change request bodies.</p>
+  <p>Agent Host persists only a small status slot under <code>_meta["vscode.promptCache"]</code>:</p>
+  <pre>{
+  modelId: string,
+  cacheExpiresAt: string
+}</pre>
+  <p>The corresponding <a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/src/vs/platform/agentHost/node/agentHostPromptCache.ts"><code>AgentHostPromptCache</code></a> read/write seam stores and compares that metadata. Copilot transcripts are persisted separately as JSONL under extension storage. Neither source contains prompt bytes or provider KV tensors. Official Cache Explorer documentation says caches expire after inactivity, but does not state a contractual duration, eviction algorithm, cross-session guarantee, or universal provider rule.</p>
+
+  <h2>4. Copilot CLI: what can and cannot be learned publicly</h2>
+  <h3>4.1 The executable request builder is not public</h3>
+  <p>The public <a href="https://github.com/github/copilot-cli">CLI repository</a> currently exposes <code>README.md</code>, <code>changelog.md</code>, installer and workflow files, but no CLI source, tests, or request-construction module. The public <a href="https://github.com/github/copilot-sdk">Copilot SDK</a> exposes a JSON-RPC session and request-interception layer, but its <code>buildFetchRequest</code> path reconstructs opaque body bytes. That proves the SDK bridge does not canonicalize an intercepted body; it does not reveal how the closed CLI creates those bytes.</p>
+
+  <h3>4.2 Confirmed provider and session signals</h3>
+  <ul>
+    <li>CLI issue <a href="https://github.com/github/copilot-cli/issues/4185">#4185</a> records Anthropic <code>cache_control</code> breakpoints and a historical five-marker failure when <code>--add-dir</code> was used. The v1.0.73 changelog records the associated Anthropic subagent fix. The issue also reports that GPT subagent requests did not carry that field. Current breakpoint placement and TTL are not visible in public CLI source.</li>
+    <li>CLI and SDK documentation describe local session state under <code>~/.copilot/session-state/{sessionId}/</code>, including conversation history, tool results, plans, checkpoints, and session artifacts. Credentials and in-memory tool state are not persisted. Resuming a session rebuilds local context; it does not prove a warm provider cache.</li>
+    <li>The SDK protocol models cache-read/write usage, cache expiration, model ID, and usage checkpoints. These are durable accounting/status fields, not serialized provider KV state.</li>
+    <li>Official CLI context-management documentation describes automatic compaction at approximately 80% usage, a buffer near approximately 95%, summary replacement, and numbered checkpoints. It does not specify provider cache TTL or cross-process provider-cache reuse.</li>
+  </ul>
+
+  <h3>4.3 Important issue-reported serialization warning</h3>
+  <p>Open issue <a href="https://github.com/github/copilot-cli/issues/4500">#4500</a> reports that a BYOK OpenAI Responses completion-nudge path rebuilt the entire <code>input</code> array rather than replaying prior items byte-for-byte. The reporter measured cached tokens dropping from 114,688 to 5,632 on a 100K-token conversation. The report concerns CLI 1.0.79, has no linked fix or public request-builder source, and must not be presented as a current v1.0.83-0 defect without a fresh reproduction. It is nevertheless a high-value failure mode for any proxy that reparses and reserializes growing history.</p>
+  <p>Open issue <a href="https://github.com/github/copilot-cli/issues/3808">#3808</a> requests explicit Anthropic breakpoints, configurable TTL, and cache-status reporting. Its open status is evidence that the public CLI contract does not yet document these controls, not proof that no internal implementation exists.</p>
+
+  <h2>5. github-router baseline</h2>
+  <h3>5.1 Existing policy matrix</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Route / workload</th><th>Current router behavior</th><th>Evidence and confidence</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Native Claude <code>/v1/messages</code> passthrough</td>
+          <td>Preserves caller-owned <code>cache_control</code>; public passthrough does not synthesize a router policy.</td>
+          <td><span class="tag verified">verified</span> <a href="../../src/routes/messages/handler.ts">messages handler</a> and <a href="../../docs/beta-headers.md">beta policy</a></td>
+        </tr>
+        <tr>
+          <td>Router-owned Claude calls</td>
+          <td>Marks the last non-deferred tool and/or stable system boundary when each independently clears a 4,096 UTF-8-byte guard. At most two markers.</td>
+          <td><span class="tag verified">verified</span> <a href="../../src/lib/prompt-cache.ts">prompt-cache.ts</a>, especially <code>applyClaudeCachePolicy</code></td>
+        </tr>
+        <tr>
+          <td>GPT-5.6 Responses, reusable-prefix</td>
+          <td>Adds an opaque hashed <code>prompt_cache_key</code>, explicit <code>prompt_cache_options</code> with <code>ttl: "30m"</code>, and a stable <code>prompt_cache_breakpoint</code> when the prefix clears the byte guard.</td>
+          <td><span class="tag verified">verified</span> <code>applyResponsesCachePolicy</code>; compatibility probe ID is documented in source</td>
+        </tr>
+        <tr>
+          <td>GPT-5.6 Responses, growing conversation</td>
+          <td>Leaves explicit mode off and relies on Copilot provider-managed caching.</td>
+          <td><span class="tag verified">measured locally</span> documented regression in <a href="../../docs/prompt-caching.md">prompt-caching.md</a></td>
+        </tr>
+        <tr>
+          <td>GPT-5.5, older GPT, Codex</td>
+          <td>Provider-managed behavior only.</td>
+          <td><span class="tag verified">policy</span> direct provider cache semantics still require probes</td>
+        </tr>
+        <tr>
+          <td>Gemini Chat and Grok Responses</td>
+          <td>Provider-managed behavior only; absent cache counters are treated as inconclusive by the probe.</td>
+          <td><span class="tag verified">policy</span> honest about missing observability</td>
+        </tr>
+        <tr>
+          <td>Public OpenAI-compatible routes</td>
+          <td>Caller-owned fields pass through; no router-generated policy.</td>
+          <td><span class="tag verified">verified</span> public-route boundary</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>5.2 Why the growing-conversation exception is correct</h3>
+  <p><code>applyResponsesCachePolicy</code> explicitly excludes <code>workload: "conversation"</code>. The repository records a controlled gpt-5.6-sol regression when only a roughly 2K-token stable system block was explicitly marked: warm turns read about 2K tokens while recomputing about 25K of accumulating history. A positivity check would have called that a pass, so the live probe instead uses per-warm-turn coverage:</p>
+  <pre>(cache_read_input_tokens + cache_creation_input_tokens)
+/ (input_tokens + cache_creation_input_tokens + cache_read_input_tokens)</pre>
+  <p>The documented target is a 0.90 mean for strict Claude and GPT-5.6 trials. The measured comparison separates whole-growing-history reuse from a small static-prefix hit. This is a stronger standard than copying a marker strategy from another client without testing the Copilot backend.</p>
+
+  <h3>5.3 Translation and serialization path</h3>
+  <p>The shared <a href="../../src/services/copilot/responses-request.ts"><code>assembleResponsesPayload</code></a> maps both worker and Anthropic-shim traffic into one Responses shape. It puts dynamic instructions before the neutral message list, preserves assistant text/tool-call order, and invokes the cache policy only when the caller supplies one. The translated Claude main loop uses <code>workload: "conversation"</code>, so it intentionally avoids the explicit GPT-5.6 policy.</p>
+  <p><a href="../../src/lib/prompt-cache.ts"><code>responsesCacheKey</code></a> hashes namespace, model, workload, optional scope, stable prefix, and tools. It deliberately excludes dynamic/user messages. This is a router-owned key convention, not evidence about Copilot's internal namespace. It also means endpoint, catalog revision, and backend identity are not part of the local digest. Whether those dimensions matter to Copilot should be tested before changing the key.</p>
+  <p><a href="../../src/routes/messages/handler.ts"><code>resolveModelInBody</code></a> reparses and serializes only when model/translation/sanitization changes are needed. That is the right default for public passthrough: unconditional canonicalization would alter request bytes even when the caller already supplied a stable prefix. The remaining risk is any owned path that rebuilds unchanged history during a nudge, retry, or translation.</p>
+
+  <h3>5.4 Usage and safety machinery</h3>
+  <ul>
+    <li><code>normalizeOpenAIUsage</code> converts inclusive OpenAI input totals into disjoint uncached, cache-read, and cache-write buckets.</li>
+    <li>Native Anthropic usage keeps <code>input_tokens</code>, <code>cache_read_input_tokens</code>, and <code>cache_creation_input_tokens</code> distinct; the request log sums them when reporting total input.</li>
+    <li>The catalog exposes context, prompt, output, endpoint, reasoning, and billing token-price metadata. The worker catalog view intentionally exposes only ordinary input/output price observations; cache-price semantics remain unverified.</li>
+    <li>Worker context management is structural and send-time: it clones before pruning, preserves tool-call/result pairing, caps tool results, and uses a 128K fallback when catalog context metadata is absent. Worker agents do not attach Pi's durable JSONL session backend, so worker transcripts and cache statistics are not durable across worker restarts.</li>
+  </ul>
+
+  <h2>6. Direct comparison</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Dimension</th><th>VS Code Copilot</th><th>Copilot CLI</th><th>github-router</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Anthropic markers</td>
+          <td>Public source clears and re-adds rolling markers, up to four. Default ephemeral behavior; one-hour TTL is gated.</td>
+          <td>Issue evidence shows <code>cache_control</code>; current placement and TTL are not public.</td>
+          <td>Preserves caller layout; router-owned internal calls use up to two markers with a byte guard.</td>
+        </tr>
+        <tr>
+          <td>Responses explicit mode</td>
+          <td>Public source emits explicit/implicit mode for capability-gated models; current helper gates explicit breakpoints to GPT-5.6.</td>
+          <td>Current CLI builder is closed; public issue evidence is insufficient.</td>
+          <td>Explicit fields only for GPT-5.6 reusable-prefix calls; growing conversations stay provider-managed after measurement.</td>
+        </tr>
+        <tr>
+          <td>Cache key</td>
+          <td>Optional <code>conversationId:family</code> key behind an experiment; <code>store: false</code>.</td>
+          <td>Not verified in current CLI source. SDK session ID is not proof of provider cache key reuse.</td>
+          <td>Opaque router hash of model/workload/scope/stable prefix/tools for owned reusable-prefix calls.</td>
+        </tr>
+        <tr>
+          <td>Prompt drift control</td>
+          <td>Snapshots customizations in the system prefix and moves drift to the latest user message. Tool order separates non-deferred tools first.</td>
+          <td>Request-first prompt and ambient tail are documented in VS Code's CLI adapter, but a closed CLI path remains unverified. Issue #4500 warns about rebuilt history bytes.</td>
+          <td>Separates stable/dynamic system material, preserves raw public bodies when possible, and has a signature logger. Tool ordering and owned reserialization remain audit targets.</td>
+        </tr>
+        <tr>
+          <td>Cross-session state</td>
+          <td>JSONL transcripts plus <code>modelId/cacheExpiresAt</code> status metadata.</td>
+          <td><code>~/.copilot/session-state</code> contains history, tool results, plans, checkpoints, and artifacts.</td>
+          <td>Claude history directories are shared through the isolated config mirror; worker agent transcripts are in memory only.</td>
+        </tr>
+        <tr>
+          <td>Provider cache after restart</td>
+          <td>Not established. Persisted metadata is an expiry hint, not KV state.</td>
+          <td>Not established. Resume reconstructs local state; no public source proves provider cache survives.</td>
+          <td>Not established. Treat provider cache as ephemeral and measure warm reads after restart/resume.</td>
+        </tr>
+        <tr>
+          <td>Compaction</td>
+          <td>Responses provider compaction plus local summarized-history path.</td>
+          <td>CLI summary replacement and checkpoints; exact provider interaction is undocumented.</td>
+          <td>Structural worker compaction; translated Responses payloads do not currently mirror VS Code's <code>context_management</code> compaction control.</td>
+        </tr>
+        <tr>
+          <td>Effectiveness telemetry</td>
+          <td>Cache Explorer uses provider-reported cached tokens and local prompt-signature diffs.</td>
+          <td><code>/usage</code>, OpenTelemetry, and SDK protocol expose cache accounting/status; request construction is opaque.</td>
+          <td>Per-request counters and an opt-in signature logger exist; durable per-model cache ratio, cost, TTL, and latency correlation are incomplete.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>7. Safe follow-up applied, then prioritized next steps</h2>
+  <div class="note"><strong>Safe follow-up applied:</strong> the branch now uses the stricter valid <code>max_prompt_tokens</code> / <code>max_context_window_tokens</code> ceiling for worker input budgeting, logs positive provider-reported cache TTL observations on supported non-streaming OpenAI-shaped responses, and corrects the explicit GPT-5.6 wording to “reusable-prefix only.” Cache-price fields remain out of the model-facing catalog until their live semantics are verified. These changes do not add upstream request fields, broaden cache policy, or alter growing-conversation behavior. Package version is <code>0.3.304</code>; focused tests (227 passes), typecheck, and lint passed.</div>
+  <h3>Measured family-validation run</h3>
+  <div class="note"><strong>Final observation:</strong> the tie-inclusive happy-path run used plan hash <code>13b76578942edd358cdd5fa846a65d939c769828ea5efb11bbe1da0266834fb5</code>, completed 48 calls without a cap violation, and did not establish an across-family improvement or invoice savings. A separate 32-call edge run also completed without a cap violation, for 80 live model calls total. Its immutable source artifact predates the later diagnostic-label correction; the separate operator-local, untracked re-derived view preserves the same family statuses, changes Google/xAI missing-cache-write diagnostics to <code>UNAVAILABLE_OPENAI</code>, and preserves their matching output-equivalence signal.</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Family and candidate</th><th>Valid repetitions</th><th>Result</th><th>Observation</th></tr></thead>
+      <tbody>
+        <tr><td>OpenAI / GPT-5.6 Luna</td><td>3/3</td><td><code>VALIDATED_REUSE_POLICY_INCONCLUSIVE</code></td><td>Policy reuse 95.7156% (95.72% rounded) versus control reuse 95.7130% (95.71% rounded); this effectively tied result did not demonstrate an incremental router-policy benefit over provider-managed automatic caching.</td></tr>
+        <tr><td>Anthropic / Claude Haiku 4.5</td><td>3/3</td><td><code>VALIDATED_POLICY_IMPROVEMENT</code></td><td>Policy reuse 99.35% and control reuse 0%; the existing bounded explicit marking was supported.</td></tr>
+        <tr><td>Google / Gemini 3.6 and 3.7 Flash</td><td>0/6</td><td><code>INCONCLUSIVE</code></td><td>Outputs matched and warm cached-token fields were observed, but Chat responses omitted cache-write telemetry needed for complete accounting.</td></tr>
+        <tr><td>xAI / Grok 4.5 and 4.6</td><td>0/6</td><td><code>INCONCLUSIVE</code></td><td>Outputs matched and warm cached-token fields were observed, but the catalog-selected Responses route in this run omitted cache-write telemetry; some cold turns also showed cached tokens.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The edge run used plan hash <code>ae23b42dfe05d8e834735028a878f14f3c08661a71c5ff9f9fa1878ed93a7a25</code> and classified the sub-threshold guard, growing-history conversation no-op, early-prefix invalidation, and suffix-only reuse as <code>EXPECTED</code> for both Luna and Haiku. Missing cache counters remain unknown, never zero-filled. The harness diagnostic was also corrected so missing OpenAI-shaped buckets are <code>UNAVAILABLE_OPENAI</code>, while malformed supplied counters or a true total mismatch remain <code>INVALID_OPENAI</code>; incomplete pairs retain their independently computed output-equivalence signal.</p>
+  <p>All cost figures remain <code>INDICATIVE_UNVERIFIED</code>. Fresh-process cache survival, streaming/non-streaming parity, near-ceiling behavior, and authoritative invoice savings remain unmeasured.</p>
+  <p>Remaining items below are a research backlog, not an approval to change provider request behavior. Every request-shape change must follow the repository's compatibility-probe and matrix rules.</p>
+  <ol class="priority">
+    <li>
+      <h3>Build a direct-versus-proxy cache evidence matrix before changing policy</h3>
+      <p>Run controlled cold/warm pairs for native Claude, GPT-5.6 Responses, GPT-5.5, Gemini Chat, and Grok Responses. For each model, test same-process turns, changed suffix, changed early prefix, changed tools, streaming/non-streaming where supported, process restart, and session resume. Capture client-to-router and router-to-Copilot bodies with credentials and user data redacted, plus model, endpoint, prompt-cache fields, usage counters, latency, and retry attempts.</p>
+      <p><strong>Acceptance:</strong> a warm read must be shown by a provider counter or billing signal. If a provider reports no cache fields, record <code>INCONCLUSIVE</code>, never <code>PASS</code>. The existing <a href="../../scripts/probe-prompt-cache.ts"><code>probe:cache</code></a> is a strong base, but it does not identify the exact reused byte boundary and hidden pre-first-byte retries can contaminate a cold trial.</p>
+    </li>
+    <li>
+      <h3>Make explicit eligibility capability-driven where the live catalog supports it</h3>
+      <p><code>GPT56_EXPLICIT_CACHE_MODELS</code> is currently a fixed ID set in <a href="../../src/lib/prompt-cache.ts"><code>prompt-cache.ts</code></a>. First verify whether Copilot's live catalog exposes a reliable explicit-cache capability and endpoint constraint. If it does, derive the decision from that capability with a conservative fallback. If it does not, retain the allowlist but make additions probe-gated and visible in the compatibility matrix. Do not broaden to every Responses model based only on an OpenAI-compatible type shape.</p>
+    </li>
+    <li>
+      <h3>Preserve byte identity on replay paths, and instrument before canonicalizing</h3>
+      <p>Audit nudges, retries, translation, and any history reconstruction against the CLI #4500 failure mode. For unchanged public bodies, retain the raw bytes. For router-owned payloads, use deterministic construction and compare the overlap between adjacent requests after removing only moving cache-marker fields. Avoid globally sorting or reserializing caller-owned JSON until a probe demonstrates that the chosen canonical form improves warm coverage without breaking an existing provider cache chain.</p>
+    </li>
+    <li>
+      <h3>Complete cache economics and effectiveness for owned worker calls</h3>
+      <p>The remaining work is to retain <code>cache_ttl_seconds</code> in worker usage mapping and compute per-model cached fraction, effective input cost, and TTL observations in a bounded diagnostic artifact rather than stuffing them into every model-facing result. Keep malformed or absent provider fields explicitly unknown. Cache-price fields are not exposed in the model-facing catalog until their live semantics are verified.</p>
+    </li>
+    <li>
+      <h3>Evaluate Responses compaction forwarding as a separate compatibility experiment</h3>
+      <p>VS Code sends <code>context_management: [{ type: "compaction", compact_threshold }]</code> for eligible Responses models and round-trips the returned compaction item. The translated shim currently does not. Probe the exact Copilot shape first, including stream ordering, continuation IDs, and interaction with prompt-cache usage. A successful VS Code request is evidence of a useful candidate shape, not permission to emit it through every Copilot model.</p>
+    </li>
+    <li>
+      <h3>Keep cross-session persistence scoped to transcripts and status, not provider KV state</h3>
+      <p>Persisting history, model ID, expiration hints, and usage checkpoints is useful. Treat a resumed process as provider-cache cold until usage proves otherwise. Do not add a router-side cache of prompt bytes or model state; it would duplicate provider ownership, raise privacy and invalidation questions, and still could not restore provider KV tensors.</p>
+    </li>
+  </ol>
+
+  <h2>8. Proposed controlled experiment sheet</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Case</th><th>Invariant</th><th>Expected observation</th><th>Failure interpretation</th></tr></thead>
+      <tbody>
+        <tr><td>Exact repeat</td><td>Same model, endpoint, tools, system, history, and suffix</td><td>Nonzero warm cached-token signal when the provider exposes one</td><td>Could be provider threshold, expiry, account scope, or request-byte drift. Inspect wire bytes before changing policy.</td></tr>
+        <tr><td>Changed suffix</td><td>Only final user text changes</td><td>Earlier cached prefix remains reusable</td><td>Early injection, tool/model change, whole-history rebuild, or provider policy that does not expose partial reuse.</td></tr>
+        <tr><td>Changed early prefix</td><td>Change one system/tool byte</td><td>Cache coverage falls at or after that component</td><td>Confirms prefix sensitivity and identifies the first invalidation boundary.</td></tr>
+        <tr><td>Growing tool loop</td><td>Append one tool result per turn, preserve prior bytes</td><td>Coverage grows with the stable overlap, or provider reports its own rolling boundary</td><td>Possible marker strategy that pins only a small static block, as seen in the router's GPT-5.6 regression.</td></tr>
+        <tr><td>Restart/resume</td><td>Persist and restore the same logical conversation</td><td>History is restored; provider warm status must be measured independently</td><td>Do not infer provider persistence from a successful local resume.</td></tr>
+        <tr><td>Model switch</td><td>Same history, different model</td><td>History may persist locally; cache namespace/coverage resets</td><td>Expected model-scoped cache boundary, not a reason to share cache keys across models.</td></tr>
+        <tr><td>Long gap</td><td>Same request prefix after a controlled idle interval</td><td>TTL/expiry behavior where provider reports it</td><td>Cache expiry, account scope, or provider-managed eviction. Avoid hard-coding five minutes without a contract.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>9. Source index</h2>
+  <ul class="source-list">
+    <li><strong>VS Code implementation</strong>
+      <ul>
+        <li><a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/extension/intents/node/cacheBreakpoints.ts">cacheBreakpoints.ts</a></li>
+        <li><a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/platform/endpoint/node/messagesApi.ts">messagesApi.ts</a></li>
+        <li><a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/platform/endpoint/node/responsesApi.ts">responsesApi.ts</a></li>
+        <li><a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/platform/endpoint/common/chatModelCapabilities.ts#L333-L340">modelSupportCacheBreakPoints</a></li>
+        <li><a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/extension/prompts/node/agent/agentPrompt.tsx">agentPrompt.tsx</a></li>
+        <li><a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/extensions/copilot/src/extension/prompts/node/agent/copilotCLIPrompt.tsx">copilotCLIPrompt.tsx</a></li>
+        <li><a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/src/vs/platform/agentHost/node/agentHostPromptCache.ts">agentHostPromptCache.ts</a></li>
+        <li><a href="https://github.com/microsoft/vscode/blob/eb84d8148027eb14978437cab306074c5be3cac2/src/vs/platform/agentHost/common/state/sessionState.ts#L1395-L1422">sessionState.ts prompt-cache metadata</a></li>
+        <li><a href="https://code.visualstudio.com/docs/agents/agent-troubleshooting/cache-explorer">Cache Explorer documentation</a></li>
+      </ul>
+    </li>
+    <li><strong>Copilot CLI and SDK</strong>
+      <ul>
+        <li><a href="https://github.com/github/copilot-cli/releases/tag/v1.0.82">CLI v1.0.82</a></li>
+        <li><a href="https://github.com/github/copilot-cli/releases/tag/v1.0.83-0">CLI v1.0.83-0</a></li>
+        <li><a href="https://github.com/github/copilot-cli/issues/4185">CLI issue #4185: cache-control breakpoint limit</a></li>
+        <li><a href="https://github.com/github/copilot-cli/issues/4500">CLI issue #4500: Responses history reserialization report</a></li>
+        <li><a href="https://github.com/github/copilot-cli/issues/3808">CLI issue #3808: explicit cache-control request</a></li>
+        <li><a href="https://docs.github.com/en/copilot/concepts/agents/copilot-cli/context-management">CLI context management documentation</a></li>
+        <li><a href="https://github.com/github/copilot-sdk/blob/main/docs/features/session-persistence.md">SDK session persistence</a></li>
+        <li><a href="https://github.com/github/copilot-sdk">Copilot SDK source</a></li>
+      </ul>
+    </li>
+    <li><strong>github-router</strong>
+      <ul>
+        <li><a href="../../docs/prompt-caching.md">docs/prompt-caching.md</a></li>
+        <li><a href="../../src/lib/prompt-cache.ts">src/lib/prompt-cache.ts</a></li>
+        <li><a href="../../src/services/copilot/responses-request.ts">src/services/copilot/responses-request.ts</a></li>
+        <li><a href="../../src/services/copilot/create-responses.ts">src/services/copilot/create-responses.ts</a></li>
+        <li><a href="../../tests/prompt-cache.test.ts">tests/prompt-cache.test.ts</a></li>
+        <li><a href="../../tests/cache-probe.test.ts">tests/cache-probe.test.ts</a></li>
+        <li><a href="../../scripts/probe-prompt-cache.ts">scripts/probe-prompt-cache.ts</a></li>
+        <li><a href="../../docs/copilot-compat-matrix.md">docs/copilot-compat-matrix.md</a></li>
+      </ul>
+    </li>
+  </ul>
+
+  <div class="footer">
+    <p><strong>Research boundary:</strong> This report records source and measurement evidence available during the lookup. Provider cache internals, eviction, tenant scope, and cross-process KV survival remain provider-owned unless a live usage signal or official contract establishes otherwise.</p>
+    <p>Production code was not modified during the upstream source investigation. A bounded follow-up was subsequently applied: worker prompt-ceiling budgeting, scoped cache TTL observation logging, and compatibility wording alignment. Cache-price fields remain out of the model-facing catalog until their semantics are verified. No new provider request field or cache-policy expansion was made.</p>
+  </div>
+</main>
+</body>
+</html>

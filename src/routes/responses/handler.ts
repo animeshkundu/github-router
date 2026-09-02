@@ -157,6 +157,7 @@ export async function handleResponses(c: Context) {
       outputTokens: responseUsage?.output,
       cacheReadTokens: responseUsage?.cacheRead,
       cacheWriteTokens: responseUsage?.cacheWrite,
+      cacheTtlSeconds: responseUsage?.cacheTtlSeconds,
       status: 200,
       streaming: isStreaming,
     },

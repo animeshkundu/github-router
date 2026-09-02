@@ -114,6 +114,33 @@ test("clamps efforts to what the worker layer can request", () => {
   }
 })
 
+test("surfaces the effective prompt ceiling in the worker catalog", () => {
+  setCatalog([
+    model({
+      id: "asymmetric-window",
+      capabilities: {
+        supports: { tool_calls: true, reasoning_effort: ["high"] },
+        limits: {
+          max_context_window_tokens: 1_050_000,
+          max_prompt_tokens: 922_000,
+        },
+      },
+    }),
+    model({
+      id: "prompt-only-window",
+      capabilities: {
+        supports: { tool_calls: true, reasoning_effort: ["high"] },
+        limits: { max_prompt_tokens: 300_000 },
+      },
+    }),
+  ])
+
+  expect(buildCatalogView()).toEqual([
+    expect.objectContaining({ id: "asymmetric-window", ctx: 922_000 }),
+    expect.objectContaining({ id: "prompt-only-window", ctx: 300_000 }),
+  ])
+})
+
 test("carries vendor but no quality ranking", () => {
   // `vendor` is present so a caller can reason about LAB DIVERSITY — the
   // reviewer must differ from whoever produced the artifact. No field here may
@@ -135,7 +162,6 @@ test("derives exact per-1M input and output prices from the live catalog", () =>
       billing: {
         token_prices: {
           batch_size: 1_000_000,
-          cache_price: 2_500_000_000,
           input_price: 20_000_000_000,
           output_price: 120_000_000_000,
         },

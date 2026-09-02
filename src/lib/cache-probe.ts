@@ -27,11 +27,12 @@ export const EXACT_CACHE_PROBE_TARGETS: ReadonlyArray<string> = [
 ]
 
 /**
- * Family prefix for the "highest-context grok-4.6*" requirement. Matched by
- * PREFIX, not exact id: the live catalog may ship `grok-4.6`, a `-mini`, a
- * `-fast` sibling, etc., and the task is to pick whichever sibling advertises
- * the largest context window, not to assume a fixed id. Grok's advertised
- * window may be smaller than the other four targets' (e.g. 500k vs 1M) —
+ * Family prefix for the "highest-effective-input-window grok-4.6*"
+ * requirement. Matched by PREFIX, not exact id: the live catalog may ship
+ * `grok-4.6`, a `-mini`, a `-fast` sibling, etc., and the task is to pick
+ * the sibling with the largest effective input window, not to assume a fixed
+ * id. The effective window is the stricter valid total/prompt limit. Grok's
+ * window may be smaller than the other targets (e.g. 500k vs 1M) —
  * `ResolvedCacheProbeTarget.contextWindow` carries the true number so the
  * harness labels it honestly instead of assuming parity.
  */
@@ -44,7 +45,7 @@ export interface ResolvedCacheProbeTarget {
   /** The catalog id actually resolved. Differs from `requestedId` only for
    * the grok wildcard. Undefined when nothing in the live catalog matched. */
   catalogId?: string
-  /** Advertised context window in tokens, when the catalog reports one. */
+  /** Effective input window in tokens, using the stricter valid catalog limit. */
   contextWindow?: number
   found: boolean
 }
@@ -56,13 +57,24 @@ export interface CacheProbeCatalogSelection {
 }
 
 function contextWindowOf(model: Model): number | undefined {
-  return model.capabilities?.limits?.max_context_window_tokens
+  const limits = model.capabilities?.limits
+  const validPositive = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0
+  const context = validPositive(limits?.max_context_window_tokens)
+    ? limits.max_context_window_tokens
+    : undefined
+  const prompt = validPositive(limits?.max_prompt_tokens)
+    ? limits.max_prompt_tokens
+    : undefined
+  if (context === undefined) return prompt
+  if (prompt === undefined) return context
+  return Math.min(context, prompt)
 }
 
 /**
  * Resolves the seven probe targets against a live (or fixture) model
- * catalog. Exact-id match for the six fixed targets; a highest-advertised-
- * context walk over every `grok-4.6*` sibling for the seventh. Deterministic given a
+ * catalog. Exact-id match for the six fixed targets; a highest-effective-input-
+ * window walk over every `grok-4.6*` sibling for the seventh. Deterministic given a
  * stable catalog: ties keep whichever candidate the catalog listed first.
  */
 export function selectCacheProbeTargets(

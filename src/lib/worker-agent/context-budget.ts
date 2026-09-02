@@ -101,7 +101,9 @@ export function tokensFromBytes(bytes: number): number {
 }
 
 /**
- * Build a per-run budget from the model's catalog context window (tokens).
+ * Build a per-run budget from the model's effective input window (tokens).
+ * The caller supplies the stricter valid catalog ceiling when the provider
+ * advertises separate total and prompt limits.
  *
  * Unknown, non-finite, and non-positive windows use the conservative fallback
  * floor so compaction and the dynamic result cap remain engaged. The returned

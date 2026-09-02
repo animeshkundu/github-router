@@ -76,8 +76,18 @@ user identifiers are never logged.
 
 **Per-request cache accounting.** The standard per-request summary line
 (`logRequest`) surfaces `cache:r<read>/w<write>` whenever either is nonzero.
-For the OpenAI-shaped routes (`/v1/chat/completions`, `/v1/responses`) the
-inclusive OpenAI usage total is first split into disjoint buckets by
+On supported non-streaming OpenAI-shaped responses (`/v1/chat/completions`,
+`/v1/responses`), it also appends `ttl:<seconds>s` when the provider reports a
+positive cache TTL. Streaming responses and native Anthropic routes may not
+expose this metadata and remain unknown. The TTL is an observation only; the
+router does not infer or synthesize it.
+
+Worker input budgeting uses the stricter valid catalog value of
+`max_context_window_tokens` and `max_prompt_tokens`, avoiding a
+request-boundary estimate above the prompt ceiling on models such as Luna and
+Grok. Cache-price fields are intentionally not surfaced in the model-facing
+worker catalog until the live field semantics are verified.
+The OpenAI-shaped usage total is first split into disjoint buckets by
 `normalizeOpenAIUsage`. Native Claude `/v1/messages` (both the passthrough and
 the non-Claude shim's synthesized usage) already reports
 `cache_read_input_tokens` / `cache_creation_input_tokens` as disjoint buckets,
@@ -108,12 +118,13 @@ meant a non-streaming response with no `usage` at all logged a confident `0`
 instead of falling back to the pre-request tokenizer estimate
 (chat-completions) or omitting the `in:` field entirely (`/responses`, which
 has no such fallback). (2) `usageDetails` (in `prompt-cache.ts`) now picks the
-first genuinely POSITIVE candidate across its priority-ranked field list
-instead of `??`-chaining them — a provider surface that always populates a
-nested detail with an explicit `0` placeholder no longer shadows a
-real, positive count reported only at a lower-priority (e.g. top-level)
-field; when every candidate really is zero, the result is a real `0`, not a
-dropped field.
+first genuinely POSITIVE token-count candidate across its priority-ranked field
+lists instead of `??`-chaining them — a provider surface that always populates
+a nested detail with an explicit `0` placeholder no longer shadows a real,
+positive count reported only at a lower-priority (e.g. top-level) field; when
+every count candidate really is zero, the result is a real `0`, not a dropped
+field. TTL metadata is retained only when a positive finite value is reported;
+non-positive values remain omitted from the request summary.
 
 Web-search placement and rollback controls are documented in
 [`web-search.md`](web-search.md). Compatibility evidence is recorded in
@@ -150,9 +161,9 @@ bun run probe:cache
 
 For `claude-opus-5`, `claude-haiku-4.5`, every GPT-5.6 tier
 (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`), `gemini-3.7-flash`, and
-the highest-context `grok-4.6*` catalog sibling (resolved from the LIVE
-Copilot catalog, never hardcoded — see `selectCacheProbeTargets` in
-`src/lib/cache-probe.ts`), sequentially (concurrency 1, no automatic
+the highest-effective-input-window `grok-4.6*` catalog sibling (resolved
+from the LIVE Copilot catalog, never hardcoded — see `selectCacheProbeTargets`
+in `src/lib/cache-probe.ts`), sequentially (concurrency 1, no automatic
 retries):
 
 - **Controlled trials** (default 3): spawn `bun run ./src/main.ts claude -m
@@ -237,9 +248,10 @@ A timestamped JSON evidence artifact is written to
 `~/.local/share/github-router/cache-probe/cache-probe-<timestamp>.json` (or
 `GH_ROUTER_CACHE_PROBE_OUTPUT` — not tracked by git either way). It records
 the resolved commit SHA, installed Claude CLI version, router version,
-resolved catalog targets (including grok's ACTUAL advertised context window,
+resolved catalog targets (including grok's ACTUAL effective input window,
 labelled honestly rather than assumed 1M — the live catalog currently
-advertises 500k for `grok-4.6`), per-trial raw usage samples, and verdicts.
+advertises 500k total / 372k prompt for `grok-4.6`), per-trial raw usage
+samples, and verdicts.
 It deliberately does NOT record prompt text, credentials, device/session
 ids, or any raw user data — only synthetic salts, char counts, and numeric
 usage fields.
@@ -274,3 +286,93 @@ Pure parsing/verdict/catalog-selection logic (`parseCacheProbeAssistantUsage`,
 etc.) lives in `src/lib/cache-probe.ts` and is unit-tested in
 `tests/cache-probe.test.ts` with no live model call, no child process, and no
 network access.
+
+## Official-family validation harness (`scripts/probe-cache-families.ts`)
+
+The additive family harness validates the four official Copilot billing families
+without changing production cache policy. Its family and default-tier rate
+authority is the [official Copilot models-and-pricing table](https://docs.github.com/en/enterprise-cloud@latest/copilot/reference/copilot-billing/models-and-pricing);
+the live `/models` catalog supplies only exact callable IDs, endpoint support,
+policy state, limits, and ordinary-price mismatch warnings. It never fuzzy-maps
+model names, uses cache-price fields as USD, or infers entitlement from catalog
+restrictions. Google (Gemini 3.6/3.7 Flash) and xAI (Grok 4.5/4.6) are
+same-rate ties and are skipped unless `--include-ties` is explicit.
+
+Always stage and inspect a dry-run first. It performs catalog setup but never
+invokes a model:
+
+```bash
+bun scripts/probe-cache-families.ts \\
+  --dry-run --families OpenAI,Anthropic,Google,xAI
+```
+
+A live run additionally requires `--live`,
+`GH_ROUTER_RUN_CACHE_PROBE=1`, the exact dry-run plan hash, and explicit
+operator caps for calls, input tokens, output tokens, and wall-clock time:
+
+```bash
+GH_ROUTER_RUN_CACHE_PROBE=1 \\
+GH_ROUTER_CACHE_VALIDATION_PLAN_SHA256=<dry-run-hash> \\
+GH_ROUTER_CACHE_VALIDATION_MAX_CALLS=8 \\
+GH_ROUTER_CACHE_VALIDATION_MAX_INPUT_TOKENS=50000 \\
+GH_ROUTER_CACHE_VALIDATION_MAX_OUTPUT_TOKENS=128 \\
+GH_ROUTER_CACHE_VALIDATION_MAX_WALLCLOCK_MS=120000 \\
+bun scripts/probe-cache-families.ts --live \\
+  --families OpenAI,Anthropic,Google,xAI
+```
+
+Run the happy path before `--edges`. A pair is publishable only when both
+turns have cache telemetry, valid accounting, equivalent exact `OK` output,
+and a cold cache-read contamination ratio no greater than 5%; missing fields,
+pre-warmed cold turns, retries, non-equivalent output, and unreconciled totals
+are inconclusive rather than cache misses or passes. For OpenAI-shaped usage,
+a missing cache bucket is labeled `UNAVAILABLE_OPENAI`; malformed supplied
+counters or a true total mismatch remain `INVALID_OPENAI`. Prefix fixtures are
+sized per model family, including the larger implicit-cache floors measured for
+Haiku, Gemini, and Grok. Artifacts retain hashes, lengths, numeric usage, and
+sanitized model metadata, never raw output or request headers.
+
+Reported savings are `INDICATIVE_UNVERIFIED`: documented-rate arithmetic for
+uncached input, cached reads, cache writes when a documented rate exists, and
+output. They are within-model cold/warm or policy/control comparisons only, not
+cross-family rankings, invoice evidence, or proof of actual billed-dollar
+savings. The control arm runs against the current proxy without the existing
+router-owned cache helper, so it is not a git-commit before/after experiment.
+The harness does not broaden explicit provider cache handling: growing
+`conversation` workloads continue to rely on provider-managed caching.
+
+### Recorded family-validation results
+
+The final tie-inclusive happy-path run used plan hash
+`13b76578942edd358cdd5fa846a65d939c769828ea5efb11bbe1da0266834fb5`, completed
+48 calls without a cap violation, and produced these within-model results. A
+separate 32-call edge run also completed without a cap violation, for 80 live
+model calls total. The
+immutable source artifact predates the later diagnostic-label correction; the
+post-correction interpretation is preserved separately in the operator-local,
+not-tracked `cache-probe` directory. The re-derived view leaves the family
+statuses unchanged, changes Google/xAI missing-cache-write diagnostics to
+`UNAVAILABLE_OPENAI`, and preserves their matching output-equivalence signal.
+The edge source artifact and its interpretation are likewise preserved in a
+separate operator-local re-derived view.
+
+| Family and candidate | Valid repetitions | Result | Interpretation |
+|---|---:|---|---|
+| OpenAI / GPT-5.6 Luna | 3/3 | `VALIDATED_REUSE_POLICY_INCONCLUSIVE` | Policy reuse 95.7156% (95.72% rounded) versus control reuse 95.7130% (95.71% rounded). This effectively tied result did not demonstrate an incremental benefit from the explicit router policy. |
+| Anthropic / Claude Haiku 4.5 | 3/3 | `VALIDATED_POLICY_IMPROVEMENT` | Policy reuse 99.35%; control reuse 0%. This supports the existing bounded explicit Claude marking. |
+| Google / Gemini 3.6 and 3.7 Flash | 0/6 | `INCONCLUSIVE` | Matching `OK` outputs and warm cached-token observations were present, but Chat responses omitted cache-write telemetry needed for complete accounting. |
+| xAI / Grok 4.5 and 4.6 | 0/6 | `INCONCLUSIVE` | Matching `OK` outputs and warm cached-token observations were present, but the catalog-selected Responses route in this run omitted cache-write telemetry; some cold turns also showed cached tokens. |
+
+The follow-up edge run used plan hash
+`ae23b42dfe05d8e834735028a878f14f3c08661a71c5ff9f9fa1878ed93a7a25` and
+completed without a cap violation for the two valid happy-path families.
+Sub-threshold marking, the growing-history conversation no-op,
+early-prefix invalidation, and suffix-only reuse were all classified
+`EXPECTED` for both Luna and Haiku. The Google and xAI results remain
+inconclusive; the harness does not convert missing cache-write counters into
+zero and does not apply Claude/OpenAI explicit markers to those providers.
+
+All cost figures in these artifacts remain `INDICATIVE_UNVERIFIED`; no
+invoice or authoritative billed-dollar signal was captured. Fresh-process
+cache survival, streaming versus non-streaming parity, and near-ceiling
+behavior remain unmeasured.
