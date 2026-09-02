@@ -1,7 +1,7 @@
 # Prompt and token caching: VS Code Copilot, Copilot CLI, and github-router
 
-**Status:** research record; bounded non-policy follow-up applied below  
-**Lookup date:** 2026-09-01  
+**Status:** research record; bounded non-policy follow-up applied below
+**Lookup date:** 2026-09-01
 **Scope:** provider-side prompt/prefix caching, cache-control and breakpoints, prompt-prefix stability, local session persistence, compaction, model-specific behavior, and safe improvements for `github-router`.
 
 The companion HTML presentation is [`prompt-cache-upstream-comparison.html`](prompt-cache-upstream-comparison.html).
@@ -464,8 +464,26 @@ The branch audit applied only changes that do not broaden provider request polic
 - Cache-price fields are intentionally not exposed in the model-facing worker catalog until the live field semantics are verified.
 - The compatibility matrix and probe registry now say the GPT-5.6 explicit shape is for `reusable-prefix` calls only, matching the measured growing-history exclusion.
 - Focused verification passed: 227 tests across six cache/worker files, TypeScript typecheck, and full lint. Package version was bumped from `0.3.303` to `0.3.304`.
+- The family-validation harness was then hardened without changing production policy: missing OpenAI-shaped cache buckets now remain `UNAVAILABLE_OPENAI` rather than being mislabeled as a total mismatch, and incomplete pairs preserve independently computed output equivalence. Focused tests passed 72/72, followed by the full two-lane suite and the isolated Windows mirror suite.
 
 These changes preserve the existing growing-conversation provider-managed policy and do not add a new upstream body field or header.
+
+### 6.1 Family validation results
+
+The final tie-inclusive happy-path run used plan hash `13b76578942edd358cdd5fa846a65d939c769828ea5efb11bbe1da0266834fb5` and completed all 48 calls without a cap violation. A separate 32-call edge run also completed without a cap violation, for 80 live model calls total. Results are within-model and use documented default-tier rates only for indicative arithmetic:
+
+| Family and candidate | Valid repetitions | Result | Observation |
+|---|---:|---|---|
+| OpenAI / GPT-5.6 Luna | 3/3 | `VALIDATED_REUSE_POLICY_INCONCLUSIVE` | Policy reuse 95.7156% (95.72% rounded) versus control reuse 95.7130% (95.71% rounded); this effectively tied result did not demonstrate an incremental router-policy benefit over upstream automatic caching. |
+| Anthropic / Claude Haiku 4.5 | 3/3 | `VALIDATED_POLICY_IMPROVEMENT` | Policy reuse 99.35% and control reuse 0%; the existing explicit marking was supported. |
+| Google / Gemini 3.6 and 3.7 Flash | 0/6 | `INCONCLUSIVE` | Matching `OK` outputs and warm cached-token observations, but Chat responses omitted cache-write telemetry. Missing counters were not treated as zero. |
+| xAI / Grok 4.5 and 4.6 | 0/6 | `INCONCLUSIVE` | Matching `OK` outputs and warm cached-token observations, but the catalog-selected Responses route in this run omitted cache-write telemetry; some cold turns also showed cached tokens. |
+
+The edge run used plan hash `ae23b42dfe05d8e834735028a878f14f3c08661a71c5ff9f9fa1878ed93a7a25` and completed without a cap violation for Luna and Haiku. The sub-threshold guard, conversation no-op, early-prefix perturbation, and suffix-only mutation were all `EXPECTED` for both candidates. These observations do not establish fresh-process cache survival, streaming/non-streaming parity, near-ceiling behavior, or actual invoice savings.
+
+The Google/xAI artifact initially labeled absent cache-write tuples `INVALID_OPENAI`; that was a harness label collapse, not evidence of a total-token arithmetic failure. The harness now reserves `INVALID_OPENAI` for malformed supplied counters or a genuine reported-total mismatch and uses `UNAVAILABLE_OPENAI` for missing structural telemetry. It still leaves those families inconclusive because a missing write bucket prevents complete exclusive accounting and contamination checks.
+
+All results remain one-account, one-time observations. No cross-family cost ranking, actual billed-dollar claim, or provider-policy broadening follows from them.
 
 ### Not safe to consume without new evidence
 

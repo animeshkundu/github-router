@@ -208,6 +208,30 @@ export const PATHS = {
  * so the homedir-mock pattern used in the test suite keeps working.
  */
 let _claudeConfigDirSuffix: string | undefined
+const sharedSymlinkLocks = new Map<string, Promise<void>>()
+
+async function withSharedSymlinkLock(
+  mirrorPath: string,
+  operation: () => Promise<void>,
+): Promise<void> {
+  const previous = sharedSymlinkLocks.get(mirrorPath) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const queued = previous.then(() => current)
+  sharedSymlinkLocks.set(mirrorPath, queued)
+  await previous
+  try {
+    await operation()
+  } finally {
+    release()
+    if (sharedSymlinkLocks.get(mirrorPath) === queued) {
+      sharedSymlinkLocks.delete(mirrorPath)
+    }
+  }
+}
+
 function claudeConfigDirSuffix(): string {
   if (_claudeConfigDirSuffix === undefined) {
     _claudeConfigDirSuffix = `${process.pid}-${randomBytes(4).toString("hex")}`
@@ -530,10 +554,11 @@ const SYNTHETIC_CLAUDE_JSON_FIELDS = {
  *
  * Idempotent: only re-copies files whose source `mtime` is newer than
  * target; SHARED-symlink creation no-ops when the symlink already
- * points at the right target. Concurrent-safe: `mkdir({recursive:true})`
- * is idempotent; symlinks are created via atomic temp+rename so two
- * parallel github-router-claude startups can't race to EEXIST; the
- * credentials write uses temp-file + atomic rename so Claude Code's
+ * points at the right target. Concurrent-safe within one per-launch mirror:
+ * `mkdir({recursive:true})` is idempotent; on Windows, same-process symlink
+ * callers are serialized by a keyed lock, while separate launches use
+ * distinct PID/random mirror paths. Symlinks are created via atomic
+ * temp+rename; the credentials write uses temp-file + atomic rename so Claude Code's
  * `EZ1()` mtime watcher never sees a partial write.
  *
  * Walks with `lstat` (does NOT follow symlinks during traversal — a
@@ -1312,12 +1337,28 @@ async function mirrorDirRecursive(
  * place. POSIX `rename` is atomic and replaces an existing symlink in
  * a single step, so two concurrent `github-router claude` startups can't
  * race to `EEXIST` — the loser's rename just overwrites the winner's
- * symlink with an identical one. Gemini-critic 3-lab-review finding.
+ * symlink with an identical one. On Windows, a process-local keyed lock
+ * serializes callers sharing a mirror slot because MoveFileEx cannot replace
+ * a junction after a competing caller has recreated it. The slot is owned by
+ * this process's per-launch `<pid>-<8 hex>` `CLAUDE_CONFIG_DIR`; separate
+ * proxy processes use different mirror paths, so this is intentionally not a
+ * cross-process lock. Gemini-critic 3-lab-review finding.
  *
  * Pre-creates `~/.claude/<name>/` as a real directory if missing so
  * Claude Code's writes through the symlink don't fail with ENOENT.
  */
 async function ensureSharedSymlink(
+  name: string,
+  sourceDir: string,
+  mirrorDir: string,
+): Promise<void> {
+  const mirrorPath = path.join(mirrorDir, name)
+  await withSharedSymlinkLock(mirrorPath, () =>
+    ensureSharedSymlinkUnlocked(name, sourceDir, mirrorDir),
+  )
+}
+
+async function ensureSharedSymlinkUnlocked(
   name: string,
   sourceDir: string,
   mirrorDir: string,

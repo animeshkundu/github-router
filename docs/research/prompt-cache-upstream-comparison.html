@@ -327,6 +327,21 @@
 
   <h2>7. Safe follow-up applied, then prioritized next steps</h2>
   <div class="note"><strong>Safe follow-up applied:</strong> the branch now uses the stricter valid <code>max_prompt_tokens</code> / <code>max_context_window_tokens</code> ceiling for worker input budgeting, logs positive provider-reported cache TTL observations on supported non-streaming OpenAI-shaped responses, and corrects the explicit GPT-5.6 wording to “reusable-prefix only.” Cache-price fields remain out of the model-facing catalog until their live semantics are verified. These changes do not add upstream request fields, broaden cache policy, or alter growing-conversation behavior. Package version is <code>0.3.304</code>; focused tests (227 passes), typecheck, and lint passed.</div>
+  <h3>Measured family-validation run</h3>
+  <div class="note"><strong>Final observation:</strong> the tie-inclusive happy-path run used plan hash <code>13b76578942edd358cdd5fa846a65d939c769828ea5efb11bbe1da0266834fb5</code>, completed 48 calls without a cap violation, and did not establish an across-family improvement or invoice savings. A separate 32-call edge run also completed without a cap violation, for 80 live model calls total. Its immutable source artifact predates the later diagnostic-label correction; the separate operator-local, untracked re-derived view preserves the same family statuses, changes Google/xAI missing-cache-write diagnostics to <code>UNAVAILABLE_OPENAI</code>, and preserves their matching output-equivalence signal.</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Family and candidate</th><th>Valid repetitions</th><th>Result</th><th>Observation</th></tr></thead>
+      <tbody>
+        <tr><td>OpenAI / GPT-5.6 Luna</td><td>3/3</td><td><code>VALIDATED_REUSE_POLICY_INCONCLUSIVE</code></td><td>Policy reuse 95.7156% (95.72% rounded) versus control reuse 95.7130% (95.71% rounded); this effectively tied result did not demonstrate an incremental router-policy benefit over provider-managed automatic caching.</td></tr>
+        <tr><td>Anthropic / Claude Haiku 4.5</td><td>3/3</td><td><code>VALIDATED_POLICY_IMPROVEMENT</code></td><td>Policy reuse 99.35% and control reuse 0%; the existing bounded explicit marking was supported.</td></tr>
+        <tr><td>Google / Gemini 3.6 and 3.7 Flash</td><td>0/6</td><td><code>INCONCLUSIVE</code></td><td>Outputs matched and warm cached-token fields were observed, but Chat responses omitted cache-write telemetry needed for complete accounting.</td></tr>
+        <tr><td>xAI / Grok 4.5 and 4.6</td><td>0/6</td><td><code>INCONCLUSIVE</code></td><td>Outputs matched and warm cached-token fields were observed, but the catalog-selected Responses route in this run omitted cache-write telemetry; some cold turns also showed cached tokens.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p>The edge run used plan hash <code>ae23b42dfe05d8e834735028a878f14f3c08661a71c5ff9f9fa1878ed93a7a25</code> and classified the sub-threshold guard, growing-history conversation no-op, early-prefix invalidation, and suffix-only reuse as <code>EXPECTED</code> for both Luna and Haiku. Missing cache counters remain unknown, never zero-filled. The harness diagnostic was also corrected so missing OpenAI-shaped buckets are <code>UNAVAILABLE_OPENAI</code>, while malformed supplied counters or a true total mismatch remain <code>INVALID_OPENAI</code>; incomplete pairs retain their independently computed output-equivalence signal.</p>
+  <p>All cost figures remain <code>INDICATIVE_UNVERIFIED</code>. Fresh-process cache survival, streaming/non-streaming parity, near-ceiling behavior, and authoritative invoice savings remain unmeasured.</p>
   <p>Remaining items below are a research backlog, not an approval to change provider request behavior. Every request-shape change must follow the repository's compatibility-probe and matrix rules.</p>
   <ol class="priority">
     <li>
@@ -345,7 +360,7 @@
     <li>
       <h3>Complete cache economics and effectiveness for owned worker calls</h3>
       <p>The remaining work is to retain <code>cache_ttl_seconds</code> in worker usage mapping and compute per-model cached fraction, effective input cost, and TTL observations in a bounded diagnostic artifact rather than stuffing them into every model-facing result. Keep malformed or absent provider fields explicitly unknown. Cache-price fields are not exposed in the model-facing catalog until their live semantics are verified.</p>
-    </li> কassistant to=functions.Edit  (commentary  )  ...jsonaby? Wait malformed tool call? Need issue. We need correctly call. I accidentally included weird? Let's check tool call output? It appears no result because I typed tool call with malformed trailing? Actually message shows `assistant to=functions.Edit` not executed? Need see. There's no tool result. We need call correctly. ) } } } Hmm. Let's call. Nunaanni. Need ensure old string exact. We'll use Edit. }
+    </li>
     <li>
       <h3>Evaluate Responses compaction forwarding as a separate compatibility experiment</h3>
       <p>VS Code sends <code>context_management: [{ type: "compaction", compact_threshold }]</code> for eligible Responses models and round-trips the returned compaction item. The translated shim currently does not. Probe the exact Copilot shape first, including stream ordering, continuation IDs, and interaction with prompt-cache usage. A successful VS Code request is evidence of a useful candidate shape, not permission to emit it through every Copilot model.</p>

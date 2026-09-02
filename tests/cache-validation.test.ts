@@ -131,7 +131,7 @@ describe("Documented Candidate Manifest", () => {
     expect(nano?.inputRatePerMillion).toBe(0.20)
     expect(nano?.outputRatePerMillion).toBe(1.25)
     expect(nano?.cachedInputRatePerMillion).toBe(0.02)
-    expect(nano?.cacheWriteRatePerMillion).toBe(0.25)
+    expect(nano?.cacheWriteRatePerMillion).toBeUndefined()
 
     const haiku = CACHE_VALIDATION_MANIFEST.find(
       (m) => m.id === "claude-haiku-4.5",
@@ -626,10 +626,40 @@ describe("Documented Cost Calculation", () => {
     expect(res.costUsd).toBeCloseTo(0.065, 6)
   })
 
+  test("returns inconclusive when a token bucket is missing", () => {
+    const luna = findManifestEntryForCatalogId("gpt-5.6-luna")!
+    const res = calculateDocumentedCost(
+      {
+        uncachedInputTokens: 100_000,
+        cachedReadTokens: 0,
+        outputTokens: 10_000,
+      },
+      luna,
+    )
+    expect(res.inconclusive).toBe(true)
+    expect(res.reasonCode).toBe("INCONCLUSIVE_MISSING_RATE_OR_BUCKET")
+  })
+
+  test("returns inconclusive when a token bucket is invalid", () => {
+    const luna = findManifestEntryForCatalogId("gpt-5.6-luna")!
+    const res = calculateDocumentedCost(
+      {
+        uncachedInputTokens: 100_000,
+        cachedReadTokens: Number.NaN,
+        cacheWriteTokens: 0,
+        outputTokens: 10_000,
+      },
+      luna,
+    )
+    expect(res.inconclusive).toBe(true)
+    expect(res.reasonCode).toBe("INCONCLUSIVE_INVALID_BUCKET")
+  })
+
   test("returns inconclusive when usage has cached tokens but rates are missing", () => {
     const gemini = findManifestEntryForCatalogId("gemini-3.7-flash")!
     const usage = {
       uncachedInputTokens: 100_000,
+      cachedReadTokens: 0,
       cacheWriteTokens: 50_000, // Gemini has undefined cache write rate in manifest
       outputTokens: 10_000,
     }
@@ -666,8 +696,18 @@ describe("Deterministic Salted Prompt Construction", () => {
 
 describe("Paired Trial Verdict Classification", () => {
   test("classifies effective caching when warm trial achieves >= 50% hit ratio", () => {
-    const cold = { inputTokens: 10_000, outputTokens: 100, cacheWriteTokens: 8_000 }
-    const warm = { inputTokens: 10_000, outputTokens: 100, cachedReadTokens: 8_000 }
+    const cold = {
+      inputTokens: 10_000,
+      outputTokens: 100,
+      cachedReadTokens: 0,
+      cacheWriteTokens: 8_000,
+    }
+    const warm = {
+      inputTokens: 10_000,
+      outputTokens: 100,
+      cachedReadTokens: 8_000,
+      cacheWriteTokens: 0,
+    }
     const luna = findManifestEntryForCatalogId("gpt-5.6-luna")
 
     const verdict = classifyPairedTrialVerdict(cold, warm, luna)
@@ -678,8 +718,18 @@ describe("Paired Trial Verdict Classification", () => {
   })
 
   test("classifies regression when cold turn wrote cache but warm turn achieved zero read", () => {
-    const cold = { inputTokens: 10_000, outputTokens: 100, cacheWriteTokens: 8_000 }
-    const warm = { inputTokens: 10_000, outputTokens: 100, cachedReadTokens: 0 }
+    const cold = {
+      inputTokens: 10_000,
+      outputTokens: 100,
+      cachedReadTokens: 0,
+      cacheWriteTokens: 8_000,
+    }
+    const warm = {
+      inputTokens: 10_000,
+      outputTokens: 100,
+      cachedReadTokens: 0,
+      cacheWriteTokens: 0,
+    }
 
     const verdict = classifyPairedTrialVerdict(cold, warm)
     expect(verdict.verdict).toBe("regression")
@@ -687,8 +737,18 @@ describe("Paired Trial Verdict Classification", () => {
   })
 
   test("classifies uncached when warm turn reports zero cached read without cold write", () => {
-    const cold = { inputTokens: 10_000, outputTokens: 100, cacheWriteTokens: 0 }
-    const warm = { inputTokens: 10_000, outputTokens: 100, cachedReadTokens: 0 }
+    const cold = {
+      inputTokens: 10_000,
+      outputTokens: 100,
+      cachedReadTokens: 0,
+      cacheWriteTokens: 0,
+    }
+    const warm = {
+      inputTokens: 10_000,
+      outputTokens: 100,
+      cachedReadTokens: 0,
+      cacheWriteTokens: 0,
+    }
 
     const verdict = classifyPairedTrialVerdict(cold, warm)
     expect(verdict.verdict).toBe("uncached")

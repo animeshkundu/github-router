@@ -7,7 +7,7 @@
  *   - OpenAI (GPT-5.6 Luna via /responses)
  *   - Anthropic (Claude Haiku 4.5 via /v1/messages)
  *   - Google (Gemini 3.6/3.7 Flash via /chat/completions; provider-managed implicit)
- *   - xAI (Grok 4.5/4.6 via /chat/completions; provider-managed implicit)
+ *   - xAI (Grok 4.5/4.6 via the catalog-selected endpoint; provider-managed implicit)
  *
  * Safety & Invariants:
  *   - Dry-run by default: prints candidate table, official rates, planned calls, and plan hash.
@@ -15,7 +15,7 @@
  *   - Execution aborts if the plan hash drifts from the expected plan hash.
  *   - Bounded by explicit call, token, and wall-clock caps.
  *   - Uses existing in-process service clients directly (no secondary proxy server).
- *   - Strict short output contract (max 16 output tokens, OK instruction, no tools).
+ *   - Strict short output contract (max 64 output tokens, exact OK instruction, no tools).
  *   - Redacted artifacts: no prompt text, auth tokens, cache-key values, raw stderr, local paths, or session IDs.
  *   - All calculated costs are labeled INDICATIVE_UNVERIFIED; actual billing is not observed.
  */
@@ -87,7 +87,7 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 4_096
 const DEFAULT_MAX_WALLCLOCK_MS = 300_000 // 5 minutes
 const DEFAULT_CALL_TIMEOUT_MS = 60_000 // 60 seconds
 const DEFAULT_REPS = 3
-const FIXED_OUTPUT_TOKENS = 16
+const FIXED_OUTPUT_TOKENS = 64
 const MIN_STABLE_PREFIX_BYTES = 4_600
 
 /**
@@ -381,7 +381,7 @@ export function buildTrialUserPrompt(
   rep: number,
 ): string {
   const code = turnType === "cold" ? `COLD_REP_${rep}_A100` : `WARM_REP_${rep}_B200`
-  return `Instruction: Validate token status for transaction code ${code}. Respond with the exact word OK and nothing else.`
+  return `Request label: ${code}. The label is metadata, not a question. Output exactly OK and nothing else. Do not explain, summarize, quote, or add punctuation.`
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +446,7 @@ export interface FetchCaptureMetadata {
  */
 export async function executeInstrumentedCall<T>(
   fn: () => Promise<T>,
+  fetchImpl: typeof fetch = globalThis.fetch,
 ): Promise<{ result?: T; metadata: FetchCaptureMetadata; error?: string }> {
   const originalFetch = globalThis.fetch
   const metadata: FetchCaptureMetadata = {
@@ -456,12 +457,13 @@ export async function executeInstrumentedCall<T>(
     cacheFieldPaths: [],
     is401Refreshed: false,
   }
+  let saw401 = false
 
   globalThis.fetch = (async (
     input: string | URL | Request,
     init?: RequestInit,
   ) => {
-    metadata.attemptCount++
+    const attemptIndex = metadata.attemptCount++
 
     let urlPath = ""
     try {
@@ -477,31 +479,30 @@ export async function executeInstrumentedCall<T>(
     }
     metadata.paths.push(urlPath)
 
-    if (init?.body) {
-      let bodyString = ""
-      if (typeof init.body === "string") {
-        bodyString = init.body
-      } else if (init.body instanceof Uint8Array) {
-        bodyString = new TextDecoder().decode(init.body)
-      }
-      if (bodyString) {
-        metadata.bodyByteLengths.push(Buffer.byteLength(bodyString, "utf8"))
-        metadata.bodySha256s.push(
-          createHash("sha256").update(bodyString).digest("hex"),
-        )
-        try {
-          const parsed = JSON.parse(bodyString)
-          metadata.cacheFieldPaths.push(...findCacheFieldPaths(parsed))
-        } catch {
-          // Non-JSON body
-        }
+    let bodyString = ""
+    if (typeof init?.body === "string") {
+      bodyString = init.body
+    } else if (init?.body instanceof Uint8Array) {
+      bodyString = new TextDecoder().decode(init.body)
+    } else if (input instanceof Request) {
+      bodyString = await input.clone().text()
+    }
+    if (bodyString) {
+      metadata.bodyByteLengths.push(Buffer.byteLength(bodyString, "utf8"))
+      metadata.bodySha256s.push(
+        createHash("sha256").update(bodyString).digest("hex"),
+      )
+      try {
+        const parsed = JSON.parse(bodyString)
+        metadata.cacheFieldPaths.push(...findCacheFieldPaths(parsed))
+      } catch {
+        // Non-JSON body
       }
     }
 
-    const response = await originalFetch(input, init)
-    if (response.status === 401) {
-      metadata.is401Refreshed = true
-    }
+    if (saw401 && attemptIndex > 0) metadata.is401Refreshed = true
+    const response = await fetchImpl(input, init)
+    if (response.status === 401) saw401 = true
     return response
   }) as typeof fetch
 
@@ -622,14 +623,19 @@ export function constructModelRequestPayload(
 // ---------------------------------------------------------------------------
 
 export interface ExtractedTurnUsage {
-  readonly totalInput: number
-  readonly uncachedInput: number
-  readonly output: number
-  readonly cacheRead: number
-  readonly cacheWrite: number
-  readonly totalTokens: number
+  readonly totalInput?: number
+  readonly uncachedInput?: number
+  readonly output?: number
+  readonly cacheRead?: number
+  readonly cacheWrite?: number
+  readonly totalTokens?: number
   readonly reportedTotal?: number
-  readonly inclusiveReconciled: boolean | "UNAVAILABLE_ANTHROPIC"
+  readonly inclusiveReconciled:
+    | boolean
+    | "UNAVAILABLE_OPENAI"
+    | "INVALID_OPENAI"
+    | "UNAVAILABLE_ANTHROPIC"
+    | "INVALID_ANTHROPIC"
   readonly validMetrics: boolean
   readonly cacheMetricsPresent: boolean
   readonly cacheReadMetricsPresent: boolean
@@ -644,6 +650,78 @@ export interface ExtractedTurnResponse {
   readonly outputMatchesOk: boolean
   readonly usage?: ExtractedTurnUsage
   readonly error?: string
+}
+
+type CompleteExtractedTurnUsage = ExtractedTurnUsage & {
+  readonly totalInput: number
+  readonly uncachedInput: number
+  readonly output: number
+  readonly cacheRead: number
+  readonly cacheWrite: number
+  readonly totalTokens: number
+  readonly reportedTotal?: number
+  readonly inclusiveReconciled:
+    | true
+    | "UNAVAILABLE_ANTHROPIC"
+}
+
+function isCompleteExtractedTurnUsage(
+  usage: ExtractedTurnUsage | undefined,
+): usage is CompleteExtractedTurnUsage {
+  return (
+    usage?.validMetrics === true &&
+    (usage.inclusiveReconciled === true ||
+      usage.inclusiveReconciled === "UNAVAILABLE_ANTHROPIC") &&
+    isValidTokenCount(usage.totalInput) &&
+    isValidTokenCount(usage.uncachedInput) &&
+    isValidTokenCount(usage.output) &&
+    isValidTokenCount(usage.cacheRead) &&
+    isValidTokenCount(usage.cacheWrite) &&
+    isValidTokenCount(usage.totalTokens) &&
+    (usage.reportedTotal === undefined ||
+      isValidTokenCount(usage.reportedTotal))
+  )
+}
+
+function isValidTokenCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+}
+
+interface ReportedTokenCount {
+  readonly value?: number
+  readonly supplied: boolean
+  readonly valid: boolean
+}
+
+/**
+ * Inspect aliases for one usage counter without turning malformed input into
+ * zero. A supplied invalid alias makes the metric invalid, even when another
+ * alias is valid, so the probe cannot silently choose a favorable field.
+ */
+function inspectReportedTokenCount(
+  values: ReadonlyArray<unknown>,
+): ReportedTokenCount {
+  let supplied = false
+  let valid = true
+  let zeroReported = false
+  let positiveValue: number | undefined
+
+  for (const value of values) {
+    if (value === undefined) continue
+    supplied = true
+    if (!isValidTokenCount(value)) {
+      valid = false
+      continue
+    }
+    if (value > 0 && positiveValue === undefined) positiveValue = value
+    if (value === 0) zeroReported = true
+  }
+
+  return {
+    value: positiveValue ?? (zeroReported ? 0 : undefined),
+    supplied,
+    valid,
+  }
 }
 
 /**
@@ -684,22 +762,26 @@ export function extractUsageFromResponse(
       }
     }
 
-    const hasInput = typeof usage.input_tokens === "number" && Number.isFinite(usage.input_tokens) && usage.input_tokens >= 0
-    const hasOutput = typeof usage.output_tokens === "number" && Number.isFinite(usage.output_tokens) && usage.output_tokens >= 0
-    const hasCacheRead = typeof usage.cache_read_input_tokens === "number" && Number.isFinite(usage.cache_read_input_tokens) && usage.cache_read_input_tokens >= 0
-    const hasCacheWrite = typeof usage.cache_creation_input_tokens === "number" && Number.isFinite(usage.cache_creation_input_tokens) && usage.cache_creation_input_tokens >= 0
+    const hasInput = isValidTokenCount(usage.input_tokens)
+    const hasOutput = isValidTokenCount(usage.output_tokens)
+    const hasCacheRead = isValidTokenCount(usage.cache_read_input_tokens)
+    const hasCacheWrite = isValidTokenCount(usage.cache_creation_input_tokens)
 
     const cacheReadMetricsPresent = hasCacheRead
     const cacheWriteMetricsPresent = hasCacheWrite
     const cacheMetricsPresent = cacheReadMetricsPresent && cacheWriteMetricsPresent
 
-    // Anthropic requires both input/output and both cache read & creation fields to be numeric
+    // Anthropic requires both input/output and both cache read & creation fields to be numeric.
     const validMetrics = hasInput && hasOutput && cacheMetricsPresent
 
     const inputTokens = hasInput ? (usage.input_tokens as number) : 0
     const outputTokens = hasOutput ? (usage.output_tokens as number) : 0
-    const cacheRead = hasCacheRead ? (usage.cache_read_input_tokens as number) : 0
-    const cacheWrite = hasCacheWrite ? (usage.cache_creation_input_tokens as number) : 0
+    const cacheRead = hasCacheRead
+      ? (usage.cache_read_input_tokens as number)
+      : 0
+    const cacheWrite = hasCacheWrite
+      ? (usage.cache_creation_input_tokens as number)
+      : 0
 
     if (hasInput) rawNumericUsage.input_tokens = inputTokens
     if (hasOutput) rawNumericUsage.output_tokens = outputTokens
@@ -718,10 +800,12 @@ export function extractUsageFromResponse(
         totalInput,
         uncachedInput: inputTokens,
         output: outputTokens,
-        cacheRead,
-        cacheWrite,
+        cacheRead: hasCacheRead ? cacheRead : undefined,
+        cacheWrite: hasCacheWrite ? cacheWrite : undefined,
         totalTokens,
-        inclusiveReconciled: "UNAVAILABLE_ANTHROPIC",
+        inclusiveReconciled: validMetrics
+          ? "UNAVAILABLE_ANTHROPIC"
+          : "INVALID_ANTHROPIC",
         validMetrics,
         cacheMetricsPresent,
         cacheReadMetricsPresent,
@@ -786,74 +870,104 @@ export function extractUsageFromResponse(
     }
   }
 
-  // Record raw whitelisted numeric fields
-  if (typeof rawUsage.prompt_tokens === "number") {
-    rawNumericUsage.prompt_tokens = rawUsage.prompt_tokens
-  }
-  if (typeof rawUsage.input_tokens === "number") {
-    rawNumericUsage.input_tokens = rawUsage.input_tokens
-  }
-  if (typeof rawUsage.completion_tokens === "number") {
-    rawNumericUsage.completion_tokens = rawUsage.completion_tokens
-  }
-  if (typeof rawUsage.output_tokens === "number") {
-    rawNumericUsage.output_tokens = rawUsage.output_tokens
-  }
-  if (typeof rawUsage.total_tokens === "number") {
-    rawNumericUsage.total_tokens = rawUsage.total_tokens
-  }
-  if (typeof rawUsage.prompt_tokens_details?.cached_tokens === "number") {
-    rawNumericUsage["prompt_tokens_details.cached_tokens"] =
-      rawUsage.prompt_tokens_details.cached_tokens
-  }
-  if (typeof rawUsage.prompt_tokens_details?.cache_write_tokens === "number") {
-    rawNumericUsage["prompt_tokens_details.cache_write_tokens"] =
-      rawUsage.prompt_tokens_details.cache_write_tokens
-  }
-  if (typeof rawUsage.input_tokens_details?.cached_tokens === "number") {
-    rawNumericUsage["input_tokens_details.cached_tokens"] =
-      rawUsage.input_tokens_details.cached_tokens
-  }
-  if (typeof rawUsage.input_tokens_details?.cache_write_tokens === "number") {
-    rawNumericUsage["input_tokens_details.cache_write_tokens"] =
-      rawUsage.input_tokens_details.cache_write_tokens
+  // Record only finite, non-negative integer usage values.
+  const whitelistedFields: ReadonlyArray<readonly [string, unknown]> = [
+    ["prompt_tokens", rawUsage.prompt_tokens],
+    ["input_tokens", rawUsage.input_tokens],
+    ["completion_tokens", rawUsage.completion_tokens],
+    ["output_tokens", rawUsage.output_tokens],
+    ["total_tokens", rawUsage.total_tokens],
+    ["prompt_tokens_details.cached_tokens", rawUsage.prompt_tokens_details?.cached_tokens],
+    ["prompt_tokens_details.cache_write_tokens", rawUsage.prompt_tokens_details?.cache_write_tokens],
+    ["input_tokens_details.cached_tokens", rawUsage.input_tokens_details?.cached_tokens],
+    ["input_tokens_details.cache_write_tokens", rawUsage.input_tokens_details?.cache_write_tokens],
+  ]
+  for (const [field, value] of whitelistedFields) {
+    if (isValidTokenCount(value)) rawNumericUsage[field] = value
   }
 
-  const hasCacheRead =
-    typeof rawUsage.prompt_tokens_details?.cached_tokens === "number" ||
-    typeof rawUsage.input_tokens_details?.cached_tokens === "number" ||
-    typeof rawUsage.cache_read_input_tokens === "number"
+  const cacheRead = inspectReportedTokenCount([
+    rawUsage.prompt_tokens_details?.cached_tokens,
+    rawUsage.input_tokens_details?.cached_tokens,
+    rawUsage.cache_read_input_tokens,
+  ])
+  const cacheWrite = inspectReportedTokenCount([
+    rawUsage.prompt_tokens_details?.cache_write_tokens,
+    rawUsage.input_tokens_details?.cache_write_tokens,
+    rawUsage.cache_write_tokens,
+    rawUsage.cache_creation_input_tokens,
+  ])
+  const input = inspectReportedTokenCount([
+    rawUsage.input_tokens,
+    rawUsage.prompt_tokens,
+  ])
+  const output = inspectReportedTokenCount([
+    rawUsage.output_tokens,
+    rawUsage.completion_tokens,
+  ])
+  const reportedTotalMetric = inspectReportedTokenCount([rawUsage.total_tokens])
 
-  const hasCacheWrite =
-    typeof rawUsage.prompt_tokens_details?.cache_write_tokens === "number" ||
-    typeof rawUsage.input_tokens_details?.cache_write_tokens === "number" ||
-    typeof rawUsage.cache_write_tokens === "number" ||
-    typeof rawUsage.cache_creation_input_tokens === "number"
-
-  const cacheReadMetricsPresent = hasCacheRead
-  const cacheWriteMetricsPresent = hasCacheWrite
-  const cacheMetricsPresent = cacheReadMetricsPresent || cacheWriteMetricsPresent
+  const cacheReadMetricsPresent = cacheRead.supplied && cacheRead.valid
+  const cacheWriteMetricsPresent = cacheWrite.supplied && cacheWrite.valid
+  const cacheMetricsPresent = cacheReadMetricsPresent && cacheWriteMetricsPresent
 
   const hasTotal =
-    typeof rawUsage.total_tokens === "number" &&
-    Number.isFinite(rawUsage.total_tokens) &&
-    rawUsage.total_tokens > 0
-
-  const normalized: NormalizedOpenAIUsage = normalizeOpenAIUsage(rawUsage)
-  const reportedTotal = hasTotal ? (rawUsage.total_tokens as number) : undefined
-
-  // Total reconciliation check for OpenAI (total_tokens must be present and match within 1%)
-  let inclusiveReconciled = false
-  if (reportedTotal !== undefined && reportedTotal > 0) {
-    const calculatedSum = normalized.totalInput + normalized.output
-    const diff = Math.abs(reportedTotal - calculatedSum)
-    if (diff / Math.max(1, reportedTotal) <= 0.01) {
-      inclusiveReconciled = true
-    }
+    reportedTotalMetric.supplied &&
+    reportedTotalMetric.valid &&
+    reportedTotalMetric.value !== undefined &&
+    reportedTotalMetric.value > 0
+  const hasInput =
+    input.supplied && input.valid && input.value !== undefined && input.value > 0
+  const hasOutput =
+    output.supplied && output.valid && output.value !== undefined
+  const normalized: NormalizedOpenAIUsage = normalizeOpenAIUsage({
+    input_tokens: input.value,
+    output_tokens: output.value,
+    total_tokens: reportedTotalMetric.value,
+    cache_read_input_tokens: cacheRead.value,
+    cache_write_tokens: cacheWrite.value,
+  })
+  const reportedTotal = hasTotal ? reportedTotalMetric.value : undefined
+  const requiredMetrics = [
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    reportedTotalMetric,
+  ]
+  const hasInvalidMetric = requiredMetrics.some(
+    (metric) => metric.supplied && !metric.valid,
+  )
+  const hasMissingMetric = requiredMetrics.some((metric) => !metric.supplied)
+  const hasInvalidRequiredValue =
+    (input.supplied && input.valid && !hasInput) ||
+    (reportedTotalMetric.supplied && reportedTotalMetric.valid && !hasTotal)
+  const normalizedForOutput = {
+    ...normalized,
+    cacheRead: cacheRead.value === undefined ? undefined : normalized.cacheRead,
+    cacheWrite: cacheWrite.value === undefined ? undefined : normalized.cacheWrite,
   }
 
-  const hasValidInput = normalized.totalInput > 0
-  const validMetrics = hasValidInput && hasTotal && inclusiveReconciled && cacheMetricsPresent
+  // Missing provider buckets are unavailable; only malformed supplied values or
+  // a complete tuple whose total diverges are invalid.
+  let inclusiveReconciled: boolean | "UNAVAILABLE_OPENAI" | "INVALID_OPENAI" =
+    "UNAVAILABLE_OPENAI"
+  const completeUsageMetrics = hasInput && hasOutput && cacheMetricsPresent
+  if (hasInvalidMetric || hasInvalidRequiredValue) {
+    inclusiveReconciled = "INVALID_OPENAI"
+  } else if (!hasMissingMetric && completeUsageMetrics && reportedTotal !== undefined) {
+    const calculatedSum = normalized.totalInput + normalized.output
+    const diff = Math.abs(reportedTotal - calculatedSum)
+    inclusiveReconciled =
+      diff / Math.max(1, reportedTotal) <= 0.01
+        ? true
+        : "INVALID_OPENAI"
+  }
+
+  const validMetrics =
+    completeUsageMetrics && inclusiveReconciled === true
+
+  // A missing cache bucket is unknown, never a measured zero.
 
   return {
     ok: true,
@@ -864,8 +978,8 @@ export function extractUsageFromResponse(
       totalInput: normalized.totalInput,
       uncachedInput: normalized.uncachedInput,
       output: normalized.output,
-      cacheRead: normalized.cacheRead,
-      cacheWrite: normalized.cacheWrite,
+      cacheRead: normalizedForOutput.cacheRead,
+      cacheWrite: normalizedForOutput.cacheWrite,
       totalTokens: normalized.totalTokens,
       reportedTotal,
       inclusiveReconciled,
@@ -999,7 +1113,7 @@ export async function executeSingleTurn(
   const response = extractUsageFromResponse(constructed.endpointType, json)
 
   let cost: CostCalculationResult | undefined
-  if (response.usage && response.usage.validMetrics) {
+  if (isCompleteExtractedTurnUsage(response.usage)) {
     cost = calculateDocumentedCost(
       {
         uncachedInputTokens: response.usage.uncachedInput,
@@ -1034,20 +1148,27 @@ export function classifyArmTrial(
   warm: SingleTurnResult,
   manifestEntry: DocumentedModelRate,
 ): PairedArmResult {
+  const outputsEquivalent =
+    cold.response?.outputMatchesOk === true &&
+    warm.response?.outputMatchesOk === true &&
+    cold.response?.outputTextLength === warm.response?.outputTextLength &&
+    cold.response?.outputTextSha256 === warm.response?.outputTextSha256 &&
+    (cold.response?.outputTextSha256.length ?? 0) > 0
+
   if (
     !cold.success ||
     !warm.success ||
     !cold.response?.usage ||
     !warm.response?.usage ||
-    !cold.response.usage.validMetrics ||
-    !warm.response.usage.validMetrics
+    !isCompleteExtractedTurnUsage(cold.response.usage) ||
+    !isCompleteExtractedTurnUsage(warm.response.usage)
   ) {
     return {
       arm,
       cold,
       warm,
       valid: false,
-      outputEquivalent: false,
+      outputEquivalent: outputsEquivalent,
       readHitRatio: 0,
       coldContaminationRatio: 1,
       pairedVerdict: "inconclusive",
@@ -1073,7 +1194,9 @@ export function classifyArmTrial(
   const warmUsage = warm.response.usage
 
   const coldContaminationRatio =
-    coldUsage.totalInput > 0 ? coldUsage.cacheRead / coldUsage.totalInput : 0
+    coldUsage.totalInput > 0
+      ? coldUsage.cacheRead / coldUsage.totalInput
+      : 0
 
   if (coldContaminationRatio > 0.05) {
     return {
@@ -1129,7 +1252,7 @@ export function classifyArmTrial(
   let indicativeCostColdUsd = cold.cost?.costUsd
   let indicativeCostWarmUsd = warm.cost?.costUsd
 
-  if (indicativeCostColdUsd === undefined && cold.response?.usage?.validMetrics) {
+  if (indicativeCostColdUsd === undefined && isCompleteExtractedTurnUsage(cold.response?.usage)) {
     const cost = calculateDocumentedCost(
       {
         uncachedInputTokens: cold.response.usage.uncachedInput,
@@ -1142,7 +1265,7 @@ export function classifyArmTrial(
     indicativeCostColdUsd = cost.costUsd
   }
 
-  if (indicativeCostWarmUsd === undefined && warm.response?.usage?.validMetrics) {
+  if (indicativeCostWarmUsd === undefined && isCompleteExtractedTurnUsage(warm.response?.usage)) {
     const cost = calculateDocumentedCost(
       {
         uncachedInputTokens: warm.response.usage.uncachedInput,
@@ -1375,6 +1498,8 @@ export class ExecutionCapTracker {
   callCount: number = 0
   totalInputTokens: number = 0
   totalOutputTokens: number = 0
+  usageUnknown: boolean = false
+  capViolationReason?: string
   startTime: number = Date.now()
   config: ProbeFamilyConfig
 
@@ -1390,57 +1515,114 @@ export class ExecutionCapTracker {
     canProceed: boolean
     reason?: string
   } {
+    const reject = (reason: string) => {
+      this.capViolationReason = reason
+      return { canProceed: false, reason }
+    }
+
     if (this.callCount + estimatedCalls > this.config.maxCalls) {
-      return {
-        canProceed: false,
-        reason: `Exceeded max calls cap (${this.config.maxCalls})`,
-      }
+      return reject(`Exceeded max calls cap (${this.config.maxCalls})`)
     }
     if (
       this.totalInputTokens + estimatedInput >
       this.config.maxInputTokens
     ) {
-      return {
-        canProceed: false,
-        reason: `Exceeded max input tokens cap (${this.config.maxInputTokens})`,
-      }
+      return reject(
+        `Exceeded max input tokens cap (${this.config.maxInputTokens})`,
+      )
     }
     if (
       this.totalOutputTokens + estimatedOutput >
       this.config.maxOutputTokens
     ) {
-      return {
-        canProceed: false,
-        reason: `Exceeded max output tokens cap (${this.config.maxOutputTokens})`,
-      }
+      return reject(
+        `Exceeded max output tokens cap (${this.config.maxOutputTokens})`,
+      )
     }
-    if (Date.now() - this.startTime > this.config.maxWallclockMs) {
-      return {
-        canProceed: false,
-        reason: `Exceeded max wallclock budget (${this.config.maxWallclockMs}ms)`,
-      }
+    const elapsedMs = Date.now() - this.startTime
+    if (elapsedMs > this.config.maxWallclockMs) {
+      return reject(
+        `Exceeded max wallclock budget (${this.config.maxWallclockMs}ms)`,
+      )
     }
     return { canProceed: true }
   }
 
-  recordCall(inputTokens = 0, outputTokens = 0): { hasOverrun: boolean; reason?: string } {
+  reserveEstimatedCall(
+    estimatedInput: number,
+    estimatedOutput: number,
+  ): { hasOverrun: boolean; reason?: string } {
+    this.totalInputTokens += estimatedInput
+    this.totalOutputTokens += estimatedOutput
+    const elapsedMs = Date.now() - this.startTime
+    let reason: string | undefined
+    if (this.callCount > this.config.maxCalls) {
+      reason = `Estimated calls exceeded cap (${this.callCount} > ${this.config.maxCalls})`
+    } else if (this.totalInputTokens > this.config.maxInputTokens) {
+      reason =
+        `Estimated input tokens exceeded cap (${this.totalInputTokens} > ${this.config.maxInputTokens})`
+    } else if (this.totalOutputTokens > this.config.maxOutputTokens) {
+      reason =
+        `Estimated output tokens exceeded cap (${this.totalOutputTokens} > ${this.config.maxOutputTokens})`
+    } else if (elapsedMs > this.config.maxWallclockMs) {
+      reason =
+        `Estimated wallclock exceeded budget (${elapsedMs}ms > ${this.config.maxWallclockMs}ms)`
+    }
+    if (reason !== undefined) {
+      this.capViolationReason = reason
+      return { hasOverrun: true, reason }
+    }
+    return { hasOverrun: false }
+  }
+
+  recordCall(inputTokens?: number, outputTokens?: number): { hasOverrun: boolean; reason?: string } {
     this.callCount++
+    if (!isValidTokenCount(inputTokens) || !isValidTokenCount(outputTokens)) {
+      this.usageUnknown = true
+      return { hasOverrun: false, reason: "Usage telemetry unavailable; cap accounting remains conservative" }
+    }
     this.totalInputTokens += inputTokens
     this.totalOutputTokens += outputTokens
 
+    let reason: string | undefined
     if (this.callCount > this.config.maxCalls) {
-      return { hasOverrun: true, reason: `Actual calls exceeded cap (${this.callCount} > ${this.config.maxCalls})` }
+      reason = `Actual calls exceeded cap (${this.callCount} > ${this.config.maxCalls})`
+    } else if (this.totalInputTokens > this.config.maxInputTokens) {
+      reason = `Actual input tokens exceeded cap (${this.totalInputTokens} > ${this.config.maxInputTokens})`
+    } else if (this.totalOutputTokens > this.config.maxOutputTokens) {
+      reason = `Actual output tokens exceeded cap (${this.totalOutputTokens} > ${this.config.maxOutputTokens})`
+    } else {
+      const elapsedMs = Date.now() - this.startTime
+      if (elapsedMs > this.config.maxWallclockMs) {
+        reason = `Actual wallclock exceeded budget (${elapsedMs}ms > ${this.config.maxWallclockMs}ms)`
+      }
     }
-    if (this.totalInputTokens > this.config.maxInputTokens) {
-      return { hasOverrun: true, reason: `Actual input tokens exceeded cap (${this.totalInputTokens} > ${this.config.maxInputTokens})` }
-    }
-    if (this.totalOutputTokens > this.config.maxOutputTokens) {
-      return { hasOverrun: true, reason: `Actual output tokens exceeded cap (${this.totalOutputTokens} > ${this.config.maxOutputTokens})` }
-    }
-    if (Date.now() - this.startTime > this.config.maxWallclockMs) {
-      return { hasOverrun: true, reason: `Actual wallclock exceeded budget (${Date.now() - this.startTime}ms > ${this.config.maxWallclockMs}ms)` }
+    if (reason !== undefined) {
+      this.capViolationReason = reason
+      return { hasOverrun: true, reason }
     }
     return { hasOverrun: false }
+  }
+
+  recordTurn(
+    result: SingleTurnResult,
+    estimatedInput: number,
+  ): { hasOverrun: boolean; reason?: string } {
+    const usage = result.response?.usage
+    if (isCompleteExtractedTurnUsage(usage)) {
+      return this.recordCall(usage.totalInput, usage.output)
+    }
+
+    const observed = this.recordCall()
+    const estimated = this.reserveEstimatedCall(
+      estimatedInput,
+      FIXED_OUTPUT_TOKENS,
+    )
+    if (estimated.hasOverrun) {
+      this.capViolationReason = estimated.reason
+      return estimated
+    }
+    return observed
   }
 
   get stats() {
@@ -1448,14 +1630,107 @@ export class ExecutionCapTracker {
       callCount: this.callCount,
       totalInputTokens: this.totalInputTokens,
       totalOutputTokens: this.totalOutputTokens,
+      usageUnknown: this.usageUnknown,
       elapsedMs: Date.now() - this.startTime,
     }
+  }
+}
+
+export interface ExecutedArmPair {
+  readonly arm?: PairedArmResult
+  readonly capViolationReason?: string
+}
+
+/**
+ * Execute one cold/warm arm pair while enforcing caps after every turn.
+ * A post-call cap overrun returns without issuing the sibling arm or any
+ * further call in the current candidate run.
+ */
+export async function executeArmPair(
+  candidate: EvaluatedCandidate,
+  arm: "policy" | "control" | "provider-managed",
+  rep: number,
+  nonce: string,
+  config: ProbeFamilyConfig,
+  tracker: ExecutionCapTracker,
+  executeTurn: typeof executeSingleTurn = executeSingleTurn,
+): Promise<ExecutedArmPair> {
+  const candidateId = candidate.catalogId ?? candidate.manifestEntry.id
+  const estimatedInput = estimateCandidateInputTokens(candidateId)
+  const capReason = (reason?: string): string =>
+    reason ?? tracker.capViolationReason ?? "Execution cap exceeded"
+
+  const coldCap = tracker.checkBeforeCall(
+    1,
+    estimatedInput,
+    FIXED_OUTPUT_TOKENS,
+  )
+  if (!coldCap.canProceed) {
+    return { capViolationReason: capReason(coldCap.reason) }
+  }
+
+  const stablePrefix = buildTrialStablePrefix(
+    candidate.manifestEntry.family,
+    candidateId,
+    arm,
+    rep,
+    nonce,
+  )
+  const cold = await executeTurn(
+    candidate,
+    arm,
+    "cold",
+    stablePrefix,
+    buildTrialUserPrompt("cold", rep),
+    config.callTimeoutMs,
+  )
+  const coldOverrun = tracker.recordTurn(cold, estimatedInput)
+  if (coldOverrun.hasOverrun) {
+    return { capViolationReason: capReason(coldOverrun.reason) }
+  }
+
+  const warmCap = tracker.checkBeforeCall(
+    1,
+    estimatedInput,
+    FIXED_OUTPUT_TOKENS,
+  )
+  if (!warmCap.canProceed) {
+    return { capViolationReason: capReason(warmCap.reason) }
+  }
+
+  const warm = await executeTurn(
+    candidate,
+    arm,
+    "warm",
+    stablePrefix,
+    buildTrialUserPrompt("warm", rep),
+    config.callTimeoutMs,
+  )
+  const warmOverrun = tracker.recordTurn(warm, estimatedInput)
+  if (warmOverrun.hasOverrun) {
+    return { capViolationReason: capReason(warmOverrun.reason) }
+  }
+
+  return {
+    arm: classifyArmTrial(arm, cold, warm, candidate.manifestEntry),
   }
 }
 
 // ---------------------------------------------------------------------------
 // Edge Cases Execution Phase
 // ---------------------------------------------------------------------------
+
+export type EdgeCaseReasonCode =
+  | "EXPECTED_SUB_THRESHOLD_GUARD"
+  | "UNEXPECTED_SUB_THRESHOLD_MARKING"
+  | "EXPECTED_CONVERSATION_NOOP"
+  | "UNEXPECTED_CONVERSATION_MARKING"
+  | "CAP_EXCEEDED"
+  | "MISSING_TELEMETRY"
+  | "EXPECTED_PREFIX_INVALIDATION"
+  | "UNEXPECTED_PREFIX_REUSE"
+  | "EXPECTED_SUFFIX_REUSE"
+  | "INCONCLUSIVE_SUFFIX_REUSE"
 
 export interface EdgeCaseTrialResult {
   readonly name:
@@ -1464,8 +1739,10 @@ export interface EdgeCaseTrialResult {
     | "sub-threshold-guard"
     | "growing-history-conversation"
   readonly success: boolean
-  readonly readHitRatio: number
+  readonly readHitRatio?: number
   readonly verdict: "EXPECTED" | "UNEXPECTED" | "INCONCLUSIVE"
+  readonly reasonCode: EdgeCaseReasonCode
+  /** Free-form detail is kept in memory only and omitted from artifacts. */
   readonly note: string
 }
 
@@ -1473,11 +1750,40 @@ export async function runEdgeCasesForCandidate(
   candidate: EvaluatedCandidate,
   config: ProbeFamilyConfig,
   tracker: ExecutionCapTracker,
+  executeTurn: typeof executeSingleTurn = executeSingleTurn,
 ): Promise<Array<EdgeCaseTrialResult>> {
   const edgeResults: Array<EdgeCaseTrialResult> = []
   const modelId = candidate.catalogId ?? candidate.manifestEntry.id
   const nonce = randomBytes(4).toString("hex")
   const estInput = estimateCandidateInputTokens(modelId)
+
+  const pushInconclusive = (
+    name: EdgeCaseTrialResult["name"],
+    reasonCode: EdgeCaseReasonCode,
+    note: string,
+  ): void => {
+    edgeResults.push({
+      name,
+      success: false,
+      verdict: "INCONCLUSIVE",
+      reasonCode,
+      note,
+    })
+  }
+
+  const recordEdgeTurn = (
+    name: EdgeCaseTrialResult["name"],
+    result: SingleTurnResult,
+  ): boolean => {
+    const overrun = tracker.recordTurn(result, estInput)
+    if (!overrun.hasOverrun) return true
+    pushInconclusive(
+      name,
+      "CAP_EXCEEDED",
+      overrun.reason ?? "Execution cap exceeded after edge-case call",
+    )
+    return false
+  }
 
   // Edge 1: Sub-threshold guard (< 4096 bytes)
   {
@@ -1493,8 +1799,10 @@ export async function runEdgeCasesForCandidate(
     edgeResults.push({
       name: "sub-threshold-guard",
       success: true,
-      readHitRatio: 0,
       verdict: !hasBreakpoint ? "EXPECTED" : "UNEXPECTED",
+      reasonCode: !hasBreakpoint
+        ? "EXPECTED_SUB_THRESHOLD_GUARD"
+        : "UNEXPECTED_SUB_THRESHOLD_MARKING",
       note: !hasBreakpoint
         ? "Sub-threshold prefix correctly bypassed explicit cache marking"
         : "Sub-threshold prefix unexpectedly received cache marking",
@@ -1521,6 +1829,9 @@ export async function runEdgeCasesForCandidate(
         success: true,
         readHitRatio: 0,
         verdict: isUntouched ? "EXPECTED" : "UNEXPECTED",
+        reasonCode: isUntouched
+          ? "EXPECTED_CONVERSATION_NOOP"
+          : "UNEXPECTED_CONVERSATION_MARKING",
         note: isUntouched
           ? "Conversation workload correctly bypassed explicit marking (no-op as expected)"
           : "Conversation workload unexpectedly marked with explicit breakpoint",
@@ -1531,6 +1842,7 @@ export async function runEdgeCasesForCandidate(
         success: true,
         readHitRatio: 0,
         verdict: "EXPECTED",
+        reasonCode: "EXPECTED_CONVERSATION_NOOP",
         note: "Non-Responses model conversation policy verified",
       })
     }
@@ -1540,13 +1852,12 @@ export async function runEdgeCasesForCandidate(
   {
     const coldCheck = tracker.checkBeforeCall(1, estInput, FIXED_OUTPUT_TOKENS)
     if (!coldCheck.canProceed) {
-      edgeResults.push({
-        name: "early-prefix-perturbation",
-        success: false,
-        readHitRatio: 0,
-        verdict: "INCONCLUSIVE",
-        note: coldCheck.reason ?? "Cap exceeded before cold call",
-      })
+      pushInconclusive(
+        "early-prefix-perturbation",
+        "CAP_EXCEEDED",
+        coldCheck.reason ?? "Cap exceeded before cold call",
+      )
+      return edgeResults
     } else {
       const stablePrefixA = buildTrialStablePrefix(
         candidate.manifestEntry.family,
@@ -1556,7 +1867,7 @@ export async function runEdgeCasesForCandidate(
         nonce,
       )
       const userPrompt = buildTrialUserPrompt("cold", 99)
-      const cold = await executeSingleTurn(
+      const cold = await executeTurn(
         candidate,
         "policy",
         "cold",
@@ -1564,20 +1875,18 @@ export async function runEdgeCasesForCandidate(
         userPrompt,
         config.callTimeoutMs,
       )
-      tracker.recordCall(
-        cold.response?.usage?.totalInput ?? estInput,
-        cold.response?.usage?.output ?? FIXED_OUTPUT_TOKENS,
-      )
+      if (!recordEdgeTurn("early-prefix-perturbation", cold)) {
+        return edgeResults
+      }
 
       const warmCheck = tracker.checkBeforeCall(1, estInput, FIXED_OUTPUT_TOKENS)
       if (!warmCheck.canProceed) {
-        edgeResults.push({
-          name: "early-prefix-perturbation",
-          success: false,
-          readHitRatio: 0,
-          verdict: "INCONCLUSIVE",
-          note: warmCheck.reason ?? "Cap exceeded before warm call",
-        })
+        pushInconclusive(
+          "early-prefix-perturbation",
+          "CAP_EXCEEDED",
+          warmCheck.reason ?? "Cap exceeded before warm call",
+        )
+        return edgeResults
       } else {
         const stablePrefixB =
           "MODIFIED_START_" +
@@ -1589,7 +1898,7 @@ export async function runEdgeCasesForCandidate(
             nonce,
           ).slice(15)
 
-        const warm = await executeSingleTurn(
+        const warm = await executeTurn(
           candidate,
           "policy",
           "warm",
@@ -1597,24 +1906,42 @@ export async function runEdgeCasesForCandidate(
           userPrompt,
           config.callTimeoutMs,
         )
-        tracker.recordCall(
-          warm.response?.usage?.totalInput ?? estInput,
-          warm.response?.usage?.output ?? FIXED_OUTPUT_TOKENS,
-        )
+        if (!recordEdgeTurn("early-prefix-perturbation", warm)) {
+          return edgeResults
+        }
 
-        const warmRead = warm.response?.usage?.cacheRead ?? 0
-        const warmTotal = warm.response?.usage?.totalInput ?? 1
-        const hitRatio = warmRead / warmTotal
-        const expectedInvalidation = hitRatio < 0.2
+        const coldUsage = cold.response?.usage
+        const warmUsage = warm.response?.usage
+        const bothTurnsHaveValidMetrics =
+          cold.success &&
+          warm.success &&
+          isCompleteExtractedTurnUsage(coldUsage) &&
+          isCompleteExtractedTurnUsage(warmUsage)
+        const hitRatio = bothTurnsHaveValidMetrics
+          ? warmUsage.cacheRead / warmUsage.totalInput
+          : undefined
+        const expectedInvalidation =
+          bothTurnsHaveValidMetrics && hitRatio !== undefined && hitRatio < 0.2
 
         edgeResults.push({
           name: "early-prefix-perturbation",
-          success: cold.success && warm.success,
+          success: bothTurnsHaveValidMetrics,
           readHitRatio: hitRatio,
-          verdict: expectedInvalidation ? "EXPECTED" : "UNEXPECTED",
-          note: expectedInvalidation
-            ? `Early-prefix perturbation broke cache as expected (hit ratio ${(hitRatio * 100).toFixed(1)}%)`
-            : `Early-prefix perturbation still matched cache (${(hitRatio * 100).toFixed(1)}%)`,
+          verdict: !bothTurnsHaveValidMetrics
+            ? "INCONCLUSIVE"
+            : expectedInvalidation
+              ? "EXPECTED"
+              : "UNEXPECTED",
+          reasonCode: !bothTurnsHaveValidMetrics
+            ? "MISSING_TELEMETRY"
+            : expectedInvalidation
+              ? "EXPECTED_PREFIX_INVALIDATION"
+              : "UNEXPECTED_PREFIX_REUSE",
+          note: !bothTurnsHaveValidMetrics
+            ? "Cold or warm turn omitted valid cache telemetry; invalidation is inconclusive"
+            : expectedInvalidation
+              ? `Early-prefix perturbation broke cache as expected (hit ratio ${((hitRatio ?? 0) * 100).toFixed(1)}%)`
+              : `Early-prefix perturbation still matched cache (${((hitRatio ?? 0) * 100).toFixed(1)}%)`,
         })
       }
     }
@@ -1624,13 +1951,11 @@ export async function runEdgeCasesForCandidate(
   {
     const coldCheck = tracker.checkBeforeCall(1, estInput, FIXED_OUTPUT_TOKENS)
     if (!coldCheck.canProceed) {
-      edgeResults.push({
-        name: "suffix-only-change",
-        success: false,
-        readHitRatio: 0,
-        verdict: "INCONCLUSIVE",
-        note: coldCheck.reason ?? "Cap exceeded before cold call",
-      })
+      pushInconclusive(
+        "suffix-only-change",
+        "CAP_EXCEEDED",
+        coldCheck.reason ?? "Cap exceeded before cold call",
+      )
     } else {
       const stablePrefix = buildTrialStablePrefix(
         candidate.manifestEntry.family,
@@ -1640,7 +1965,7 @@ export async function runEdgeCasesForCandidate(
         nonce,
       )
       const userPrompt1 = buildTrialUserPrompt("cold", 101)
-      const cold = await executeSingleTurn(
+      const cold = await executeTurn(
         candidate,
         "policy",
         "cold",
@@ -1648,23 +1973,20 @@ export async function runEdgeCasesForCandidate(
         userPrompt1,
         config.callTimeoutMs,
       )
-      tracker.recordCall(
-        cold.response?.usage?.totalInput ?? estInput,
-        cold.response?.usage?.output ?? FIXED_OUTPUT_TOKENS,
-      )
+      if (!recordEdgeTurn("suffix-only-change", cold)) {
+        return edgeResults
+      }
 
       const warmCheck = tracker.checkBeforeCall(1, estInput, FIXED_OUTPUT_TOKENS)
       if (!warmCheck.canProceed) {
-        edgeResults.push({
-          name: "suffix-only-change",
-          success: false,
-          readHitRatio: 0,
-          verdict: "INCONCLUSIVE",
-          note: warmCheck.reason ?? "Cap exceeded before warm call",
-        })
+        pushInconclusive(
+          "suffix-only-change",
+          "CAP_EXCEEDED",
+          warmCheck.reason ?? "Cap exceeded before warm call",
+        )
       } else {
         const userPrompt2 = buildTrialUserPrompt("warm", 101)
-        const warm = await executeSingleTurn(
+        const warm = await executeTurn(
           candidate,
           "policy",
           "warm",
@@ -1672,27 +1994,411 @@ export async function runEdgeCasesForCandidate(
           userPrompt2,
           config.callTimeoutMs,
         )
-        tracker.recordCall(
-          warm.response?.usage?.totalInput ?? estInput,
-          warm.response?.usage?.output ?? FIXED_OUTPUT_TOKENS,
-        )
+        if (!recordEdgeTurn("suffix-only-change", warm)) {
+          return edgeResults
+        }
 
-        const warmRead = warm.response?.usage?.cacheRead ?? 0
-        const warmTotal = warm.response?.usage?.totalInput ?? 1
-        const hitRatio = warmRead / warmTotal
+        const coldUsage = cold.response?.usage
+        const warmUsage = warm.response?.usage
+        const bothTurnsHaveValidMetrics =
+          cold.success &&
+          warm.success &&
+          isCompleteExtractedTurnUsage(coldUsage) &&
+          isCompleteExtractedTurnUsage(warmUsage)
+        const hitRatio = bothTurnsHaveValidMetrics
+          ? warmUsage.cacheRead / warmUsage.totalInput
+          : undefined
 
         edgeResults.push({
           name: "suffix-only-change",
-          success: cold.success && warm.success,
+          success: bothTurnsHaveValidMetrics,
           readHitRatio: hitRatio,
-          verdict: hitRatio >= 0.5 ? "EXPECTED" : "INCONCLUSIVE",
-          note: `Suffix-only modification achieved ${(hitRatio * 100).toFixed(1)}% cache hit ratio`,
+          verdict: !bothTurnsHaveValidMetrics
+            ? "INCONCLUSIVE"
+            : hitRatio !== undefined && hitRatio >= 0.5
+              ? "EXPECTED"
+              : "INCONCLUSIVE",
+          reasonCode: !bothTurnsHaveValidMetrics
+            ? "MISSING_TELEMETRY"
+            : hitRatio !== undefined && hitRatio >= 0.5
+              ? "EXPECTED_SUFFIX_REUSE"
+              : "INCONCLUSIVE_SUFFIX_REUSE",
+          note: !bothTurnsHaveValidMetrics
+            ? "Cold or warm turn omitted valid cache telemetry; suffix reuse is inconclusive"
+            : `Suffix-only modification achieved ${((hitRatio ?? 0) * 100).toFixed(1)}% cache hit ratio`,
         })
       }
     }
   }
 
   return edgeResults
+}
+
+// ---------------------------------------------------------------------------
+// Artifact Redaction
+// ---------------------------------------------------------------------------
+
+interface SanitizedCostCalculation {
+  readonly costUsd?: number
+  readonly uncachedInputCostUsd?: number
+  readonly cachedReadCostUsd?: number
+  readonly cacheWriteCostUsd?: number
+  readonly outputCostUsd?: number
+  readonly inconclusive: boolean
+  readonly reasonCode?: string
+}
+
+interface SanitizedTurnUsage {
+  readonly totalInput?: number
+  readonly uncachedInput?: number
+  readonly output?: number
+  readonly cacheRead?: number
+  readonly cacheWrite?: number
+  readonly totalTokens?: number
+  readonly reportedTotal?: number
+  readonly inclusiveReconciled: ExtractedTurnUsage["inclusiveReconciled"]
+  readonly validMetrics: boolean
+  readonly cacheMetricsPresent: boolean
+  readonly cacheReadMetricsPresent: boolean
+  readonly cacheWriteMetricsPresent: boolean
+  readonly rawNumericUsage: Record<string, number>
+}
+
+interface SanitizedTurnResponse {
+  readonly ok: boolean
+  readonly outputTextSha256: string
+  readonly outputTextLength: number
+  readonly outputMatchesOk: boolean
+  readonly usage?: SanitizedTurnUsage
+}
+
+interface SanitizedSingleTurnResult {
+  readonly turnType: "cold" | "warm"
+  readonly success: boolean
+  readonly attempts?: number
+  readonly contaminated: boolean
+  readonly requestSha256: string
+  readonly requestBytes?: number
+  readonly cacheFieldPaths: ReadonlyArray<string>
+  readonly response?: SanitizedTurnResponse
+  readonly cost?: SanitizedCostCalculation
+}
+
+interface SanitizedPairedArmResult {
+  readonly arm: PairedArmResult["arm"]
+  readonly cold: SanitizedSingleTurnResult
+  readonly warm: SanitizedSingleTurnResult
+  readonly valid: boolean
+  readonly outputEquivalent: boolean
+  readonly readHitRatio?: number
+  readonly coldContaminationRatio?: number
+  readonly pairedVerdict: PairedArmResult["pairedVerdict"]
+  readonly indicativeCostColdUsd?: number
+  readonly indicativeCostWarmUsd?: number
+  readonly indicativeSavingsUsd?: number
+  readonly reason: string
+}
+
+interface SanitizedCandidateRepetitionResult {
+  readonly repIndex: number
+  readonly arms: Record<string, SanitizedPairedArmResult>
+  readonly valid: boolean
+  readonly policyImprovementVerdict: CandidateRepetitionResult["policyImprovementVerdict"]
+  readonly reason: string
+}
+
+interface SanitizedEdgeCaseTrialResult {
+  readonly name: EdgeCaseTrialResult["name"]
+  readonly success: boolean
+  readonly readHitRatio?: number
+  readonly verdict: EdgeCaseTrialResult["verdict"]
+  readonly reasonCode: EdgeCaseReasonCode
+}
+
+interface SanitizedCandidateValidationSummary {
+  readonly modelId: string
+  readonly status: CandidateValidationSummary["status"]
+  readonly validRepetitions: number
+  readonly totalRepetitions: number
+  readonly meanPolicyHitRatio?: number
+  readonly meanControlHitRatio?: number
+  readonly meanIndicativeSavingsUsd?: number
+  readonly repetitions: ReadonlyArray<SanitizedCandidateRepetitionResult>
+  readonly edgeCases?: ReadonlyArray<SanitizedEdgeCaseTrialResult>
+  readonly reason: string
+}
+
+interface SanitizedFamilyValidationSummary {
+  readonly family: FamilyValidationSummary["family"]
+  readonly modelId?: string
+  readonly status: FamilyValidationSummary["status"]
+  readonly validRepetitions: number
+  readonly totalRepetitions: number
+  readonly meanPolicyHitRatio?: number
+  readonly meanControlHitRatio?: number
+  readonly meanIndicativeSavingsUsd?: number
+  readonly candidates?: Record<string, SanitizedCandidateValidationSummary>
+  readonly repetitions: ReadonlyArray<SanitizedCandidateRepetitionResult>
+  readonly edgeCases?: ReadonlyArray<SanitizedEdgeCaseTrialResult>
+  readonly reason: FamilyValidationSummary["status"]
+}
+
+const SAFE_USAGE_FIELD_NAMES = new Set([
+  "prompt_tokens",
+  "input_tokens",
+  "completion_tokens",
+  "output_tokens",
+  "total_tokens",
+  "prompt_tokens_details.cached_tokens",
+  "prompt_tokens_details.cache_write_tokens",
+  "input_tokens_details.cached_tokens",
+  "input_tokens_details.cache_write_tokens",
+])
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
+}
+
+function safeInteger(value: unknown): number | undefined {
+  return isValidTokenCount(value) ? value : undefined
+}
+
+function sanitizeCost(
+  cost: CostCalculationResult | undefined,
+): SanitizedCostCalculation | undefined {
+  if (!cost) return undefined
+  const sanitized: SanitizedCostCalculation = {
+    inconclusive: cost.inconclusive,
+    ...(typeof cost.reasonCode === "string"
+      ? { reasonCode: cost.reasonCode }
+      : {}),
+  }
+  const fields: ReadonlyArray<
+    readonly [keyof Omit<SanitizedCostCalculation, "inconclusive" | "reasonCode">, unknown]
+  > = [
+    ["costUsd", cost.costUsd],
+    ["uncachedInputCostUsd", cost.uncachedInputCostUsd],
+    ["cachedReadCostUsd", cost.cachedReadCostUsd],
+    ["cacheWriteCostUsd", cost.cacheWriteCostUsd],
+    ["outputCostUsd", cost.outputCostUsd],
+  ]
+  for (const [field, value] of fields) {
+    const numberValue = finiteNumber(value)
+    if (numberValue !== undefined) {
+      Object.assign(sanitized, { [field]: numberValue })
+    }
+  }
+  return sanitized
+}
+
+function sanitizeUsage(
+  usage: ExtractedTurnUsage,
+): SanitizedTurnUsage {
+  const rawNumericUsage: Record<string, number> = {}
+  for (const [field, value] of Object.entries(usage.rawNumericUsage)) {
+    if (SAFE_USAGE_FIELD_NAMES.has(field) && isValidTokenCount(value)) {
+      rawNumericUsage[field] = value
+    }
+  }
+  const sanitized: SanitizedTurnUsage = {
+    inclusiveReconciled: usage.inclusiveReconciled,
+    validMetrics: usage.validMetrics,
+    cacheMetricsPresent: usage.cacheMetricsPresent,
+    cacheReadMetricsPresent: usage.cacheReadMetricsPresent,
+    cacheWriteMetricsPresent: usage.cacheWriteMetricsPresent,
+    rawNumericUsage,
+  }
+  const fields: ReadonlyArray<
+    readonly [keyof Omit<SanitizedTurnUsage, "inclusiveReconciled" | "validMetrics" | "cacheMetricsPresent" | "cacheReadMetricsPresent" | "cacheWriteMetricsPresent" | "rawNumericUsage">, unknown]
+  > = [
+    ["totalInput", usage.totalInput],
+    ["uncachedInput", usage.uncachedInput],
+    ["output", usage.output],
+    ["cacheRead", usage.cacheRead],
+    ["cacheWrite", usage.cacheWrite],
+    ["totalTokens", usage.totalTokens],
+    ["reportedTotal", usage.reportedTotal],
+  ]
+  for (const [field, value] of fields) {
+    const integerValue = safeInteger(value)
+    if (integerValue !== undefined) {
+      Object.assign(sanitized, { [field]: integerValue })
+    }
+  }
+  return sanitized
+}
+
+function sanitizeTurnResponse(
+  response: ExtractedTurnResponse,
+): SanitizedTurnResponse {
+  return {
+    ok: response.ok,
+    outputTextSha256: response.outputTextSha256,
+    outputTextLength: safeInteger(response.outputTextLength) ?? 0,
+    outputMatchesOk: response.outputMatchesOk,
+    ...(response.usage ? { usage: sanitizeUsage(response.usage) } : {}),
+  }
+}
+
+function sanitizeSingleTurn(
+  result: SingleTurnResult,
+): SanitizedSingleTurnResult {
+  return {
+    turnType: result.turnType,
+    success: result.success,
+    ...(safeInteger(result.attempts) !== undefined
+      ? { attempts: safeInteger(result.attempts) }
+      : {}),
+    contaminated: result.contaminated,
+    requestSha256: result.requestSha256,
+    ...(safeInteger(result.requestBytes) !== undefined
+      ? { requestBytes: safeInteger(result.requestBytes) }
+      : {}),
+    cacheFieldPaths: [...result.cacheFieldPaths],
+    ...(result.response ? { response: sanitizeTurnResponse(result.response) } : {}),
+    ...(result.cost ? { cost: sanitizeCost(result.cost) } : {}),
+  }
+}
+
+function sanitizeArm(
+  arm: PairedArmResult,
+): SanitizedPairedArmResult {
+  return {
+    arm: arm.arm,
+    cold: sanitizeSingleTurn(arm.cold),
+    warm: sanitizeSingleTurn(arm.warm),
+    valid: arm.valid,
+    outputEquivalent: arm.outputEquivalent,
+    ...(finiteNumber(arm.readHitRatio) !== undefined
+      ? { readHitRatio: finiteNumber(arm.readHitRatio) }
+      : {}),
+    ...(finiteNumber(arm.coldContaminationRatio) !== undefined
+      ? { coldContaminationRatio: finiteNumber(arm.coldContaminationRatio) }
+      : {}),
+    pairedVerdict: arm.pairedVerdict,
+    ...(finiteNumber(arm.indicativeCostColdUsd) !== undefined
+      ? { indicativeCostColdUsd: finiteNumber(arm.indicativeCostColdUsd) }
+      : {}),
+    ...(finiteNumber(arm.indicativeCostWarmUsd) !== undefined
+      ? { indicativeCostWarmUsd: finiteNumber(arm.indicativeCostWarmUsd) }
+      : {}),
+    ...(finiteNumber(arm.indicativeSavingsUsd) !== undefined
+      ? { indicativeSavingsUsd: finiteNumber(arm.indicativeSavingsUsd) }
+      : {}),
+    // Never relay free-form diagnostic text. The verdict is the stable reason code.
+    reason: arm.pairedVerdict,
+  }
+}
+
+function sanitizeRepetition(
+  repetition: CandidateRepetitionResult,
+): SanitizedCandidateRepetitionResult {
+  const arms: Record<string, SanitizedPairedArmResult> = {}
+  for (const [name, arm] of Object.entries(repetition.arms)) {
+    if (
+      name === "policy" ||
+      name === "control" ||
+      name === "provider-managed"
+    ) {
+      arms[name] = sanitizeArm(arm)
+    }
+  }
+  return {
+    repIndex: safeInteger(repetition.repIndex) ?? 0,
+    arms,
+    valid: repetition.valid,
+    policyImprovementVerdict: repetition.policyImprovementVerdict,
+    reason: repetition.policyImprovementVerdict,
+  }
+}
+
+function sanitizeEdgeCase(
+  edgeCase: EdgeCaseTrialResult,
+): SanitizedEdgeCaseTrialResult {
+  return {
+    name: edgeCase.name,
+    success: edgeCase.success,
+    ...(edgeCase.success && finiteNumber(edgeCase.readHitRatio) !== undefined
+      ? { readHitRatio: finiteNumber(edgeCase.readHitRatio) }
+      : {}),
+    verdict: edgeCase.verdict,
+    reasonCode: edgeCase.reasonCode,
+  }
+}
+
+function sanitizeCandidateSummary(
+  summary: CandidateValidationSummary,
+): SanitizedCandidateValidationSummary {
+  return {
+    modelId: summary.modelId,
+    status: summary.status,
+    validRepetitions: summary.validRepetitions,
+    totalRepetitions: summary.totalRepetitions,
+    ...(finiteNumber(summary.meanPolicyHitRatio) !== undefined
+      ? { meanPolicyHitRatio: finiteNumber(summary.meanPolicyHitRatio) }
+      : {}),
+    ...(finiteNumber(summary.meanControlHitRatio) !== undefined
+      ? { meanControlHitRatio: finiteNumber(summary.meanControlHitRatio) }
+      : {}),
+    ...(finiteNumber(summary.meanIndicativeSavingsUsd) !== undefined
+      ? { meanIndicativeSavingsUsd: finiteNumber(summary.meanIndicativeSavingsUsd) }
+      : {}),
+    repetitions: summary.repetitions.map(sanitizeRepetition),
+    ...(summary.edgeCases
+      ? { edgeCases: summary.edgeCases.map(sanitizeEdgeCase) }
+      : {}),
+    reason: summary.status,
+  }
+}
+
+function sanitizeFamilySummary(
+  summary: FamilyValidationSummary,
+): SanitizedFamilyValidationSummary {
+  const candidates: Record<string, SanitizedCandidateValidationSummary> = {}
+  if (summary.candidates) {
+    for (const [modelId, candidate] of Object.entries(summary.candidates)) {
+      candidates[modelId] = sanitizeCandidateSummary(candidate)
+    }
+  }
+  return {
+    family: summary.family,
+    ...(summary.modelId ? { modelId: summary.modelId } : {}),
+    status: summary.status,
+    validRepetitions: summary.validRepetitions,
+    totalRepetitions: summary.totalRepetitions,
+    ...(finiteNumber(summary.meanPolicyHitRatio) !== undefined
+      ? { meanPolicyHitRatio: finiteNumber(summary.meanPolicyHitRatio) }
+      : {}),
+    ...(finiteNumber(summary.meanControlHitRatio) !== undefined
+      ? { meanControlHitRatio: finiteNumber(summary.meanControlHitRatio) }
+      : {}),
+    ...(finiteNumber(summary.meanIndicativeSavingsUsd) !== undefined
+      ? { meanIndicativeSavingsUsd: finiteNumber(summary.meanIndicativeSavingsUsd) }
+      : {}),
+    ...(summary.candidates ? { candidates } : {}),
+    repetitions: summary.repetitions.map(sanitizeRepetition),
+    ...(summary.edgeCases
+      ? { edgeCases: summary.edgeCases.map(sanitizeEdgeCase) }
+      : {}),
+    reason: summary.status,
+  }
+}
+
+/**
+ * Keep the final validation artifact an allowlisted evidence record. In
+ * particular, never copy free-form errors, prompt text, request headers, or
+ * future fields from the live turn objects into a durable artifact.
+ */
+export function sanitizeFamilyRollups(
+  rollups: Record<string, FamilyValidationSummary>,
+): Record<string, SanitizedFamilyValidationSummary> {
+  const sanitized: Record<string, SanitizedFamilyValidationSummary> = {}
+  for (const [family, summary] of Object.entries(rollups)) {
+    if (OFFICIAL_BILLING_FAMILIES.includes(summary.family)) {
+      sanitized[family] = sanitizeFamilySummary(summary)
+    }
+  }
+  return sanitized
 }
 
 // ---------------------------------------------------------------------------
@@ -1761,9 +2467,26 @@ export function summarizeCandidateRollup(
   const isProviderManagedOnly = family === "Google" || family === "xAI"
 
   if (isProviderManagedOnly) {
-    const hitRatios = validReps.map(
-      (r) => r.arms["provider-managed"]?.readHitRatio ?? 0,
-    )
+    const providerArms = validReps
+      .map((r) => r.arms["provider-managed"])
+      .filter(
+        (arm): arm is PairedArmResult =>
+          arm !== undefined &&
+          arm.valid &&
+          Number.isFinite(arm.readHitRatio),
+      )
+    if (providerArms.length !== validReps.length) {
+      return {
+        modelId,
+        status: "INCONCLUSIVE",
+        validRepetitions: providerArms.length,
+        totalRepetitions: repetitions.length,
+        repetitions,
+        edgeCases,
+        reason: "One or more provider-managed repetitions lacked a valid cache-read metric",
+      }
+    }
+    const hitRatios = providerArms.map((arm) => arm.readHitRatio)
     const meanHitRatio =
       hitRatios.reduce((a, b) => a + b, 0) / hitRatios.length
     const status =
@@ -1785,24 +2508,54 @@ export function summarizeCandidateRollup(
     }
   }
 
-  const policyHitRatios = validReps.map(
-    (r) => r.arms.policy?.readHitRatio ?? 0,
+  const policyArms = validReps
+    .map((r) => r.arms.policy)
+    .filter(
+      (arm): arm is PairedArmResult =>
+        arm !== undefined &&
+        arm.valid &&
+        Number.isFinite(arm.readHitRatio),
+    )
+  const controlArms = validReps
+    .map((r) => r.arms.control)
+    .filter(
+      (arm): arm is PairedArmResult =>
+        arm !== undefined &&
+        arm.valid &&
+        Number.isFinite(arm.readHitRatio),
+    )
+  if (
+    policyArms.length !== validReps.length ||
+    controlArms.length !== validReps.length
+  ) {
+    return {
+      modelId,
+      status: "INCONCLUSIVE",
+      validRepetitions: Math.min(policyArms.length, controlArms.length),
+      totalRepetitions: repetitions.length,
+      repetitions,
+      edgeCases,
+      reason: "One or more policy/control repetitions lacked a valid cache-read metric",
+    }
+  }
+  const policyHitRatios = policyArms.map((arm) => arm.readHitRatio)
+  const controlHitRatios = controlArms.map((arm) => arm.readHitRatio)
+  const savings = validReps.map(
+    (r) => r.arms.policy?.indicativeSavingsUsd,
   )
-  const controlHitRatios = validReps.map(
-    (r) => r.arms.control?.readHitRatio ?? 0,
+  const completeSavings = savings.filter(
+    (value): value is number =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0,
   )
-  const savings = validReps
-    .map((r) => r.arms.policy?.indicativeSavingsUsd ?? 0)
-    .filter((s) => s >= 0)
 
   const meanPolicyHitRatio =
     policyHitRatios.reduce((a, b) => a + b, 0) / policyHitRatios.length
   const meanControlHitRatio =
     controlHitRatios.reduce((a, b) => a + b, 0) / controlHitRatios.length
   const meanIndicativeSavingsUsd =
-    savings.length > 0
-      ? savings.reduce((a, b) => a + b, 0) / savings.length
-      : 0
+    completeSavings.length === savings.length && completeSavings.length > 0
+      ? completeSavings.reduce((a, b) => a + b, 0) / completeSavings.length
+      : undefined
 
   const policySupportedCount = validReps.filter(
     (r) => r.policyImprovementVerdict === "POLICY_IMPROVEMENT_SUPPORTED",
@@ -2031,152 +2784,50 @@ export async function runFamilyProbe(
 
       for (const candidate of candidatesToRun) {
         const candidateId = candidate.catalogId ?? candidate.manifestEntry.id
-        const estInput = estimateCandidateInputTokens(candidateId)
         const repetitions: Array<CandidateRepetitionResult> = []
 
         for (let rep = 0; rep < config.reps; rep++) {
-          const nonce = randomBytes(4).toString("hex")
           const arms: Record<string, PairedArmResult> = {}
 
           if (isProviderManagedOnly) {
-            // Check before cold call
-            const coldCap = tracker.checkBeforeCall(1, estInput, FIXED_OUTPUT_TOKENS)
-            if (!coldCap.canProceed) {
-              hasCapViolation = true
-              terminationReason = coldCap.reason ?? "Cap exceeded"
-              break
-            }
-
-            const stablePrefix = buildTrialStablePrefix(
-              family,
-              candidateId,
+            const pair = await executeArmPair(
+              candidate,
               "provider-managed",
               rep,
-              nonce,
+              randomBytes(4).toString("hex"),
+              config,
+              tracker,
             )
-            const coldPrompt = buildTrialUserPrompt("cold", rep)
-            const warmPrompt = buildTrialUserPrompt("warm", rep)
-
-            const cold = await executeSingleTurn(
-              candidate,
-              "provider-managed",
-              "cold",
-              stablePrefix,
-              coldPrompt,
-              config.callTimeoutMs,
-            )
-            const coldOverrun = tracker.recordCall(
-              cold.response?.usage?.totalInput ?? estInput,
-              cold.response?.usage?.output ?? FIXED_OUTPUT_TOKENS,
-            )
-            if (coldOverrun.hasOverrun) {
+            if (pair.capViolationReason !== undefined) {
               hasCapViolation = true
-              terminationReason = coldOverrun.reason ?? "Actual cap overrun"
-            }
-
-            // Check before warm call
-            const warmCap = tracker.checkBeforeCall(1, estInput, FIXED_OUTPUT_TOKENS)
-            if (!warmCap.canProceed) {
-              hasCapViolation = true
-              terminationReason = warmCap.reason ?? "Cap exceeded"
+              terminationReason = pair.capViolationReason
               break
             }
-
-            const warm = await executeSingleTurn(
-              candidate,
-              "provider-managed",
-              "warm",
-              stablePrefix,
-              warmPrompt,
-              config.callTimeoutMs,
-            )
-            const warmOverrun = tracker.recordCall(
-              warm.response?.usage?.totalInput ?? estInput,
-              warm.response?.usage?.output ?? FIXED_OUTPUT_TOKENS,
-            )
-            if (warmOverrun.hasOverrun) {
-              hasCapViolation = true
-              terminationReason = warmOverrun.reason ?? "Actual cap overrun"
+            if (pair.arm !== undefined) {
+              arms["provider-managed"] = pair.arm
             }
-
-            arms["provider-managed"] = classifyArmTrial(
-              "provider-managed",
-              cold,
-              warm,
-              candidate.manifestEntry,
-            )
           } else {
             // Counterbalance order: even reps policy-first, odd reps control-first
             const armOrder: Array<"policy" | "control"> =
               rep % 2 === 0 ? ["policy", "control"] : ["control", "policy"]
 
             for (const armType of armOrder) {
-              // Check before cold call
-              const coldCap = tracker.checkBeforeCall(1, estInput, FIXED_OUTPUT_TOKENS)
-              if (!coldCap.canProceed) {
-                hasCapViolation = true
-                terminationReason = coldCap.reason ?? "Cap exceeded"
-                break
-              }
-
-              const stablePrefix = buildTrialStablePrefix(
-                family,
-                candidateId,
+              const pair = await executeArmPair(
+                candidate,
                 armType,
                 rep,
-                nonce,
+                randomBytes(4).toString("hex"),
+                config,
+                tracker,
               )
-              const coldPrompt = buildTrialUserPrompt("cold", rep)
-              const warmPrompt = buildTrialUserPrompt("warm", rep)
-
-              const cold = await executeSingleTurn(
-                candidate,
-                armType,
-                "cold",
-                stablePrefix,
-                coldPrompt,
-                config.callTimeoutMs,
-              )
-              const coldOverrun = tracker.recordCall(
-                cold.response?.usage?.totalInput ?? estInput,
-                cold.response?.usage?.output ?? FIXED_OUTPUT_TOKENS,
-              )
-              if (coldOverrun.hasOverrun) {
+              if (pair.capViolationReason !== undefined) {
                 hasCapViolation = true
-                terminationReason = coldOverrun.reason ?? "Actual cap overrun"
-              }
-
-              // Check before warm call
-              const warmCap = tracker.checkBeforeCall(1, estInput, FIXED_OUTPUT_TOKENS)
-              if (!warmCap.canProceed) {
-                hasCapViolation = true
-                terminationReason = warmCap.reason ?? "Cap exceeded"
+                terminationReason = pair.capViolationReason
                 break
               }
-
-              const warm = await executeSingleTurn(
-                candidate,
-                armType,
-                "warm",
-                stablePrefix,
-                warmPrompt,
-                config.callTimeoutMs,
-              )
-              const warmOverrun = tracker.recordCall(
-                warm.response?.usage?.totalInput ?? estInput,
-                warm.response?.usage?.output ?? FIXED_OUTPUT_TOKENS,
-              )
-              if (warmOverrun.hasOverrun) {
-                hasCapViolation = true
-                terminationReason = warmOverrun.reason ?? "Actual cap overrun"
+              if (pair.arm !== undefined) {
+                arms[armType] = pair.arm
               }
-
-              arms[armType] = classifyArmTrial(
-                armType,
-                cold,
-                warm,
-                candidate.manifestEntry,
-              )
             }
           }
 
@@ -2196,6 +2847,10 @@ export async function runFamilyProbe(
         if (config.runEdges && !hasCapViolation) {
           edgeCases = await runEdgeCasesForCandidate(candidate, config, tracker)
           lastEdgeCases = edgeCases
+          if (tracker.capViolationReason !== undefined) {
+            hasCapViolation = true
+            terminationReason = tracker.capViolationReason
+          }
         }
 
         candidateSummaries[candidateId] = summarizeCandidateRollup(
@@ -2236,7 +2891,7 @@ export async function runFamilyProbe(
       manifest: CACHE_VALIDATION_MANIFEST,
       selections: planArtifact.selections,
       plannedReservations: planArtifact.plannedReservations,
-      familyRollups,
+      familyRollups: sanitizeFamilyRollups(familyRollups),
       executionStats: tracker.stats,
       limitations: [
         "All cost calculations are INDICATIVE_UNVERIFIED and based on documented default-tier token rates from GitHub Copilot documentation. Actual invoice dollars/savings were not directly observed.",

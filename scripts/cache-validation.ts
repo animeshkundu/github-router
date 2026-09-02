@@ -83,7 +83,7 @@ export interface DocumentedModelRate {
  * Rates (USD per million tokens):
  * - OpenAI:
  *     - GPT-5.6 Luna: $0.20 input / $1.20 output / $0.02 cached read / $0.25 cache write
- *     - GPT-5.4 Nano: $0.20 input / $1.25 output / $0.02 cached read / $0.25 cache write (Luna wins output tie)
+ *     - GPT-5.4 Nano: $0.20 input / $1.25 output / $0.02 cached read / cache-write rate not listed (Luna wins output tie)
  * - Anthropic:
  *     - Claude Haiku 4.5: $1.00 input / $5.00 output / $0.10 cached read / $1.25 cache write (aliases: claude-haiku-4.5, claude-haiku-4-5)
  * - Google:
@@ -112,7 +112,6 @@ export const CACHE_VALIDATION_MANIFEST: ReadonlyArray<DocumentedModelRate> = Obj
     inputRatePerMillion: 0.20,
     outputRatePerMillion: 1.25,
     cachedInputRatePerMillion: 0.02,
-    cacheWriteRatePerMillion: 0.25,
     aliases: Object.freeze(["gpt-5.4-nano"]),
   },
   // Anthropic
@@ -868,6 +867,10 @@ export interface TokenUsageCounts {
   readonly outputTokens?: number
 }
 
+export type CostInconclusiveReasonCode =
+  | "INCONCLUSIVE_MISSING_RATE_OR_BUCKET"
+  | "INCONCLUSIVE_INVALID_BUCKET"
+
 export interface CostCalculationResult {
   readonly costUsd?: number
   readonly uncachedInputCostUsd?: number
@@ -875,42 +878,83 @@ export interface CostCalculationResult {
   readonly cacheWriteCostUsd?: number
   readonly outputCostUsd?: number
   readonly inconclusive: boolean
+  readonly reasonCode?: CostInconclusiveReasonCode
   readonly reason?: string
+}
+
+function isValidTokenCount(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0
+  )
+}
+
+function inconclusiveCost(
+  reasonCode: CostInconclusiveReasonCode,
+  reason: string,
+): CostCalculationResult {
+  return { inconclusive: true, reasonCode, reason: `${reasonCode}: ${reason}` }
 }
 
 /**
  * Calculates theoretical cost in USD using documented rates.
- * If usage specifies tokens for a category whose rate is missing/undefined (e.g. cache write rate missing),
- * returns `{ inconclusive: true, reason: ... }`.
+ * Every disjoint token bucket must be present and valid. Missing buckets or
+ * undocumented rates remain explicitly inconclusive and are never treated as
+ * zero, because zero is an observed value rather than an absence of evidence.
  */
 export function calculateDocumentedCost(
   usage: TokenUsageCounts,
   rates: DocumentedModelRate,
 ): CostCalculationResult {
-  const uncachedInput = usage.uncachedInputTokens ?? 0
-  const cachedRead = usage.cachedReadTokens ?? 0
-  const cacheWrite = usage.cacheWriteTokens ?? 0
-  const output = usage.outputTokens ?? 0
+  const buckets: ReadonlyArray<readonly [string, unknown]> = [
+    ["uncached input", usage.uncachedInputTokens],
+    ["cached read", usage.cachedReadTokens],
+    ["cache write", usage.cacheWriteTokens],
+    ["output", usage.outputTokens],
+  ]
 
-  if (cachedRead > 0 && rates.cachedInputRatePerMillion === undefined) {
-    return {
-      inconclusive: true,
-      reason: `Missing documented cached input rate for ${rates.id}`,
-    }
+  const missingBucket = buckets.find(([, value]) => value === undefined)
+  if (missingBucket) {
+    return inconclusiveCost(
+      "INCONCLUSIVE_MISSING_RATE_OR_BUCKET",
+      `Missing ${missingBucket[0]} token bucket for ${rates.id}`,
+    )
   }
 
-  if (cacheWrite > 0 && rates.cacheWriteRatePerMillion === undefined) {
-    return {
-      inconclusive: true,
-      reason: `Missing documented cache write rate for ${rates.id}`,
-    }
+  const invalidBucket = buckets.find(([, value]) => !isValidTokenCount(value))
+  if (invalidBucket) {
+    return inconclusiveCost(
+      "INCONCLUSIVE_INVALID_BUCKET",
+      `Invalid ${invalidBucket[0]} token bucket for ${rates.id}`,
+    )
   }
 
-  const uncachedInputCostUsd = (uncachedInput / 1_000_000) * rates.inputRatePerMillion
+  if (rates.cachedInputRatePerMillion === undefined) {
+    return inconclusiveCost(
+      "INCONCLUSIVE_MISSING_RATE_OR_BUCKET",
+      `Missing documented cached input rate for ${rates.id}`,
+    )
+  }
+
+  if (rates.cacheWriteRatePerMillion === undefined) {
+    return inconclusiveCost(
+      "INCONCLUSIVE_MISSING_RATE_OR_BUCKET",
+      `Missing documented cache write rate for ${rates.id}`,
+    )
+  }
+
+  const uncachedInput = usage.uncachedInputTokens as number
+  const cachedRead = usage.cachedReadTokens as number
+  const cacheWrite = usage.cacheWriteTokens as number
+  const output = usage.outputTokens as number
+
+  const uncachedInputCostUsd =
+    (uncachedInput / 1_000_000) * rates.inputRatePerMillion
   const cachedReadCostUsd =
-    cachedRead > 0 ? (cachedRead / 1_000_000) * (rates.cachedInputRatePerMillion ?? 0) : 0
+    (cachedRead / 1_000_000) * rates.cachedInputRatePerMillion
   const cacheWriteCostUsd =
-    cacheWrite > 0 ? (cacheWrite / 1_000_000) * (rates.cacheWriteRatePerMillion ?? 0) : 0
+    (cacheWrite / 1_000_000) * rates.cacheWriteRatePerMillion
   const outputCostUsd = (output / 1_000_000) * rates.outputRatePerMillion
 
   const totalCost =
@@ -983,8 +1027,8 @@ export function buildSaltedPrompt(
 export interface CacheTrialSample {
   readonly inputTokens: number
   readonly outputTokens: number
-  readonly cachedReadTokens?: number
-  readonly cacheWriteTokens?: number
+  readonly cachedReadTokens: number
+  readonly cacheWriteTokens: number
 }
 
 export interface PairedVerdictResult {
@@ -1003,30 +1047,72 @@ export function classifyPairedTrialVerdict(
   warm: CacheTrialSample,
   rates?: DocumentedModelRate,
 ): PairedVerdictResult {
-  const warmRead = warm.cachedReadTokens ?? 0
-  const warmTotalInput = warm.inputTokens
-  const coldWrite = cold.cacheWriteTokens ?? 0
-
-  if (warmTotalInput <= 0) {
+  const tokenCounts: ReadonlyArray<readonly [string, unknown]> = [
+    ["cold input", cold.inputTokens],
+    ["cold output", cold.outputTokens],
+    ["cold cache read", cold.cachedReadTokens],
+    ["cold cache write", cold.cacheWriteTokens],
+    ["warm input", warm.inputTokens],
+    ["warm output", warm.outputTokens],
+    ["warm cache read", warm.cachedReadTokens],
+    ["warm cache write", warm.cacheWriteTokens],
+  ]
+  const invalid = tokenCounts.find(([, value]) => !isValidTokenCount(value))
+  if (invalid) {
     return {
       verdict: "inconclusive",
       readHitRatio: 0,
       savingsPercentage: 0,
-      reason: "Warm trial reported zero or invalid input tokens",
+      reason: `Missing or invalid ${invalid[0]} token count`,
+    }
+  }
+
+  const warmRead = warm.cachedReadTokens
+  const warmWrite = warm.cacheWriteTokens
+  const warmTotalInput = warm.inputTokens
+  const coldWrite = cold.cacheWriteTokens
+  const invalidComposition =
+    cold.cachedReadTokens + cold.cacheWriteTokens > cold.inputTokens ||
+    warmRead + warmWrite > warmTotalInput
+  if (warmTotalInput <= 0 || invalidComposition) {
+    return {
+      verdict: "inconclusive",
+      readHitRatio: 0,
+      savingsPercentage: 0,
+      reason: invalidComposition
+        ? "Cache component counts exceed the reported input total"
+        : "Warm trial reported zero or invalid input tokens",
     }
   }
 
   const readHitRatio = Math.min(1.0, Math.max(0.0, warmRead / warmTotalInput))
 
   let estimatedSavingsUsd: number | undefined
-  if (rates && rates.cachedInputRatePerMillion !== undefined) {
-    const fullCost = (warmTotalInput / 1_000_000) * rates.inputRatePerMillion
-    const uncachedInput = Math.max(0, warmTotalInput - warmRead)
-    const actualCost =
-      (uncachedInput / 1_000_000) * rates.inputRatePerMillion +
-      (warmRead / 1_000_000) * rates.cachedInputRatePerMillion
-
-    estimatedSavingsUsd = Math.max(0, fullCost - actualCost)
+  if (rates) {
+    const baseline = calculateDocumentedCost(
+      {
+        uncachedInputTokens: warmTotalInput,
+        cachedReadTokens: 0,
+        cacheWriteTokens: 0,
+        outputTokens: warm.outputTokens,
+      },
+      rates,
+    )
+    const cached = calculateDocumentedCost(
+      {
+        uncachedInputTokens: warmTotalInput - warmRead - warmWrite,
+        cachedReadTokens: warmRead,
+        cacheWriteTokens: warmWrite,
+        outputTokens: warm.outputTokens,
+      },
+      rates,
+    )
+    if (!baseline.inconclusive && !cached.inconclusive) {
+      estimatedSavingsUsd = Math.max(
+        0,
+        (baseline.costUsd ?? 0) - (cached.costUsd ?? 0),
+      )
+    }
   }
 
   if (readHitRatio >= 0.50) {
@@ -1044,7 +1130,7 @@ export function classifyPairedTrialVerdict(
       verdict: "regression",
       readHitRatio: 0,
       savingsPercentage: 0,
-      estimatedSavingsUsd: 0,
+      estimatedSavingsUsd,
       reason: "Cold turn created cache writes but warm turn achieved zero cache reads",
     }
   }
@@ -1054,7 +1140,7 @@ export function classifyPairedTrialVerdict(
       verdict: "uncached",
       readHitRatio: 0,
       savingsPercentage: 0,
-      estimatedSavingsUsd: 0,
+      estimatedSavingsUsd,
       reason: "Zero cached input tokens observed on warm turn",
     }
   }

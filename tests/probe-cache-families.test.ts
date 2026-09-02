@@ -15,7 +15,7 @@
  * - Policy application on policy vs control arms
  * - Fetch instrumentation, attempt counting, and contamination detection (401 refresh / multiple attempts)
  * - Usage normalization and inclusive reconciliation (OpenAI total reconciliation, nested output content text)
- * - Short output contract verification (fixed max output 16, exact OK validation, hash & length matching)
+ * - Short output contract verification (fixed max output 64, exact OK validation, hash & length matching)
  * - Documented cost calculation (within-model indicative costs, inconclusive on missing rates)
  * - Paired arm verdict classification (cached, uncached, inconclusive, regression)
  * - Edge case evaluation (sub-threshold, growing-history conversation, prefix perturbation, suffix change)
@@ -37,7 +37,10 @@ import {
   ExecutionCapTracker,
   extractUsageFromResponse,
   parseProbeArgs,
+  executeArmPair,
+  runEdgeCasesForCandidate,
   runFamilyProbe,
+  sanitizeFamilyRollups,
   type ConstructedRequest,
   type SingleTurnResult,
 } from "../scripts/probe-cache-families"
@@ -297,6 +300,26 @@ describe("Live Mode Gating Preconditions", () => {
 })
 
 describe("Execution Cap Tracker", () => {
+  test("reserves estimated tokens when usage telemetry is unavailable", () => {
+    const config = parseProbeArgs([
+      "--max-calls",
+      "2",
+      "--max-input-tokens",
+      "3000",
+      "--max-output-tokens",
+      "32",
+    ])
+    const tracker = new ExecutionCapTracker(config)
+    const first = tracker.recordCall()
+    expect(first.hasOverrun).toBe(false)
+    expect(tracker.usageUnknown).toBe(true)
+    const reserved = tracker.reserveEstimatedCall(2500, 16)
+    expect(reserved.hasOverrun).toBe(false)
+    const blocked = tracker.checkBeforeCall(1, 600, 16)
+    expect(blocked.canProceed).toBe(false)
+    expect(blocked.reason).toContain("Exceeded max input tokens cap")
+  })
+
   test("enforces max calls, token caps, and wallclock limits with estimatedCalls", () => {
     const config = parseProbeArgs([
       "--max-calls",
@@ -325,7 +348,250 @@ describe("Execution Cap Tracker", () => {
     expect(check.canProceed).toBe(false)
     expect(check.reason).toContain("Exceeded max calls cap")
   })
+
+  test("records conservative estimated usage through recordTurn when telemetry is missing", () => {
+    const config = parseProbeArgs([
+      "--max-calls",
+      "2",
+      "--max-input-tokens",
+      "3000",
+      "--max-output-tokens",
+      "128",
+    ])
+    const tracker = new ExecutionCapTracker(config)
+    const result: SingleTurnResult = {
+      turnType: "cold",
+      success: false,
+      attempts: 1,
+      contaminated: false,
+      requestSha256: "hash",
+      requestBytes: 10,
+      cacheFieldPaths: [],
+    }
+
+    const first = tracker.recordTurn(result, 2500)
+    expect(first.hasOverrun).toBe(false)
+    expect(tracker.usageUnknown).toBe(true)
+    expect(tracker.stats.totalInputTokens).toBe(2500)
+    expect(tracker.stats.totalOutputTokens).toBe(64)
+
+    const second = tracker.recordTurn(result, 600)
+    expect(second.hasOverrun).toBe(true)
+    expect(second.reason).toContain("Estimated input tokens exceeded cap")
+    expect(tracker.capViolationReason).toBe(second.reason)
+  })
+
+  test("reports post-call overrun from actual usage", () => {
+    const config = parseProbeArgs([
+      "--max-calls",
+      "4",
+      "--max-input-tokens",
+      "3000",
+      "--max-output-tokens",
+      "32",
+    ])
+    const tracker = new ExecutionCapTracker(config)
+    const result: SingleTurnResult = {
+      turnType: "warm",
+      success: true,
+      attempts: 1,
+      contaminated: false,
+      requestSha256: "hash",
+      requestBytes: 10,
+      cacheFieldPaths: [],
+      response: {
+        ok: true,
+        outputTextSha256: "ok",
+        outputTextLength: 2,
+        outputMatchesOk: true,
+        usage: {
+          totalInput: 3500,
+          uncachedInput: 3500,
+          output: 2,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 3502,
+          reportedTotal: 3502,
+          inclusiveReconciled: true,
+          validMetrics: true,
+          cacheMetricsPresent: true,
+          cacheReadMetricsPresent: true,
+          cacheWriteMetricsPresent: true,
+          rawNumericUsage: {},
+        },
+      },
+    }
+
+    const overrun = tracker.recordTurn(result, 3500)
+    expect(overrun.hasOverrun).toBe(true)
+    expect(overrun.reason).toContain("Actual input tokens exceeded cap")
+    expect(tracker.capViolationReason).toBe(overrun.reason)
+  })
+
+  test("retains the cap reason when a pre-call check blocks an edge", () => {
+    const config = parseProbeArgs([
+      "--max-calls",
+      "1",
+      "--max-input-tokens",
+      "100",
+      "--max-output-tokens",
+      "16",
+    ])
+    const tracker = new ExecutionCapTracker(config)
+    const blocked = tracker.checkBeforeCall(1, 1500, 16)
+    expect(blocked.canProceed).toBe(false)
+    expect(tracker.capViolationReason).toBe(blocked.reason)
+  })
+
+  test("stops an arm pair immediately after a completed-turn cap overrun", async () => {
+    const candidate = selectCheapestPerFamily(createFullMockCatalog(), {
+      families: ["Anthropic"],
+    }).families.Anthropic.selected!
+    const config = parseProbeArgs([
+      "--max-calls",
+      "4",
+      "--max-input-tokens",
+      "500000",
+      "--max-output-tokens",
+      "128",
+    ])
+    const tracker = new ExecutionCapTracker(config)
+    const result: SingleTurnResult = {
+      turnType: "cold",
+      success: true,
+      attempts: 1,
+      contaminated: false,
+      requestSha256: "hash",
+      requestBytes: 10,
+      cacheFieldPaths: [],
+      response: {
+        ok: true,
+        outputTextSha256: "ok",
+        outputTextLength: 2,
+        outputMatchesOk: true,
+        usage: {
+          totalInput: 500001,
+          uncachedInput: 500001,
+          output: 2,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 500003,
+          reportedTotal: 500003,
+          inclusiveReconciled: true,
+          validMetrics: true,
+          cacheMetricsPresent: true,
+          cacheReadMetricsPresent: true,
+          cacheWriteMetricsPresent: true,
+          rawNumericUsage: {},
+        },
+      },
+    }
+    let calls = 0
+    const pair = await executeArmPair(
+      candidate,
+      "policy",
+      0,
+      "nonce",
+      config,
+      tracker,
+      async () => {
+        calls++
+        return result
+      },
+    )
+    expect(calls).toBe(1)
+    expect(pair.arm).toBeUndefined()
+    expect(pair.capViolationReason).toContain("input tokens exceeded cap")
+  })
+
+  test("sanitizes edge diagnostics to reason codes in final rollups", () => {
+    const summary = {
+      family: "OpenAI" as const,
+      modelId: "gpt-5.6-luna",
+      status: "INCONCLUSIVE" as const,
+      validRepetitions: 0,
+      totalRepetitions: 0,
+      repetitions: [],
+      edgeCases: [
+        {
+          name: "suffix-only-change" as const,
+          success: false,
+          verdict: "INCONCLUSIVE" as const,
+          reasonCode: "CAP_EXCEEDED" as const,
+          note: "secret prompt, C:\\Users\\person, and Authorization: Bearer token",
+        },
+      ],
+      reason: "free-form summary reason",
+    }
+    const serialized = JSON.stringify(sanitizeFamilyRollups({ OpenAI: summary }))
+    expect(serialized).toContain("CAP_EXCEEDED")
+    expect(serialized).not.toContain("secret prompt")
+    expect(serialized).not.toContain("Bearer")
+    expect(serialized).not.toContain("C:\\Users\\person")
+    expect(serialized).not.toContain("free-form summary reason")
+  })
+
+  test("does not include free-form edge notes in sanitized output", () => {
+    const summary = {
+      family: "OpenAI" as const,
+      modelId: "gpt-5.6-luna",
+      status: "INCONCLUSIVE" as const,
+      validRepetitions: 0,
+      totalRepetitions: 0,
+      repetitions: [],
+      edgeCases: [
+        {
+          name: "suffix-only-change" as const,
+          success: false,
+          verdict: "INCONCLUSIVE" as const,
+          reasonCode: "CAP_EXCEEDED" as const,
+          note: "do not serialize this note",
+        },
+      ],
+      reason: "summary detail",
+    }
+    const serialized = JSON.stringify(sanitizeFamilyRollups({ OpenAI: summary }))
+    expect(serialized).toContain("CAP_EXCEEDED")
+    expect(serialized).not.toContain("do not serialize this note")
+  })
+
+  test("stops edge execution after a pre-call cap block", async () => {
+    const candidate = selectCheapestPerFamily(createFullMockCatalog(), {
+      families: ["Anthropic"],
+    }).families.Anthropic.selected!
+    const config = parseProbeArgs([
+      "--max-calls",
+      "1",
+      "--max-input-tokens",
+      "100",
+      "--max-output-tokens",
+      "16",
+    ])
+    const tracker = new ExecutionCapTracker(config)
+    const result = await runEdgeCasesForCandidate(
+      candidate,
+      config,
+      tracker,
+      async () => {
+        throw new Error("edge call should not be reached")
+      },
+    )
+    expect(result).toHaveLength(3)
+    expect(result[2]).toEqual(
+      expect.objectContaining({
+        name: "early-prefix-perturbation",
+        verdict: "INCONCLUSIVE",
+        reasonCode: "CAP_EXCEEDED",
+      }),
+    )
+    expect(tracker.capViolationReason).toContain("Exceeded max input tokens cap")
+    expect(result[2]?.note).toContain("Exceeded max input tokens cap")
+    expect(result[2]?.note).not.toContain("Bearer")
+  })
+
 })
+
+
 
 describe("Request Construction & Equal Byte-Length Prefixes", () => {
   const catalog = createFullMockCatalog()
@@ -421,6 +687,14 @@ describe("Fetch Instrumentation", () => {
       model: "test-model",
       prompt_cache_key: "ghr-cache-v1-abc",
     })
+    let called = false
+    const localFetch = (async (
+      _input: string | URL | Request,
+      _init?: RequestInit,
+    ) => {
+      called = true
+      return new Response(null, { status: 200 })
+    }) as typeof fetch
 
     const { metadata } = await executeInstrumentedCall(async () => {
       const resp = await globalThis.fetch("https://api.githubcopilot.com/responses", {
@@ -429,12 +703,14 @@ describe("Fetch Instrumentation", () => {
         body: sampleBody,
       })
       return resp
-    })
+    }, localFetch)
 
+    expect(called).toBe(true)
     expect(metadata.attemptCount).toBe(1)
     expect(metadata.paths).toContain("/responses")
     expect(metadata.bodyByteLengths[0]).toBe(Buffer.byteLength(sampleBody, "utf8"))
     expect(metadata.cacheFieldPaths).toContain("prompt_cache_key")
+    expect(metadata.bodySha256s[0]).toMatch(/^[a-f0-9]{64}$/)
   })
 })
 
@@ -474,6 +750,8 @@ describe("Usage Extraction & Normalization", () => {
     const extracted = extractUsageFromResponse("messages", mockMessagesMissing)
     expect(extracted.usage?.validMetrics).toBe(false)
     expect(extracted.usage?.cacheMetricsPresent).toBe(false)
+    expect(extracted.usage?.cacheRead).toBeUndefined()
+    expect(extracted.usage?.cacheWrite).toBeUndefined()
   })
 
   test("extracts and normalizes OpenAI Responses usage with nested content output and reconciles total", () => {
@@ -507,6 +785,55 @@ describe("Usage Extraction & Normalization", () => {
     expect(extracted.usage?.inclusiveReconciled).toBe(true)
   })
 
+  test("treats a missing OpenAI cache bucket as unavailable rather than zero", () => {
+    const extracted = extractUsageFromResponse("responses", {
+      output_text: "OK",
+      usage: {
+        input_tokens: 2000,
+        output_tokens: 2,
+        total_tokens: 2002,
+        input_tokens_details: { cached_tokens: 1800 },
+      },
+    })
+    expect(extracted.usage?.cacheReadMetricsPresent).toBe(true)
+    expect(extracted.usage?.cacheWriteMetricsPresent).toBe(false)
+    expect(extracted.usage?.validMetrics).toBe(false)
+    expect(extracted.usage?.inclusiveReconciled).toBe("UNAVAILABLE_OPENAI")
+  })
+
+  test("rejects invalid Anthropic counters", () => {
+    const extracted = extractUsageFromResponse("messages", {
+      content: [{ type: "text", text: "OK" }],
+      usage: {
+        input_tokens: 1500,
+        output_tokens: 2,
+        cache_read_input_tokens: Number.NaN,
+        cache_creation_input_tokens: -1,
+      },
+    })
+    expect(extracted.usage?.validMetrics).toBe(false)
+    expect(extracted.usage?.cacheRead).toBeUndefined()
+    expect(extracted.usage?.cacheWrite).toBeUndefined()
+  })
+
+  test("rejects invalid OpenAI cache counters", () => {
+    const extracted = extractUsageFromResponse("responses", {
+      output_text: "OK",
+      usage: {
+        input_tokens: 2000,
+        output_tokens: 2,
+        total_tokens: 2002,
+        input_tokens_details: {
+          cached_tokens: Number.NaN,
+          cache_write_tokens: -1,
+        },
+      },
+    })
+    expect(extracted.usage?.cacheMetricsPresent).toBe(false)
+    expect(extracted.usage?.validMetrics).toBe(false)
+    expect(extracted.usage?.inclusiveReconciled).toBe("INVALID_OPENAI")
+  })
+
   test("flags OpenAI usage as invalid when total tokens reconciliation fails (>1% discrepancy)", () => {
     const mockResponsesDiscrepant = {
       output_text: "OK",
@@ -522,11 +849,11 @@ describe("Usage Extraction & Normalization", () => {
     }
 
     const extracted = extractUsageFromResponse("responses", mockResponsesDiscrepant)
-    expect(extracted.usage?.inclusiveReconciled).toBe(false)
+    expect(extracted.usage?.inclusiveReconciled).toBe("INVALID_OPENAI")
     expect(extracted.usage?.validMetrics).toBe(false)
   })
 
-  test("flags OpenAI usage as invalid when cache telemetry is completely missing", () => {
+  test("flags OpenAI usage as unavailable when cache telemetry is completely missing", () => {
     const mockResponsesNoCache = {
       output_text: "OK",
       usage: {
@@ -538,6 +865,61 @@ describe("Usage Extraction & Normalization", () => {
 
     const extracted = extractUsageFromResponse("responses", mockResponsesNoCache)
     expect(extracted.usage?.cacheMetricsPresent).toBe(false)
+    expect(extracted.usage?.validMetrics).toBe(false)
+    expect(extracted.usage?.inclusiveReconciled).toBe("UNAVAILABLE_OPENAI")
+  })
+
+  test("preserves unknown Anthropic cache buckets instead of reporting zero", () => {
+    const extracted = extractUsageFromResponse("messages", {
+      content: [{ type: "text", text: "OK" }],
+      usage: { input_tokens: 1500, output_tokens: 2 },
+    })
+    expect(extracted.usage?.cacheRead).toBeUndefined()
+    expect(extracted.usage?.cacheWrite).toBeUndefined()
+    expect(extracted.usage?.validMetrics).toBe(false)
+  })
+
+  test("preserves unknown OpenAI cache buckets instead of reporting zero", () => {
+    const extracted = extractUsageFromResponse("responses", {
+      output_text: "OK",
+      usage: { input_tokens: 2000, output_tokens: 2, total_tokens: 2002 },
+    })
+    expect(extracted.usage?.cacheRead).toBeUndefined()
+    expect(extracted.usage?.cacheWrite).toBeUndefined()
+    expect(extracted.usage?.validMetrics).toBe(false)
+  })
+
+  test("reports missing OpenAI total as unavailable", () => {
+    const extracted = extractUsageFromResponse("responses", {
+      output_text: "OK",
+      usage: {
+        input_tokens: 2000,
+        output_tokens: 2,
+        input_tokens_details: {
+          cached_tokens: 1800,
+          cache_write_tokens: 0,
+        },
+      },
+    })
+    expect(extracted.usage?.inclusiveReconciled).toBe("UNAVAILABLE_OPENAI")
+    expect(extracted.usage?.validMetrics).toBe(false)
+  })
+
+  test("does not treat an invalid alias as a valid OpenAI counter", () => {
+    const extracted = extractUsageFromResponse("responses", {
+      output_text: "OK",
+      usage: {
+        input_tokens: 2000,
+        output_tokens: 2,
+        total_tokens: 2002,
+        input_tokens_details: {
+          cached_tokens: Number.NaN,
+          cache_write_tokens: 0,
+        },
+        cache_read_input_tokens: 1800,
+      },
+    })
+    expect(extracted.usage?.cacheReadMetricsPresent).toBe(false)
     expect(extracted.usage?.validMetrics).toBe(false)
   })
 })
@@ -568,6 +950,7 @@ describe("Trial & Arm Verdict Classification", () => {
           cacheRead: 0,
           cacheWrite: 0,
           totalTokens: 2002,
+          reportedTotal: 2002,
           inclusiveReconciled: true,
           validMetrics: true,
           cacheMetricsPresent: true,
@@ -598,6 +981,7 @@ describe("Trial & Arm Verdict Classification", () => {
           cacheRead: 1800,
           cacheWrite: 0,
           totalTokens: 2002,
+          reportedTotal: 2002,
           inclusiveReconciled: true,
           validMetrics: true,
           cacheMetricsPresent: true,
@@ -645,6 +1029,48 @@ describe("Trial & Arm Verdict Classification", () => {
     )
   })
 
+  test("preserves output equivalence when usage is unavailable", () => {
+    const makeTurn = (requestSha256: string): SingleTurnResult => ({
+      turnType: "cold",
+      success: true,
+      attempts: 1,
+      contaminated: false,
+      requestSha256,
+      requestBytes: 1000,
+      cacheFieldPaths: [],
+      response: {
+        ok: true,
+        outputTextSha256: "same-hash",
+        outputTextLength: 2,
+        outputMatchesOk: true,
+        usage: {
+          totalInput: 2000,
+          uncachedInput: 2000,
+          output: 2,
+          cacheRead: 0,
+          totalTokens: 2002,
+          reportedTotal: 2002,
+          inclusiveReconciled: "UNAVAILABLE_OPENAI",
+          validMetrics: false,
+          cacheMetricsPresent: false,
+          cacheReadMetricsPresent: true,
+          cacheWriteMetricsPresent: false,
+          rawNumericUsage: {},
+        },
+      },
+    })
+
+    const armResult = classifyArmTrial(
+      "provider-managed",
+      makeTurn("cold-hash"),
+      { ...makeTurn("warm-hash"), turnType: "warm" },
+      lunaRates,
+    )
+    expect(armResult.valid).toBe(false)
+    expect(armResult.outputEquivalent).toBe(true)
+    expect(armResult.pairedVerdict).toBe("inconclusive")
+  })
+
   test("marks trial inconclusive when output hashes or lengths diverge", () => {
     const cold: SingleTurnResult = {
       turnType: "cold",
@@ -666,6 +1092,7 @@ describe("Trial & Arm Verdict Classification", () => {
           cacheRead: 0,
           cacheWrite: 0,
           totalTokens: 2002,
+          reportedTotal: 2002,
           inclusiveReconciled: true,
           validMetrics: true,
           cacheMetricsPresent: true,
@@ -696,6 +1123,7 @@ describe("Trial & Arm Verdict Classification", () => {
           cacheRead: 1800,
           cacheWrite: 0,
           totalTokens: 2002,
+          reportedTotal: 2002,
           inclusiveReconciled: true,
           validMetrics: true,
           cacheMetricsPresent: true,
@@ -733,6 +1161,7 @@ describe("Trial & Arm Verdict Classification", () => {
           cacheRead: 200, // 10% contamination (>5%)
           cacheWrite: 0,
           totalTokens: 2002,
+          reportedTotal: 2002,
           inclusiveReconciled: true,
           validMetrics: true,
           cacheMetricsPresent: true,
@@ -763,6 +1192,7 @@ describe("Trial & Arm Verdict Classification", () => {
           cacheRead: 1800,
           cacheWrite: 0,
           totalTokens: 2002,
+          reportedTotal: 2002,
           inclusiveReconciled: true,
           validMetrics: true,
           cacheMetricsPresent: true,

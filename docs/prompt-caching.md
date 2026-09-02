@@ -325,8 +325,10 @@ Run the happy path before `--edges`. A pair is publishable only when both
 turns have cache telemetry, valid accounting, equivalent exact `OK` output,
 and a cold cache-read contamination ratio no greater than 5%; missing fields,
 pre-warmed cold turns, retries, non-equivalent output, and unreconciled totals
-are inconclusive rather than cache misses or passes. Prefix fixtures are sized
-per model family, including the larger implicit-cache floors measured for
+are inconclusive rather than cache misses or passes. For OpenAI-shaped usage,
+a missing cache bucket is labeled `UNAVAILABLE_OPENAI`; malformed supplied
+counters or a true total mismatch remain `INVALID_OPENAI`. Prefix fixtures are
+sized per model family, including the larger implicit-cache floors measured for
 Haiku, Gemini, and Grok. Artifacts retain hashes, lengths, numeric usage, and
 sanitized model metadata, never raw output or request headers.
 
@@ -338,3 +340,39 @@ savings. The control arm runs against the current proxy without the existing
 router-owned cache helper, so it is not a git-commit before/after experiment.
 The harness does not broaden explicit provider cache handling: growing
 `conversation` workloads continue to rely on provider-managed caching.
+
+### Recorded family-validation results
+
+The final tie-inclusive happy-path run used plan hash
+`13b76578942edd358cdd5fa846a65d939c769828ea5efb11bbe1da0266834fb5`, completed
+48 calls without a cap violation, and produced these within-model results. A
+separate 32-call edge run also completed without a cap violation, for 80 live
+model calls total. The
+immutable source artifact predates the later diagnostic-label correction; the
+post-correction interpretation is preserved separately in the operator-local,
+not-tracked `cache-probe` directory. The re-derived view leaves the family
+statuses unchanged, changes Google/xAI missing-cache-write diagnostics to
+`UNAVAILABLE_OPENAI`, and preserves their matching output-equivalence signal.
+The edge source artifact and its interpretation are likewise preserved in a
+separate operator-local re-derived view.
+
+| Family and candidate | Valid repetitions | Result | Interpretation |
+|---|---:|---|---|
+| OpenAI / GPT-5.6 Luna | 3/3 | `VALIDATED_REUSE_POLICY_INCONCLUSIVE` | Policy reuse 95.7156% (95.72% rounded) versus control reuse 95.7130% (95.71% rounded). This effectively tied result did not demonstrate an incremental benefit from the explicit router policy. |
+| Anthropic / Claude Haiku 4.5 | 3/3 | `VALIDATED_POLICY_IMPROVEMENT` | Policy reuse 99.35%; control reuse 0%. This supports the existing bounded explicit Claude marking. |
+| Google / Gemini 3.6 and 3.7 Flash | 0/6 | `INCONCLUSIVE` | Matching `OK` outputs and warm cached-token observations were present, but Chat responses omitted cache-write telemetry needed for complete accounting. |
+| xAI / Grok 4.5 and 4.6 | 0/6 | `INCONCLUSIVE` | Matching `OK` outputs and warm cached-token observations were present, but the catalog-selected Responses route in this run omitted cache-write telemetry; some cold turns also showed cached tokens. |
+
+The follow-up edge run used plan hash
+`ae23b42dfe05d8e834735028a878f14f3c08661a71c5ff9f9fa1878ed93a7a25` and
+completed without a cap violation for the two valid happy-path families.
+Sub-threshold marking, the growing-history conversation no-op,
+early-prefix invalidation, and suffix-only reuse were all classified
+`EXPECTED` for both Luna and Haiku. The Google and xAI results remain
+inconclusive; the harness does not convert missing cache-write counters into
+zero and does not apply Claude/OpenAI explicit markers to those providers.
+
+All cost figures in these artifacts remain `INDICATIVE_UNVERIFIED`; no
+invoice or authoritative billed-dollar signal was captured. Fresh-process
+cache survival, streaming versus non-streaming parity, and near-ceiling
+behavior remain unmeasured.
