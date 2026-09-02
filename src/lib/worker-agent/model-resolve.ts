@@ -66,10 +66,11 @@ export interface ResolveOk {
   modelId: string
   thinking: WorkerThinkingLevel
   /**
-   * Catalog context window (tokens) for the resolved model, or undefined
-   * when the catalog doesn't report one. The engine uses a conservative
-   * fallback budget for compaction/capping when undefined, while leaving the
-   * request-boundary backstop advisory because the real window is unknown.
+   * Effective worker input window (tokens) for the resolved model. When both
+   * catalog limits are valid, this is the stricter of
+   * `max_context_window_tokens` and `max_prompt_tokens`; when only one is
+   * present, that one is used. Undefined keeps the conservative fallback
+   * budget and advisory request-boundary behavior.
    */
   contextWindow?: number
 }
@@ -82,6 +83,31 @@ export type ResolveResult = ResolveOk | ResolveErr
 export interface ResolveOpts {
   model: string
   thinking: WorkerThinkingLevel
+}
+
+type InputLimits = {
+  max_context_window_tokens?: unknown
+  max_prompt_tokens?: unknown
+}
+
+function validPositiveNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+}
+
+/**
+ * Use the strictest valid catalog input ceiling. Copilot can advertise a
+ * larger total window than the prompt ceiling it actually enforces.
+ */
+function effectiveInputWindow(limits: InputLimits | undefined): number | undefined {
+  const contextLimit = validPositiveNumber(limits?.max_context_window_tokens)
+    ? limits.max_context_window_tokens
+    : undefined
+  const promptLimit = validPositiveNumber(limits?.max_prompt_tokens)
+    ? limits.max_prompt_tokens
+    : undefined
+  if (contextLimit === undefined) return promptLimit
+  if (promptLimit === undefined) return contextLimit
+  return Math.min(contextLimit, promptLimit)
 }
 
 /**
@@ -120,10 +146,13 @@ export function resolveModelAndThinking(opts: ResolveOpts): ResolveResult {
     }
   }
 
-  // Surface the catalog context window so the engine can size its per-run
-  // context budget. When absent, the engine uses a fallback floor for
-  // compaction/per-result caps but does not hard-reject at the request boundary.
-  const contextWindow = found.capabilities?.limits?.max_context_window_tokens
+  // Surface the strictest valid catalog input ceiling so the engine can size
+  // its per-run context budget. Copilot can advertise a larger total window
+  // than the prompt ceiling it actually enforces, so using the total alone can
+  // let a worker assemble a request that upstream rejects. If either limit is
+  // absent or invalid, keep the valid one; if neither is valid, the engine
+  // uses its conservative fallback and leaves the request backstop advisory.
+  const contextWindow = effectiveInputWindow(found.capabilities?.limits)
   const mkOk = (thinking: WorkerThinkingLevel): ResolveOk => ({
     ok: true,
     modelId: found.id,
@@ -355,7 +384,7 @@ export function indicativeTokensPerSecond(modelId: string): number | undefined {
 export interface CatalogRow {
   id: string
   vendor: string
-  /** Context window in tokens. */
+  /** Effective worker input window in tokens. */
   ctx: number
   /** Max output tokens, omitted when the catalog doesn't advertise it. */
   maxOut?: number
@@ -405,13 +434,16 @@ export function buildCatalogView(): Array<CatalogRow> {
     const supports = model.capabilities?.supports
     const limits = model.capabilities?.limits
     if (supports?.tool_calls !== true) continue
-    const ctx = limits?.max_context_window_tokens ?? 0
+    const ctx = effectiveInputWindow(limits) ?? 0
     if (ctx < CATALOG_MIN_CONTEXT) continue
     const efforts = (supports.reasoning_effort ?? []).filter((effort) =>
       (WORKER_THINKING_LEVELS as ReadonlyArray<string>).includes(effort),
     )
     if (efforts.length === 0) continue
-    const prices = catalogTokenPrices(model.id)
+    // The model-facing catalog reports observed live prices only. The dated
+    // fallback table remains useful for native-agent awareness, but surfacing
+    // it here would make a stale estimate look like live catalog metadata.
+    const prices = livePricesFor(model.id)
     const tps = indicativeTokensPerSecond(model.id)
     rows.push({
       id: model.id,

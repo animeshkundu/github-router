@@ -79,8 +79,8 @@ Set GH_ROUTER_RUN_CACHE_PROBE=1 to run it, e.g.:
   GH_ROUTER_RUN_CACHE_PROBE=1 bun run probe:cache
 
 It resolves claude-opus-5, claude-haiku-4.5, all three GPT-5.6 tiers
-(sol/terra/luna), gemini-3.7-flash, and the highest-context grok-4.6* sibling
-from the LIVE Copilot catalog, then spawns
+(sol/terra/luna), gemini-3.7-flash, and the highest-effective-input-window
+grok-4.6* sibling from the LIVE Copilot catalog, then spawns
 the real launcher ("bun run ./src/main.ts claude") and the real installed
 Claude Code CLI for each, feeding multi-turn stdin traffic and reading the
 per-turn result-event usage's cache fields (NOT assistant.message.usage,
@@ -391,7 +391,7 @@ async function runOneTrial(opts: {
 function contextWindowNoteFor(target: ResolvedCacheProbeTarget): string | undefined {
   if (target.contextWindow === undefined) return undefined
   if (target.contextWindow >= 1_000_000) return undefined
-  return `sub-1M advertised context (${target.contextWindow} tokens) — reported as measured, not assumed 1M`
+  return `sub-1M effective input window (${target.contextWindow} tokens) — reported as measured, not assumed 1M`
 }
 
 async function commandOutput(command: ReadonlyArray<string>, cwd: string): Promise<string> {

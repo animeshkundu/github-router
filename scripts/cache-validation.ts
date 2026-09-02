@@ -87,11 +87,11 @@ export interface DocumentedModelRate {
  * - Anthropic:
  *     - Claude Haiku 4.5: $1.00 input / $5.00 output / $0.10 cached read / $1.25 cache write (aliases: claude-haiku-4.5, claude-haiku-4-5)
  * - Google:
- *     - Gemini 3.6 Flash: $0.075 input / $0.375 output / $0.01875 cached read / undefined cache write (tie)
- *     - Gemini 3.7 Flash: $0.075 input / $0.375 output / $0.01875 cached read / undefined cache write (tie)
+ *     - Gemini 3.6 Flash: $0.75 input / $3.75 output / $0.075 cached read / undefined cache write (tie)
+ *     - Gemini 3.7 Flash: $0.75 input / $3.75 output / $0.075 cached read / undefined cache write (tie)
  * - xAI:
- *     - Grok 4.5: $0.20 input / $0.60 output / $0.05 cached read / undefined cache write (tie)
- *     - Grok 4.6: $0.20 input / $0.60 output / $0.05 cached read / undefined cache write (tie)
+ *     - Grok 4.5: $2.00 input / $6.00 output / $0.50 cached read / undefined cache write (tie)
+ *     - Grok 4.6: $2.00 input / $6.00 output / $0.50 cached read / undefined cache write (tie)
  */
 export const CACHE_VALIDATION_MANIFEST: ReadonlyArray<DocumentedModelRate> = Object.freeze([
   // OpenAI
@@ -131,9 +131,9 @@ export const CACHE_VALIDATION_MANIFEST: ReadonlyArray<DocumentedModelRate> = Obj
     id: "gemini-3.6-flash",
     name: "Gemini 3.6 Flash",
     family: "Google",
-    inputRatePerMillion: 0.075,
-    outputRatePerMillion: 0.375,
-    cachedInputRatePerMillion: 0.01875,
+    inputRatePerMillion: 0.75,
+    outputRatePerMillion: 3.75,
+    cachedInputRatePerMillion: 0.075,
     cacheWriteRatePerMillion: undefined,
     aliases: Object.freeze(["gemini-3.6-flash"]),
   },
@@ -141,9 +141,9 @@ export const CACHE_VALIDATION_MANIFEST: ReadonlyArray<DocumentedModelRate> = Obj
     id: "gemini-3.7-flash",
     name: "Gemini 3.7 Flash",
     family: "Google",
-    inputRatePerMillion: 0.075,
-    outputRatePerMillion: 0.375,
-    cachedInputRatePerMillion: 0.01875,
+    inputRatePerMillion: 0.75,
+    outputRatePerMillion: 3.75,
+    cachedInputRatePerMillion: 0.075,
     cacheWriteRatePerMillion: undefined,
     aliases: Object.freeze(["gemini-3.7-flash"]),
   },
@@ -152,9 +152,9 @@ export const CACHE_VALIDATION_MANIFEST: ReadonlyArray<DocumentedModelRate> = Obj
     id: "grok-4.5",
     name: "Grok 4.5",
     family: "xAI",
-    inputRatePerMillion: 0.20,
-    outputRatePerMillion: 0.60,
-    cachedInputRatePerMillion: 0.05,
+    inputRatePerMillion: 2.00,
+    outputRatePerMillion: 6.00,
+    cachedInputRatePerMillion: 0.50,
     cacheWriteRatePerMillion: undefined,
     aliases: Object.freeze(["grok-4.5"]),
   },
@@ -162,9 +162,9 @@ export const CACHE_VALIDATION_MANIFEST: ReadonlyArray<DocumentedModelRate> = Obj
     id: "grok-4.6",
     name: "Grok 4.6",
     family: "xAI",
-    inputRatePerMillion: 0.20,
-    outputRatePerMillion: 0.60,
-    cachedInputRatePerMillion: 0.05,
+    inputRatePerMillion: 2.00,
+    outputRatePerMillion: 6.00,
+    cachedInputRatePerMillion: 0.50,
     cacheWriteRatePerMillion: undefined,
     aliases: Object.freeze(["grok-4.6"]),
   },
@@ -538,6 +538,85 @@ export interface SelectCheapestResult {
   readonly families: Record<OfficialBillingFamily, FamilySelectionResult>
   readonly allSelected: ReadonlyArray<EvaluatedCandidate>
   readonly warnings: ReadonlyArray<string>
+}
+
+// ---------------------------------------------------------------------------
+// Sanitized Plan & Artifact Selection Types (No catalogModel leakage)
+// ---------------------------------------------------------------------------
+
+export interface SanitizedEvaluatedCandidate {
+  readonly manifestEntry: DocumentedModelRate
+  readonly catalogId?: string
+  readonly endpoint?: "messages" | "chat" | "responses"
+  readonly effectiveLimits: ModelEffectiveLimits
+  readonly policyState?: string
+  readonly eligible: boolean
+  readonly reasonCode: ValidationReasonCode
+  readonly livePriceValidation?: LivePriceValidationResult
+  readonly warnings: ReadonlyArray<string>
+}
+
+export interface SanitizedFamilySelectionResult {
+  readonly family: OfficialBillingFamily
+  readonly status:
+    | "selected"
+    | "tie"
+    | "tie_unresolved"
+    | "no_candidates"
+    | "all_ineligible"
+  readonly selected?: SanitizedEvaluatedCandidate
+  readonly candidates: ReadonlyArray<SanitizedEvaluatedCandidate>
+  readonly winningCandidates: ReadonlyArray<SanitizedEvaluatedCandidate>
+  readonly reasonCode: ValidationReasonCode
+  readonly warnings: ReadonlyArray<string>
+}
+
+export interface SanitizedSelectCheapestResult {
+  readonly families: Record<OfficialBillingFamily, SanitizedFamilySelectionResult>
+  readonly allSelected: ReadonlyArray<SanitizedEvaluatedCandidate>
+  readonly warnings: ReadonlyArray<string>
+}
+
+export function sanitizeCandidateForPlan(
+  candidate: EvaluatedCandidate,
+): SanitizedEvaluatedCandidate {
+  return {
+    manifestEntry: candidate.manifestEntry,
+    catalogId: candidate.catalogId,
+    endpoint: candidate.endpoint,
+    effectiveLimits: candidate.effectiveLimits,
+    policyState: candidate.policyState,
+    eligible: candidate.eligible,
+    reasonCode: candidate.reasonCode,
+    livePriceValidation: candidate.livePriceValidation,
+    warnings: candidate.warnings,
+  }
+}
+
+export function sanitizeSelectionsForPlan(
+  selections: SelectCheapestResult,
+): SanitizedSelectCheapestResult {
+  const families = {} as Record<OfficialBillingFamily, SanitizedFamilySelectionResult>
+  for (const family of OFFICIAL_BILLING_FAMILIES) {
+    const famResult = selections.families[family]
+    if (!famResult) continue
+    families[family] = {
+      family: famResult.family,
+      status: famResult.status,
+      selected: famResult.selected
+        ? sanitizeCandidateForPlan(famResult.selected)
+        : undefined,
+      candidates: famResult.candidates.map(sanitizeCandidateForPlan),
+      winningCandidates: famResult.winningCandidates.map(sanitizeCandidateForPlan),
+      reasonCode: famResult.reasonCode,
+      warnings: famResult.warnings,
+    }
+  }
+  return {
+    families,
+    allSelected: selections.allSelected.map(sanitizeCandidateForPlan),
+    warnings: selections.warnings,
+  }
 }
 
 /**

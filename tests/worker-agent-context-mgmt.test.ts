@@ -142,6 +142,13 @@ describe("makeContextBudget", () => {
     expect(b.perResultCapBytes).toBeLessThanOrEqual(256 * 1024)
   })
 
+  test("a prompt-ceiling-sized budget stays below the provider prompt limit", () => {
+    const b = makeContextBudget(922_000)
+    expect(b.windowTokens).toBe(922_000)
+    expect(b.inputHardLimitTokens).toBeLessThan(922_000)
+    expect(b.compactTriggerTokens).toBeLessThan(922_000)
+  })
+
   test("per-result cap clamps to the 64KiB floor on a small window", () => {
     const b = makeContextBudget(30_000)!
     expect(b.perResultCapBytes).toBe(64 * 1024)

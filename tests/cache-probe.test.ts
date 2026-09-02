@@ -28,7 +28,11 @@ import {
 } from "~/lib/cache-probe"
 import type { Model } from "~/services/copilot/get-models"
 
-function makeModel(id: string, contextWindow?: number): Model {
+function makeModel(
+  id: string,
+  contextWindow?: number,
+  promptWindow?: number,
+): Model {
   return {
     id,
     name: id,
@@ -42,7 +46,13 @@ function makeModel(id: string, contextWindow?: number): Model {
       object: "model_capabilities",
       tokenizer: "test",
       type: "chat",
-      limits: contextWindow === undefined ? undefined : { max_context_window_tokens: contextWindow },
+      limits:
+        contextWindow === undefined && promptWindow === undefined
+          ? undefined
+          : {
+              ...(contextWindow === undefined ? {} : { max_context_window_tokens: contextWindow }),
+              ...(promptWindow === undefined ? {} : { max_prompt_tokens: promptWindow }),
+            },
     },
   }
 }
@@ -72,7 +82,7 @@ describe("selectCacheProbeTargets", () => {
     expect(gptSol?.catalogId).toBeUndefined()
   })
 
-  test("picks the highest-context grok-4.6* sibling, not just the first match", () => {
+  test("picks the highest-effective-input-window grok-4.6* sibling, not just the first match", () => {
     const catalog = [
       makeModel("grok-4.6-mini", 128_000),
       makeModel("grok-4.6", 500_000),
@@ -85,6 +95,17 @@ describe("selectCacheProbeTargets", () => {
     expect(grok?.found).toBe(true)
     expect(grok?.catalogId).toBe("grok-4.6")
     expect(grok?.contextWindow).toBe(500_000)
+  })
+
+  test("uses the stricter prompt ceiling when choosing a grok sibling", () => {
+    const catalog = [
+      makeModel("grok-4.6-wide", 1_000_000, 180_000),
+      makeModel("grok-4.6", 500_000, 372_000),
+    ]
+    const selection = selectCacheProbeTargets(catalog)
+    const grok = selection.targets.find((t) => t.requestedId === "grok-4.6*")
+    expect(grok?.catalogId).toBe("grok-4.6")
+    expect(grok?.contextWindow).toBe(372_000)
   })
 
   test("grok wildcard is honestly reported missing when no grok-4.6* sibling exists", () => {

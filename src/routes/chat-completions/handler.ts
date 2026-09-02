@@ -180,6 +180,7 @@ export async function handleCompletion(c: Context) {
       outputTokens,
       cacheReadTokens: responseUsage?.cacheRead,
       cacheWriteTokens: responseUsage?.cacheWrite,
+      cacheTtlSeconds: responseUsage?.cacheTtlSeconds,
       status: 200,
       streaming: isStreaming,
     },

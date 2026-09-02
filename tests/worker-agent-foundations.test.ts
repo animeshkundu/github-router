@@ -663,7 +663,12 @@ describe("semaphore", () => {
 describe("resolveModelAndThinking", () => {
   const fakeModel = (
     id: string,
-    opts: { tool_calls?: boolean; reasoning_effort?: Array<string> } = {},
+    opts: {
+      tool_calls?: boolean
+      reasoning_effort?: Array<string>
+      max_context_window_tokens?: number
+      max_prompt_tokens?: number
+    } = {},
   ) => ({
     id,
     name: id,
@@ -677,7 +682,14 @@ describe("resolveModelAndThinking", () => {
       family: id,
       object: "model_capabilities",
       tokenizer: "o200k_base",
-      limits: {},
+      limits: {
+        ...(opts.max_context_window_tokens === undefined
+          ? {}
+          : { max_context_window_tokens: opts.max_context_window_tokens }),
+        ...(opts.max_prompt_tokens === undefined
+          ? {}
+          : { max_prompt_tokens: opts.max_prompt_tokens }),
+      },
       supports: {
         ...(opts.tool_calls !== undefined
           ? { tool_calls: opts.tool_calls }
@@ -799,6 +811,65 @@ describe("resolveModelAndThinking", () => {
     })
     expect(r.ok).toBe(true)
     if (r.ok) expect(r.thinking).toBe("off")
+  })
+
+  test("uses the stricter prompt ceiling when total and prompt windows differ", () => {
+    state.models = {
+      object: "list",
+      data: [
+        fakeModel("asymmetric-window", {
+          tool_calls: true,
+          reasoning_effort: ["high"],
+          max_context_window_tokens: 1_050_000,
+          max_prompt_tokens: 922_000,
+        }),
+      ],
+    }
+    const r = resolveModelAndThinking({
+      model: "asymmetric-window",
+      thinking: "high",
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.contextWindow).toBe(922_000)
+  })
+
+  test("uses the valid prompt ceiling when total window is absent", () => {
+    state.models = {
+      object: "list",
+      data: [
+        fakeModel("prompt-only-window", {
+          tool_calls: true,
+          reasoning_effort: ["high"],
+          max_prompt_tokens: 300_000,
+        }),
+      ],
+    }
+    const r = resolveModelAndThinking({
+      model: "prompt-only-window",
+      thinking: "high",
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.contextWindow).toBe(300_000)
+  })
+
+  test("ignores invalid prompt ceilings and keeps the valid total window", () => {
+    state.models = {
+      object: "list",
+      data: [
+        fakeModel("invalid-prompt-window", {
+          tool_calls: true,
+          reasoning_effort: ["high"],
+          max_context_window_tokens: 500_000,
+          max_prompt_tokens: Number.NaN,
+        }),
+      ],
+    }
+    const r = resolveModelAndThinking({
+      model: "invalid-prompt-window",
+      thinking: "high",
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.contextWindow).toBe(500_000)
   })
 
   test("empty catalog: unknown-model error lists <none>", () => {

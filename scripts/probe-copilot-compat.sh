@@ -86,7 +86,7 @@ declare -a PROBE_REGISTRY=(
   # ===== Prompt caching =====
   "cache_control_ephemeral_1h|claude-emits|Claude cache_control with ttl:1h returns 200"
   "cache_control_marker_limit_5|exploratory|Five Claude cache_control markers return 400 (upstream maximum is four)"
-  "gpt56_explicit_cache_breakpoint|copilot-cli|GPT-5.6 Responses accepts prompt_cache_key + explicit prompt_cache_options + prompt_cache_breakpoint"
+  "gpt56_explicit_cache_breakpoint|copilot-cli|GPT-5.6 Responses accepts prompt_cache_key + explicit prompt_cache_options + prompt_cache_breakpoint (reusable-prefix policy only; growing conversations remain provider-managed)"
   "gpt55_cache_retention_24h|vscode-source|GPT-5.5 Responses accepts prompt_cache_retention:24h (acceptance only; long-idle effectiveness is not claimed)"
 
   # ===== Native Anthropic tool types =====

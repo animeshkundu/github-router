@@ -42,6 +42,7 @@ import {
   resolveModelEndpoint,
   resolveModelFamily,
   sanitizeCatalogForPlan,
+  sanitizeSelectionsForPlan,
   selectCheapestPerFamily,
   validateLivePrices,
   ValidationReasonCode,
@@ -149,20 +150,20 @@ describe("Documented Candidate Manifest", () => {
     const gem37 = CACHE_VALIDATION_MANIFEST.find(
       (m) => m.id === "gemini-3.7-flash",
     )
-    expect(gem36?.inputRatePerMillion).toBe(0.075)
-    expect(gem37?.inputRatePerMillion).toBe(0.075)
-    expect(gem36?.outputRatePerMillion).toBe(0.375)
-    expect(gem37?.outputRatePerMillion).toBe(0.375)
-    expect(gem36?.cachedInputRatePerMillion).toBe(0.01875)
+    expect(gem36?.inputRatePerMillion).toBe(0.75)
+    expect(gem37?.inputRatePerMillion).toBe(0.75)
+    expect(gem36?.outputRatePerMillion).toBe(3.75)
+    expect(gem37?.outputRatePerMillion).toBe(3.75)
+    expect(gem36?.cachedInputRatePerMillion).toBe(0.075)
     expect(gem36?.cacheWriteRatePerMillion).toBeUndefined()
 
     const grok45 = CACHE_VALIDATION_MANIFEST.find((m) => m.id === "grok-4.5")
     const grok46 = CACHE_VALIDATION_MANIFEST.find((m) => m.id === "grok-4.6")
-    expect(grok45?.inputRatePerMillion).toBe(0.20)
-    expect(grok46?.inputRatePerMillion).toBe(0.20)
-    expect(grok45?.outputRatePerMillion).toBe(0.60)
-    expect(grok46?.outputRatePerMillion).toBe(0.60)
-    expect(grok45?.cachedInputRatePerMillion).toBe(0.05)
+    expect(grok45?.inputRatePerMillion).toBe(2.00)
+    expect(grok46?.inputRatePerMillion).toBe(2.00)
+    expect(grok45?.outputRatePerMillion).toBe(6.00)
+    expect(grok46?.outputRatePerMillion).toBe(6.00)
+    expect(grok45?.cachedInputRatePerMillion).toBe(0.50)
     expect(grok45?.cacheWriteRatePerMillion).toBeUndefined()
   })
 
@@ -734,5 +735,21 @@ describe("Deterministic Plan Sanitization and Hashing", () => {
     expect(plan1.models.length).toBe(2)
     expect(plan1.models[0].id).toBe("claude-haiku-4.5")
     expect(plan1.models[1].id).toBe("gpt-5.6-luna")
+  })
+
+  test("sanitizeSelectionsForPlan removes catalogModel objects", () => {
+    const catalog = [
+      createMockModel({
+        id: "gpt-5.6-luna",
+        vendor: "OpenAI",
+        supported_endpoints: ["/responses"],
+      }),
+    ]
+    const selections = selectCheapestPerFamily(catalog, { families: ["OpenAI"] })
+    expect(selections.families.OpenAI.selected?.catalogModel).toBeDefined()
+
+    const sanitized = sanitizeSelectionsForPlan(selections)
+    expect("catalogModel" in (sanitized.families.OpenAI.selected ?? {})).toBe(false)
+    expect(sanitized.families.OpenAI.selected?.catalogId).toBe("gpt-5.6-luna")
   })
 })

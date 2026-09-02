@@ -12,6 +12,8 @@ export interface RequestLogInfo {
   outputTokens?: number
   cacheReadTokens?: number
   cacheWriteTokens?: number
+  /** Provider-reported cache retention in seconds, when available. */
+  cacheTtlSeconds?: number
   status?: number
   streaming?: boolean
   errorBody?: string
@@ -180,13 +182,14 @@ function formatTokens(n: number): string {
 }
 
 /**
- * Build a context window summary: "in:1.2K out:50 ctx:1.2K/1M (0.1%)"
+ * Build a context window summary: "in:1.2K out:50 cache:r1K/w2K ttl:1800s"
  */
 function formatTokenInfo(
   inputTokens: number | undefined,
   outputTokens: number | undefined,
   cacheReadTokens: number | undefined,
   cacheWriteTokens: number | undefined,
+  cacheTtlSeconds: number | undefined,
   model: Model | undefined,
 ): string | undefined {
   if (inputTokens === undefined) return undefined
@@ -208,6 +211,13 @@ function formatTokenInfo(
     parts.push(
       `cache:r${formatTokens(cacheReadTokens ?? 0)}/w${formatTokens(cacheWriteTokens ?? 0)}`,
     )
+  }
+  if (
+    cacheTtlSeconds !== undefined
+    && Number.isFinite(cacheTtlSeconds)
+    && cacheTtlSeconds > 0
+  ) {
+    parts.push(`ttl:${cacheTtlSeconds}s`)
   }
 
   return parts.join(" ")
@@ -264,6 +274,7 @@ export function logRequest(
     info.outputTokens,
     info.cacheReadTokens,
     info.cacheWriteTokens,
+    info.cacheTtlSeconds,
     model,
   )
   if (tokenInfo) {
