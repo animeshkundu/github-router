@@ -149,7 +149,7 @@ bun run probe:cache
 ### What it does
 
 For `claude-opus-5`, `claude-haiku-4.5`, every GPT-5.6 tier
-(`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`), `gemini-3.7-flash`, and
+(`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`), `gemini-3.8-flash`, and
 the highest-context `grok-4.6*` catalog sibling (resolved from the LIVE
 Copilot catalog, never hardcoded — see `selectCacheProbeTargets` in
 `src/lib/cache-probe.ts`), sequentially (concurrency 1, no automatic
@@ -171,9 +171,11 @@ retries):
   guard (`src/lib/prompt-cache.ts`) and, for this deterministic natural-language
   filler, measured above Anthropic's cacheable-prefix floor — and
   40,000 chars for Gemini/Grok, whose implicit-cache floor measured higher
-  live (Gemini 3.7 Flash cached nothing at 6,000 chars but cached cleanly at
-  ~40,000). Haiku 4.5 also uses the larger prefix because its cacheable-prefix
-  floor is materially higher than current Opus models.
+  live. The predecessor Gemini Flash generation cached nothing at 6,000 chars
+  but cached cleanly at ~40,000; that empirical result is a conservative
+  baseline for 3.8, not a newly run 3.8 measurement. Haiku 4.5 also uses the
+  larger prefix because its cacheable-prefix floor is materially higher than
+  current Opus models.
 - **One authentic trial per native-Claude target**: default toolset, default
   system prompt (no `--bare`/`--safe-mode`), salted first turn, prompt text
   instructs the model not to call tools (tools remain technically available,

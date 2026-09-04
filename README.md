@@ -104,10 +104,10 @@ The launcher also registers focused native subagents that run in their own conte
 |---|---|---|---|
 | `implementer` | Coding changes needing judgment or with ambiguous scope | gpt-5.6-sol → gpt-5.5 | Full inherited toolset |
 | `implementer-fast` | Well-specified, mechanical coding changes | gpt-5.6-terra → gemini-3.1-pro-preview | Full inherited toolset |
-| `reviewer` | Assessing an existing diff, plan, document, or failure | gemini-3.1-pro-preview → gemini-3.7-flash → OpenAI frontier | Full inherited toolset |
-| `reviewer-fast` | Lower-stakes assessment on a cheaper cross-lab model | gemini-3.7-flash | Full inherited toolset |
-| `brainstorm` | Divergent approaches before selecting one | gemini-3.1-pro-preview → gemini-3.7-flash → OpenAI frontier | Read-only allowlist |
-| `scout` | Low-cost repository exploration | gpt-5.6-luna → gemini-3.7-flash | Read-only allowlist |
+| `reviewer` | Assessing an existing diff, plan, document, or failure | gemini-3.1-pro-preview → gemini-3.8-flash → OpenAI frontier | Full inherited toolset |
+| `reviewer-fast` | Lower-stakes assessment on a cheaper cross-lab model | gemini-3.8-flash | Full inherited toolset |
+| `brainstorm` | Divergent approaches before selecting one | gemini-3.1-pro-preview → gemini-3.8-flash → OpenAI frontier | Read-only allowlist |
+| `scout` | Low-cost repository exploration | gpt-5.6-luna → gemini-3.8-flash | Read-only allowlist |
 | `scribe` | Documentation that trails the code | gpt-5.6-terra → OpenAI frontier | Full inherited toolset |
 | `general-purpose-fast` | Work no specialist fits | gpt-5.6-luna | Full inherited toolset |
 

@@ -26,7 +26,7 @@ describe("fast endpoint policy", () => {
     ["gpt-5.6-luna", "responses"],
     ["gpt-5.6-sol", "responses"],
     ["grok-4.6", "responses"],
-    ["gemini-3.7-flash", "chat"],
+    ["gemini-3.8-flash", "chat"],
     ["claude-opus-5", "messages"],
   ] as const)("requires %s on %s", (id, expected) => {
     expect(fastEndpointRequirement(id)).toBe(expected)
@@ -37,13 +37,13 @@ describe("fast endpoint policy", () => {
       fastEndpointForModel(model("gpt-5.6-luna", ["/chat/completions", "/responses"])),
     ).toBe("responses")
     expect(
-      fastEndpointForModel(model("gemini-3.7-flash", ["/responses", "/chat/completions"])),
+      fastEndpointForModel(model("gemini-3.8-flash", ["/responses", "/chat/completions"])),
     ).toBe("chat")
   })
 
   test("rejects a missing required endpoint", () => {
     expect(fastEndpointForModel(model("gpt-5.6-sol", ["/chat/completions"]))).toBeUndefined()
-    expect(fastEndpointForModel(model("gemini-3.7-flash", ["/responses"]))).toBeUndefined()
+    expect(fastEndpointForModel(model("gemini-3.8-flash", ["/responses"]))).toBeUndefined()
   })
 
   test("fast prerequisites use the same policy and fail on wrong endpoints", () => {
@@ -51,7 +51,7 @@ describe("fast endpoint policy", () => {
       model("gpt-5.6-luna", ["/responses"]),
       model("gpt-5.6-sol", ["/chat/completions"]),
       model("grok-4.6", ["/responses"]),
-      model("gemini-3.7-flash", ["/chat/completions"]),
+      model("gemini-3.8-flash", ["/chat/completions"]),
       model("claude-opus-5", ["/v1/messages"]),
     ]
     const result = validateFastProfilePrerequisites({ object: "list", data: full } as never)

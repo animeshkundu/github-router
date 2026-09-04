@@ -4,7 +4,7 @@
  *
  * Twin of `tests/integration/advisor-cancel-leak.test.ts`, which pins the SAME
  * race for a Claude-passthrough lead. This file exercises both translated
- * endpoints: Luna on Responses and Gemini 3.7 Flash on Chat. Their Advisor
+ * endpoints: Luna on Responses and Gemini 3.8 Flash on Chat. Their Advisor
  * dispatches on non-streaming Chat, while continuations return through each
  * selected lead's original shim via `streamParsedRequestViaShim` /
  * `makeShimContinueTurn` (`src/lib/anthropic-translate/index.ts`).
@@ -50,7 +50,7 @@ let baseUrl = ""
 
 const LUNA_MODEL = "gpt-5.6-luna"
 const LUNA_DRIVER_ALIAS = "gh-router-luna-driver-max[1m]"
-const GEMINI_ADVISOR_MODEL = "gemini-3.7-flash"
+const GEMINI_ADVISOR_MODEL = "gemini-3.8-flash"
 const FAST_SECRET = "f".repeat(64)
 
 function resetState() {
@@ -84,7 +84,7 @@ function resetState() {
       },
       {
         id: GEMINI_ADVISOR_MODEL,
-        name: "Gemini 3.7 Flash",
+        name: "Gemini 3.8 Flash",
         vendor: "Google",
         version: "1",
         preview: false,
@@ -361,7 +361,7 @@ test(
       }
 
       if (u.includes("/chat/completions")) {
-        // Advisor call (gemini-3.7-flash). Slow, so the abort signal has time
+        // Advisor call (gemini-3.8-flash). Slow, so the abort signal has time
         // to fire through the threaded callerSignal — same pattern as the
         // Claude-lead twin test's /responses advisor mock.
         advisorChatCallCount++

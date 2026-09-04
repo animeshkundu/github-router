@@ -21,7 +21,7 @@ const LEADS = [
   { id: "gpt-5.6-luna", transport: "responses" as const },
   { id: "gpt-5.6-sol", transport: "responses" as const },
   { id: "grok-4.6", transport: "responses" as const },
-  { id: "gemini-3.7-flash", transport: "chat" as const },
+  { id: "gemini-3.8-flash", transport: "chat" as const },
   { id: "claude-opus-5", transport: "messages" as const },
 ]
 

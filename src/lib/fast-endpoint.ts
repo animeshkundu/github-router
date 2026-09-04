@@ -23,7 +23,7 @@ const ENDPOINTS: Readonly<Record<FastEndpoint, ReadonlySet<string>>> = {
  */
 export function fastEndpointRequirement(modelId: string): FastEndpoint | undefined {
   const id = modelId.replace(/(?:\[1m\])+$/i, "")
-  if (id === "gemini-3.7-flash") return "chat"
+  if (id === "gemini-3.8-flash") return "chat"
   if (id === "gpt-5.6-luna" || id === "gpt-5.6-sol" || id === "grok-4.6") {
     return "responses"
   }

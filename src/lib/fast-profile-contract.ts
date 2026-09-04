@@ -9,15 +9,15 @@
 export const FAST_PROFILE_MODELS = Object.freeze({
   luna: "gpt-5.6-luna",
   sol: "gpt-5.6-sol",
-  gemini: "gemini-3.7-flash",
+  gemini: "gemini-3.8-flash",
   grok: "grok-4.6",
   opus: "claude-opus-5",
   explore: "gpt-5.6-luna",
   plan: "gpt-5.6-sol",
   "general-purpose": "gpt-5.6-luna",
-  implementer: "gemini-3.7-flash",
+  implementer: "gemini-3.8-flash",
   reviewer: "grok-4.6",
-  advisor: "gemini-3.7-flash",
+  advisor: "gemini-3.8-flash",
   oracle: "claude-opus-5",
 } as const)
 

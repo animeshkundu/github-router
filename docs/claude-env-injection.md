@@ -14,11 +14,11 @@ The injection uses a **presence-based guard** in `getClaudeCodeEnvVars` (`src/li
 
 Every `github-router claude` launch also presence-guards `CLAUDE_CODE_AUTO_COMPACT_WINDOW` with a catalog-derived **decimal integer**. It derives the complete client window for each reachable `[1m]` active/tier/custom/gateway model — `floor(max_prompt_tokens * 0.85) + min(max_output_tokens, 20_000) + 13_000` — and exports the minimum. This is not fast-only. `/model` does not mutate the process env, but Claude Code resolves the effective value as `Math.min(locallyRecognizedModelWindow, launchValue)`, so one launch-global minimum remains safe after a switch. Native subagents inherit it; 1M roles use the launch value, true 200K roles remain about 200K, and Grok's bare 500K id is conservatively treated as about 200K because Claude Code has no 500K declaration. The value must be a plain integer: that env path is `parseInt`-based, not the suffix-aware `/config` parser, so `"1m"` would parse to `1`, be floored to the client's 100,000 minimum, and compact a 1M session roughly every 52K tokens. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is deliberately not set. See the "Context-window safety" section of [`default-models.md`](default-models.md).
 
-This closes the failure observed on 2026-08-26: a top-level (`isSidechain:false`) Luna turn reached about 919,814 input tokens, then Copilot rejected the `/responses` request because Luna's 1.05M total window exposes only a 922K prompt ceiling after reserving 128K output. The failing call was not a planner/reviewer/scout/critic or `/responses/compact` request. Current live Opus/Sonnet/Gemini rows expose 1M total / 936K prompt; the defect class is any locally 1M-accounted model whose provider prompt ceiling lies below Claude Code's uncorrected ~967K trigger.
+This closes the failure observed on 2026-08-26: a top-level (`isSidechain:false`) Luna turn reached about 919,814 input tokens, then Copilot rejected the `/responses` request because Luna's 1.05M total window exposes only a 922K prompt ceiling after reserving 128K output. The failing call was not a planner/reviewer/scout/critic or `/responses/compact` request. Current live Opus/Sonnet rows expose 1M total / 936K prompt, while Gemini 3.8 exposes 1,048,576 total / 983,040 prompt. The defect class is any locally 1M-accounted model whose provider prompt ceiling lies below Claude Code's uncorrected ~967K trigger; Gemini 3.8 is above that trigger but still participates in the launch-wide minimum.
 
 | Env var | Feature |
 |---|---|
-| `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL` | Transcript-aware Advisor (standard selection is unchanged; `-m fast` fixes both the client identity and proxy dispatch to Gemini 3.7 Flash/high; see [`unsupported-features.md`](unsupported-features.md) ADVISOR section) |
+| `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL` | Transcript-aware Advisor (standard selection is unchanged; `-m fast` fixes both the client identity and proxy dispatch to Gemini 3.8 Flash/high; see [`unsupported-features.md`](unsupported-features.md) ADVISOR section) |
 | `CLAUDE_CODE_FORK_SUBAGENT` | Forked subagents inherit the full conversation context (vs starting fresh). **Headless mode (`claude --print`) silently no-ops the fork** (`Z8()` precondition in the binary) — don't expect forked context in `-p` runs |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `TeamCreate` + inter-teammate `SendMessage` primitives. **Requires the CLAUDE_CONFIG_DIR snapshot mirror** — see [`auth-isolation.md`](auth-isolation.md). The teammate-spawn allowlist drops `ANTHROPIC_AUTH_TOKEN`, so spawned teammates can only authenticate by reading a credential from disk in a CONFIG_DIR they inherit. |
 | `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` | Tool inputs stream as the model generates them. Anthropic explicitly recommends this for proxy users at [code.claude.com/docs/en/env-vars](https://code.claude.com/docs/en/env-vars): "Set to `1` to force on when routing through a proxy via `ANTHROPIC_BASE_URL`" |
@@ -57,7 +57,7 @@ Phase 3 of the Anthropic-translation shim exploits exactly that asymmetry.
 `getClaudeCodeEnvVars` (`src/lib/server-setup.ts`) pre-seeds
 `<CLAUDE_CONFIG_DIR>/cache/gateway-models.json` with the current fast-profile
 non-Claude rows present in the live catalog (`gpt-5.6-sol`, `gpt-5.6-luna`,
-`gemini-3.7-flash`, `grok-4.6`) via `seedGatewayModelCache`, then enables
+`gemini-3.8-flash`, `grok-4.6`) via `seedGatewayModelCache`, then enables
 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` — but ONLY when the seed actually
 landed AND the key is unset in both the parent env and the injected `vars` (a
 user-set value always wins, same presence guard as the five features above). When
@@ -74,7 +74,7 @@ by the `/v1/messages` translation shim. Full mechanism and non-regression argume
 in [`anthropic-translation-shim.md`](anthropic-translation-shim.md).
 
 **Fast profile.** The seeded gateway rows are now exactly `gpt-5.6-sol`,
-`gpt-5.6-luna`, `gemini-3.7-flash`, and `grok-4.6`, gated on the live catalog.
+`gpt-5.6-luna`, `gemini-3.8-flash`, and `grok-4.6`, gated on the live catalog.
 The cache-read-vs-fetch asymmetry, presence guard, and version-coupling caveat are
 unchanged. The literal raw `-m fast` profile additionally uses private Luna
 aliases where the same catalog model needs different fixed efforts (lead/general-purpose

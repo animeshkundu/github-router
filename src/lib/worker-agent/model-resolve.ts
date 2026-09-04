@@ -226,7 +226,7 @@ export const FALLBACK_TOKEN_PRICES: Readonly<Record<string, CatalogTokenPrices>>
     "gemini-3.6-flash": { in: 75, out: 375 },
     "gemini-3.5-flash": { in: 150, out: 900 },
     "gemini-3.1-pro-preview": { in: 200, out: 1200 },
-    "gemini-3.7-flash": { in: 75, out: 375 },
+    "gemini-3.8-flash": { in: 75, out: 375 },
   })
 
 /**
@@ -313,21 +313,16 @@ export function catalogTokenPrices(modelId: string): CatalogTokenPrices | undefi
  * second speed axis invites optimising a routing choice that policy already
  * settles (see the decorrelation note below).
  *
- * `gemini-3.7-flash` and the re-measured `gemini-3.1-pro-preview` (2026-08-13,
- * n=5, one untimed warmup rep) used the script's newer `GH_ROUTER_BENCH_STREAM=1`
- * mode, which splits wall-clock into TTFT and a decode-phase rate excluding the
- * first delta's own time+tokens. This row still records the SAME metric family
- * as every other row here (total tokens / total wall-clock, i.e. the script's
- * "total tok/s" column) — NOT the new decode-phase figure — so the table stays
- * internally comparable across rows measured at different times. The decode
- * figure is materially different and worth knowing for routing decisions that
- * care about steady-state throughput specifically: at matched effort,
- * `gemini-3.7-flash` decodes at ~275-315 tok/s (Google's own ~340 tok/s
- * Artificial Analysis figure, roughly confirmed once TTFT is excluded) against
- * `gpt-5.6-terra`'s ~135-190 tok/s decode — gemini-3.7-flash is the faster
- * decoder, but its ~1.1-1.7s TTFT (vs terra's ~0.9-1.0s) drags its TOTAL rate
- * below terra's on short responses, which is exactly why this row uses total,
- * not decode, to stay consistent with its neighbors.
+ * The `gemini-3.8-flash` row carries forward the predecessor generation's 91
+ * total-tokens/sec result as a conservative floor: the user confirmed 3.8 is the
+ * same speed or slightly faster. It is not a fresh 3.8 benchmark. The predecessor
+ * measurement (2026-08-13, n=5, one untimed warmup rep) used the script's newer
+ * `GH_ROUTER_BENCH_STREAM=1` mode, which splits wall-clock into TTFT and a
+ * decode-phase rate excluding the first delta's own time+tokens. The row records
+ * the SAME metric family as every other row here (total tokens / total wall-clock,
+ * the script's "total tok/s" column), not the decode-phase figure, so the table
+ * remains internally comparable. `gemini-3.1-pro-preview` was re-measured with
+ * the same method.
  */
 export const INDICATIVE_TOKENS_PER_SECOND: Readonly<Record<string, number>> = Object.freeze({
   "gpt-5.6-luna": 120,
@@ -340,7 +335,7 @@ export const INDICATIVE_TOKENS_PER_SECOND: Readonly<Record<string, number>> = Ob
   "gpt-5.6-sol": 75,
   "grok-4.5": 70,
   "gpt-5.5": 65,
-  "gemini-3.7-flash": 91,
+  "gemini-3.8-flash": 91,
   "gemini-3.6-flash": 45,
   "gemini-3.5-flash": 40,
   "gemini-3.1-pro-preview": 33,

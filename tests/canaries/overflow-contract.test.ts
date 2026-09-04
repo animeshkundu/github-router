@@ -39,16 +39,20 @@ const REQUIRED_MARKERS: ReadonlyArray<{ needle: string; why: string }> = [
     needle: "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
     why: "the env var the derived compaction window is exported through",
   },
+  // 2.1.260 renamed the minified floor/cap bindings (2.1.251: ike/JNe;
+  // 2.1.258: yCe/KUe) but kept the same 1e5 floor, 1e6 cap, parseInt
+  // fallback, and Math.max raise. "1m" still parses to 1 and is raised
+  // to 100,000. No change to src/lib/error.ts or src/lib/grok-context.ts.
   {
-    needle: "ike=1e5,JNe=1e6",
+    needle: "QTe=1e5,ZUe=1e6",
     why: "the 100,000 floor and 1,000,000 cap used by the auto-compact env parser",
   },
   {
-    needle: "cee(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,ike,JNe)",
+    needle: "Uee(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,QTe,ZUe)",
     why: "the auto-compact env parser receiving those floor and cap constants",
   },
   {
-    needle: "Math.max(ike,A.effective)",
+    needle: "Math.max(QTe,N.effective)",
     why: "the parsed auto-compact window being raised to the 100,000 floor",
   },
 ]

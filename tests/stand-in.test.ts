@@ -185,7 +185,7 @@ function maxCatalog(opts: { grok?: boolean } = {}) {
       supported_endpoints: ["/chat/completions"],
     },
     {
-      id: "gemini-3.7-flash",
+      id: "gemini-3.8-flash",
       capabilities: {
         limits: {
           max_context_window_tokens: 1_000_000,
@@ -239,14 +239,14 @@ describe("max stand_in panel", () => {
     ])
   })
 
-  test("falls back to Gemini 3.7 Flash 1M/high and never selects Gemini Pro", () => {
+  test("falls back to Gemini 3.8 Flash 1M/high and never selects Gemini Pro", () => {
     state.models = maxCatalog()
     expect(standInModels({ maxProfile: true })).toEqual([
       expect.objectContaining({ key: "gpt-5.6-sol", model: "gpt-5.6-sol" }),
       expect.objectContaining({ key: "claude-opus-5", model: "claude-opus-5" }),
       expect.objectContaining({
-        key: "gemini-3.7-flash",
-        model: "gemini-3.7-flash",
+        key: "gemini-3.8-flash",
+        model: "gemini-3.8-flash",
         endpoint: "/v1/chat/completions",
         effort: "high",
       }),
@@ -262,7 +262,7 @@ describe("max stand_in panel", () => {
     )
   })
 
-  test("max tool boundary falls back to Gemini 3.7 Flash/high without Grok", async () => {
+  test("max tool boundary falls back to Gemini 3.8 Flash/high without Grok", async () => {
     state.models = maxCatalog()
     const requests: Array<Record<string, unknown>> = []
     globalThis.fetch = mock(async (url, init) => {
@@ -277,7 +277,7 @@ describe("max stand_in panel", () => {
       }
       if (String(url).includes("/chat/completions")) {
         return new Response(JSON.stringify({
-          id: "c", object: "chat.completion", created: 0, model: "gemini-3.7-flash",
+          id: "c", object: "chat.completion", created: 0, model: "gemini-3.8-flash",
           choices: [{ index: 0, message: { role: "assistant", content: vote }, finish_reason: "stop", logprobs: null }],
         }), { status: 200, headers: { "content-type": "application/json" } })
       }
@@ -289,9 +289,9 @@ describe("max stand_in panel", () => {
 
     const toolResult = await runStandInToolCall(TINY_INPUT, undefined, true)
     const result = JSON.parse(toolResult.content[0]?.text ?? "{}") as StandInResult
-    expect(result.votes["gemini-3.7-flash"]).toBeDefined()
+    expect(result.votes["gemini-3.8-flash"]).toBeDefined()
     expect(result.votes["gemini-3.1-pro-preview"]).toBeUndefined()
-    const geminiRequest = requests.find((body) => body.model === "gemini-3.7-flash")
+    const geminiRequest = requests.find((body) => body.model === "gemini-3.8-flash")
     expect(geminiRequest).toBeDefined()
     expect(geminiRequest?.reasoning_effort).toBe("high")
   })

@@ -1042,7 +1042,7 @@ test("profile:'max' steers to role defaults and excludes Gemini Pro", () => {
   expect(directive).toContain("configured model is the deliberate default")
   expect(directive).toContain("most useful after a concrete mismatch")
   expect(directive).toContain("Grok 4.6/high")
-  expect(directive).toContain("Gemini 3.7 Flash 1M/high")
+  expect(directive).toContain("Gemini 3.8 Flash 1M/high")
   expect(directive).toContain("Gemini 3.1 Pro")
   expect(directive).toContain("is replaced")
   expect(directive).toContain("Advisor is optional, non-binding")

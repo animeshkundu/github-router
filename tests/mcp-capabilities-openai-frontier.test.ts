@@ -113,7 +113,7 @@ test("standInToolEnabled keeps the Google slot on the Flash fallback", () => {
   setCatalog([
     entry("gpt-5.6-sol", true),
     entry("claude-opus-5", true),
-    entry("gemini-3.7-flash", true),
+    entry("gemini-3.8-flash", true),
   ])
   expect(standInToolEnabled()).toBe(true)
 })
@@ -136,7 +136,7 @@ test("max standInToolEnabled ignores Gemini Pro and prefers Grok/high or Flash 1
     capable("gpt-5.6-sol", 1_050_000, "/responses"),
     capable("claude-opus-5", 1_000_000, "/v1/messages"),
     capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions"),
-    capable("gemini-3.7-flash", 1_000_000, "/chat/completions"),
+    capable("gemini-3.8-flash", 1_000_000, "/chat/completions"),
     capable("grok-4.6", 500_000, "/responses"),
   ])
   expect(standInToolEnabled({ maxProfile: true })).toBe(true)

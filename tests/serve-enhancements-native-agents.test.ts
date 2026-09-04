@@ -32,10 +32,10 @@ afterEach(() => {
 test("serve resolves reviewer-fast once and propagates matching availability", () => {
   state.models = {
     object: "list",
-    data: [model("gemini-3.7-flash")] as never,
+    data: [model("gemini-3.8-flash")] as never,
   }
   const resolved = resolveServeNativeAgentOptions()
-  expect(resolved.models.reviewerFastModel).toBe("gemini-3.7-flash")
+  expect(resolved.models.reviewerFastModel).toBe("gemini-3.8-flash")
   expect(resolved.nativeAvailability.reviewerFastAvailable).toBe(true)
 })
 

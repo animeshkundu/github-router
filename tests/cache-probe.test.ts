@@ -66,7 +66,7 @@ describe("selectCacheProbeTargets", () => {
     expect(selection.missing).toContain("gpt-5.6-sol")
     expect(selection.missing).toContain("gpt-5.6-terra")
     expect(selection.missing).toContain("gpt-5.6-luna")
-    expect(selection.missing).toContain("gemini-3.7-flash")
+    expect(selection.missing).toContain("gemini-3.8-flash")
     const gptSol = selection.targets.find((t) => t.requestedId === "gpt-5.6-sol")
     expect(gptSol?.found).toBe(false)
     expect(gptSol?.catalogId).toBeUndefined()
@@ -106,7 +106,7 @@ describe("cacheOracleClassFor", () => {
   })
 
   test("gemini, grok, and non-5.6 gpt families are provider-managed", () => {
-    expect(cacheOracleClassFor("gemini-3.7-flash")).toBe("provider-managed")
+    expect(cacheOracleClassFor("gemini-3.8-flash")).toBe("provider-managed")
     expect(cacheOracleClassFor("grok-4.6")).toBe("provider-managed")
     // Boundary case: gpt-5.5 must NOT match the gpt-5.6 prefix check.
     expect(cacheOracleClassFor("gpt-5.5")).toBe("provider-managed")
@@ -386,7 +386,7 @@ describe("buildCacheProbeClaudeArgs", () => {
 describe("systemPrefixCharsFor", () => {
   test("gives Haiku, Gemini, and Grok the larger prefix by default", () => {
     expect(systemPrefixCharsFor("claude-haiku-4.5")).toBe(LARGE_SYSTEM_PREFIX_CHARS)
-    expect(systemPrefixCharsFor("gemini-3.7-flash")).toBe(LARGE_SYSTEM_PREFIX_CHARS)
+    expect(systemPrefixCharsFor("gemini-3.8-flash")).toBe(LARGE_SYSTEM_PREFIX_CHARS)
     expect(systemPrefixCharsFor("grok-4.6")).toBe(LARGE_SYSTEM_PREFIX_CHARS)
   })
 
@@ -398,7 +398,7 @@ describe("systemPrefixCharsFor", () => {
   })
 
   test("an explicit override always wins, for every model", () => {
-    expect(systemPrefixCharsFor("gemini-3.7-flash", 1_234)).toBe(1_234)
+    expect(systemPrefixCharsFor("gemini-3.8-flash", 1_234)).toBe(1_234)
     expect(systemPrefixCharsFor("claude-opus-5", 1_234)).toBe(1_234)
   })
 })

@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Subagent name | Standard: `scout`; fast profile: capitalized `Explore` |
-| Subagent's OWN model | Standard: `gpt-5.6-luna` preferred, then `gemini-3.7-flash`; fast: exact Luna/high via `gh-router-luna-scout-high[1m]` |
+| Subagent's OWN model | Standard: `gpt-5.6-luna` preferred, then `gemini-3.8-flash`; fast: exact Luna/high via `gh-router-luna-scout-high[1m]` |
 | Gate | Standard `scout` is conditional. Fast `Explore` is mandatory under the fast-profile prerequisite and replaces fast `scout`. |
 | Registered via | `buildPeerAgentDefinitions` in `src/lib/codex-mcp-config.ts` |
 | Description source | Inline native-agent definition in `buildPeerAgentDefinitions` |

@@ -108,7 +108,7 @@ test("max tier resolution excludes Gemini Pro in favor of Grok then Flash", () =
     object: "list",
     data: [
       capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions"),
-      capable("gemini-3.7-flash", 1_000_000, "/chat/completions"),
+      capable("gemini-3.8-flash", 1_000_000, "/chat/completions"),
       capable("grok-4.6", 500_000, "/responses"),
     ],
   } as unknown as ModelCatalog
@@ -120,11 +120,11 @@ test("max tier resolution excludes Gemini Pro in favor of Grok then Flash", () =
     object: "list",
     data: [
       capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions"),
-      capable("gemini-3.7-flash", 1_000_000, "/chat/completions"),
+      capable("gemini-3.8-flash", 1_000_000, "/chat/completions"),
     ],
   } as unknown as ModelCatalog
-  expect(resolveTierModel("T1", { maxProfile: true })).toBe("gemini-3.7-flash")
-  expect(resolveTierModel("T2", { maxProfile: true })).toBe("gemini-3.7-flash")
+  expect(resolveTierModel("T1", { maxProfile: true })).toBe("gemini-3.8-flash")
+  expect(resolveTierModel("T2", { maxProfile: true })).toBe("gemini-3.8-flash")
 
   setModels(["gemini-3.1-pro-preview"])
   expect(resolveTierModel("T1", { maxProfile: true })).toBeUndefined()

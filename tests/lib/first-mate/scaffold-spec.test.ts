@@ -77,7 +77,7 @@ describe("buildScaffoldFiles", () => {
     })
     const maxGemini = buildScaffoldFiles({
       repoName: "test-repo",
-      maxProfileReviewModel: "gemini-3.7-flash",
+      maxProfileReviewModel: "gemini-3.8-flash",
     })
     const reviewer = (files: ReturnType<typeof buildScaffoldFiles>) =>
       files.find((file) => file.path === ".claude/agents/reviewer.md")!.content
@@ -85,7 +85,7 @@ describe("buildScaffoldFiles", () => {
     expect(reviewer(standard)).toContain("model: gemini-3.1-pro-preview")
     expect(reviewer(maxGrok)).toContain("model: grok-4.6")
     expect(reviewer(maxGrok)).not.toContain("gemini-3.1-pro-preview")
-    expect(reviewer(maxGemini)).toContain("model: gemini-3.7-flash")
+    expect(reviewer(maxGemini)).toContain("model: gemini-3.8-flash")
     expect(reviewer(maxGemini)).not.toContain("gemini-3.1-pro-preview")
   })
 

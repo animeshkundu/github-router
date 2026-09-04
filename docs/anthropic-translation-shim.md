@@ -44,7 +44,7 @@ The shim is generic across catalog-advertised Responses/Chat models. The current
 |---|---|---|
 | `gpt-5.6-sol` | `/responses` | 1.05M context on the base slug |
 | `gpt-5.6-luna` | `/responses` | 1.05M context on the base slug |
-| `gemini-3.7-flash` | `/chat/completions` | 1M context on the base slug |
+| `gemini-3.8-flash` | `/chat/completions` | 1M context on the base slug |
 | `grok-4.6` | `/responses` | 500K total / 372K prompt; kept bare |
 
 The compatibility matrix also retains older explicit model probes (`gpt-5.5`, `gpt-5.3-codex`, `gemini-3.5-flash`, `gemini-3.1-pro-preview`) because raw clients can still name them and the generic shim continues to support them.
@@ -280,10 +280,10 @@ Non-regression is **structural**, not "we were careful": the Claude path shares
 no code with the shim beyond the branch, and the classifier is guard-tested to
 keep every Claude model on the passthrough. ADVISOR (`advisor-tool` beta) plus an ordinary non-Claude model degrades by
 stripping the internal tool. An authenticated fast primary lead is the exception:
-both shim paths run the server-side Advisor loop, dispatch fixed Gemini 3.7 Flash
+both shim paths run the server-side Advisor loop, dispatch fixed Gemini 3.8 Flash
 on Chat/high, and continue on the selected lead's original endpoint. The fast
 launcher also pins Claude Code's client-side Advisor setting to
-`gemini-3.7-flash[1m]`, so its native tool schema, UI, and JSONL no longer retain a
+`gemini-3.8-flash[1m]`, so its native tool schema, UI, and JSONL no longer retain a
 mirrored standard-profile Advisor id while the proxy dispatches Gemini. A missing
 Gemini Chat runtime invariant or a conflicting in-session Advisor model fails
 visibly rather than selecting the standard Sol/Opus path.
@@ -432,11 +432,11 @@ honestly rather than papered over:
 ## Phase 3: native model selection (gateway cache-seed)
 
 > **Fast profile (shipped).** The picker inventory is exactly `gpt-5.6-sol` /
-> `gpt-5.6-luna` / `gemini-3.7-flash` / `grok-4.6`, gated on the live catalog.
+> `gpt-5.6-luna` / `gemini-3.8-flash` / `grok-4.6`, gated on the live catalog.
 > A literal `-m fast` launch starts on Luna and fixes the native roster to
 > Explore (Luna/high), Plan (Sol/high), general-purpose (Luna/max), implementer
 > (Gemini/high), and reviewer (Grok/medium), plus gated worker-browse. Its optional
-> primary-lead-only Advisor stays on Gemini 3.7 Flash after `/model` switches to
+> primary-lead-only Advisor stays on Gemini 3.8 Flash after `/model` switches to
 > any fixed fast row. The fixed endpoint contract is Responses for Luna, Sol, and
 > Grok; Chat Completions for Gemini; native Messages for Opus.
 > Non-Claude Advisor continuations return through the selected lead's same endpoint;
@@ -495,7 +495,7 @@ seed decorates `id` with `[1m]` when that exact catalog entry advertises at leas
 1M context and `CLAUDE_CODE_DISABLE_1M_CONTEXT` is unset. Claude Code recognizes
 the literal suffix and accounts a decorated row at 1M; `display_name` remains
 bare. In the current fast target set this decorates `gpt-5.6-sol`,
-`gpt-5.6-luna`, and `gemini-3.7-flash`; `grok-4.6` stays bare because the cache
+`gpt-5.6-luna`, and `gemini-3.8-flash`; `grok-4.6` stays bare because the cache
 schema has no representation for 500K and over-budgeting it as 1M would risk
 overflow.
 

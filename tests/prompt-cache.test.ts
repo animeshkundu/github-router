@@ -196,7 +196,7 @@ describe("Responses cache policy", () => {
 
   test("is a no-op for Gemini, Grok, older GPT, and caller-owned policy", () => {
     for (const model of [
-      "gemini-3.7-flash",
+      "gemini-3.8-flash",
       "grok-4.6",
       "gpt-5.5",
       "gpt-5.6-future",
@@ -537,7 +537,7 @@ describe("web-search stable-prefix placement", () => {
 
   test("Chat inserts results after the stable system prefix", () => {
     const payload: ChatCompletionsPayload = {
-      model: "gemini-3.7-flash",
+      model: "gemini-3.8-flash",
       messages: [
         { role: "system", content: "stable" },
         { role: "user", content: "question" },

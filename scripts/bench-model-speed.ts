@@ -46,7 +46,7 @@
 // Usage:
 //   GH_ROUTER_BENCH_BASE_URL=http://127.0.0.1:8787 bun scripts/bench-model-speed.ts
 //   GH_ROUTER_BENCH_MODELS=gpt-5.6-luna,gemini-3.6-flash bun scripts/bench-model-speed.ts
-//   GH_ROUTER_BENCH_STREAM=1 GH_ROUTER_BENCH_MODELS=gemini-3.7-flash,gpt-5.6-terra bun scripts/bench-model-speed.ts
+//   GH_ROUTER_BENCH_STREAM=1 GH_ROUTER_BENCH_MODELS=gemini-3.8-flash,gpt-5.6-terra bun scripts/bench-model-speed.ts
 //   GH_ROUTER_BENCH_STREAM=1 GH_ROUTER_BENCH_EFFORT=low bun scripts/bench-model-speed.ts
 
 const BASE_URL = process.env.GH_ROUTER_BENCH_BASE_URL ?? "http://127.0.0.1:8787"
@@ -66,7 +66,7 @@ const DEFAULT_MODELS = [
   "gpt-5.5",
   "gpt-5.3-codex",
   "gpt-5.4-mini",
-  "gemini-3.7-flash",
+  "gemini-3.8-flash",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
   "gemini-3.1-pro-preview",

@@ -79,7 +79,7 @@ Set GH_ROUTER_RUN_CACHE_PROBE=1 to run it, e.g.:
   GH_ROUTER_RUN_CACHE_PROBE=1 bun run probe:cache
 
 It resolves claude-opus-5, claude-haiku-4.5, all three GPT-5.6 tiers
-(sol/terra/luna), gemini-3.7-flash, and the highest-context grok-4.6* sibling
+(sol/terra/luna), gemini-3.8-flash, and the highest-context grok-4.6* sibling
 from the LIVE Copilot catalog, then spawns
 the real launcher ("bun run ./src/main.ts claude") and the real installed
 Claude Code CLI for each, feeding multi-turn stdin traffic and reading the

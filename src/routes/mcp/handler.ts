@@ -434,7 +434,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry): Array<ToolEn
       .map((tool) => ({
         name: tool.toolNameHttp,
         description: tool.toolNameHttp === "stand_in"
-          ? "Three-lab away-mode decision tiebreak for bounded choices while the user is unavailable. The max panel is Sol, Opus 5, and Grok 4.6 at high effort when available, otherwise Gemini 3.7 Flash 1M at high. It recommends but never executes; destructive actions still require the user."
+          ? "Three-lab away-mode decision tiebreak for bounded choices while the user is unavailable. The max panel is Sol, Opus 5, and Grok 4.6 at high effort when available, otherwise Gemini 3.8 Flash 1M at high. It recommends but never executes; destructive actions still require the user."
           : tool.description,
         inputSchema: tool.inputSchema,
       }))

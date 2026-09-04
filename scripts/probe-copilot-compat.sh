@@ -202,7 +202,7 @@ declare -a PROBE_REGISTRY=(
   "shim_gpt55_messages|exploratory|gpt-5.5 on /v1/messages (→ /responses shim): 200 + well-formed Anthropic message (content array)"
   "shim_gpt53codex_messages|exploratory|gpt-5.3-codex on /v1/messages (→ /responses shim): 200 + well-formed Anthropic message (400k context)"
   "shim_gemini35flash_messages|exploratory|gemini-3.5-flash on /v1/messages (→ /chat/completions shim): 200 + well-formed Anthropic message"
-  "shim_gemini31pro_messages|exploratory|gemini-3.1-pro-preview on /v1/messages (→ /chat/completions shim): 200 + well-formed Anthropic message"
+  "shim_gemini31pro_messages|exploratory|retired gemini-3.1-pro-preview on /v1/messages: explicit 400 unavailable-model rejection (retained monotonic probe)"
   "shim_gpt55_messages_streaming|exploratory|gpt-5.5 on /v1/messages with stream:true: 200 + synthesized Anthropic SSE (event: message_start … message_stop)"
   "shim_gpt55_messages_tool_use|exploratory|gpt-5.5 on /v1/messages with forced tool_choice: 200 + tool_use block with non-empty input"
   "shim_gemini35flash_messages_streaming|exploratory|gemini-3.5-flash on /v1/messages with stream:true (→ /chat/completions shim): 200 + synthesized Anthropic SSE (event: message_start … message_stop) — chat-shim symmetric to shim_gpt55_messages_streaming"
@@ -226,7 +226,7 @@ declare -a PROBE_REGISTRY=(
   "shim_image_tool_result_gpt55|exploratory|image inside a tool_result on /v1/messages → gpt-5.5 /responses shim: 200 (the shape a subagent reading a screenshot actually produces)"
   "shim_image_tool_result_gemini35flash|exploratory|image inside a tool_result on /v1/messages → gemini-3.5-flash /chat shim: 200 (same shape, chat egress)"
   "vision_multi_image_gpt|exploratory|2 images to a max_prompt_images:1 gpt model → 200; the catalog field understates the real ceiling (gpt-5.5 accepted 120) and must not gate locally"
-  "vision_ceiling_recovery_gemini|exploratory|12 images to gemini (real upstream ceiling 10) → 200; the proxy prunes to the number upstream names and retries once"
+  "vision_ceiling_recovery_gemini|exploratory|12 images to gemini-3.8-flash (real upstream ceiling 10) → 200; the proxy prunes to the number upstream names and retries once"
   "shim_advisor_degrade_gpt55|exploratory|advisor beta header + advisor tool on /v1/messages → gpt-5.5 /responses shim: 200 graceful degrade (advisor tool stripped, no 400)"
   "shim_advisor_degrade_gemini35flash|exploratory|advisor beta header + advisor tool on /v1/messages → gemini-3.5-flash /chat shim: 200 graceful degrade (advisor tool stripped, no 400)"
   "shim_count_tokens_gpt53codex|exploratory|/v1/messages/count_tokens with gpt-5.3-codex model id: 200 + input_tokens count"
@@ -243,10 +243,10 @@ declare -a PROBE_REGISTRY=(
   "fast_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the fast profile's general-purpose assignment; 'max' is the top of Luna's none..max ladder)"
   "fast_sol_responses_reasoning_high|exploratory|gpt-5.6-sol on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's Plan assignment)"
   "fast_opus5_messages_reasoning_high|exploratory|claude-opus-5 on /v1/messages accepts tools[] + adaptive thinking + high effort (the fast profile's Oracle assignment)"
-  "fast_gemini37flash_messages_reasoning_high|exploratory|gemini-3.7-flash on /v1/messages translation shim with high reasoning effort (the fast profile's native implementer path)"
-  "fast_gemini37flash_messages_tool_use|exploratory|gemini-3.7-flash on /v1/messages translation shim accepts a tool-use request (the fast profile's implementer tool path)"
-  "fast_gemini37flash_chat_reasoning_high|exploratory|gemini-3.7-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (the fast profile's Advisor assignment and native implementer shape)"
-  "fast_gemini37flash_chat_reasoning_medium|exploratory|gemini-3.7-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'medium' (historical: former fast native critic assignment)"
+  "fast_gemini38flash_messages_reasoning_high|exploratory|gemini-3.8-flash on /v1/messages translation shim with high reasoning effort (the fast profile's native implementer path)"
+  "fast_gemini38flash_messages_tool_use|exploratory|gemini-3.8-flash on /v1/messages translation shim accepts a tool-use request (the fast profile's implementer tool path)"
+  "fast_gemini38flash_chat_reasoning_high|exploratory|gemini-3.8-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (the fast profile's Advisor assignment and native implementer shape)"
+  "fast_gemini38flash_chat_reasoning_medium|exploratory|gemini-3.8-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'medium' (historical: former fast native critic assignment)"
   "fast_grok46_responses_reasoning_medium|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'medium'} (the fast profile's reviewer assignment)"
   "max_grok46_responses_reasoning_high|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the max profile's reviewer assignment)"
   "max_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the max profile's reviewer fallback assignment)"
@@ -1061,14 +1061,15 @@ probe_shim_gemini35flash_messages() {
 }
 
 probe_shim_gemini31pro_messages() {
-  # gemini-3.1-pro-preview: same /chat/completions shim path as gemini-3.5-flash.
+  # Retained monotonic probe for the retired Pro preview. On 2026-09-03 the live
+  # catalog removed the model, so the symmetric contract is now explicit reject.
   do_request POST /v1/messages '{
     "model": "gemini-3.1-pro-preview",
     "max_tokens": 128,
     "messages": [{"role":"user","content":"Reply with the single word: ok"}]
   }'
-  assert_status 200 \
-    && assert_anthropic_message
+  assert_status 400 \
+    && assert_body_contains 'model is not available'
 }
 
 probe_shim_gpt55_messages_streaming() {
@@ -1376,8 +1377,8 @@ probe_vision_ceiling_recovery_gemini() {
   local i
   for i in $(seq 2 12); do images="${images},${img}"; done
   do_request POST /v1/messages "{
-    \"model\": \"gemini-3.1-pro-preview\",
-    \"max_tokens\": 128,
+    \"model\": \"gemini-3.8-flash\",
+    \"max_tokens\": 512,
     \"messages\": [{\"role\":\"user\",\"content\":[${images},{\"type\":\"text\",\"text\":\"How many images?\"}]}]
   }"
   # This asserts the user-visible OUTCOME only: without the recovery this is a
@@ -1467,13 +1468,13 @@ probe_shim_parallel_tool_emit_gpt55() {
 }
 
 # ===========================================================================
-# Fast-launch-profile model shapes (Luna / Gemini 3.7 Flash / Grok 4.6)
+# Fast-launch-profile model shapes (Luna / Gemini 3.8 Flash / Grok 4.6)
 # ===========================================================================
 # See docs/default-models.md "Fast launch profile" for the design these shapes
-# support: gpt-5.6-luna is the fast lead (and backs Explore/implementer
-# natives at high/max effort respectively), gemini-3.7-flash backs the native
-# critic at medium effort and the Advisor target at high effort, and grok-4.6
-# backs the reviewer at medium effort. The native/MCP roster narrowing and its
+# support: gpt-5.6-luna is the fast lead and backs Explore/general-purpose at
+# high/max effort respectively; gemini-3.8-flash backs the implementer and
+# Advisor at high effort; and grok-4.6 backs the reviewer at medium effort.
+# The Gemini medium-effort row below is retained as a historical shape probe. The native/MCP roster narrowing and its
 # Task/Agent ACL are local policy; these probes assert the underlying Copilot
 # request shapes, which are ordinary passthrough/shim contracts today.
 
@@ -1491,10 +1492,10 @@ probe_fast_opus5_messages_reasoning_high() {
   assert_status 200
 }
 
-probe_fast_gemini37flash_messages_reasoning_high() {
-  # Fast implementer uses Gemini 3.7 Flash via the /v1/messages translation shim at high effort.
+probe_fast_gemini38flash_messages_reasoning_high() {
+  # Fast implementer uses Gemini 3.8 Flash via the /v1/messages translation shim at high effort.
   do_request POST /v1/messages '{
-    "model": "gemini-3.7-flash",
+    "model": "gemini-3.8-flash",
     "max_tokens": 128,
     "output_config": {"effort": "high"},
     "messages": [{"role":"user","content":"Reply with the single word: ok"}]
@@ -1502,11 +1503,11 @@ probe_fast_gemini37flash_messages_reasoning_high() {
   assert_status 200 && assert_anthropic_message
 }
 
-probe_fast_gemini37flash_messages_tool_use() {
+probe_fast_gemini38flash_messages_tool_use() {
   # The native implementer reaches Gemini through the /v1/messages translation shim with tools.
   do_request POST /v1/messages '{
-    "model": "gemini-3.7-flash",
-    "max_tokens": 50,
+    "model": "gemini-3.8-flash",
+    "max_tokens": 512,
     "output_config": {"effort": "high"},
     "messages": [{"role":"user","content":"Use the echo tool with text ok."}],
     "tools": [{"name":"echo","description":"echo the input","input_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
@@ -1558,12 +1559,12 @@ probe_fast_luna_responses_reasoning_max() {
   assert_status 200
 }
 
-probe_fast_gemini37flash_chat_reasoning_high() {
-  # gemini-3.7-flash on /v1/chat/completions at reasoning_effort:"high" — the
+probe_fast_gemini38flash_chat_reasoning_high() {
+  # gemini-3.8-flash on /v1/chat/completions at reasoning_effort:"high" — the
   # fast profile's native implementer shape and Advisor target. Same shape as the
   # worker_gemini_tools_reasoning probe above (chat-style nested {function:{...}} tools[]).
   do_request POST /v1/chat/completions '{
-    "model": "gemini-3.7-flash",
+    "model": "gemini-3.8-flash",
     "messages": [{"role":"user","content":"reply with the literal string ok"}],
     "tools": [{"type":"function","function":{"name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}}],
     "tool_choice": "auto",
@@ -1573,10 +1574,10 @@ probe_fast_gemini37flash_chat_reasoning_high() {
   assert_status 200
 }
 
-probe_fast_gemini37flash_chat_reasoning_medium() {
-  # gemini-3.7-flash at medium effort (historical: former fast native critic assignment).
+probe_fast_gemini38flash_chat_reasoning_medium() {
+  # gemini-3.8-flash at medium effort (historical: former fast native critic assignment).
   do_request POST /v1/chat/completions '{
-    "model": "gemini-3.7-flash",
+    "model": "gemini-3.8-flash",
     "messages": [{"role":"user","content":"reply with the literal string ok"}],
     "tools": [{"type":"function","function":{"name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}}],
     "tool_choice": "auto",

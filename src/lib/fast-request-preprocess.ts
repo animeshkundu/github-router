@@ -68,7 +68,7 @@ export function preprocessFastRequest(
     effort = "high"
   } else if (bare === "grok-4.6") {
     effort = "medium"
-  } else if (bare === "gemini-3.7-flash") {
+  } else if (bare === "gemini-3.8-flash") {
     effort = "high"
   } else if (bare === "claude-opus-5") {
     effort = "high"

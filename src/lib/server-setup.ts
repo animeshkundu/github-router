@@ -693,8 +693,8 @@ export function parseSharedArgs(args: Record<string, unknown>): {
  * Copilot `/responses` (gpt) or `/chat/completions` (gemini/grok).
  *
  * This list is EXACT and STATIC — no dynamic Gemini-review append (the
- * earlier `gemini-3.1-pro-preview`-preferred / `gemini-3.7-flash`-fallback
- * row is retired: `gemini-3.7-flash` is now a first-class row on its own,
+ * earlier `gemini-3.1-pro-preview`-preferred / `gemini-3.8-flash`-fallback
+ * row is retired: `gemini-3.8-flash` is now a first-class row on its own,
  * always at this fixed id). A model missing from the catalog is simply
  * omitted, never substituted — see `nativeSelectableModelsInCatalog`.
  *
@@ -710,7 +710,7 @@ const NATIVE_NON_CLAUDE_MODELS: ReadonlyArray<{
 }> = [
   { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" },
   { id: "gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
-  { id: "gemini-3.7-flash", displayName: "Gemini 3.7 Flash" },
+  { id: "gemini-3.8-flash", displayName: "Gemini 3.8 Flash" },
   { id: "grok-4.6", displayName: "Grok 4.6" },
 ]
 
@@ -760,7 +760,7 @@ export function nativeSelectableModelsInCatalog(): Array<{
 const MAX_NATIVE_MODELS: ReadonlyArray<{ id: string; displayName: string }> = [
   { id: MAX_PROFILE_MODELS.sol, displayName: "GPT-5.6 Sol" },
   { id: MAX_PROFILE_MODELS.luna, displayName: "GPT-5.6 Luna" },
-  { id: MAX_PROFILE_MODELS.gemini, displayName: "Gemini 3.7 Flash" },
+  { id: MAX_PROFILE_MODELS.gemini, displayName: "Gemini 3.8 Flash" },
   { id: MAX_PROFILE_MODELS.opus, displayName: "Claude Opus 5" },
 ]
 

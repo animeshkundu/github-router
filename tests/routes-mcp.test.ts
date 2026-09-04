@@ -339,13 +339,13 @@ describe("/mcp protocol methods", () => {
   // personasFor()'s own already-covered test) used to set `.model` to the
   // resolved fallback while leaving `.description` unchanged, so `tools/list`
   // would advertise "backed by gemini-3.1-pro-preview" for a persona actually
-  // dispatching to gemini-3.7-flash. Assert the two never disagree.
+  // dispatching to gemini-3.8-flash. Assert the two never disagree.
   test("tools/list persona descriptions agree with the resolved model when Pro is absent and Flash is present", async () => {
     state.models = {
       object: "list",
       data: [
         ...baseModels.data.filter((m) => !m.id.startsWith("gemini")),
-        fakeModel("gemini-3.7-flash", ["/v1/chat/completions"]),
+        fakeModel("gemini-3.8-flash", ["/v1/chat/completions"]),
       ],
     }
     const { json } = await rpc({
@@ -359,7 +359,7 @@ describe("/mcp protocol methods", () => {
     expect(critic).toBeDefined()
     expect(reviewer).toBeDefined()
     for (const t of [critic, reviewer]) {
-      expect(t!.description).toContain("gemini-3.7-flash")
+      expect(t!.description).toContain("gemini-3.8-flash")
       expect(t!.description).not.toContain("gemini-3.1-pro-preview")
     }
   })
@@ -1538,7 +1538,7 @@ describe("/mcp stand_in tool", () => {
         capable("gpt-5.6-sol", 1_050_000, "/responses", "openai"),
         capable("claude-opus-5", 1_000_000, "/v1/messages", "anthropic"),
         capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions", "google"),
-        capable("gemini-3.7-flash", 1_000_000, "/chat/completions", "google"),
+        capable("gemini-3.8-flash", 1_000_000, "/chat/completions", "google"),
         capable("grok-4.6", 500_000, "/responses", "xai"),
       ] as never,
     }

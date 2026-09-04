@@ -23,7 +23,7 @@ export const EXACT_CACHE_PROBE_TARGETS: ReadonlyArray<string> = [
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-5.6-luna",
-  "gemini-3.7-flash",
+  "gemini-3.8-flash",
 ]
 
 /**
@@ -602,12 +602,13 @@ export function buildSaltedSystemPrefix(targetChars: number, salt: string): stri
  * for Claude/GPT in the live target catalog. It also clears this repo's own
  * 4,096-byte `MIN_CACHEABLE_PREFIX_BYTES` heuristic where router-owned discrete
  * calls use it, though the controlled conversation path itself stays provider-
- * managed. Providers do not share ONE floor: live measurement found
- * Gemini 3.7 Flash caching nothing at a 6,000-char prefix but caching
- * cleanly once the prefix reached ~40,000 chars, while native Claude and
- * gpt-5.6 cached at the smaller size. Grok's floor is unmeasured; it is
- * grouped with Gemini's larger size as the conservative (over- rather than
- * under-sized) choice rather than assumed to match Claude/gpt-5.6.
+ * managed. Providers do not share ONE floor: the predecessor Gemini Flash
+ * generation cached nothing at a 6,000-char prefix but cached cleanly once
+ * the prefix reached ~40,000 chars. That result is carried forward as a
+ * conservative 3.8 baseline, not claimed as a fresh 3.8 measurement. Native
+ * Claude and gpt-5.6 cached at the smaller size. Grok's floor is unmeasured;
+ * it is grouped with Gemini's larger size as the conservative (over- rather
+ * than under-sized) choice rather than assumed to match Claude/gpt-5.6.
  */
 export const DEFAULT_SYSTEM_PREFIX_CHARS = 6_000
 

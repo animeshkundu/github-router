@@ -26,7 +26,7 @@ export function maxRequestError(result: MaxRequestPreprocessResult): string | un
     return `Router-owned model alias ${JSON.stringify(result.rejectedAlias)} is valid only for an authenticated -m max launch.`
   }
   if (result.rejectedModel) {
-    return `Model ${JSON.stringify(result.rejectedModel)} is outside the fixed -m max model set (Sol, Luna, Gemini 3.7 Flash, or Opus 5).`
+    return `Model ${JSON.stringify(result.rejectedModel)} is outside the fixed -m max model set (Sol, Luna, Gemini 3.8 Flash, or Opus 5).`
   }
   return undefined
 }
@@ -34,7 +34,7 @@ export function maxRequestError(result: MaxRequestPreprocessResult): string | un
 const MAX_MODEL_EFFORTS: Readonly<Record<string, Effort>> = Object.freeze({
   "gpt-5.6-sol": "high",
   "gpt-5.6-luna": "high",
-  "gemini-3.7-flash": "high",
+  "gemini-3.8-flash": "high",
   "claude-opus-5": "high",
 })
 
