@@ -33,7 +33,7 @@ export function assertMaxDispatchGuardInstalled(
   }
 }
 
-const MAX_ALLOWED_MODEL_BASES = new Set(["gpt-5.6-luna", "gemini-3.7-flash", "grok-4.6"])
+const MAX_ALLOWED_MODEL_BASES = new Set(["gpt-5.6-luna", "gemini-3.8-flash", "grok-4.6"])
 
 /**
  * Claude Code's public Agent schema currently requires one of these built-in
@@ -108,7 +108,7 @@ export function normalizeMaxDispatchEffort(
     ? ["high", "xhigh", "max"]
     : model === "gpt-5.6-luna"
       ? ["none", "low", "medium", "high", "xhigh", "max"]
-      : model === "grok-4.6" || model === "gemini-3.7-flash"
+      : model === "grok-4.6" || model === "gemini-3.8-flash"
         // The optional reviewer/brainstorm fallback swaps these two models;
         // their max-profile effort intersection is deliberately identical.
         ? ["low", "medium", "high"]
@@ -159,7 +159,7 @@ export function decideMaxDispatchGuard(
     ? undefined
     : normalizeMaxDispatchModel(modelValue)
   if (modelValue !== undefined && !schemaAlias && !normalizedModel) {
-    return { allowed: false, reason: "max dispatch denied: model must be a Claude Code Agent schema alias, Luna[1m], Gemini 3.7 Flash[1m], or bare Grok 4.6", target, verdict: "deny" }
+    return { allowed: false, reason: "max dispatch denied: model must be a Claude Code Agent schema alias, Luna[1m], Gemini 3.8 Flash[1m], or bare Grok 4.6", target, verdict: "deny" }
   }
   const requestedEffort = toolInput.thinking ?? toolInput.effort
   const effectiveModel = normalizedModel

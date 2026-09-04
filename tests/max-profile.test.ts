@@ -73,7 +73,7 @@ const catalog = {
   data: [
     model("gpt-5.6-sol", { context: 1_050_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
     model("gpt-5.6-luna", { context: 1_050_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
-    model("gemini-3.7-flash", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["low", "medium", "high"], endpoints: ["/chat/completions"] }),
+    model("gemini-3.8-flash", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["low", "medium", "high"], endpoints: ["/chat/completions"] }),
     model("grok-4.6", { context: 500_000, prompt: 372_000, output: 16_000, efforts: ["low", "medium", "high"], endpoints: ["/responses"] }),
     model("claude-opus-5", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh"], endpoints: ["/messages"], adaptive: true }),
   ],
@@ -133,7 +133,7 @@ describe("max profile contract", () => {
     expect(agents.Explore?.model).toBe("gpt-5.6-luna[1m]")
     expect(agents.Plan?.model).toBe("gpt-5.6-sol[1m]")
     expect(agents["general-purpose"]?.model).toBe("gpt-5.6-luna[1m]")
-    expect(agents.implementer?.model).toBe("gemini-3.7-flash[1m]")
+    expect(agents.implementer?.model).toBe("gemini-3.8-flash[1m]")
     expect(agents.reviewer?.model).toBe("grok-4.6")
     expect(agents.brainstorm?.model).toBe("grok-4.6")
     expect(agents["peer-review-coordinator"]?.model).toBe("gpt-5.6-luna[1m]")
@@ -162,7 +162,7 @@ describe("max profile contract", () => {
     expect(agents.Plan?.effort).toBe("high")
     expect(agents.reviewer?.model).toBe("grok-4.6")
     expect(agents.reviewer?.effort).toBe("high")
-    expect(agents.implementer?.model).toBe("gemini-3.7-flash[1m]")
+    expect(agents.implementer?.model).toBe("gemini-3.8-flash[1m]")
     expect(agents.implementer?.effort).toBe("high")
     expect(agents["peer-review-coordinator"]?.prompt).toContain("sol_critic")
     expect(agents["peer-review-coordinator"]?.tools).toEqual(["mcp__peers__*"])
@@ -422,7 +422,7 @@ describe("max profile contract", () => {
     expect(maxAdvisorPinIsValid("claude-opus-5")).toBe(true)
     expect(maxAdvisorPinIsValid("gpt-5.6-sol[1m]")).toBe(true)
     expect(maxAdvisorPinIsValid("claude-opus-5[1m]")).toBe(true)
-    expect(maxAdvisorPinIsValid("gemini-3.7-flash")).toBe(false)
+    expect(maxAdvisorPinIsValid("gemini-3.8-flash")).toBe(false)
     expect(maxAdvisorPinIsValid("gpt-5.6-luna")).toBe(false)
     expect(maxAdvisorModelFromPin("gpt-5.6-sol", "claude-opus-5")).toBe("gpt-5.6-sol")
     expect(maxAdvisorModelFromPin(undefined, "claude-opus-5")).toBe("claude-opus-5")

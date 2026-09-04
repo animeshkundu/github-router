@@ -55,7 +55,7 @@ describe("fast request preprocessing", () => {
       ["gpt-5.6-luna", "max"],
       ["gpt-5.6-sol[1m]", "high"],
       ["grok-4.6", "medium"],
-      ["gemini-3.7-flash", "high"],
+      ["gemini-3.8-flash", "high"],
       ["claude-opus-5[1m]", "high"],
     ] as const) {
       const parsed = JSON.parse(preprocessFastRequest(body(model), fastLaunch).body)
@@ -68,7 +68,7 @@ describe("fast request preprocessing", () => {
     for (const [model, effort] of [
       ["gpt-5.6-luna[1m][1M]", "max"],
       ["gpt-5.6-sol[1m][1m]", "high"],
-      ["gemini-3.7-flash[1m][1m]", "high"],
+      ["gemini-3.8-flash[1m][1m]", "high"],
       ["claude-opus-5[1m][1m]", "high"],
     ] as const) {
       const result = preprocessFastRequest(body(model), fastLaunch)

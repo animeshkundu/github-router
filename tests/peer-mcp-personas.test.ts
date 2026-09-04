@@ -265,11 +265,11 @@ describe("personasFor", () => {
     const gemini = personasFor({
       codexCli: false,
       geminiAvailable: true,
-      geminiModel: "gemini-3.7-flash",
+      geminiModel: "gemini-3.8-flash",
     }).filter((p) => p.requiresGeminiCatalog)
     expect(gemini).toHaveLength(2)
-    expect(gemini.every((p) => p.model === "gemini-3.7-flash")).toBe(true)
-    expect(gemini.every((p) => p.description.includes("gemini-3.7-flash"))).toBe(true)
+    expect(gemini.every((p) => p.model === "gemini-3.8-flash")).toBe(true)
+    expect(gemini.every((p) => p.description.includes("gemini-3.8-flash"))).toBe(true)
     expect(gemini.every((p) => !p.description.includes("gemini-3.1-pro-preview"))).toBe(true)
   })
 
@@ -1073,7 +1073,7 @@ test("the cost/speed preamble appears only when figures actually rendered", () =
     implementer: "gpt-5.6-sol",
     "implementer-fast": "gpt-5.6-terra",
     reviewer: "gemini-3.1-pro-preview",
-    "reviewer-fast": "gemini-3.7-flash",
+    "reviewer-fast": "gemini-3.8-flash",
     brainstorm: "gemini-3.1-pro-preview",
     scout: "gpt-5.6-luna",
     scribe: "gpt-5.6-terra",

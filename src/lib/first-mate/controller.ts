@@ -199,7 +199,7 @@ export interface AdvanceInput {
    */
   renewLease?: () => Promise<boolean>
   /** Max launch replacement for any persisted or submitted Gemini Pro model pin. */
-  maxProfileReviewModel?: "grok-4.6" | "gemini-3.7-flash"
+  maxProfileReviewModel?: "grok-4.6" | "gemini-3.8-flash"
 }
 
 export interface ModelAnswer {

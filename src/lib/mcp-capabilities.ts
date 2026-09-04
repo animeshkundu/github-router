@@ -40,7 +40,7 @@ import {
 } from "./worker-agent"
 import { pickEndpoint } from "../services/copilot/endpoint"
 
-export const REVIEW_FAST_DEFAULT_MODEL = "gemini-3.7-flash"
+export const REVIEW_FAST_DEFAULT_MODEL = "gemini-3.8-flash"
 
 /**
  * Gate for the `stand_in` tool.
@@ -51,8 +51,8 @@ export const REVIEW_FAST_DEFAULT_MODEL = "gemini-3.7-flash"
  *     `resolveOpenAiFrontier`)
  *   - `claude-opus-5`       (stand_in's Anthropic slot)
  *   - standard/BYO: the preferred Gemini reviewer model
- *     (`gemini-3.1-pro-preview`, falling back to `gemini-3.7-flash`)
- *   - max: Grok 4.6/high when usable, otherwise Gemini 3.7 Flash 1M/high
+ *     (`gemini-3.1-pro-preview`, falling back to `gemini-3.8-flash`)
+ *   - max: Grok 4.6/high when usable, otherwise Gemini 3.8 Flash 1M/high
  *
  * If any one is missing, `stand_in` is dropped from `tools/list` AND
  * fails `tools/call` with -32601 (mirroring the `worker` capability's
@@ -283,16 +283,16 @@ export function scribeModel(): string | undefined {
  * impostor wearing the cheap agent's name.
  *
  * `gpt-5.6-luna` leads because it is the cheapest 1M-context model in the
- * catalog; `gemini-3.7-flash` remains the cross-vendor fallback so an OpenAI-side
+ * catalog; `gemini-3.8-flash` remains the cross-vendor fallback so an OpenAI-side
  * outage does not remove the scout. Both entries must continue advertising at
  * least 1M context so Claude Code's `[1m]` accounting remains honest if an
  * upstream catalog entry shrinks.
  *
- * The fallback moved off `gemini-3.6-flash` on 2026-08-13: `gemini-3.7-flash`
- * is strictly better on every axis this chain cares about — half the price
- * (75/375 vs 150/750 per 1M), materially faster (measured tool-call p50 ~1.2s
- * against 3.6's ~2.6s), same 1M window, same vendor, so the cross-vendor
- * property the fallback exists for is preserved.
+ * The fallback moved off `gemini-3.6-flash` on 2026-08-13 and subsequently
+ * upgraded to `gemini-3.8-flash`: it is strictly better on every axis this chain
+ * cares about — half the price (75/375 vs 150/750 per 1M), fast tool-call
+ * performance, same 1M window, same vendor, so the cross-vendor property the
+ * fallback exists for is preserved.
  *
  * This chain deliberately uses literal ids rather than `EXPLORE_DEFAULT_MODEL`:
  * the explore worker default and scout's cross-vendor fallback are independent
@@ -302,7 +302,7 @@ export function scribeModel(): string | undefined {
  */
 export const SCOUT_MODEL_CHAIN = Object.freeze([
   "gpt-5.6-luna",
-  "gemini-3.7-flash",
+  "gemini-3.8-flash",
 ] as const)
 
 export function scoutModel(): string | undefined {
@@ -372,7 +372,7 @@ export function generalPurposeFastModel(): string | undefined {
  * These are deliberately separate from the standard resolvers above. The fast
  * profile is a hard, single-entry, no-fallback assignment: `Explore` and
  * `general-purpose` pin to Luna, `Plan` pins to Sol, `implementer` pins to
- * Gemini 3.7 Flash, and `reviewer` pins to Grok 4.6. Retuning a standard
+ * Gemini 3.8 Flash, and `reviewer` pins to Grok 4.6. Retuning a standard
  * resolver must never move a fast role silently.
  */
 
@@ -467,7 +467,7 @@ export function fastReviewerModel(): string | undefined {
   return FAST_REVIEWER_MODEL
 }
 
-/** Dedicated Gemini 3.7 Flash Advisor check. */
+/** Dedicated Gemini 3.8 Flash Advisor check. */
 export function fastAdvisorModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === FAST_ADVISOR_MODEL)
   if (!found) return undefined

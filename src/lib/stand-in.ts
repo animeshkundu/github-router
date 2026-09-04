@@ -4,7 +4,7 @@
  * Polls gpt-5.6-sol xhigh (OpenAI) + claude-opus-5 xhigh (Anthropic) +
  * a third-lab model across two structured voting rounds and returns a
  * ranked-choice verdict. Standard uses the preferred Gemini review model/high;
- * max uses Grok 4.6/high when available, otherwise Gemini 3.7 Flash 1M/high.
+ * max uses Grok 4.6/high when available, otherwise Gemini 3.8 Flash 1M/high.
  * Bounded to advisor:
  * recommends, never decides — irreversible actions (push, delete, drop,
  * deploy) remain gated by the user-confirmation discipline in CLAUDE.md
@@ -60,12 +60,12 @@ export type ModelKey =
   | "gpt-5.6-sol"
   | "claude-opus-5"
   | "gemini-3.1-pro-preview"
-  | "gemini-3.7-flash"
+  | "gemini-3.8-flash"
   | "grok-4.6"
 
 export interface StandInRunOptions {
   /** Bound max launches replace the standard Google slot with Grok 4.6/high
-   * when usable, otherwise exact Gemini 3.7 Flash 1M/high. Standard/BYO callers
+   * when usable, otherwise exact Gemini 3.8 Flash 1M/high. Standard/BYO callers
    * retain the Pro-preferred resolver. */
   maxProfile?: boolean
 }
@@ -129,7 +129,7 @@ interface ModelConfig {
  * The tool's purpose is "give me the best 3-lab judgment available";
  * exposing effort knobs would invite the caller to cheap out and would
  * muddy the consensus signal. Standard retains the Pro-preferred Google slot.
- * Max replaces that slot with Grok 4.6/high, falling back only to Gemini 3.7
+ * Max replaces that slot with Grok 4.6/high, falling back only to Gemini 3.8
  * Flash/high; neither max branch can select Gemini 3.1 Pro.
  */
 const STAND_IN_MODELS_BASE: ReadonlyArray<ModelConfig> = Object.freeze([
@@ -156,7 +156,7 @@ export function standInModels(
             }
           : {
               ...config,
-              key: "gemini-3.7-flash",
+              key: "gemini-3.8-flash",
               model: MAX_PROFILE_MODELS.gemini,
               effort: "high",
             }

@@ -626,7 +626,7 @@ export async function handleCompletion(c: Context) {
     // ADVISOR is Claude-only in the GENERAL case: the server-side advisor
     // translate-loop (buildAdvisorStream) exists only on native Messages.
     // The authenticated fast primary lead is the one exception: regardless of
-    // which fixed fast model `/model` selected, Gemini 3.7 Flash Advisor runs
+    // which fixed fast model `/model` selected, Gemini 3.8 Flash Advisor runs
     // through THIS SAME shim's translation + SSE synthesis machinery
     // (`streamParsedRequestViaShim` initially, `makeShimContinueTurn` after).
     // Every ordinary non-Claude lead still degrades below. Advisor only runs on

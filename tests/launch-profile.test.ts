@@ -62,7 +62,7 @@ const fullCatalog = {
     model("gpt-5.6-luna", { context: 1_050_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
     model("gpt-5.6-sol", { context: 1_050_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
     model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["medium"], endpoints: ["/responses"] }),
-    model("gemini-3.7-flash", { context: 1_000_000, efforts: ["medium", "high"], endpoints: ["/chat/completions"] }),
+    model("gemini-3.8-flash", { context: 1_000_000, efforts: ["medium", "high"], endpoints: ["/chat/completions"] }),
     {
       ...model("claude-opus-5", { context: 1_000_000, prompt: 872_000, efforts: ["high", "max"], endpoints: ["/v1/messages"] }),
       capabilities: {
@@ -118,7 +118,7 @@ describe("fast startup prerequisites", () => {
     const prefixed = {
       ...fullCatalog,
       data: fullCatalog.data.map((entry) =>
-        entry.id === "gemini-3.7-flash"
+        entry.id === "gemini-3.8-flash"
           ? { ...entry, supported_endpoints: ["/v1/chat/completions"] }
           : entry,
       ),
@@ -133,7 +133,7 @@ describe("fast startup prerequisites", () => {
     const message = formatFastPrerequisiteFailure(result.missing)
     expect(message).toContain("gpt-5.6-luna")
     expect(message).toContain("grok-4.6")
-    expect(message).toContain("gemini-3.7-flash")
+    expect(message).toContain("gemini-3.8-flash")
     expect(message).toContain("github-router claude")
   })
 })

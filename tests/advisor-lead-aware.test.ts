@@ -38,7 +38,7 @@ let savedEnv: string | undefined
  *  so the assertions below never depend on what upstream ships today. */
 const OPUS_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
 const SOL_EFFORTS = ["none", "low", "medium", "high", "xhigh"]
-/** Gemini 3.7 Flash's advertised ladder per the plan: "low..high", no xhigh/max/none. */
+/** Gemini 3.8 Flash's advertised ladder per the plan: "low..high", no xhigh/max/none. */
 const GEMINI_EFFORTS = ["low", "medium", "high"]
 
 function model(
@@ -220,7 +220,7 @@ describe("resolveAdvisorModel — authenticated fast profile", () => {
     "openai/gpt-5.6-luna",
     "gpt-5.6-sol",
     "grok-4.6",
-    "gemini-3.7-flash",
+    "gemini-3.8-flash",
     "claude-opus-5",
   ]) {
     test(`${lead} picks the fast-profile Gemini advisor`, () => {

@@ -1,5 +1,5 @@
 // Phase 3 — native selection of the four non-Claude models
-// (gpt-5.6-sol, gpt-5.6-luna, gemini-3.7-flash, grok-4.6) in Claude Code's
+// (gpt-5.6-sol, gpt-5.6-luna, gemini-3.8-flash, grok-4.6) in Claude Code's
 // model picker. Modernized by the fast-launch-profile change from the
 // earlier five-model / dynamic-Gemini-review-append list to this EXACT,
 // STATIC four-row list.
@@ -31,7 +31,7 @@ import { state } from "../src/lib/state"
 const SEED_TARGET_IDS = [
   "gpt-5.6-sol",
   "gpt-5.6-luna",
-  "gemini-3.7-flash",
+  "gemini-3.8-flash",
   "grok-4.6",
 ] as const
 
@@ -77,7 +77,7 @@ function setCatalogWithWindows(entries: Record<string, number>) {
 const LIVE_WINDOWS: Record<string, number> = {
   "gpt-5.6-sol": 1_050_000,
   "gpt-5.6-luna": 1_050_000,
-  "gemini-3.7-flash": 1_000_000,
+  "gemini-3.8-flash": 1_000_000,
   "grok-4.6": 500_000,
 }
 
@@ -150,8 +150,8 @@ describe("nativeSelectableModelsInCatalog", () => {
 
   test("no dynamic fifth row: an unrelated Gemini pro-preview model does not appear", () => {
     // The earlier design dynamically appended a Gemini review row
-    // (gemini-3.1-pro-preview preferred, gemini-3.7-flash fallback). That
-    // mechanism is retired — gemini-3.7-flash is now a first-class static
+    // (gemini-3.1-pro-preview preferred, gemini-3.8-flash fallback). That
+    // mechanism is retired — gemini-3.8-flash is now a first-class static
     // row on its own, and gemini-3.1-pro-preview is simply not on the list
     // at all, present in the catalog or not.
     setCatalog([...SEED_TARGET_IDS, "gemini-3.1-pro-preview"])
@@ -171,7 +171,7 @@ describe("nativeSelectableModelsInCatalog — [1m] context accounting", () => {
     expect(nativeSelectableModelsInCatalog().map((m) => m.id)).toEqual([
       "gpt-5.6-sol[1m]",
       "gpt-5.6-luna[1m]",
-      "gemini-3.7-flash[1m]",
+      "gemini-3.8-flash[1m]",
       // 500K total / 372K max-prompt — deliberately bare, and deliberately
       // never decorated even if the catalog advertised >=1M for it (see the
       // next test).
@@ -193,7 +193,7 @@ describe("nativeSelectableModelsInCatalog — [1m] context accounting", () => {
     expect(got.map((m) => m.display_name)).toEqual([
       "GPT-5.6 Sol",
       "GPT-5.6 Luna",
-      "Gemini 3.7 Flash",
+      "Gemini 3.8 Flash",
       "Grok 4.6",
     ])
   })
@@ -382,7 +382,7 @@ describe("getClaudeCodeEnvVars — native model selection injection", () => {
   })
 
   test("seeds the gateway-model cache (real Copilot ids) under CLAUDE_CONFIG_DIR when targets are present", () => {
-    setCatalog(["gpt-5.6-sol", "gemini-3.7-flash"])
+    setCatalog(["gpt-5.6-sol", "gemini-3.8-flash"])
     const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
     // CLAUDE_CONFIG_DIR the child reads is where we seed the cache.
     expect(vars.CLAUDE_CONFIG_DIR).toBe(PATHS.CLAUDE_CONFIG_DIR)
@@ -390,7 +390,7 @@ describe("getClaudeCodeEnvVars — native model selection injection", () => {
     expect(parsed.baseUrl).toBe("http://127.0.0.1:8787")
     expect(parsed.models.map((m: { id: string }) => m.id)).toEqual([
       "gpt-5.6-sol",
-      "gemini-3.7-flash",
+      "gemini-3.8-flash",
     ])
   })
 })

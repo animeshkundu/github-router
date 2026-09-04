@@ -5,6 +5,13 @@ import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
 /**
  * Drift canary for the client-owned seams used by the fixed fast profile.
  * It skips where no Claude Code install exists, matching the other canaries.
+ *
+ * 2.1.260 reworded the Agent-spawn rewrite comment. Through 2.1.258 the
+ * checkArgument explanation was "the Agent tool decided it; a rewrite
+ * changes model alone". 2.1.260 still admits a string model on agent.spawn
+ * via check:_((e)=>ut(e,"{ model }",(t)=>typeof t.model==="string")) while
+ * pinning identity fields, so a PreToolUse hook may still return
+ * updatedInput that changes model alone.
  */
 const REQUIRED_MARKERS = [
   "--advisor <model>",
@@ -13,7 +20,7 @@ const REQUIRED_MARKERS = [
   "Advising",
   " using ",
   "updatedInput",
-  "a rewrite changes model alone",
+  'check:_((e)=>ut(e,"{ model }",(t)=>typeof t.model==="string"))',
   'agentType:"Explore"',
   "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP",
 ] as const

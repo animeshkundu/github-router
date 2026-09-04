@@ -143,7 +143,7 @@ const ADVISOR_MIN_EFFORT: Effort = "high"
  *  keeps a cross-lab advisor one env var away for anyone who wants it back. */
 export const ADVISOR_ESCALATION_MODEL = "claude-opus-5"
 
-/** The Advisor model for an authenticated fast primary lead. Gemini 3.7 Flash
+/** The Advisor model for an authenticated fast primary lead. Gemini 3.8 Flash
  * is cross-lab from the OpenAI-backed Luna/Sol leads and is selected only when
  * its live catalog entry advertises the required Chat endpoint. Kept distinct
  * from `ADVISOR_DEFAULT_MODEL` so standard launches remain unchanged. */
@@ -209,7 +209,7 @@ export function advisorUsesResponses(resolvedAdvisorModel: string): boolean {
  *  Generalizes the historical two-way `useResponses` branch (added when
  *  `gpt-5.6-sol` was the only advisor candidate) to three, now that
  *  `resolveAdvisorModel` can also pick a `/chat/completions`-only model
- *  (`gemini-3.7-flash`, the authenticated fast profile's advisor). */
+ *  (`gemini-3.8-flash`, the authenticated fast profile's advisor). */
 export type AdvisorTransport = "responses" | "chat" | "messages"
 
 /**
@@ -960,7 +960,7 @@ async function runAdvisor(
 
   // chat branch: /chat/completions with the conversation as a single user
   // message. Reachable now that `resolveAdvisorModel` can pick a
-  // chat-only advisor (`gemini-3.7-flash`, the authenticated fast profile). No
+  // chat-only advisor (`gemini-3.8-flash`, the authenticated fast profile). No
   // request-shaping helper is extracted from `dispatchModelCall` here:
   // the advisor's payload (one system + one user message, no tools, no
   // caching hints) is simple enough that reuse would cost more in

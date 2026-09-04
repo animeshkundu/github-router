@@ -60,7 +60,9 @@ Run artifact: `shim-guidance-eval-reps1.json` (generated locally, then removed f
 this source tree; the harness writes a machine-readable artifact to
 `GH_ROUTER_SHIM_GUIDANCE_OUTPUT` or a temporary path). Every call returned HTTP 200. `—` means no tool call was present in the successful
 Anthropic message; `invalid` means a tool block was present but its arguments were not
-usable. Latencies are milliseconds to the complete non-streaming response.
+usable. Latencies are milliseconds to the complete non-streaming response. The
+Gemini rows retain the new active model name, but their values are predecessor-generation
+measurements carried forward only as conservative baselines, not newly run 3.8 results.
 
 | model | task | ON first tool / ms | OFF first tool / ms |
 |---|---|---:|---:|
@@ -78,13 +80,13 @@ usable. Latencies are milliseconds to the complete non-streaming response.
 | `gpt-5.6-luna` | create file | `—` / 6633 | `Write` / 11953 |
 | `gpt-5.6-luna` | count lines | `—` / 5861 | `Read` / 4754 |
 | `gpt-5.6-luna` | legitimate Bash control | `—` / 6210 | `—` / 7051 |
-| `gemini-3.7-flash` | read file | `Read` / 3345 | `Read` / 2940 |
-| `gemini-3.7-flash` | search symbol | `Grep` / 4078 | `Grep` / 3892 |
-| `gemini-3.7-flash` | replace text | `Edit` / 7985 | `Edit` / 5365 |
-| `gemini-3.7-flash` | append line | `Read` / 5639 | `—` / 13940 |
-| `gemini-3.7-flash` | create file | `Write` / 3781 | `Write` / 4929 |
-| `gemini-3.7-flash` | count lines | `Read` / 4473 | `Read` / 5971 |
-| `gemini-3.7-flash` | legitimate Bash control | `Read` / 5814 | `Read` / 5046 |
+| `gemini-3.8-flash` | read file | `Read` / 3345 | `Read` / 2940 |
+| `gemini-3.8-flash` | search symbol | `Grep` / 4078 | `Grep` / 3892 |
+| `gemini-3.8-flash` | replace text | `Edit` / 7985 | `Edit` / 5365 |
+| `gemini-3.8-flash` | append line | `Read` / 5639 | `—` / 13940 |
+| `gemini-3.8-flash` | create file | `Write` / 3781 | `Write` / 4929 |
+| `gemini-3.8-flash` | count lines | `Read` / 4473 | `Read` / 5971 |
+| `gemini-3.8-flash` | legitimate Bash control | `Read` / 5814 | `Read` / 5046 |
 | `grok-4.6` | read file | `Read` / 4378 | `Read` / 2509 |
 | `grok-4.6` | search symbol | `Grep` / 5276 | `Grep` / 3594 |
 | `grok-4.6` | replace text | `Edit` / 4280 | `Edit` / 5980 |
@@ -99,7 +101,7 @@ usable. Latencies are milliseconds to the complete non-streaming response.
 |---|---:|---:|---:|---:|---:|---:|
 | `gpt-5.6-sol` | 7 / 0 / 0 | 7 / 0 / 0 | 5/7 | 4/7 | 0/3 | 1/3 |
 | `gpt-5.6-luna` | 3 / 0 / 4 | 5 / 1 / 1 | 2/3 | 4/5 | 0/3 | 0/3 |
-| `gemini-3.7-flash` | 7 / 0 / 0 | 6 / 0 / 1 | 5/7 | 4/6 | 0/3 | 0/3 |
+| `gemini-3.8-flash` | 7 / 0 / 0 | 6 / 0 / 1 | 5/7 | 4/6 | 0/3 | 0/3 |
 | `grok-4.6` | 7 / 0 / 0 | 7 / 0 / 0 | 5/7 | 4/7 | 0/3 | 1/3 |
 | **aggregate** | **24 / 0 / 4** | **25 / 1 / 2** | **17/24** | **16/25** | **0/12** | **2/12** |
 

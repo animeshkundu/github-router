@@ -130,17 +130,17 @@ test("fast Plan pins to Sol high, requiring tool_calls + 1M + Responses", () => 
 })
 
 test("fast implementer pins to Gemini Flash with tool calls, 1M, high, and chat", () => {
-  expect(FAST_IMPLEMENTER_MODEL).toBe("gemini-3.7-flash")
+  expect(FAST_IMPLEMENTER_MODEL).toBe("gemini-3.8-flash")
   expect(FAST_IMPLEMENTER_EFFORT).toBe("high")
-  setCatalog(entry("gemini-3.7-flash", { ctx: ONE_M, efforts: ["high"], endpoints: ["/chat/completions"] }))
-  expect(fastImplementerModel()).toBe("gemini-3.7-flash")
+  setCatalog(entry("gemini-3.8-flash", { ctx: ONE_M, efforts: ["high"], endpoints: ["/chat/completions"] }))
+  expect(fastImplementerModel()).toBe("gemini-3.8-flash")
   for (const opts of [
     { ctx: ONE_M, efforts: ["medium"], endpoints: ["/chat/completions"] },
     { ctx: 400_000, efforts: ["high"], endpoints: ["/chat/completions"] },
     { ctx: ONE_M, efforts: ["high"], endpoints: ["/responses"] },
     { ctx: ONE_M, efforts: ["high"], endpoints: ["/chat/completions"], toolCalls: false },
   ]) {
-    setCatalog(entry("gemini-3.7-flash", opts))
+    setCatalog(entry("gemini-3.8-flash", opts))
     expect(fastImplementerModel()).toBeUndefined()
   }
 })
@@ -165,15 +165,15 @@ test("fast reviewer pins to Grok 4.6 via max_prompt_tokens and Responses medium"
   expect(fastReviewerModel()).toBeUndefined()
 
   // Absent entirely -> dropped, no fallback to any other model.
-  setCatalog(entry("gemini-3.7-flash", { ctx: ONE_M, maxPrompt: ONE_M }))
+  setCatalog(entry("gemini-3.8-flash", { ctx: ONE_M, maxPrompt: ONE_M }))
   expect(fastReviewerModel()).toBeUndefined()
 })
 
-test("fast Advisor decouples to dedicated Gemini 3.7 Flash 1M high on chat", () => {
-  expect(FAST_ADVISOR_MODEL).toBe("gemini-3.7-flash")
+test("fast Advisor decouples to dedicated Gemini 3.8 Flash 1M high on chat", () => {
+  expect(FAST_ADVISOR_MODEL).toBe("gemini-3.8-flash")
   expect(FAST_ADVISOR_EFFORT).toBe("high")
-  setCatalog(entry("gemini-3.7-flash", { ctx: ONE_M, efforts: ["high"], endpoints: ["/chat/completions"] }))
-  expect(fastAdvisorModel()).toBe("gemini-3.7-flash")
+  setCatalog(entry("gemini-3.8-flash", { ctx: ONE_M, efforts: ["high"], endpoints: ["/chat/completions"] }))
+  expect(fastAdvisorModel()).toBe("gemini-3.8-flash")
 })
 
 test("fast Oracle pins to exact Opus 5 1M high on messages with adaptive thinking", () => {

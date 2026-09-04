@@ -34,7 +34,7 @@ const ANSI_RESET = "\x1b[0m"
 
 /** Cheap, fast, 1M-context tool-caller — the point is to exercise the tool
  *  surface, not to get a clever answer. Override with SMOKE_MODEL. */
-const SMOKE_MODEL = process.env.SMOKE_MODEL ?? "gemini-3.7-flash"
+const SMOKE_MODEL = process.env.SMOKE_MODEL ?? "gemini-3.8-flash"
 /** Per-leg ceiling. See the header note on why this must never be omitted. */
 const LEG_WALL_CLOCK_MS = Number(process.env.SMOKE_WALLCLOCK_MS ?? 10 * 60 * 1000)
 

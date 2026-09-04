@@ -38,8 +38,8 @@ export type ScaffoldFinalDestination = "github-pages" | "npm" | "pypi" | "crates
 export interface ScaffoldOpts {
   repoName: string
   /** Max launch replaces any Gemini Pro scaffold role with Grok/high or
-   * Gemini 3.7 Flash/high. Standard scaffolds retain their established models. */
-  maxProfileReviewModel?: "grok-4.6" | "gemini-3.7-flash"
+   * Gemini 3.8 Flash/high. Standard scaffolds retain their established models. */
+  maxProfileReviewModel?: "grok-4.6" | "gemini-3.8-flash"
   repoDescription?: string
   defaultBranch?: string
   techStack?: string
@@ -281,7 +281,7 @@ function splitTopLevelSections(markdown: string): Array<{ heading: string; text:
 }
 
 type NormalizedScaffoldOpts = Omit<Required<ScaffoldOpts>, "maxProfileReviewModel"> & {
-  maxProfileReviewModel?: "grok-4.6" | "gemini-3.7-flash"
+  maxProfileReviewModel?: "grok-4.6" | "gemini-3.8-flash"
 }
 
 function normalizeScaffoldOpts(opts: ScaffoldOpts): NormalizedScaffoldOpts {
@@ -428,7 +428,7 @@ function commandOrTodo(command: string | undefined, todo: string): string {
 
 function buildRoleAgent(
   role: (typeof ROLE_AGENT_NAMES)[number],
-  maxProfileReviewModel?: "grok-4.6" | "gemini-3.7-flash",
+  maxProfileReviewModel?: "grok-4.6" | "gemini-3.8-flash",
 ): string {
   const specs: Record<(typeof ROLE_AGENT_NAMES)[number], {
     description: string

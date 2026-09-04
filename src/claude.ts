@@ -848,7 +848,7 @@ export const claude = defineCommand({
         if (!geminiModelsAvailable) {
           consola.info(
             isMaxProfile
-              ? "Neither Grok 4.6/high nor Gemini 3.7 Flash 1M/high is usable; max third-lab personas and stand_in will not be registered."
+              ? "Neither Grok 4.6/high nor Gemini 3.8 Flash 1M/high is usable; max third-lab personas and stand_in will not be registered."
               : "gemini-3.1-pro-preview not found in your Copilot model catalog; gemini-critic persona will not be registered.",
           )
         }

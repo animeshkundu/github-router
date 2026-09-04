@@ -48,7 +48,7 @@ const OVER_100_CONFIRMATION = "I_UNDERSTAND_REAL_SPEND"
 export const DEFAULT_MODELS = [
   "gpt-5.6-sol",
   "gpt-5.6-luna",
-  "gemini-3.7-flash",
+  "gemini-3.8-flash",
   "grok-4.6",
 ] as const
 

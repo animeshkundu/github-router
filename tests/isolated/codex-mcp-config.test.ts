@@ -444,7 +444,7 @@ describe("buildPeerAgentDefinitions", () => {
       groupKeys: { peers: "peers" },
       nativeSubagentModel: "gpt-5.5",
       reviewerModel: "gemini-3.1-pro-preview",
-      reviewerFastModel: "gemini-3.7-flash",
+      reviewerFastModel: "gemini-3.8-flash",
       brainstormModel: "gemini-3.1-pro-preview",
       scoutModel: "gemini-3.6-flash",
       scribeModel: "gpt-5.6-terra",
@@ -458,7 +458,7 @@ describe("buildPeerAgentDefinitions", () => {
       // Cross-lab by design: reviewer must NOT resolve to implementer's model,
       // or a review of implementer-produced work is one model checking itself.
       reviewer: { description: "Feedback subagent", model: "gemini-3.1-pro-preview", readOnly: false },
-      "reviewer-fast": { description: "Cheaper feedback subagent", model: "gemini-3.7-flash", readOnly: false },
+      "reviewer-fast": { description: "Cheaper feedback subagent", model: "gemini-3.8-flash", readOnly: false },
       brainstorm: { description: "Divergent-options", model: "gemini-3.1-pro-preview", readOnly: true },
       scout: { description: "Read-only exploration", model: "gemini-3.6-flash", readOnly: true },
       scribe: { description: "Documentation subagent", model: "gpt-5.6-terra", readOnly: false },
@@ -529,7 +529,7 @@ describe("buildPeerAgentDefinitions", () => {
       codexCli: false,
       geminiAvailable: false,
       groupKeys: { peers: "peers" },
-      reviewerFastModel: "gemini-3.7-flash",
+      reviewerFastModel: "gemini-3.8-flash",
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
@@ -549,7 +549,7 @@ describe("buildPeerAgentDefinitions", () => {
     const models: Record<string, string> = {
       implementer: "gpt-5.6-sol",
       reviewer: "gemini-3.1-pro-preview",
-      "reviewer-fast": "gemini-3.7-flash",
+      "reviewer-fast": "gemini-3.8-flash",
       brainstorm: "gemini-3.1-pro-preview",
       scout: "gemini-3.6-flash",
       scribe: "gpt-5.6-terra",
@@ -625,7 +625,7 @@ describe("buildPeerAgentDefinitions", () => {
           entry("gpt-5.6-sol", 1_050_000),
           entry("gemini-3.1-pro-preview", 1_000_000),
           entry("gpt-5.6-terra", 1_050_000),
-          entry("gemini-3.7-flash", 1_000_000),
+          entry("gemini-3.8-flash", 1_000_000),
           entry("gemini-3.6-flash", 1_000_000),
           entry("gemini-3.5-flash", 1_000_000),
           entry("gpt-5.6-luna", 1_050_000),
@@ -639,7 +639,7 @@ describe("buildPeerAgentDefinitions", () => {
         groupKeys: { peers: "peers" },
         nativeSubagentModel: "gpt-5.6-sol",
         reviewerModel: "gemini-3.1-pro-preview",
-        reviewerFastModel: "gemini-3.7-flash",
+        reviewerFastModel: "gemini-3.8-flash",
         brainstormModel: "synthetic-sub-1m",
         scoutModel: "gpt-5.6-luna",
         scribeModel: "gpt-5.6-terra",
@@ -650,7 +650,7 @@ describe("buildPeerAgentDefinitions", () => {
       })
       expect(agents.implementer!.model).toBe("gpt-5.6-sol[1m]")
       expect(agents.reviewer!.model).toBe("gemini-3.1-pro-preview[1m]")
-      expect(agents["reviewer-fast"]!.model).toBe("gemini-3.7-flash[1m]")
+      expect(agents["reviewer-fast"]!.model).toBe("gemini-3.8-flash[1m]")
       // Synthetic sub-1M model: bare, so Claude Code keeps its conservative
       // accounting rather than over-budgeting a 400K model into an overflow.
       expect(agents.brainstorm!.model).toBe("synthetic-sub-1m")
@@ -827,7 +827,7 @@ describe("buildPeerAgentDefinitions", () => {
         fastExploreModel: "gpt-5.6-luna",
         fastPlanModel: "gpt-5.6-sol",
         fastGeneralPurposeModel: "gpt-5.6-luna",
-        fastImplementerModel: "gemini-3.7-flash",
+        fastImplementerModel: "gemini-3.8-flash",
         fastReviewerModel: "grok-4.6",
         ...extra,
       })
@@ -847,7 +847,7 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents.Explore!.model).toBe("gh-router-luna-scout-high[1m]")
       expect(agents.Plan!.model).toBe("gpt-5.6-sol[1m]")
       expect(agents["general-purpose"]!.model).toBe("gpt-5.6-luna[1m]")
-      expect(agents.implementer!.model).toBe("gemini-3.7-flash[1m]")
+      expect(agents.implementer!.model).toBe("gemini-3.8-flash[1m]")
       expect(agents.reviewer!.model).toBe("grok-4.6")
 
       expect(agents.Explore!.effort).toBe("high")

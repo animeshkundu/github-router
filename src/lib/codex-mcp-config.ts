@@ -628,7 +628,7 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
   const effort = (name: keyof typeof MAX_PROFILE_NATIVE_EFFORTS): SubagentEffort =>
     MAX_PROFILE_NATIVE_EFFORTS[name]
   const base = (name: string, model: string, roleEffort: SubagentEffort): PeerAgentDefinition => ({
-    description: `Max-profile ${name} subagent running ${model}. This model is the deliberate default for the role; use it first and override only after a concrete failure or task-model mismatch. Max dispatch strips Claude Code's required built-in model placeholder so the roster model remains authoritative; clients that can send catalog ids may override only to Luna, Gemini 3.7 Flash, or Grok 4.6.`,
+    description: `Max-profile ${name} subagent running ${model}. This model is the deliberate default for the role; use it first and override only after a concrete failure or task-model mismatch. Max dispatch strips Claude Code's required built-in model placeholder so the roster model remains authoritative; clients that can send catalog ids may override only to Luna, Gemini 3.8 Flash, or Grok 4.6.`,
     prompt: `You are the max-profile ${name} subagent. Work from the supplied brief, verify against the actual repository, and return concrete evidence with file:line references. You do not have Advisor. Do not spawn further agents.`,
     model: oneM(model),
     effort: roleEffort,

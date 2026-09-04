@@ -132,7 +132,7 @@ describe("classifyMessagesRoute", () => {
       supported_endpoints: ["/chat/completions", "/responses"],
     })
     const gemini = model({
-      id: "gemini-3.7-flash",
+      id: "gemini-3.8-flash",
       vendor: "google",
       supported_endpoints: ["/responses", "/chat/completions"],
     })
@@ -141,7 +141,7 @@ describe("classifyMessagesRoute", () => {
     expect(classifyMessagesRoute("gpt-5.6-luna", luna, undefined, true)).toBe(
       "responses-shim",
     )
-    expect(classifyMessagesRoute("gemini-3.7-flash", gemini, undefined, true)).toBe(
+    expect(classifyMessagesRoute("gemini-3.8-flash", gemini, undefined, true)).toBe(
       "chat-shim",
     )
   })

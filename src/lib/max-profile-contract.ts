@@ -21,7 +21,7 @@ function catalogModel(id: string): Model | undefined {
 export const MAX_PROFILE_MODELS = Object.freeze({
   sol: "gpt-5.6-sol",
   luna: "gpt-5.6-luna",
-  gemini: "gemini-3.7-flash",
+  gemini: "gemini-3.8-flash",
   grok: "grok-4.6",
   opus: "claude-opus-5",
 } as const)
@@ -239,7 +239,7 @@ function usableGrokReviewer(model: Model | undefined): boolean {
  *
  * Max is a deliberately strong, closed profile. Its lead, planning, reviewer,
  * and transcript-aware Advisor paths must all be present before any runtime
- * artifact is written: Sol, Luna, Gemini 3.7 Flash, and Opus 5 are mandatory.
+ * artifact is written: Sol, Luna, Gemini 3.8 Flash, and Opus 5 are mandatory.
  * Grok 4.6 is the only optional model. When present it supplies the preferred
  * medium-effort brainstorm/critic path, but it is never a max lead and its
  * sub-1M context must remain undecorated.
