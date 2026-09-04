@@ -2,8 +2,9 @@
 
 Governing lens: raise the floor, never nerf. Three vars suppress external calls Claude
 Code would otherwise make. The floor question: does suppressing them remove any capability
-the model needs, or only quiet non-essential noise? (One of them, `NONESSENTIAL_TRAFFIC`,
-is also load-bearing for the gateway-cache-seed non-regression argument.)
+the model needs, or only quiet non-essential noise? Gateway-model discovery is
+not one of the invariants anymore: Claude Code 2.1.258+ runs that refresh despite
+`NONESSENTIAL_TRAFFIC`, and curated rows now come from `modelPicker` settings.
 
 ## 1. Identity
 
@@ -25,7 +26,7 @@ From the inline comment (`src/lib/server-setup.ts:553-563`):
 - **`DISABLE_NON_ESSENTIAL_MODEL_CALLS`** + **`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`** —
   Anthropic's own knobs (per cc-backup `managedEnv.ts`). Suppress non-essential model calls
   and traffic: Files API OAuth, account/settings sync, team-memory sync, user-settings sync,
-  auto-updater checks, and the gateway-model network fetch (`docs/unsupported-features.md:17`).
+  auto-updater checks, and most gateway/account background traffic (`docs/unsupported-features.md:17`). Claude Code 2.1.258+ explicitly exempts gateway model discovery from this suppression.
 - **`DISABLE_TELEMETRY`** — suppresses Datadog/Statsig/etc. external analytics that would run
   regardless of the proxy.
 
@@ -33,12 +34,11 @@ None of these calls reach the proxy — they hit external Anthropic/analytics ho
 proxy doesn't implement (Copilot has no equivalent). Suppressing them turns the spawned child
 into a quiet local-only session, saving user resources and not leaking metadata.
 
-**Load-bearing second role**: `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` is what keeps the
-gateway-model DISCOVERY network fetch permanently inert (the fetch bails when nonessential
-traffic is disabled). That inertness is the structural basis for the gateway-cache-seed
-non-regression argument (see [gateway-model-cache-seed.md](gateway-model-cache-seed.md)) — the
-one path that could degrade the Claude tier capability mapping cannot run. So this var is not
-just noise-suppression; it's a safety interlock.
+The old second role as a gateway-discovery safety interlock no longer exists.
+Claude Code 2.1.258 intentionally runs gateway discovery despite this flag, and
+2.1.260's filtered refresh is why cache seeding was retired. Curated non-Claude
+rows now use the supported `modelPicker` setting; see
+[gateway-model-cache-seed.md](gateway-model-cache-seed.md).
 
 ## 3. Raise-the-floor assessment
 
@@ -49,45 +49,28 @@ just noise-suppression; it's a safety interlock.
   and error noise, not real capability. This is "quiet the calls that would fail regardless."
 - `DISABLE_TELEMETRY` removes external analytics — a privacy/resource win, no model capability.
 
-There is a subtle interaction: `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` blocks the gateway
-network FETCH, which WOULD be a capability path (auto-discovering models). But that path is the
-HAZARDOUS one (it discovers dotted `claude-*` slugs and degrades tier tool-use mapping), and the
-proxy replaces it with the safe cache-SEED path. So the net is: block a harmful auto-discovery,
-substitute a safe curated one. Floor-raising overall.
+Gateway discovery is now independent of this flag in the installed client. The
+router leaves its own discovery enable unset and uses `modelPicker`, so traffic
+suppression neither enables nor disables model selection.
 
-**Is unconditional (no presence guard) the right choice?** This is the one place the pattern
-diverges from every other var, and it's defensible but worth flagging:
-
-- FOR unconditional: `NONESSENTIAL_TRAFFIC=1` is a load-bearing safety interlock for the
-  gateway-cache-seed non-regression argument. If a user could set it to `0`, the network fetch
-  could run, discover Copilot's dotted slugs, and overwrite the curated seed — re-opening the
-  exact tier-degradation hazard the design closes. Forcing it on protects the invariant.
-- AGAINST: a user who genuinely wants telemetry or non-essential calls (e.g. to debug an
-  Anthropic-side feature) has no per-launch opt-out — they'd have to edit the source. The other
-  two (`DISABLE_NON_ESSENTIAL_MODEL_CALLS`, `DISABLE_TELEMETRY`) don't have the interlock role,
-  yet they're also unconditional.
-
-The asymmetry (these three ignore the user; everything else respects them) is unstated. For
-`NONESSENTIAL_TRAFFIC` it's justified by the interlock; for the other two the justification is
-weaker (they'd be safe to presence-guard).
+**Is unconditional (no presence guard) the right choice?** These three still
+diverge from the presence-guard pattern used by optional feature gates. Their
+current role is a product-level quiet-session default: prevent unsupported sync
+calls and external analytics. A user who wants those calls has no per-launch
+opt-out, so presence-guarding the trio remains a possible follow-up, but it is no
+longer entangled with model-picker correctness.
 
 ## 4. Findings
 
-- **[Important]** `src/lib/server-setup.ts:560-562` — all three are set UNCONDITIONALLY, breaking
-  the presence-guard pattern used by every other injected var, and this asymmetry is not
-  documented. For `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` it's load-bearing (the gateway-fetch
-  interlock — a user `=0` would re-open the tier-degradation hazard), and that justification should
-  be stated at the injection site. For `DISABLE_NON_ESSENTIAL_MODEL_CALLS` and `DISABLE_TELEMETRY`
-  the unconditional set is a mild over-reach — they have no interlock role, so presence-guarding
-  them (like every other var) would give users an opt-out without weakening any invariant. Either
-  presence-guard those two, or document why the trio is deliberately non-overridable.
-- No Critical. Nothing here removes model capability the model actually needs; the suppressed
-  calls are Copilot-unsupported or pure analytics.
+- **[Suggestion]** The trio is unconditional while optional feature gates are
+  presence-guarded. Since `NONESSENTIAL_TRAFFIC` is no longer a discovery
+  interlock, all three could be considered together for a clean operator opt-out.
+  That policy change is outside this compatibility fix.
+- No Critical or Important finding. Nothing here removes model capability the
+  model needs; the suppressed calls are Copilot-unsupported or pure analytics.
 
 ## 5. Verdict
 
-Floor-neutral-to-raising: suppresses only calls Copilot can't serve (no real capability lost) plus
-external telemetry, and `NONESSENTIAL_TRAFFIC=1` doubles as the safety interlock that keeps the
-hazardous gateway auto-discovery inert. The one blemish is the undocumented break from the
-presence-guard pattern: the interlock justifies forcing `NONESSENTIAL_TRAFFIC`, but the other two
-could be presence-guarded for a clean opt-out. No meaningful nerf.
+Floor-neutral-to-raising: it suppresses unsupported background calls and external
+telemetry. Model selection no longer relies on this behavior; the supported
+`modelPicker` setting owns curated rows independently.

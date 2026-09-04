@@ -20,6 +20,7 @@ import {
 } from "../claude-md-injection"
 import { type SelfInvocation } from "../hook-launcher/self-invocation"
 import { INJECTED_SKILLS, writeInjectedSkill } from "../injected-skills"
+import { injectModelPickerSettingsFile } from "../model-picker-settings"
 import {
   configureServeDefaultPermissionMode,
   injectAllowRules,
@@ -65,6 +66,9 @@ import {
 export interface ServeEnhancementsHandle {
   cleanup: () => Promise<void>
   nonce?: string
+  /** Effective mirror-level modelPicker rows, including a preserved user picker.
+   * Used to derive the launch-global compaction minimum before CloudCLI starts. */
+  pickerModels?: string[]
   /** Exact `mcp__<key>__<tool>` names of every injected MCP tool — seeded into
    *  the reverse-proxy's `localStorage['claude-settings'].allowedTools` so
    *  CloudCLI's `canUseTool` auto-approves them in PLAN mode. */
@@ -225,6 +229,20 @@ export async function provisionServeEnhancements(
 
     const settingsPath = path.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
 
+    // CloudCLI reads the same per-launch mirror as the CLI launcher. Add the
+    // Standard profile's live-catalog-gated rows through the supported picker
+    // setting before CloudCLI starts. Preserve an existing user-curated picker;
+    // explicit model selection remains available if this best-effort write fails.
+    const picker = await injectModelPickerSettingsFile(settingsPath, "standard").catch((err) => {
+      consola.warn(`Could not inject serve model-picker settings: ${String(err)}`)
+      return undefined
+    })
+    if (picker?.reason === "user-set") {
+      consola.info(
+        "Serve: preserving the user-configured modelPicker; router-curated rows were not merged.",
+      )
+    }
+
     // Suppress AI attribution in the mirror's settings.json (no-op if the user
     // already configured it).
     await injectAttributionSuppressionIntoSettingsFile(settingsPath).catch(() => {})
@@ -326,6 +344,7 @@ export async function provisionServeEnhancements(
     return {
       cleanup: runtime.cleanup,
       nonce: runtime.nonce,
+      pickerModels: picker?.models,
       mcpToolNames: enumerateInjectedMcpToolNames(groupKeys, { codexCli: opts.codexCli === true }),
     }
   } catch (err) {

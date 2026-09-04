@@ -143,7 +143,7 @@ Claude Code's `[1m]` marker unlocks local accounting against a 1,000,000-token *
 
 The observed 2026-08-26 overflow was the top-level Luna lead (`isSidechain:false`), not a native subagent or `/responses/compact`: the session had reached about 919,814 input tokens before Copilot rejected the next `/responses` request. **This is not fast-specific** — any 1M-accounted lead whose provider prompt ceiling is below the client's uncorrected ~967K threshold has the same defect class.
 
-Every launch therefore presence-guards `CLAUDE_CODE_AUTO_COMPACT_WINDOW` with a **catalog-derived decimal integer**. For each reachable `[1m]` lead candidate (active model, tier/custom rows, and gateway-discovered rows), it derives:
+Every launch therefore presence-guards `CLAUDE_CODE_AUTO_COMPACT_WINDOW` with a **catalog-derived decimal integer**. For each reachable `[1m]` lead candidate (active model, tier/custom rows, and settings-injected picker rows), it derives:
 
 ```
 window(model) = floor(model.max_prompt_tokens * 0.85)
@@ -156,7 +156,7 @@ The current fast/standard catalog derives `816700` because Luna/Sol bind at a 78
 
 `/model` does **not** change the environment; the value is fixed at process launch. This is safe and conservative because the client resolves an effective window as `Math.min(locallyRecognizedModelWindow, launchWindow)`. Switching from Luna to a 936K-prompt Opus/Sonnet model keeps `816700`, 11.9K (about 1.4%) below that model's individual optimum; switching to Gemini 3.8 keeps the same launch value, 51,884 (about 6.0%) below its `868584` individual optimum. Native subagents inherit the same env; their frontmatter model controls the locally recognized window. A true 200K model therefore stays about 200K. Grok advertises 500K but carries no `[1m]` marker because the client has no 500K declaration, so Claude Code conservatively treats it as about 200K and compacts early. The fixed fast roster has no true 200K role.
 
-The value **must be a plain decimal integer**: that env path uses `parseInt`, not the suffix-aware `/config` parser, so `"1m"` parses to `1`, is floored to the client's 100,000 minimum, and would compact a 1M session roughly every 52K tokens. Regression tests pin both the integer shape and the gateway-model `/model` switch case.
+The value **must be a plain decimal integer**: that env path uses `parseInt`, not the suffix-aware `/config` parser, so `"1m"` parses to `1`, is floored to the client's 100,000 minimum, and would compact a 1M session roughly every 52K tokens. Regression tests pin both the integer shape and the settings-injected `/model` switch case.
 
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is deliberately **not** set: with an honest window the client's built-in reserves are already correct, and the percentage interacts with a separate 20% precompute buffer. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` was rejected as the lever because the client applies it only to ids that do not start with `claude-`, so it cannot fix the Opus 5 default lead. Operator-set values always win.
 
@@ -174,6 +174,8 @@ Standard Advisor behavior is unchanged: Sol/xhigh (high floor) on the normal Opu
 
 Claude Code locally recognizes the literal `[1m]` suffix. The proxy adds it only when the live catalog advertises at least 1M and strips it before upstream dispatch. `CLAUDE_CODE_DISABLE_1M_CONTEXT` remains a presence-based opt-out. Grok remains bare because its window is below 1M.
 
-## Gateway picker
+## Curated model picker
 
-The gateway cache advertises live-catalog-present rows for Sol, Luna, Gemini 3.8 Flash, and Grok 4.6. Missing rows are omitted, not substituted. This picker inventory is global, but selecting a row does not change a launch profile’s roster or MCP scope.
+The per-launch mirror's supported `modelPicker` setting advertises only live-catalog-present rows. Standard and Fast expose Sol, Luna, Gemini 3.8 Flash, and Grok 4.6; Max exposes Sol, Luna, Gemini 3.8 Flash, and Opus 5 so every row is an allowed Max lead. Missing rows are omitted, not substituted. Selecting a row changes the active lead model but does not change the launch profile's roster or MCP scope. Existing user `modelPicker` configuration wins wholesale, and its valid `[1m]` rows still participate in the compaction bound. Claude Code 2.1.260 requires `behavesAs` to offer otherwise-unknown ids, so Sol/Luna use the Opus 5 client profile and Gemini/Grok use Sonnet 5 while labels and wire ids remain unchanged. Gateway discovery stays disabled because the same client filters its refresh to Claude/Anthropic ids and replaces its cache.
+
+`github-router serve` intentionally uses the Standard roster, ACL, and picker. The `fast` and `max` aliases are rejected there with an actionable message; use `github-router claude -m fast|max` for those profiles, or pass an explicit model id to `serve` while retaining its Standard enhancement surface.

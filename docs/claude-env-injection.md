@@ -1,9 +1,9 @@
-# Experimental Claude Code env-var injection
+# Experimental Claude Code env-var and picker injection
 
 How `github-router claude` auto-enables five Anthropic-internal feature gates that
-default off for non-Anthropic users, plus the gateway-model discovery gate it now
-CONDITIONALLY enables (cache-seeded) — and why that gate's network-fetch path
-stays closed.
+default off for non-Anthropic users, derives a safe compaction window, and adds
+catalog-gated non-Claude `/model` rows through the supported `modelPicker`
+settings surface.
 See [`../CLAUDE.md`](../CLAUDE.md) for project overview.
 
 ## Auto-enabled features
@@ -32,52 +32,74 @@ Independent of the Claude Code feature gates above, the proxy appends a short `-
 
 **Race-surface coverage**: enabling FORK_SUBAGENT and FINE_GRAINED_TOOL_STREAMING by default amplifies the SSE frame distribution through `relayAnthropicStream`. Per the Review checklist in `CLAUDE.md`, `tests/integration/fork-fgts-cancel.test.ts` exercises consumer cancels against fragmented `input_json_delta` streams to assert no smoking-gun warns surface.
 
-## Conditionally auto-enabled: `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`
+## Curated `/model` rows through `modelPicker`
 
-Gateway model discovery would let the `/model` picker auto-populate from a
-proxy-served model list, but Claude Code's hardcoded slug registry maps slugs to
-**capabilities** (computer tool support, prompt caching, context window sizes,
-tool-use dialects), not just display labels. Copilot's slugs (`claude-opus-4.6-1m`,
-with dots) don't match Anthropic's registry entries (`claude-opus-4-6`, with
-dashes). Discovery has two code paths and only one of them carries that hazard:
+Claude Code 2.1.258 changed gateway discovery to run even when
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`; 2.1.260 requests
+`GET /v1/models?limit=1000`, filters the result to ids matching
+`/(claude|anthropic)/i`, and replaces `cache/gateway-models.json` when that
+filtered list differs. The former router-written cache seed is therefore not an
+authoritative source for Sol, Luna, Gemini, or Grok rows. The router no longer
+writes or clears that cache and no longer enables
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`.
 
-- The **network-FETCH path** would discover Copilot's dotted `claude-*` slugs and
-  silently degrade advanced tool use to lowest-common-denominator fallback. It is
-  **never trusted** — and here it is permanently inert anyway: it bails when
-  nonessential traffic is disabled, and the proxy ALWAYS sets
-  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (and it never reads the synthetic
-  OAuth credential). So the fetch cannot run, cannot discover Copilot's Claude
-  slugs, and cannot overwrite anything.
-- The **cache-READ path** applies NO id filter (the `/^(claude|anthropic)/i`
-  filter lives only on the fetch path). So a pre-seeded cache can carry real
-  non-Claude Copilot ids and the picker builder APPENDS them as rows, leaving the
-  opus/sonnet/haiku tier rows untouched.
+Instead, `src/lib/model-picker-settings.ts` uses Claude Code's supported
+`modelPicker` setting (available since 2.1.243). After
+`ensureClaudeConfigMirror()` snapshots the user's configuration and before the
+child starts, the launcher atomically adds this object to the mirror's
+`settings.json`:
 
-Phase 3 of the Anthropic-translation shim exploits exactly that asymmetry.
-`getClaudeCodeEnvVars` (`src/lib/server-setup.ts`) pre-seeds
-`<CLAUDE_CONFIG_DIR>/cache/gateway-models.json` with the current fast-profile
-non-Claude rows present in the live catalog (`gpt-5.6-sol`, `gpt-5.6-luna`,
-`gemini-3.8-flash`, `grok-4.6`) via `seedGatewayModelCache`, then enables
-`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` — but ONLY when the seed actually
-landed AND the key is unset in both the parent env and the injected `vars` (a
-user-set value always wins, same presence guard as the five features above). When
-no target model is in the catalog, any prior seed is cleared
-(`clearGatewayModelCache`) so a user-pinned flag can't surface stale rows.
+```json
+{
+  "modelPicker": {
+    "options": [
+      {
+        "model": "gpt-5.6-sol[1m]",
+        "label": "GPT-5.6 Sol",
+        "behavesAs": "claude-opus-5"
+      }
+    ],
+    "replaceBuiltInOptions": false
+  }
+}
+```
 
-This is safe precisely because the capability-mapping hazard lived entirely on the
-blocked fetch path, and the cache-read path appends real ids without a filter and
-without degrading the Claude tiers. It is coupled to Claude Code's cache
-path/schema (verified against build 2.1.201); if a future build changes them, the
-seed is ignored and the rows simply don't appear (graceful degradation) — the
-models still run via explicit selection (`github-router claude -m <id>`), routed
-by the `/v1/messages` translation shim. Full mechanism and non-regression argument
-in [`anthropic-translation-shim.md`](anthropic-translation-shim.md).
+Rows are ordered and gated on the live Copilot catalog. Standard and Fast offer
+Sol, Luna, Gemini 3.8 Flash, and Grok 4.6. Max offers Sol, Luna, Gemini 3.8
+Flash, and Opus 5, matching its allowed lead set. The model value receives
+`[1m]` only when the exact catalog entry advertises at least 1M and the user has
+not set `CLAUDE_CODE_DISABLE_1M_CONTEXT`; Grok stays bare.
 
-**Fast profile.** The seeded gateway rows are now exactly `gpt-5.6-sol`,
-`gpt-5.6-luna`, `gemini-3.8-flash`, and `grok-4.6`, gated on the live catalog.
-The cache-read-vs-fetch asymmetry, presence guard, and version-coupling caveat are
-unchanged. The literal raw `-m fast` profile additionally uses private Luna
-aliases where the same catalog model needs different fixed efforts (lead/general-purpose
-max versus Explore high); those aliases are accepted only on an authenticated Fast
-request and never reach Copilot. Retired role aliases are rejected. See
-[`default-models.md`](default-models.md).
+Claude Code 2.1.260 filters an otherwise-unknown `modelPicker` id from `/model`
+unless its row has `behavesAs` pointing at a model this client knows. The router
+therefore maps Sol/Luna to `claude-opus-5` and Gemini/Grok to
+`claude-sonnet-5`, the closest available client-side prompt/capability/effort
+profiles. The setting changes neither the row label nor the model id sent, and
+the profile request preprocessors remain authoritative for actual upstream
+effort. The `[1m]` marker remains the explicit context-accounting signal; Grok
+has no marker and stays conservatively budgeted below its 500K backend.
+
+The write is additive (`replaceBuiltInOptions: false`) and preserves unrelated
+settings. If the mirrored user settings already define `modelPicker`, that value
+wins wholesale and the router does not merge into or relabel the user's curated
+lineup. The launcher still parses valid model ids from that effective picker and
+includes every `[1m]` row whose live catalog limits are known in the one
+launch-global `CLAUDE_CODE_AUTO_COMPACT_WINDOW` minimum. Invalid settings are
+never clobbered. Writes use a same-directory temp file, mode `0o600`, atomic
+rename, and bounded retry for transient Windows `EPERM`/`EBUSY`/`EACCES`
+contention.
+
+This lifecycle applies to `github-router claude` even with `--no-codex-mcp`, and
+to `github-router serve`. Serve is intentionally Standard-profile only: its
+`fast` and `max` aliases are rejected rather than launching the corresponding
+lead with a mismatched Standard roster/ACL; pass an explicit model id to retain
+the Standard serve surface. `start --cc` deliberately remains env-only because
+it generates a command without owning an isolated mirror lifecycle; use explicit
+`-m <id>` there when selecting a non-built-in row. The raw `/models` and
+`/v1/models` APIs remain profile-independent Copilot catalog views.
+
+**Fast profile.** The literal raw `-m fast` profile additionally uses private
+Luna aliases where the same catalog model needs different fixed efforts
+(lead/general-purpose max versus Explore high); those aliases are accepted only
+on an authenticated Fast request and never reach Copilot. Retired role aliases
+are rejected. See [`default-models.md`](default-models.md).

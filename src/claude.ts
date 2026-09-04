@@ -24,6 +24,7 @@ import { getCodexVersion, launchChild } from "./lib/launch"
 import { injectAllowRules, planModeAllowRules } from "./lib/mcp-permissions-settings"
 import { listModelsForEndpoint } from "./lib/model-validation"
 import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror, writeArtifactCredsToMirror } from "./lib/paths"
+import { injectModelPickerSettingsFile } from "./lib/model-picker-settings"
 import {
   buildArtifactOpenHookCommand,
   buildSessionBindHookCommand,
@@ -638,7 +639,38 @@ export const claude = defineCommand({
     // Print to stderr directly — consola's terminal reporter is already gone
     process.stderr.write(`Server ready on ${serverUrl}, launching Claude Code (${banner})...\n`)
 
-    const envVars = getClaudeCodeEnvVars(serverUrl, chosenSlug, launchProfileId)
+    // Add the profile's live-catalog-gated rows through Claude Code's supported
+    // `modelPicker` setting. This is independent of MCP wiring, so Standard
+    // `--no-codex-mcp` still gets the same picker. The target is the per-launch
+    // mirror provisioned above, never the operator's real settings.json.
+    // Preserve an existing user-curated modelPicker wholesale. Its effective
+    // row ids still feed the launch-global compaction minimum. Failures are
+    // visible but non-fatal: explicit `-m` remains available and env setup
+    // falls back to the router-declared profile rows.
+    let pickerModels: string[] | undefined
+    try {
+      const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+      const picker = await injectModelPickerSettingsFile(settingsPath, launchProfileId)
+      pickerModels = picker.models
+      if (picker.reason === "user-set") {
+        consola.info(
+          "Preserving the user-configured modelPicker for this launch; router-curated rows were not merged.",
+        )
+      }
+    } catch (err) {
+      consola.warn(
+        `Model-picker settings injection skipped: ${
+          err instanceof Error ? err.message : String(err)
+        }. Use an explicit -m model if the curated rows are unavailable.`,
+      )
+    }
+    const envVars = getClaudeCodeEnvVars(
+      serverUrl,
+      chosenSlug,
+      launchProfileId,
+      pickerModels,
+    )
+
     // Forward unrecognized flags (e.g. --print / --output-format / --resume)
     // to the spawned Claude Code child. citty is non-strict, so those land in
     // the parsed `args` object with their values swallowed rather than in

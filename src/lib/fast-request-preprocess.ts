@@ -60,7 +60,7 @@ export function preprocessFastRequest(
     effort = alias.absentEffortDefault
     parsed.model = canonicalizeAliasModel(originalModel)
   } else if (bare === "gpt-5.6-luna") {
-    // The global gateway picker exposes bare Luna. Within an authenticated fast
+    // The curated model picker exposes bare Luna. Within an authenticated fast
     // launch that selection is the lead/driver role, fixed at max; role-specific
     // Explore/implementer traffic uses private aliases above.
     effort = "max"

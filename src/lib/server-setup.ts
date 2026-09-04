@@ -1,6 +1,3 @@
-import * as fs from "node:fs"
-import * as nodePath from "node:path"
-
 import consola from "consola"
 import { serve, type ServerHandler } from "srvx"
 import { createBodyTooLargeError, limitRequestBody } from "srvx/body-limit"
@@ -9,6 +6,7 @@ import { PATHS, ensurePaths } from "./paths"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
 import { deriveAutoCompactWindowTokens } from "./grok-context"
+import { selectableModelsInCatalog } from "./model-picker-settings"
 import { stripTrailingOneMSuffix } from "./model-suffix"
 import type { Model } from "~/services/copilot/get-models"
 import {
@@ -20,10 +18,7 @@ import {
   canonicalizeAliasModel,
   type LaunchProfileId,
 } from "./launch-profile"
-import {
-  MAX_PROFILE_MODELS,
-  maxOpusModel,
-} from "./max-profile-contract"
+import { MAX_PROFILE_MODELS, maxOpusModel } from "./max-profile-contract"
 import { catalogAdvertises1M, oneMContextDisabled, withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
 import {
   BUDGET_SMALL_FAST_CATALOG_ID,
@@ -684,188 +679,6 @@ export function parseSharedArgs(args: Record<string, unknown>): {
 }
 
 /**
- * Non-Claude models we surface as first-class, selectable rows in Claude
- * Code's model picker (Phase 3 of native-non-claude-models, later
- * modernized to exactly these four live models by the fast-launch-profile
- * change). The main agent loop runs on them through the `/v1/messages`
- * translation shim (`src/lib/anthropic-translate/*`, branched in
- * `routes/messages/handler.ts`) that forwards non-Claude targets to
- * Copilot `/responses` (gpt) or `/chat/completions` (gemini/grok).
- *
- * This list is EXACT and STATIC — no dynamic Gemini-review append (the
- * earlier `gemini-3.1-pro-preview`-preferred / `gemini-3.8-flash`-fallback
- * row is retired: `gemini-3.8-flash` is now a first-class row on its own,
- * always at this fixed id). A model missing from the catalog is simply
- * omitted, never substituted — see `nativeSelectableModelsInCatalog`.
- *
- * Display labels only: the gateway-model cache schema Claude Code reads is
- * `{id, display_name?}` per model — there is NO per-model context-window
- * field. Context accounting is instead driven off the id itself, via the
- * `[1m]` literal-bracket suffix `nativeSelectableModelsInCatalog` attaches to
- * every row the catalog says serves >=1M. See `withOneMSuffix`.
- */
-const NATIVE_NON_CLAUDE_MODELS: ReadonlyArray<{
-  id: string
-  displayName: string
-}> = [
-  { id: "gpt-5.6-sol", displayName: "GPT-5.6 Sol" },
-  { id: "gpt-5.6-luna", displayName: "GPT-5.6 Luna" },
-  { id: "gemini-3.8-flash", displayName: "Gemini 3.8 Flash" },
-  { id: "grok-4.6", displayName: "Grok 4.6" },
-]
-
-/**
- * `grok-4.6` never carries `[1m]` — its live-catalog window is 500K total
- * (372K max prompt), genuinely below the 1M accounting threshold, and this
- * project deliberately does NOT inject a global
- * `CLAUDE_CODE_MAX_CONTEXT_TOKENS` override for it (see
- * `docs/default-models.md` "fast launch profile" once landed): Claude Code
- * permits arbitrary bare non-Claude ids and runtime `/model` switches, so a
- * Grok-specific process-global window override would incorrectly follow the
- * session onto every other model after a switch. Grok is simply left bare,
- * which is also its true accounting rather than an over- or under-estimate
- * disguised as one.
- */
-const NEVER_1M_MODEL_IDS = new Set(["grok-4.6"])
-
-/**
- * The subset of `NATIVE_NON_CLAUDE_MODELS` actually present in the live
- * Copilot catalog. License tiers differ, so a model missing from the
- * catalog is silently dropped — the caller then neither enables discovery
- * nor writes a cache for it, and lesser tiers see the unchanged picker.
- * Pure (reads `state.models`), so it is unit-testable without side effects.
- *
- * The projected id carries a `[1m]` suffix when the catalog advertises a
- * >=1M window for it AND the id isn't in `NEVER_1M_MODEL_IDS`, because
- * Claude Code budgets a gateway-discovered row at its 200K default
- * otherwise. `withOneMSuffix` is catalog-gated on top of that, so a model
- * whose advertised window shrinks below 1M stays bare regardless. The
- * lookup below still keys off the BARE id — the decoration is applied only
- * to the value handed to Claude Code.
- */
-export function nativeSelectableModelsInCatalog(): Array<{
-  id: string
-  display_name: string
-}> {
-  const catalog = state.models?.data
-  if (!catalog || catalog.length === 0) return []
-  const present = new Set(catalog.map((m) => m.id))
-  const models = NATIVE_NON_CLAUDE_MODELS.filter((m) => present.has(m.id))
-  return models.map((m) => ({
-    id: NEVER_1M_MODEL_IDS.has(m.id) ? m.id : withOneMSuffix(m.id),
-    display_name: m.displayName,
-  }))
-}
-
-const MAX_NATIVE_MODELS: ReadonlyArray<{ id: string; displayName: string }> = [
-  { id: MAX_PROFILE_MODELS.sol, displayName: "GPT-5.6 Sol" },
-  { id: MAX_PROFILE_MODELS.luna, displayName: "GPT-5.6 Luna" },
-  { id: MAX_PROFILE_MODELS.gemini, displayName: "Gemini 3.8 Flash" },
-  { id: MAX_PROFILE_MODELS.opus, displayName: "Claude Opus 5" },
-]
-
-export function maxSelectableModelsInCatalog(): Array<{ id: string; display_name: string }> {
-  return MAX_NATIVE_MODELS
-    .filter((model) => state.models?.data.some((entry) => entry.id === model.id))
-    .map((model) => ({ id: withOneMSuffix(model.id), display_name: model.displayName }))
-}
-
-export function maxModelRowsInCatalog(): Array<{ id: string; display_name: string }> {
-  return maxSelectableModelsInCatalog()
-}
-
-/**
- * Pre-seed Claude Code's gateway-model discovery cache so the non-Claude
- * models appear as selectable picker rows WITHOUT the network fetch.
- *
- * Verified against the installed Claude Code build (2.1.201): the picker
- * builder reads `<CLAUDE_CONFIG_DIR>/cache/gateway-models.json`
- * (schema `{baseUrl: string, fetchedAt: number, models: [{id, display_name?}]}`)
- * and — when gateway discovery is enabled (first-party auth mode +
- * `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` set + a non-`api.anthropic.com`
- * `ANTHROPIC_BASE_URL`, all true for the proxy) — maps each cached model to
- * a picker row `{value: id, label: display_name}`. Critically, the
- * cache-READ path applies NO id filter; the `/^(claude|anthropic)/i` filter
- * lives ONLY in the network-FETCH path. So a pre-seeded cache can carry the
- * real Copilot ids (`gpt-5.5`, `gemini-3.1-pro-preview`, …) — no `claude-*`
- * alias needed — and selecting a row sends that real id, which
- * `resolveModel()` exact-matches and the `/v1/messages` shim routes.
- *
- * The network fetch never overwrites this seed: it bails when nonessential
- * traffic is disabled, and the proxy ALWAYS sets
- * `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, so the fetch returns before
- * it can write. The seed is therefore authoritative for the session.
- *
- * `baseUrl` MUST equal the `ANTHROPIC_BASE_URL` Claude Code sees
- * (`serverUrl`) or the cache is discarded. `configDir` defaults to
- * `PATHS.CLAUDE_CONFIG_DIR` — the same dir the proxy points
- * `CLAUDE_CONFIG_DIR` at — so the write target and Claude Code's read
- * target are identical by construction.
- *
- * Best-effort: every failure is swallowed — a missing picker row must never
- * break launch. This is coupled to Claude Code's internal cache path/schema;
- * if a future build changes them the read simply ignores the seed and the
- * rows don't appear (graceful degradation). Returns whether a file was
- * written (for tests/observability).
- *
- * The write is atomic (temp file in the same dir + rename) so a Claude Code
- * read can never observe a torn/partial JSON (which its safeParse would
- * reject, dropping the rows). Rename-over-existing is atomic on POSIX and
- * Windows (libuv MoveFileEx REPLACE_EXISTING).
- */
-export function seedGatewayModelCache(
-  serverUrl: string,
-  models: ReadonlyArray<{ id: string; display_name: string }>,
-  configDir: string = PATHS.CLAUDE_CONFIG_DIR,
-): boolean {
-  if (models.length === 0) return false
-  const cacheDir = nodePath.join(configDir, "cache")
-  const target = nodePath.join(cacheDir, "gateway-models.json")
-  const tmp = nodePath.join(
-    cacheDir,
-    `gateway-models.json.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`,
-  )
-  try {
-    fs.mkdirSync(cacheDir, { recursive: true })
-    const payload = {
-      baseUrl: serverUrl,
-      fetchedAt: Date.now(),
-      models: models.map((m) => ({ id: m.id, display_name: m.display_name })),
-    }
-    fs.writeFileSync(tmp, JSON.stringify(payload), "utf-8")
-    fs.renameSync(tmp, target)
-    return true
-  } catch {
-    try {
-      fs.rmSync(tmp, { force: true })
-    } catch {
-      /* best-effort cleanup */
-    }
-    return false
-  }
-}
-
-/**
- * Remove any seeded gateway-model cache. Called when the current catalog
- * carries none of the target models, so a user who has pinned
- * `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` on cannot surface rows for
- * models that are no longer available. Best-effort (per-launch config dirs
- * make a stale file rare, but this closes the pinned-port + catalog-change
- * seam). Never throws.
- */
-export function clearGatewayModelCache(
-  configDir: string = PATHS.CLAUDE_CONFIG_DIR,
-): void {
-  try {
-    fs.rmSync(nodePath.join(configDir, "cache", "gateway-models.json"), {
-      force: true,
-    })
-  } catch {
-    /* best-effort */
-  }
-}
-
-/**
  * Build environment variables for Claude Code.
  *
  * The parent env is sanitized of every key in `STRIPPED_PARENT_ENV_KEYS`
@@ -926,6 +739,7 @@ export function getClaudeCodeEnvVars(
   serverUrl: string,
   model?: string,
   launchProfileId: LaunchProfileId = "standard",
+  pickerModels?: readonly string[],
 ): Record<string, string> {
   const vars: Record<string, string> = {
     // Route to the proxy
@@ -1235,13 +1049,11 @@ export function getClaudeCodeEnvVars(
   // routing through a proxy via ANTHROPIC_BASE_URL". TASKS only
   // manifests in `claude -p` headless mode.
   //
-  // GATEWAY_MODEL_DISCOVERY is intentionally NOT enabled here — Claude
-  // Code's hardcoded slug registry maps slugs to capabilities, not just
-  // labels; Copilot's slugs (claude-opus-4.6-1m) don't match
-  // Anthropic's registry (claude-opus-4-6), so dynamic discovery would
-  // silently degrade advanced tool use. Enable it intentionally only
-  // after building a slug-translation shim in /v1/models. See
-  // CLAUDE.md "Experimental Claude Code features auto-enabled".
+  // GATEWAY_MODEL_DISCOVERY is intentionally NOT enabled here. Claude Code
+  // 2.1.258+ refreshes it despite DISABLE_NONESSENTIAL_TRAFFIC, filters the
+  // gateway response to Claude/Anthropic ids, and replaces its cache. The
+  // supported `modelPicker` settings surface below the launcher owns curated
+  // non-Claude rows without changing this raw catalog endpoint.
   const experimentalEnables: ReadonlyArray<string> = [
     "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL",
     "CLAUDE_CODE_FORK_SUBAGENT",
@@ -1255,52 +1067,14 @@ export function getClaudeCodeEnvVars(
     }
   }
 
-  // Native selection of the four non-Claude models (Phase 3). Surface
-  // gpt-5.5, gpt-5.3-codex, gemini-3.5-flash, gemini-3.1-pro-preview as
-  // selectable rows in Claude Code's model picker — ADDITIVELY, without
-  // touching the opus/sonnet/haiku tier defaults (ANTHROPIC_DEFAULT_*,
-  // ANTHROPIC_MODEL, ANTHROPIC_SMALL_FAST_MODEL) seeded above.
-  //
-  // Mechanism (verified against installed Claude Code 2.1.201): the ONLY
-  // env lever that adds MORE THAN ONE selectable row is gateway model
-  // discovery — ANTHROPIC_CUSTOM_MODEL_OPTION adds exactly one. Discovery's
-  // NETWORK fetch is blocked here (it never reads the synthetic OAuth
-  // credential, and bails on CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1),
-  // but its cache-READ path is not — so we (1) enable discovery and (2)
-  // pre-seed its cache with the real Copilot ids (seedGatewayModelCache).
-  // The cache-read applies no id filter, so no claude-* alias / no
-  // /v1/models normalization is needed, and the picker rows carry the real
-  // ids the /v1/messages shim already routes.
-  //
-  // Non-regression is structural: the fetch that could otherwise discover
-  // Copilot's dotted claude-* slugs (and degrade tier capability mapping —
-  // the reason discovery is normally left off) is permanently blocked, and
-  // the cache we seed contains ONLY these four non-Claude models. Tiers are
-  // untouched.
-  //
-  // Gated on at least one target being in the live catalog (license tiers
-  // differ) and presence-guarded: a user-set discovery value always wins.
-  // The guard checks BOTH the parent env (consistent with every other guard
-  // in this function) AND `vars` (defence against a future in-function
-  // refactor that sets this key earlier). Discovery is enabled only when the
-  // cache seed actually landed, so we never turn on a feature with nothing
-  // to show. When no target is in the catalog we clear any prior seed so a
-  // user-pinned discovery flag can't surface stale rows.
-  const nativeModels = isMaxProfile
-    ? maxSelectableModelsInCatalog()
-    : nativeSelectableModelsInCatalog()
-  if (nativeModels.length > 0) {
-    const seeded = seedGatewayModelCache(serverUrl, nativeModels)
-    if (
-      seeded
-      && process.env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === undefined
-      && vars.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY === undefined
-    ) {
-      vars.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
-    }
-  } else {
-    clearGatewayModelCache()
-  }
+  // Profile-specific non-Claude `/model` rows are injected through the
+  // supported `modelPicker` setting after the per-launch config mirror exists.
+  // Do not enable gateway discovery here: Claude Code 2.1.258+ refreshes it
+  // even with nonessential traffic disabled, filters `/v1/models` to
+  // Claude/Anthropic ids, and replaces its cache, so a router-written cache is
+  // not authoritative. Keeping env construction side-effect-free also makes
+  // `start --cc` honest: it generates an env-only command and does not mutate
+  // the operator's persistent settings.
 
   // Context-window safety, applied AFTER every model-bearing var is seeded so
   // it can read the exact ids this launch made selectable.
@@ -1325,7 +1099,7 @@ export function getClaudeCodeEnvVars(
   // suffix-aware `/config` parser — it is `parseInt`-based, so "1m" parses to
   // 1 and is then floored to 100,000, which would compact a 1M session every
   // ~52K tokens. Pinned by a regression test.
-  applyAutoCompactWindow(vars, launchProfileId)
+  applyAutoCompactWindow(vars, launchProfileId, pickerModels)
 
   // Prepend the toolbelt bin dir to the spawned agent's PATH so it can
   // call rg/fd/jq/sd/sg/yq directly. Uses the parent's existing PATH
@@ -1380,7 +1154,11 @@ function catalogEntryForSeededModel(value: string): Model | undefined {
  *
  * Presence-guarded on the parent env, symmetric with every other guard here.
  */
-function applyAutoCompactWindow(vars: Record<string, string>, launchProfileId: LaunchProfileId): void {
+function applyAutoCompactWindow(
+  vars: Record<string, string>,
+  launchProfileId: LaunchProfileId,
+  pickerModels?: readonly string[],
+): void {
   if (process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW !== undefined) return
 
   let tightestWindow: number | undefined
@@ -1412,14 +1190,16 @@ function applyAutoCompactWindow(vars: Record<string, string>, launchProfileId: L
     // for the lead this only ever reads what we just set.
     consider(vars[key] ?? process.env[key])
   }
-  // Gateway-discovered rows are equally selectable active lead ids even though
-  // they have no dedicated ANTHROPIC_DEFAULT_* env. Ignoring them makes a
-  // standard Opus launch derive 828600, then overflow after `/model` switches
-  // to Luna whose 922K prompt ceiling requires 816700.
-  const gatewayModels = launchProfileId === "max"
-    ? maxSelectableModelsInCatalog()
-    : nativeSelectableModelsInCatalog()
-  for (const model of gatewayModels) consider(model.id)
+  // Settings-injected modelPicker rows are equally selectable active lead ids
+  // even though they have no dedicated ANTHROPIC_DEFAULT_* env. Ignoring them
+  // makes a standard Opus launch derive 828600, then overflow after `/model`
+  // switches to Luna whose 922K prompt ceiling requires 816700.
+  // The caller passes the EFFECTIVE mirrored picker rows after respecting an
+  // existing user modelPicker. Direct utility/test callers that do not own the
+  // mirror lifecycle fall back to the router-declared profile rows.
+  const effectivePickerModels = pickerModels
+    ?? selectableModelsInCatalog(launchProfileId).map((model) => model.model)
+  for (const model of effectivePickerModels) consider(model)
 
   if (tightestWindow === undefined) return
   vars.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(tightestWindow)

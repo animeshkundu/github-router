@@ -105,7 +105,7 @@ Assembly and order map in [`injected-prompt/README.md`](./injected-prompt/README
 | `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | presence-guard | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
 | `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` | sonnet-5 / sonnet-5 / opus-5 | presence-guard | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
 | `MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` | `22_500_000` ms (6h15m) | `GH_ROUTER_MCP_TOOL_TIMEOUT_MS` | [mcp-timeout](./env-and-settings/mcp-tool-timeout.md) |
-| `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | `1` (conditional, when seed lands) | presence-guard | [gateway-seed](./env-and-settings/gateway-model-cache-seed.md) |
+| `modelPicker` setting | additive profile-specific catalog rows | existing user value wins wholesale | [picker migration](./env-and-settings/gateway-model-cache-seed.md) |
 | `CLAUDE_CODE_PLAN_V2_AGENT_COUNT` | `7` | presence-guard | [plan-agent-count](./env-and-settings/plan-mode-agent-count.md) |
 | `DISABLE_NON_ESSENTIAL_MODEL_CALLS` / `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `DISABLE_TELEMETRY` | `1` | **unconditional** | [traffic-suppression](./env-and-settings/traffic-telemetry-suppression.md) |
 | `CLAUDE_CONFIG_DIR` + synthetic cred + onboarding skip | per-launch mirror dir | by design | [config-mirror](./env-and-settings/claude-config-dir-mirror.md) |

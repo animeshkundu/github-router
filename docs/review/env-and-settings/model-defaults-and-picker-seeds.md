@@ -9,11 +9,11 @@ live catalog?
 
 | Setting | Value injected | Where set | Opt-out |
 |---|---|---|---|
-| `ANTHROPIC_MODEL` | `chosenSlug` — `claude-opus-5` or `claude-opus-5[1m]` (enterprise, cap-aware) | `src/claude.ts:447` (threaded from `pickClaudeDefault`, `src/lib/port.ts:83`) | `-m <model>` explicit pin; stripped from parent by `STRIPPED_PARENT_ENV_KEYS` so a shell export can't leak |
-| `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | `src/lib/server-setup.ts:633-635` | set in parent shell (presence-guarded); NOT stripped from parent (`src/lib/launch.ts:77-81`) |
-| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `claude-sonnet-5` | `src/lib/server-setup.ts:660-662` | set in parent shell (presence-guarded) |
-| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claude-sonnet-5` (NOT a Haiku slug) | `src/lib/server-setup.ts:663-665` | set in parent shell (presence-guarded) |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5` (catalog-gated `[1m]`) | `src/lib/server-setup.ts` tier seed | set in parent shell (presence-guarded) |
+| `ANTHROPIC_MODEL` | `chosenSlug` — `claude-opus-5` or `claude-opus-5[1m]` (enterprise, cap-aware) | `src/claude.ts` + `getClaudeCodeEnvVars` | `-m <model>` explicit pin; stripped from parent by `STRIPPED_PARENT_ENV_KEYS` so a shell export can't leak |
+| `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | `getClaudeCodeEnvVars` in `src/lib/server-setup.ts` | set in parent shell (presence-guarded); NOT stripped from parent |
+| `ANTHROPIC_DEFAULT_SONNET_MODEL` | `claude-sonnet-5` | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
+| `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claude-sonnet-5` (NOT a Haiku slug) | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5` (catalog-gated `[1m]`) | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
 | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | catalog-derived decimal integer, every profile | `applyAutoCompactWindow` in `src/lib/server-setup.ts` | parent value wins; omitted when catalog limits are unusable |
 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | never set | n/a | deliberately unset; see note below |
 | Design doc | `docs/default-models.md` | | |
@@ -45,8 +45,8 @@ live catalog?
   before Copilot dispatch. The Haiku row is deliberately seeded to `claude-sonnet-5`
   in a standard Opus session to match the small/fast default.
 - **Compaction window.** Every profile injects one derived integer window when unset.
-  For each reachable `[1m]` candidate (lead, tier/custom rows, and gateway-discovered
-  rows), compute `floor(prompt * 0.85) + min(output, 20_000) + 13_000`; export the
+  For each reachable `[1m]` candidate (lead, tier/custom rows, and settings-injected
+  picker rows), compute `floor(prompt * 0.85) + min(output, 20_000) + 13_000`; export the
   minimum complete expression. Current Luna/Sol rows bind at `816700`; current live
   Opus/Sonnet/Gemini rows individually derive `828600`. `/model` cannot mutate the
   launch env, but Claude Code resolves `Math.min(locallyRecognizedModelWindow, value)`,

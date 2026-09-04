@@ -59,6 +59,11 @@ const setupAndServeMock = mock()
 const parseSharedArgsMock = mock()
 const getClaudeCodeEnvVarsMock = mock()
 const getCodexEnvVarsMock = mock()
+const injectModelPickerSettingsFileMock = mock()
+
+mock.module("~/lib/model-picker-settings", () => ({
+  injectModelPickerSettingsFile: injectModelPickerSettingsFileMock,
+}))
 
 mock.module("~/lib/server-setup", () => ({
   setupAndServe: setupAndServeMock,
@@ -415,6 +420,8 @@ beforeEach(() => {
     proxyEnv: false,
     extendedBetas: false,
   })
+  injectModelPickerSettingsFileMock.mockReset()
+  injectModelPickerSettingsFileMock.mockResolvedValue({ written: true, models: [] })
   getClaudeCodeEnvVarsMock.mockReset()
   getClaudeCodeEnvVarsMock.mockImplementation(
     (serverUrl: string, model?: string) => {
@@ -589,12 +596,52 @@ describe("claude command", () => {
       "http://127.0.0.1:12345",
       "claude-opus-5",
       "standard",
+      [],
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:12345")
     expect(options.env.ANTHROPIC_AUTH_TOKEN).toBe("dummy")
     expect(options.env.DISABLE_NON_ESSENTIAL_MODEL_CALLS).toBe("1")
     expect(options.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
+  })
+
+  test("injects Standard modelPicker settings before spawning", async () => {
+    const order: string[] = []
+    injectModelPickerSettingsFileMock.mockImplementation(async () => {
+      order.push("picker")
+      return { written: true, models: [] }
+    })
+    spawnMock.mockImplementation(() => {
+      order.push("spawn")
+      return createFakeChild()
+    })
+
+    const run = getRunFn()
+    await run({ args: {} })
+
+    expect(injectModelPickerSettingsFileMock).toHaveBeenCalledWith(
+      expect.stringContaining("settings.json"),
+      "standard",
+    )
+    expect(order).toEqual(["picker", "spawn"])
+  })
+
+  test("threads a preserved user picker's models into the compaction env", async () => {
+    injectModelPickerSettingsFileMock.mockResolvedValue({
+      written: false,
+      reason: "user-set",
+      models: ["custom-low-ceiling[1m]"],
+    })
+    const run = getRunFn()
+
+    await run({ args: {} })
+
+    expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345",
+      "claude-opus-5",
+      "standard",
+      ["custom-low-ceiling[1m]"],
+    )
   })
 
   test("model override sets ANTHROPIC_MODEL", async () => {
@@ -606,6 +653,7 @@ describe("claude command", () => {
       "http://127.0.0.1:12345",
       "claude-sonnet-4-20250514",
       "standard",
+      [],
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_MODEL).toBe("claude-sonnet-4-20250514")
@@ -649,6 +697,11 @@ describe("claude command", () => {
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
       "gh-router-luna-driver-max",
+      "fast",
+      [],
+    )
+    expect(injectModelPickerSettingsFileMock).toHaveBeenCalledWith(
+      expect.stringContaining("settings.json"),
       "fast",
     )
     const [, , options] = spawnMock.mock.calls[0]
@@ -773,6 +826,7 @@ describe("claude command", () => {
       "http://127.0.0.1:12345",
       "gh-router-luna-driver-max[1m]",
       "fast",
+      [],
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_MODEL).toBe("gh-router-luna-driver-max[1m]")
@@ -842,6 +896,7 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-5[1m]",
         "standard",
+        [],
       )
     } finally {
       state.models = undefined
@@ -867,6 +922,7 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-5",
         "standard",
+        [],
       )
     } finally {
       state.models = undefined
@@ -890,6 +946,7 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-4-8",
         "standard",
+        [],
       )
     } finally {
       state.models = undefined
@@ -917,6 +974,7 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-4-8[1m]",
         "standard",
+        [],
       )
       // The re-derivation must ask for the FALLBACK's family, not re-ask for
       // the default one — that is the whole mechanism under test.
@@ -946,6 +1004,7 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-5",
         "standard",
+        [],
       )
     } finally {
       state.models = undefined
@@ -969,6 +1028,7 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-4.7",
         "standard",
+        [],
       )
     } finally {
       state.models = undefined
@@ -999,6 +1059,7 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-4-7[1m]",
         "standard",
+        [],
       )
     } finally {
       state.models = undefined
@@ -1027,6 +1088,7 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-4-8[1m]",
         "standard",
+        [],
       )
       const [, , options] = spawnMock.mock.calls[0]
       expect(options.env.ANTHROPIC_MODEL).toBe("claude-opus-4-8[1m]")
@@ -1053,6 +1115,7 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-4-6[1m]",
         "standard",
+        [],
       )
     } finally {
       state.models = undefined
@@ -1077,6 +1140,7 @@ describe("claude command", () => {
         "http://127.0.0.1:12345",
         "claude-opus-4.7-1m-internal",
         "standard",
+        [],
       )
     } finally {
       state.models = undefined
@@ -1094,6 +1158,7 @@ describe("claude command", () => {
       "http://127.0.0.1:12345",
       "garbage-slug",
       "standard",
+      [],
     )
   })
 
@@ -1353,6 +1418,12 @@ describe("claude command", () => {
       expect(snippet).toContain("Operating defaults")
       expect(snippet).not.toContain("Peer review and advisor")
       expect(prependOperatingDefaultsToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
+      // Picker injection is a launcher capability, not part of the optional MCP
+      // enhancement layer.
+      expect(injectModelPickerSettingsFileMock).toHaveBeenCalledWith(
+        expect.stringContaining("settings.json"),
+        "standard",
+      )
     })
 
     test("--codex-cli requested + codex absent → falls back to http backend", async () => {
@@ -1637,6 +1708,10 @@ describe("claude command", () => {
       expect(opts.workerToolsAvailable).toBe(false)
       expect(opts.maxImplementerModel).toBe("gemini-3.8-flash")
       expect(opts.maxPlanModel).toBe("gpt-5.6-sol")
+      expect(injectModelPickerSettingsFileMock).toHaveBeenCalledWith(
+        expect.stringContaining("settings.json"),
+        "max",
+      )
     })
 
     test("gemini availability is probed against state.models catalog", async () => {
