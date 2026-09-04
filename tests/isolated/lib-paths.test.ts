@@ -1262,6 +1262,73 @@ test("ensureClaudeConfigMirror copies user's ~/.claude entries (snapshot, not sy
   expect(settings).toBe('{"theme":"dark"}')
 })
 
+test("ensureClaudeConfigMirror excludes Agency Hub hooks from only the isolated settings mirror", async () => {
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+
+  const nonce = "a4617907-0b9e-4bcf-b4ef-b10d7c5a31be"
+  const agencyUrl = `http://127.0.0.1:7824/hook/${nonce}`
+  const httpEvents = [
+    "PreToolUse",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "PermissionRequest",
+    "Stop",
+    "Notification",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "TeammateIdle",
+    "TaskCompleted",
+    "SessionEnd",
+  ]
+  const hooks: Record<string, unknown[]> = {}
+  for (const event of httpEvents) {
+    hooks[event] = [{
+      matcher: "*",
+      hooks: [{
+        type: "http",
+        url: agencyUrl,
+        timeout: event === "PermissionRequest" ? 1800 : 10,
+      }],
+    }]
+  }
+  hooks.SessionStart = [{
+    matcher: "*",
+    hooks: [{
+      type: "command",
+      command: `curl.exe -q -sS --noproxy "*" --connect-timeout 2 --max-time 5 -H "Content-Type: application/json" --data-binary @- "${agencyUrl}" 1>NUL 2>NUL`,
+    }],
+  }]
+  hooks.PreToolUse!.push({
+    matcher: "Bash",
+    hooks: [{ type: "command", command: "custom-audit" }],
+  })
+  const sourceSettings = { theme: "dark", hooks }
+  const sourcePath = path.join(claudeHome, "settings.json")
+  await fs.writeFile(sourcePath, JSON.stringify(sourceSettings, null, 2))
+
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await ensureClaudeConfigMirror()
+
+  // Canonical user settings remain byte-for-byte intact: the filter owns only
+  // the disposable launch mirror.
+  expect(JSON.parse(await fs.readFile(sourcePath, "utf8"))).toEqual(sourceSettings)
+
+  const mirrored = JSON.parse(
+    await fs.readFile(path.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json"), "utf8"),
+  ) as { theme: string; hooks: Record<string, unknown[]> }
+  expect(mirrored.theme).toBe("dark")
+  expect(mirrored.hooks.PreToolUse).toEqual([
+    { matcher: "Bash", hooks: [{ type: "command", command: "custom-audit" }] },
+  ])
+  for (const event of [...httpEvents.filter((event) => event !== "PreToolUse"), "SessionStart"]) {
+    expect(mirrored.hooks[event]).toEqual([])
+  }
+})
+
 test("ensureClaudeConfigMirror: ISOLATED entries absent, SHARED entries become symlinks to ~/.claude/<name>", async () => {
   const claudeHome = path.join(tempDir, ".claude")
   await fs.rm(claudeHome, { recursive: true, force: true })
