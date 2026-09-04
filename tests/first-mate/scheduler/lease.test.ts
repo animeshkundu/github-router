@@ -162,6 +162,7 @@ describe("SchedulerLease", () => {
     const events: string[] = []
     const gateA = deferred()
     const gateC = deferred()
+    const cEntered = deferred()
 
     // A acquires the lock and STALLS inside its critical section.
     const aDone = withLeaseLock(file, async () => {
@@ -178,13 +179,15 @@ describe("SchedulerLease", () => {
     // C breaks A's stale lock, acquires a FRESH lock, and also stalls inside.
     const cDone = withLeaseLock(file, async () => {
       events.push("C:enter")
+      cEntered.resolve()
       await gateC.promise
       events.push("C:exit")
     })
-    await waitFor(async () => {
-      const cur = await readLock(lockPath)
-      return cur !== undefined && cur !== aOwner
-    })
+    // Seeing C's hardlink at lockPath proves acquisition but not callback entry:
+    // withLeaseLock still has an async scheduling boundary before fn() runs. Wait
+    // for the state this assertion actually depends on so suite load cannot let A
+    // resume in that gap and reorder only the observation events.
+    await cEntered.promise
     const cOwner = await readLock(lockPath)
     expect(cOwner).not.toBe(aOwner)
 
