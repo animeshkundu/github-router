@@ -43,6 +43,40 @@ afterEach(() => {
   state.models = undefined
 })
 
+test("Claude Code 2.1.260 discovery drops non-Claude ids before replacing its cache", async () => {
+  state.models = {
+    object: "list",
+    data: [
+      fakeUpstreamModel,
+      { ...fakeUpstreamModel, id: "gpt-5.6-sol", name: "GPT-5.6 Sol", vendor: "OpenAI" },
+      { ...fakeUpstreamModel, id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", vendor: "Google" },
+      { ...fakeUpstreamModel, id: "grok-4.6", name: "Grok 4.6", vendor: "xAI" },
+    ],
+  }
+  const app = new Hono().route("/", modelRoutes)
+  const response = await app.request("/?limit=1000")
+  const payload = (await response.json()) as {
+    data: Array<{ id: string; display_name?: string }>
+  }
+
+  // Claude Code 2.1.260 applies this client-owned filter, then replaces
+  // gateway-models.json when the result differs. A router-written cache is
+  // therefore not an authoritative picker source once discovery is enabled.
+  const refreshedCacheRows = payload.data
+    .filter((entry) => /(claude|anthropic)/i.test(entry.id))
+    .map((entry) => ({ id: entry.id, display_name: entry.display_name }))
+
+  expect(payload.data.map((entry) => entry.id)).toEqual([
+    "claude-opus-4.7",
+    "gpt-5.6-sol",
+    "gemini-3.8-flash",
+    "grok-4.6",
+  ])
+  expect(refreshedCacheRows).toEqual([
+    { id: "claude-opus-4.7", display_name: "Claude Opus 4.7" },
+  ])
+})
+
 test("/models preserves upstream Copilot fields (regression for projection drop)", async () => {
   const app = new Hono().route("/", modelRoutes)
   const res = await app.request("/")

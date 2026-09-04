@@ -9,8 +9,7 @@
 See [`../CLAUDE.md`](../CLAUDE.md) for the project overview,
 [`default-models.md`](default-models.md) for Claude-model selection and slug
 translation, and [`claude-env-injection.md`](claude-env-injection.md) for the
-`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` gate this feature now conditionally
-enables.
+catalog-gated `modelPicker` settings this feature uses for native selection.
 
 ## Purpose
 
@@ -27,11 +26,10 @@ There are two independent gates, and both must be satisfied for a non-Claude
 model to run a Claude Code session end-to-end:
 
 1. **Selection gate (client side)** — Claude Code has to let the user *pick* a
-   non-Claude id. Phase 3 makes the four fast-profile target models appear as first-class rows
-   in Claude Code's `/model` picker by pre-seeding its gateway-model discovery
-   cache (see [Phase 3](#phase-3-native-model-selection-gateway-cache-seed)).
-   Any explicit selection (`github-router claude -m <id>`) also works without the
-   picker.
+   non-Claude id. Phase 3 makes the profile's catalog-present targets appear as
+   first-class rows through the supported `modelPicker` setting (see
+   [Phase 3](#phase-3-native-model-selection-modelpicker-settings)). Any explicit
+   selection (`github-router claude -m <id>`) also works without the picker.
 2. **Serving gate (proxy side)** — once the request arrives at `/v1/messages`
    carrying a non-Claude model, the shim translates it. This is the bulk of the
    design below.
@@ -429,7 +427,7 @@ honestly rather than papered over:
   the 1M window for `gpt-5.5` and the Gemini models is **native to the base
   slug** — there is no `-1m` sibling to select, and none is needed.
 
-## Phase 3: native model selection (gateway cache-seed)
+## Phase 3: native model selection (`modelPicker` settings)
 
 > **Fast profile (shipped).** The picker inventory is exactly `gpt-5.6-sol` /
 > `gpt-5.6-luna` / `gemini-3.8-flash` / `grok-4.6`, gated on the live catalog.
@@ -437,71 +435,55 @@ honestly rather than papered over:
 > Explore (Luna/high), Plan (Sol/high), general-purpose (Luna/max), implementer
 > (Gemini/high), and reviewer (Grok/medium), plus gated worker-browse. Its optional
 > primary-lead-only Advisor stays on Gemini 3.8 Flash after `/model` switches to
-> any fixed fast row. The fixed endpoint contract is Responses for Luna, Sol, and
-> Grok; Chat Completions for Gemini; native Messages for Opus.
-> Non-Claude Advisor continuations return through the selected lead's same endpoint;
-> Task subagents still have Advisor stripped. Standard launches, including direct `-m gpt-5.6-luna`, retain their
-> standard surface and catalog-derived routing. See [`default-models.md`](default-models.md)
-> and [`claude-env-injection.md`](claude-env-injection.md).
+> any fixed fast row. Standard launches, including direct `-m gpt-5.6-luna`,
+> retain their standard surface and catalog-derived routing.
 
-Phase 3 (`src/lib/server-setup.ts`) makes the four fast-profile target models selectable in
-Claude Code's `/model` picker WITHOUT a network round-trip and without touching
-the Claude tier defaults.
+Phase 3 now lives in `src/lib/model-picker-settings.ts`. It adds ordered rows to
+the per-launch mirror's `settings.json` through Claude Code's supported
+`modelPicker.options` surface (introduced in 2.1.243). The write runs after
+`ensureClaudeConfigMirror()` and before the CLI or CloudCLI child starts. It is
+therefore isolated from the user's real settings and available to both
+`github-router claude` and `github-router serve`.
 
-**Mechanism** (verified against installed Claude Code 2.1.201). The only Claude
-Code env lever that adds MORE THAN ONE selectable picker row is gateway model
-discovery. Its picker builder reads a cache file at
-`<CLAUDE_CONFIG_DIR>/cache/gateway-models.json` (schema
-`{baseUrl: string, fetchedAt: number, models: [{id, display_name?}]}`) and, when
-discovery is enabled and the base URL is non-`api.anthropic.com` (both true for
-the proxy), maps each cached model to a picker row. Critically:
+The migration away from gateway-cache seeding is required by observed client
+behavior. Claude Code 2.1.258 made gateway discovery run even when nonessential
+traffic is disabled. Version 2.1.260 fetches `/v1/models?limit=1000`, keeps only
+ids matching `/(claude|anthropic)/i`, and replaces `gateway-models.json` when the
+result differs. That consumer-owned refresh drops every non-Claude seed. The
+router therefore does not write or clear that cache and does not enable
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`. `/models` remains the raw,
+profile-independent Copilot catalog rather than growing fake `claude-*` aliases.
 
-- The cache-**READ** path applies **NO id filter** — the `/^(claude|anthropic)/i`
-  filter lives ONLY on the network-**FETCH** path. So a pre-seeded cache can carry
-  the real Copilot ids (`gpt-5.5`, `gemini-3.1-pro-preview`, …) directly; no
-  `claude-*` alias and no `/v1/models` normalization is needed. Selecting a row
-  sends that real id, which `resolveModel` exact-matches and the shim routes.
-- The read path **APPENDS** these rows; it does not replace the opus/sonnet/haiku
-  tier rows (seeded via `ANTHROPIC_DEFAULT_*` / `ANTHROPIC_MODEL` /
-  `ANTHROPIC_SMALL_FAST_MODEL`), which stay untouched.
+**Rows and profile alignment.** Standard and Fast use Sol, Luna, Gemini 3.8
+Flash, and Grok 4.6. Max uses Sol, Luna, Gemini 3.8 Flash, and Opus 5 because
+Grok is not an allowed Max lead. Only live-catalog-present rows are emitted and
+declaration order is stable. Missing rows are omitted rather than substituted.
+The setting uses `replaceBuiltInOptions: false`, so the built-in lineup stays
+available.
 
-So Phase 3 (1) writes the seed via `seedGatewayModelCache` (atomic temp-file +
-rename, so a concurrent Claude Code read never sees torn JSON) and (2) enables
-`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`. The enable is conditional and
-presence-guarded:
+**Context and semantics.** Each row is `{model, label}`. `model` receives `[1m]`
+when the exact catalog entry advertises at least 1M and the user has not set
+`CLAUDE_CODE_DISABLE_1M_CONTEXT`; `label` stays undecorated. Grok remains bare
+because its real window is 500K and the client has no 500K declaration.
+Claude Code 2.1.260 filters an otherwise-unknown row unless `behavesAs` maps it
+to a model this client knows. Sol/Luna therefore use `claude-opus-5`, while
+Gemini/Grok use `claude-sonnet-5`, the closest client-side prompt/capability and
+effort profiles. The mapping changes neither label nor selected model id; profile
+request preprocessing remains authoritative for upstream effort. The selected
+real id reaches `resolveModel`, which strips `[1m]`, and the shim routes it to the
+catalog-advertised endpoint.
 
-- Only the subset of the four fast-profile rows actually present in the live Copilot catalog
-  is seeded (`nativeSelectableModelsInCatalog`) — license tiers differ, so a
-  missing model is silently dropped and lesser tiers see the unchanged picker.
-- Discovery is turned on ONLY when the seed actually landed AND neither the parent
-  env nor the in-function `vars` already set the key (a user value always wins).
-- When no target is in the catalog, any prior seed is removed
-  (`clearGatewayModelCache`) so a user-pinned discovery flag can't surface stale
-  rows.
+**User ownership and write safety.** If the mirrored user settings already have
+a `modelPicker` key, the router preserves that value wholesale. Claude Code picks
+one highest-precedence picker object rather than merging objects from settings
+sources, so merging router rows into a deliberate user lineup would silently
+rewrite user intent. Valid model ids from the preserved picker are still fed
+into the launch-global compaction minimum, so a catalog-known `[1m]` row with a
+lower prompt ceiling cannot bypass the overflow guard. Invalid settings are
+never clobbered. Writes use a same-directory temporary file, mode `0o600`, atomic
+rename, and bounded retries for transient Windows rename contention. A write failure warns and degrades to
+explicit `-m <id>` selection rather than blocking launch.
 
-**Why this is safe** (and why the network-fetch path is still NOT trusted). The
-historical reason discovery was left off is that its network fetch would discover
-Copilot's dotted `claude-*` slugs, which don't match Claude Code's dashed
-capability registry and would silently degrade advanced tool use. Phase 3 doesn't
-change that verdict: the network fetch is **permanently blocked** here (the proxy
-always sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, and the fetch never reads
-the synthetic OAuth credential), so it can never overwrite the seed. The seed is
-authoritative for the session, and it contains ONLY these four non-Claude ids. The
-capability-mapping hazard lived entirely on the fetch path, which stays closed.
-
-**Display labels only / context accounting.** The cache schema is `{id,
-display_name?}` per model — there is no per-model context-window field, so the
-seed decorates `id` with `[1m]` when that exact catalog entry advertises at least
-1M context and `CLAUDE_CODE_DISABLE_1M_CONTEXT` is unset. Claude Code recognizes
-the literal suffix and accounts a decorated row at 1M; `display_name` remains
-bare. In the current fast target set this decorates `gpt-5.6-sol`,
-`gpt-5.6-luna`, and `gemini-3.8-flash`; `grok-4.6` stays bare because the cache
-schema has no representation for 500K and over-budgeting it as 1M would risk
-overflow.
-
-**Version-coupling caveat.** The cache path and schema are Claude Code internals,
-verified against build 2.1.201. This is graceful-degradation-coupled: if a future
-Claude Code build changes the cache path or schema, the seed is simply ignored and
-the picker rows don't appear — the models still work via explicit selection
-(`github-router claude -m <id>`), and nothing breaks. Every failure in the seed
-path is swallowed; a missing picker row must never break launch.
+`start --cc` is intentionally env-only and does not own a mirror lifecycle, so
+it does not inject settings. The generated command can still select any model
+explicitly with `-m`.

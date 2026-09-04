@@ -220,7 +220,7 @@ export const FALLBACK_TOKEN_PRICES: Readonly<Record<string, CatalogTokenPrices>>
     "gpt-5.3-codex": { in: 175, out: 1400 },
     "claude-haiku-4.5": { in: 100, out: 500 },
     "claude-opus-5": { in: 500, out: 2500 },
-    "gpt-5.6-sol": { in: 200, out: 1000 },
+    "gpt-5.6-sol": { in: 400, out: 2000 },
     "grok-4.5": { in: 200, out: 600 },
     "gpt-5.5": { in: 500, out: 3000 },
     "gemini-3.6-flash": { in: 75, out: 375 },

@@ -15,6 +15,7 @@ import {
   resolveSelfInvocation,
 } from "./lib/hook-launcher/self-invocation"
 import { getCodexVersion } from "./lib/launch"
+import { resolveLaunchProfile } from "./lib/launch-profile"
 import { browserToolsEnabled } from "./lib/mcp-capabilities"
 import { SEAMLESS_BUILTIN_TOOLS } from "./lib/mcp-permissions-settings"
 import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror } from "./lib/paths"
@@ -49,6 +50,17 @@ import { state } from "./lib/state"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { resolveModel } from "./lib/utils"
 import { getGitHubUser } from "./services/github/get-user"
+
+export function assertStandardServeModel(model: string | undefined): void {
+  const requestedProfile = resolveLaunchProfile(model)
+  if (requestedProfile === "standard") return
+  throw new Error(
+    `The ${requestedProfile} launch profile is available only through `
+      + `github-router claude -m ${requestedProfile}; github-router serve uses `
+      + "the Standard roster, ACL, and model picker. Pass an explicit model id "
+      + "to serve instead of the profile alias.",
+  )
+}
 
 async function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -223,6 +235,12 @@ export const serve = defineCommand({
     }
 
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
+    try {
+      assertStandardServeModel(args.model as string | undefined)
+    } catch (err) {
+      consola.error(err instanceof Error ? err.message : String(err))
+      process.exit(1)
+    }
 
     // Single-instance guard: `serve` is a machine-wide control plane meant to run
     // ONCE per machine (work on any repo through its file explorer / sessions). If
@@ -370,7 +388,12 @@ export const serve = defineCommand({
     //    drops GITHUB_TOKEN/GH_ROUTER_*/ANTHROPIC_AUTH_TOKEN/OPENAI_API_KEY/
     //    COPILOT_TOKEN) plus the non-secret ANTHROPIC_BASE_URL/CLAUDE_CONFIG_DIR
     //    /model vars. Auth rides the synthetic .credentials.json FILE, not env.
-    const anthropicVars = getClaudeCodeEnvVars(serverUrl, chosenSlug)
+    const anthropicVars = getClaudeCodeEnvVars(
+      serverUrl,
+      chosenSlug,
+      "standard",
+      enhancements.pickerModels,
+    )
     // CLAUDE_CODE_FORK_SUBAGENT silently no-ops under CloudCLI's headless
     // `claude --print` path (the binary's Z8() precondition disables forking
     // without an interactive session), so setting it here is dead weight that

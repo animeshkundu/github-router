@@ -278,12 +278,12 @@ describe("getClaudeCodeEnvVars", () => {
     expect(value).toBe("828600")
   })
 
-  test("includes gateway-discovered 1M models after a standard launch", () => {
+  test("includes settings-injected 1M picker models after a standard launch", () => {
     const value = withCatalog(
       [
         // Standard Opus alone would derive 828600.
         catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
-        // The gateway-discovered Luna row is selectable through `/model` and
+        // The settings-injected Luna row is selectable through `/model` and
         // binds lower even though it has no dedicated ANTHROPIC_DEFAULT_* env.
         catalogModel("gpt-5.6-luna", 1_050_000, 922_000, 128_000),
       ],
@@ -295,6 +295,26 @@ describe("getClaudeCodeEnvVars", () => {
         ),
     )
     expect(value).toBe("816700")
+  })
+
+  test("uses preserved user modelPicker rows in the launch-global bound", () => {
+    const value = withCatalog(
+      [
+        catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
+        catalogModel("custom-low-ceiling", 1_000_000, 600_000, 64_000),
+      ],
+      () =>
+        withoutCompactionEnv(
+          () =>
+            getClaudeCodeEnvVars(
+              "http://127.0.0.1:8787",
+              "claude-opus-5[1m]",
+              "standard",
+              ["custom-low-ceiling[1m]"],
+            ).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    expect(value).toBe("543000")
   })
 
   /**

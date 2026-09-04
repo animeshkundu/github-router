@@ -335,6 +335,10 @@ test("falls back to recorded prices only when the live catalog cannot answer", (
   expect(catalogTokenPrices("gpt-5.6-luna")).toEqual(
     FALLBACK_TOKEN_PRICES["gpt-5.6-luna"],
   )
+  // Pin the current live Sol price literally. Referring only to the fallback
+  // table here would let a stale table prove itself correct on the exact
+  // degraded path this test exists to protect.
+  expect(catalogTokenPrices("gpt-5.6-sol")).toEqual({ in: 400, out: 2000 })
   // Not in the catalog AND not in the fallback table: still undefined. The
   // fallback covers models actually recorded, never every id.
   expect(catalogTokenPrices("no-such-model")).toBeUndefined()
