@@ -278,12 +278,12 @@ Non-regression is **structural**, not "we were careful": the Claude path shares
 no code with the shim beyond the branch, and the classifier is guard-tested to
 keep every Claude model on the passthrough. ADVISOR (`advisor-tool` beta) plus an ordinary non-Claude model degrades by
 stripping the internal tool. An authenticated fast primary lead is the exception:
-both shim paths run the server-side Advisor loop, dispatch fixed Gemini 3.8 Flash
-on Chat/high, and continue on the selected lead's original endpoint. The fast
+both shim paths run the server-side Advisor loop, dispatch fixed GPT-5.6 Sol on
+Responses/high, and continue on the selected lead's original endpoint. The fast
 launcher also pins Claude Code's client-side Advisor setting to
-`gemini-3.8-flash[1m]`, so its native tool schema, UI, and JSONL no longer retain a
-mirrored standard-profile Advisor id while the proxy dispatches Gemini. A missing
-Gemini Chat runtime invariant or a conflicting in-session Advisor model fails
+`gpt-5.6-sol[1m]`, so its native tool schema, UI, and JSONL no longer retain a
+mirrored standard-profile Advisor id while the proxy dispatches Sol. A missing
+Sol Responses runtime invariant or a conflicting in-session Advisor model fails
 visibly rather than selecting the standard Sol/Opus path.
 
 `classifyMessagesRoute` fails **CLOSED toward Claude**. `isClaudeModel` returns
@@ -431,10 +431,10 @@ honestly rather than papered over:
 
 > **Fast profile (shipped).** The picker inventory is exactly `gpt-5.6-sol` /
 > `gpt-5.6-luna` / `gemini-3.8-flash` / `grok-4.6`, gated on the live catalog.
-> A literal `-m fast` launch starts on Luna and fixes the native roster to
+> A literal `-m fast` launch starts on Gemini 3.8 Flash and fixes the native roster to
 > Explore (Luna/high), Plan (Sol/high), general-purpose (Luna/max), implementer
-> (Gemini/high), and reviewer (Grok/medium), plus gated worker-browse. Its optional
-> primary-lead-only Advisor stays on Gemini 3.8 Flash after `/model` switches to
+> (Gemini/high), and reviewer (Sonnet 5 1M/xhigh), plus gated worker-browse. Its optional
+> primary-lead-only Advisor stays on GPT-5.6 Sol 1M/high after `/model` switches to
 > any fixed fast row. Standard launches, including direct `-m gpt-5.6-luna`,
 > retain their standard surface and catalog-derived routing.
 

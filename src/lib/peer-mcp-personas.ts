@@ -26,6 +26,11 @@ import path from "node:path"
 import { ARTIFACT_TOOLS } from "./artifact/tools"
 import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
 import { MAX_PROFILE_MODELS } from "./max-profile-contract"
+import {
+  maxPeerDescription,
+  maxPeerInstructions,
+  type MaxPeerPromptOptions,
+} from "./max-profile-prompts"
 import type { McpToolResult } from "./attachments"
 import { FLEET_TOOLS } from "./fleet/tools"
 import { FIRST_MATE_TOOLS } from "./first-mate/tools"
@@ -622,6 +627,10 @@ export function buildPeerAwarenessSnippet(opts: {
   /** Whether `general-purpose-fast` resolved a model and was therefore emitted.
    *  Like `scout`, it is dropped rather than downgraded. */
   generalPurposeFastAvailable?: boolean
+  /** Max persona tool names resolved from the same live-catalog projection
+   *  used for tools/list. Passing them prevents awareness prose from
+   *  independently recomputing an availability decision. */
+  maxPersonaNames?: ReadonlyArray<string>
   /** Resolved config key per group (bare, or `gh-router-<group>` fallback on
    *  collision). Missing key → use the preferred bare key. Keeps the
    *  `mcp__<server>__<tool>` paths in this snippet pointing at OUR servers. */
@@ -648,11 +657,16 @@ export function buildPeerAwarenessSnippet(opts: {
     const artifactClause = opts.artifactToolsAvailable
       ? ` \`mcp__${peersKey}__artifact_*\` provides human review in the artifact panel with auto-open on plan completion.`
       : ""
+    const personas = (opts.maxPersonaNames ?? maxPersonasFor({
+      solModel: MAX_PROFILE_MODELS.sol,
+      sonnetModel: MAX_PROFILE_MODELS.sonnet,
+    }).map((persona) => persona.toolNameHttp)).map((name) => `\`${name}\``).join(", ")
     return [
       "## Peer review and advisor",
       "",
-      `Max launch profile. The native roster is a menu of complementary capabilities rather than a required workflow: \`Explore\` for broad discovery, \`brainstorm\` (Claude Opus 5 1M/high) for open design choices, \`Plan\` when sequencing or acceptance criteria benefit from a separate view, \`implementer\` for bounded coding, \`general-purpose\` for mixed work, and \`reviewer\` (Claude Sonnet 5 1M/xhigh) for repository-aware verification. Their frontmatter models are intentional defaults chosen for role fit and cross-lab diversity; overrides are most useful after a concrete mismatch and remain within the max allowlist. Independent work can run in parallel when it improves context isolation or latency. Fresh-context peers can reduce correlated blind spots where deterministic evidence does not settle the issue; \`peer-review-coordinator\` can combine reviewer peers (\`gemini_reviewer\`, \`codex_reviewer\`/\`sonnet_reviewer\`, \`grok_reviewer\`) or strategic critics (\`sol_critic\`, \`opus_critic\`, \`gemini_critic\`, \`grok_critic\`) when the risk merits several lenses. Small or obvious tasks are often better handled directly, and model output remains evidence to synthesize rather than a vote.`,
-      `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is optional, non-binding, primary-lead-only counsel for a focused consequential uncertainty that direct evidence, Plan, reviewer, or peers cannot settle. It is not a supervisor, approver, or routine workflow/completion gate; consult again only when materially new evidence creates a different question. It remains available across controlled max lead switches, while native subagents and browse workers do not receive it.${opts.standInAvailable ? " Max stand_in uses Sol + Opus 5 + Grok 4.6/high when available, otherwise Gemini 3.8 Flash 1M/high; it never uses Gemini 3.1 Pro." : ""}${opts.agentToolsAvailable ? " Max first-mate replaces any Gemini 3.1 Pro model choice with the same Grok/high → Gemini 3.8 Flash/high fallback." : ""}${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
+      "Max native roster: `Explore` discovers broadly; `Plan` structures cross-boundary changes; `general-purpose` owns bounded mixed execution; `implementer` writes a settled change; `reviewer` verifies against the repository and runtime; `brainstorm` explores materially different approaches; `peer-review-coordinator` synthesizes multiple distinct fresh-context lenses. Configured models are deliberate role defaults.",
+      `Available cold-start peers under \`mcp__${peersKey}__*\`: ${personas || "none"}. They cannot inspect the repository or transcript and evaluate only the supplied artifact, constraints, and images. Their tool descriptions state the exact lens and boundary. Use the native \`reviewer\` when navigation, commands, tests, or reproduction are required; a peer suits a self-contained artifact. The coordinator has peer tools only and cannot gather missing repository context.`,
+      `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is transcript-aware, primary-lead-only, and unavailable to native subagents and browse workers; it can detect framing drift but is not independent verification.${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
     ].join("\n")
   }
   if (opts.profile === "fast") {
@@ -849,12 +863,11 @@ export function buildPeerAwarenessSummary(opts: {
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
-    const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
     return [
       "## Injected capabilities (summary)",
       "",
-      "Max launch profile. The roster offers complementary capabilities: `Explore` for broad discovery, `brainstorm` (Claude Opus 5 1M/high) for open choices, `Plan` for a separate planning view, `implementer` and `general-purpose` for execution, and `reviewer` (Claude Sonnet 5 1M/xhigh) for repository-aware verification. Small or obvious tasks can be handled directly; independent work can run in parallel. Configured models are the default best fit, and a fresh-context peer or `peer-review-coordinator` (coordinating reviewers `gemini-reviewer`, `codex-reviewer`/`sonnet-reviewer`, and `grok-reviewer`) can reduce correlated blind spots when risk and uncertainty justify it. Model output is evidence to synthesize, not a vote. Advisor is optional, non-binding, and primary-lead-only counsel for a focused consequential uncertainty the normal evidence and roles cannot settle; it has no approval or workflow authority. The lead decides. On every retained max path, replace Gemini 3.1 Pro with Grok 4.6/high when available, otherwise Gemini 3.8 Flash 1M/high.",
-      `\`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide code and web search.${directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides browser control.` : ""}${opts.browseAvailable ? ` \`worker-browse\` dispatches the browse-only worker through \`mcp__${key("workers")}__browse\`.` : ""}${opts.standInAvailable ? ` \`mcp__${key("decide")}__stand_in\` provides deterministic decision tiebreak.` : ""}${opts.fleetAvailable ? ` \`mcp__${key("fleet")}__*\` provides gated remote sessions.` : ""}${opts.agentToolsAvailable ? " First-mate remains available when its own gate passes." : ""}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
+      "Max native roster: `Explore` for broad discovery; `Plan` for interfaces, sequencing, risks, and acceptance criteria; `general-purpose` for bounded mixed execution; `implementer` for settled coding changes; `reviewer` for repository-aware verification and reproduction; `brainstorm` for materially different open approaches; and `peer-review-coordinator` for several distinct fresh-context review lenses. Configured models are deliberate role defaults.",
+      "Native roles can inspect the repository within their listed tools. Fresh-context peers see only the artifact and constraints supplied to them. Advisor is transcript-aware, optional, non-binding, and primary-lead-only; it can identify framing drift but is not independent verification or an approval gate. Detailed routing lives in each role or tool description, and the full gated capability inventory lives in CLAUDE.md.",
     ].join("\n")
   }
   if (opts.profile === "fast") {
@@ -1032,18 +1045,22 @@ function maxPersona(
   toolNameHttp: string,
   model: string,
   endpoint: PersonaSpec["endpoint"],
-  description: string,
-  baseInstructions: string,
+  copy: Omit<MaxPeerPromptOptions, "name" | "model">,
   allowedEfforts: ReadonlyArray<Effort>,
   defaultEffort: Effort,
 ): PersonaSpec {
+  const promptOpts: MaxPeerPromptOptions = {
+    ...copy,
+    name: toolNameHttp,
+    model,
+  }
   return {
     agentName,
     toolNameHttp,
     model,
     endpoint,
-    description,
-    baseInstructions,
+    description: maxPeerDescription(promptOpts),
+    baseInstructions: maxPeerInstructions(promptOpts),
     agentPrompt: "",
     writeCapable: false,
     requiresHttp: true,
@@ -1064,6 +1081,9 @@ export function maxPersonasFor(opts: {
 }): Array<PersonaSpec> {
   const sol = opts.solModel ?? MAX_PROFILE_MODELS.sol
   const codex = opts.codexModel
+  // Sonnet is mandatory for a real Max launch, but this pure builder also has
+  // test/BYO callers. Preserve the historical default for those callers; the
+  // launch and bound MCP paths pass the catalog-validated value explicitly.
   const sonnet = opts.sonnetModel ?? MAX_PROFILE_MODELS.sonnet
   const opus = opts.opusModel
   const gemini = opts.geminiModel
@@ -1074,8 +1094,12 @@ export function maxPersonasFor(opts: {
       "sol_critic",
       sol,
       "/v1/responses",
-      `Max-profile strategic critic backed by ${sol} (OpenAI). Reviews plans, designs, tradeoffs, and large artifacts for unsound assumptions and missing failure modes.`,
-      `You are sol_critic, a fresh-context adversarial architecture critic running on ${sol}. Review the complete artifact and constraints, report concrete assumptions and failure modes, and do not invent objections.`,
+      {
+        kind: "strategic critic",
+        lens: "architecture, assumptions, alternatives, and system-level failure modes",
+        useWhen: "a self-contained plan or design needs adversarial review before a consequential decision",
+        notFor: "line-level code review or claims a repository check can settle",
+      },
       ["low", "medium", "high", "xhigh"],
       "xhigh",
     ),
@@ -1087,8 +1111,12 @@ export function maxPersonasFor(opts: {
         "codex_reviewer",
         codex,
         "/v1/responses",
-        `Max-profile line-level reviewer backed by ${codex} (OpenAI). Reviews concrete diffs and files for bugs, edge cases, security, concurrency, and resource issues.`,
-        `You are codex_reviewer, a fresh-context line-level code reviewer running on ${codex}. Cite real file:line locations and report severity-ranked findings with minimal fixes.`,
+        {
+          kind: "line-level reviewer",
+          lens: "correctness, edge cases, security, concurrency, and resource handling",
+          useWhen: "a concrete code excerpt or diff needs a focused implementation review",
+          notFor: "open architecture decisions, repository exploration, or executing tests",
+        },
         ["low", "medium", "high", "xhigh"],
         "xhigh",
       ),
@@ -1100,8 +1128,12 @@ export function maxPersonasFor(opts: {
         "sonnet_reviewer",
         sonnet,
         "/v1/messages",
-        `Max-profile line-level reviewer backed by ${sonnet} (Anthropic). Reviews concrete diffs and files for bugs, edge cases, security, concurrency, and resource issues.`,
-        `You are sonnet_reviewer, a fresh-context line-level code reviewer running on ${sonnet}. Cite real file:line locations and report severity-ranked findings with minimal fixes.`,
+        {
+          kind: "line-level reviewer",
+          lens: "correctness, edge cases, security, concurrency, and resource handling",
+          useWhen: "a concrete code excerpt or diff needs a focused implementation review",
+          notFor: "open architecture decisions, repository exploration, or executing tests",
+        },
         ["low", "medium", "high", "xhigh"],
         "xhigh",
       ),
@@ -1113,8 +1145,12 @@ export function maxPersonasFor(opts: {
       "opus_critic",
       opus,
       "/v1/messages",
-      `Max-profile same-lab critic backed by ${opus} (Anthropic). Provides a fresh-context sanity check for plans, designs, and code tradeoffs.`,
-      `You are opus_critic, a fresh-context adversarial reviewer running on ${opus}. Find cognitive momentum and unsupported assumptions in the supplied artifact; silence on sound work is valid.`,
+      {
+        kind: "strategic critic",
+        lens: "coherence, requirement drift, overcomplication, and cognitive momentum",
+        useWhen: "a self-contained design or decision needs a fresh Anthropic-family sanity check",
+        notFor: "independent repository verification or line-level defect discovery",
+      },
       ["low", "medium", "high"],
       "high",
     ))
@@ -1126,8 +1162,12 @@ export function maxPersonasFor(opts: {
         "gemini_critic",
         gemini,
         "/v1/chat/completions",
-        `Max-profile third-lab strategic critic backed by ${gemini} (Google). Reviews plans, invariants, proofs, and formal tradeoffs.`,
-        `You are gemini_critic, a fresh-context strategic critic running on ${gemini}. Review the artifact against its constraints and report only concrete invariant or assumption failures.`,
+        {
+          kind: "strategic critic",
+          lens: "invariants, formal consistency, proofs, and constraint violations",
+          useWhen: "a self-contained plan or argument depends on subtle logical invariants",
+          notFor: "line-level implementation review, repository exploration, or executing tests",
+        },
         ["low", "medium", "high"],
         "high",
       ),
@@ -1136,8 +1176,12 @@ export function maxPersonasFor(opts: {
         "gemini_reviewer",
         gemini,
         "/v1/chat/completions",
-        `Max-profile line-level reviewer backed by ${gemini} (Google). Provides an independent second-lab review of concrete code.`,
-        `You are gemini_reviewer, a fresh-context line-level code reviewer running on ${gemini}. Cite real file:line locations and report severity-ranked findings.`,
+        {
+          kind: "line-level reviewer",
+          lens: "boundary conditions, state transitions, and concrete implementation defects",
+          useWhen: "a supplied code excerpt or diff needs an independent Google-family review",
+          notFor: "architecture ideation, repository exploration, or executing tests",
+        },
         ["low", "medium", "high"],
         "high",
       ),
@@ -1150,8 +1194,12 @@ export function maxPersonasFor(opts: {
         "grok_critic",
         grok,
         "/v1/responses",
-        `Max-profile strategic critic backed by ${grok} (xAI). Challenges plans, designs, and decisions with a fresh context.`,
-        `You are grok_critic, a fresh-context strategic critic running on ${grok}. Challenge the supplied artifact against its constraints and report concrete findings only.`,
+        {
+          kind: "strategic critic",
+          lens: "operational counterexamples, hidden assumptions, and alternate strategies",
+          useWhen: "a self-contained plan or decision needs a distinct xAI-family challenge",
+          notFor: "line-level implementation review, repository exploration, or executing tests",
+        },
         ["low", "medium", "high"],
         "medium",
       ),
@@ -1160,8 +1208,12 @@ export function maxPersonasFor(opts: {
         "grok_reviewer",
         grok,
         "/v1/responses",
-        `Max-profile line-level reviewer backed by ${grok} (xAI). Reviews concrete code and diffs at medium effort.`,
-        `You are grok_reviewer, a fresh-context line-level code reviewer running on ${grok}. Cite real file:line locations and report severity-ranked findings.`,
+        {
+          kind: "line-level reviewer",
+          lens: "runtime behavior, concurrency, resources, and operational edge cases",
+          useWhen: "a supplied code excerpt or diff needs an xAI-family implementation review",
+          notFor: "open design work, repository exploration, or executing tests",
+        },
         ["low", "medium", "high"],
         "medium",
       ),

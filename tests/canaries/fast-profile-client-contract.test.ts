@@ -35,7 +35,7 @@ describe("fast-profile client contract canary", () => {
       return
     }
     for (const marker of REQUIRED_MARKERS) {
-      const candidates = Array.isArray(marker) ? marker : [marker]
+      const candidates: Array<string> = Array.isArray(marker) ? [...marker] : [marker]
       const present = await bundleContainsAny(bundle, candidates)
       if (!present) {
         throw new Error(

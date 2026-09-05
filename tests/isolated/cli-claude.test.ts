@@ -60,9 +60,14 @@ const parseSharedArgsMock = mock()
 const getClaudeCodeEnvVarsMock = mock()
 const getCodexEnvVarsMock = mock()
 const injectModelPickerSettingsFileMock = mock()
+const buildMaxDispatchGuardHookCommandMock = mock()
 
 mock.module("~/lib/model-picker-settings", () => ({
   injectModelPickerSettingsFile: injectModelPickerSettingsFileMock,
+}))
+
+mock.module("~/internal-max-dispatch-guard", () => ({
+  buildMaxDispatchGuardHookCommand: buildMaxDispatchGuardHookCommandMock,
 }))
 
 mock.module("~/lib/server-setup", () => ({
@@ -422,6 +427,8 @@ beforeEach(() => {
   })
   injectModelPickerSettingsFileMock.mockReset()
   injectModelPickerSettingsFileMock.mockResolvedValue({ written: true, models: [] })
+  buildMaxDispatchGuardHookCommandMock.mockReset()
+  buildMaxDispatchGuardHookCommandMock.mockReturnValue("max-dispatch-guard")
   getClaudeCodeEnvVarsMock.mockReset()
   getClaudeCodeEnvVarsMock.mockImplementation(
     (serverUrl: string, model?: string) => {
@@ -1721,6 +1728,19 @@ describe("claude command", () => {
       expect(opts.workerToolsAvailable).toBe(false)
       expect(opts.maxImplementerModel).toBe("gemini-3.8-flash")
       expect(opts.maxPlanModel).toBe("gpt-5.6-sol")
+      expect(opts.maxReviewerModel).toBe("claude-sonnet-5")
+      expect(opts.maxReviewerEffort).toBe("xhigh")
+      expect(buildMaxDispatchGuardHookCommandMock).toHaveBeenCalledWith(
+        expect.anything(),
+        { reviewerModel: "claude-sonnet-5", reviewerEffort: "xhigh" },
+      )
+      expect(opts.maxPeerModels).toEqual(expect.objectContaining({
+        sol: "gpt-5.6-sol",
+        codex: undefined,
+        sonnet: "claude-sonnet-5",
+        opus: "claude-opus-5",
+        gemini: "gemini-3.8-flash",
+      }))
       expect(injectModelPickerSettingsFileMock).toHaveBeenCalledWith(
         expect.stringContaining("settings.json"),
         "max",

@@ -36,14 +36,19 @@ export function fastEndpointRequirement(modelId: string): FastEndpoint | undefin
  * the required endpoint. An entry that advertises both still resolves to the
  * policy endpoint, regardless of advertisement order.
  */
+export function advertisesEndpoint(
+  model: Model | undefined,
+  endpoint: FastEndpoint,
+): boolean {
+  const advertised = model?.supported_endpoints
+  return Array.isArray(advertised)
+    && advertised.some((value) => ENDPOINTS[endpoint].has(value))
+}
+
 export function fastEndpointForModel(model: Model): FastEndpoint | undefined {
   const required = fastEndpointRequirement(model.id)
   if (!required) return undefined
-  const advertised = model.supported_endpoints
-  if (!Array.isArray(advertised) || advertised.length === 0) return undefined
-  return advertised.some((endpoint) => ENDPOINTS[required].has(endpoint))
-    ? required
-    : undefined
+  return advertisesEndpoint(model, required) ? required : undefined
 }
 
 /** Resolve a fast endpoint from a catalog id, without selecting a fallback. */

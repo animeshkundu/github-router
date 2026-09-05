@@ -1,5 +1,6 @@
 import {
   MAX_PROFILE_NATIVE_AGENT_NAMES,
+  MAX_PROFILE_NATIVE_EFFORTS,
   MAX_PROFILE_NATIVE_MODELS,
   type MaxProfileNativeAgentName,
 } from "./max-profile-contract"
@@ -178,7 +179,7 @@ export function decideMaxDispatchGuard(
   const fixedReviewerEffort = nativeTarget === "reviewer"
     && !normalizedModel
     && opts.reviewerModel
-    ? opts.reviewerEffort ?? (baseModel(opts.reviewerModel) === "gpt-5.6-luna" ? "max" : "high")
+    ? opts.reviewerEffort ?? MAX_PROFILE_NATIVE_EFFORTS.reviewer
     : undefined
   const effectiveEffort = fixedReviewerEffort ?? effort
   const updatedInput = { ...toolInput }
@@ -186,8 +187,8 @@ export function decideMaxDispatchGuard(
   else delete updatedInput.model
   if (effectiveEffort) {
     // Claude Code's native Agent payload uses `model` and `effort`; preserve
-    // an explicit field when possible, and emit the catalog-resolved reviewer
-    // fallback effort so Luna cannot inherit Grok's high frontmatter default.
+    // an explicit field when possible, and emit the launch-resolved reviewer
+    // effort so the dispatch cannot drift from the generated frontmatter.
     if (toolInput.thinking !== undefined) updatedInput.thinking = effectiveEffort
     else updatedInput.effort = effectiveEffort
   }

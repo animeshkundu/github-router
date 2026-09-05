@@ -1,6 +1,10 @@
 import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 import type { Effort } from "./reasoning-effort"
-import { fastEndpointForModel } from "./fast-endpoint"
+import {
+  advertisesEndpoint,
+  fastEndpointForModel,
+} from "./fast-endpoint"
+import { MAX_ADVISOR_TOOL_INSTRUCTIONS } from "./max-profile-prompts"
 import { stripTrailingOneMSuffix } from "./model-suffix"
 import { state } from "./state"
 
@@ -65,15 +69,7 @@ export const MAX_PROFILE_NATIVE_MODELS = Object.freeze({
 export const MAX_PROFILE_LEAD_MODEL = MAX_PROFILE_MODELS.sol
 export const MAX_PROFILE_ADVISOR_MODEL = MAX_PROFILE_MODELS.opus
 export const MAX_PROFILE_ADVISOR_EFFORT = "high" as const
-export const MAX_PROFILE_ADVISOR_INSTRUCTIONS = `# Advisor Tool
-
-You have access to an optional, lead-only, transcript-aware Max Advisor. It offers a focused second opinion; it is not a supervisor, approver, workflow gate, or substitute for your own reasoning. You keep decision ownership.
-
-Use it only when a consequential uncertainty remains after direct investigation and cannot be settled by repository evidence, a focused command or test, Plan, reviewer, or a fresh-context peer: conflicting evidence, a materially changed assumption, a genuinely non-converging approach, or a hard-to-reverse trade-off. State the precise unresolved question immediately before calling it.
-
-Do not call it automatically before substantive work or completion, for routine progress, while waiting, after ordinary tool output, for directly verifiable facts, planner approval, reviewer verification, or as reassurance for a decision the evidence already supports.
-
-Treat the result as advice, not authority. Weigh it against the user's intent and verified evidence. Consult again only when materially new evidence creates a different question or directly conflicts with the earlier advice.`
+export const MAX_PROFILE_ADVISOR_INSTRUCTIONS = MAX_ADVISOR_TOOL_INSTRUCTIONS
 
 export function maxAdvisorModelFromPin(pinned: string | undefined, opusModel?: string): string {
   const trimmed = pinned?.trim()
@@ -238,12 +234,13 @@ function usableGrokReviewer(model: Model | undefined): boolean {
 /**
  * Validate the fixed prerequisites for the raw `-m max` launch.
  *
- * Max is a deliberately strong, closed profile. Its lead, planning, reviewer,
- * and transcript-aware Advisor paths must all be present before any runtime
- * artifact is written: Sol, Luna, Gemini 3.8 Flash, and Opus 5 are mandatory.
- * Grok 4.6 is the only optional model. When present it supplies the preferred
- * medium-effort brainstorm/critic path, but it is never a max lead and its
- * sub-1M context must remain undecorated.
+ * Max is a deliberately strong, closed profile. Its lead, planning,
+ * implementation, repository-review, brainstorm, and transcript-aware Advisor
+ * paths must all be present before any runtime artifact is written: Sol, Luna,
+ * Gemini 3.8 Flash, Sonnet 5, and Opus 5 are mandatory. Grok 4.6 is optional;
+ * when present it supplies additional peer critic/reviewer coverage and the
+ * preferred third-lab stand-in slot, but it is never a max lead and its sub-1M
+ * context must remain undecorated.
  */
 export function validateMaxProfilePrerequisites(
   catalog: ModelsResponse | undefined,
@@ -452,7 +449,7 @@ export function maxCodexReviewerModel(): string | undefined {
   const model = catalogModel(MAX_PROFILE_MODELS.codex)
   return model && hasToolCalls(model)
     && supportsEffort(model, "xhigh")
-    && supportsEndpoint(model, "responses")
+    && advertisesEndpoint(model, "responses")
     && hasUsableLimits(model)
     && (model.capabilities?.limits?.max_prompt_tokens ?? 0) >= 200_000
     ? model.id

@@ -273,7 +273,7 @@ test(
             resolve(
               new Response(
                 JSON.stringify({
-                  model: GEMINI_ADVISOR_MODEL,
+                  model: FAST_ADVISOR_MODEL,
                   choices: [{ message: { role: "assistant", content: "advice" } }],
                 }),
                 { headers: { "content-type": "application/json" } },

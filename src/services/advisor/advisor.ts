@@ -54,6 +54,7 @@ import {
   FAST_PROFILE_ADVISOR_MODEL,
 } from "~/lib/fast-profile-contract"
 import { HTTPError } from "~/lib/error"
+import { MAX_ADVISOR_SYSTEM_PROMPT } from "~/lib/max-profile-prompts"
 import {
   fastEndpointForCatalogId,
   fastEndpointForModel,
@@ -809,16 +810,7 @@ export function advisorSystemPrompt(
   fastProfile = false,
   maxProfile = false,
 ): string {
-  if (maxProfile) {
-    return (
-      "You are a non-binding consultant to the primary lead. The transcript is context for one "
-      + "focused consequential uncertainty, not an invitation to supervise the whole session. "
-      + "Offer a concise recommendation with its assumptions, material risks, credible alternatives, "
-      + "confidence, and any evidence gap that would change it. Cite relevant transcript evidence. "
-      + "Do not approve, veto, dictate, or take ownership; the lead weighs your advice against the "
-      + "user's intent and verified evidence."
-    )
-  }
+  if (maxProfile) return MAX_ADVISOR_SYSTEM_PROMPT
   return (
     "You are an expert advisor reviewing an in-progress Claude Code session. "
     + "The transcript below is the work-in-progress (turns numbered, with "

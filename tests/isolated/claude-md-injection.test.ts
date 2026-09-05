@@ -29,6 +29,10 @@ const {
   findMarkerBlocks,
   __testExports,
 } = await import("../../src/lib/claude-md-injection")
+const {
+  buildPeerAwarenessSnippet,
+  buildPeerAwarenessSummary,
+} = await import("../../src/lib/peer-mcp-personas")
 
 const {
   MARKER_OPEN,
@@ -1034,21 +1038,86 @@ test("budgetLead does not name reviewer-fast when it was dropped", () => {
 // signal — `profile: "fast"` must override every other flag rather than
 // merge with it, and the rendered prose must never name an agent, MCP tool,
 // or skill this profile does not register.
-test("profile:'max' steers to role defaults and excludes Gemini Pro", () => {
+test("profile:'max' carries orchestration policy without duplicating the roster", () => {
   const directive = buildOperatingDefaultsDirective({ profile: "max" })
-  expect(directive).toContain("set of complementary capabilities, not a required sequence")
-  expect(directive).toContain("Small or obvious tasks are often better handled directly")
-  expect(directive).toContain("evidence to synthesize rather than a vote")
-  expect(directive).toContain("configured model is the deliberate default")
-  expect(directive).toContain("most useful after a concrete mismatch")
-  expect(directive).toContain("Grok 4.6/high")
-  expect(directive).toContain("Gemini 3.8 Flash 1M/high")
-  expect(directive).toContain("Gemini 3.1 Pro")
-  expect(directive).toContain("is replaced")
+  expect(directive).toContain("The lead owns the outcome")
+  expect(directive).toContain("Start with direct repository or runtime evidence")
+  expect(directive).toContain("narrow, obvious, surgical, and single-command work directly")
+  expect(directive).toContain("independent and non-overlapping")
+  expect(directive).toContain("sequence them when one needs another's result")
+  expect(directive).toContain("desired outcome, relevant context, constraints, expected evidence, and verification")
+  expect(directive).toContain("never as a required Explore → Plan → implement → review sequence")
+  expect(directive).toContain("do not ask several models the same generic question")
+  expect(directive).toContain("model agreement is not verification")
   expect(directive).toContain("Advisor is optional, non-binding")
   expect(directive).toContain("no approval or workflow authority")
-  expect(directive).toContain("a further consultation is useful only when materially new evidence")
-  expect(directive).toContain("The lead owns the outcome")
+  expect(directive).toContain("materially new or conflicting evidence")
+  for (const implementationDetail of [
+    "Claude Sonnet 5",
+    "Claude Opus 5",
+    "Grok 4.6",
+    "Gemini 3.8 Flash",
+    "gemini_reviewer",
+    "codex_reviewer",
+    "mcp__",
+  ]) {
+    expect(directive).not.toContain(implementationDetail)
+  }
+})
+
+test("profile:'max' partitions policy from its resident roster and gated inventory", () => {
+  const directive = buildOperatingDefaultsDirective({ profile: "max" })
+  const digest = buildOperatingDefaultsDigest({ profile: "max" })
+  const common = {
+    profile: "max" as const,
+    codexCli: false,
+    geminiAvailable: true,
+    workerToolsAvailable: false,
+    standInAvailable: true,
+    browseAvailable: true,
+    browserToolsAvailable: true,
+    compoundBrowseAvailable: false,
+    fleetAvailable: true,
+    agentToolsAvailable: true,
+    artifactToolsAvailable: true,
+    maxPersonaNames: [
+      "sol_critic",
+      "codex_reviewer",
+      "opus_critic",
+      "gemini_critic",
+      "gemini_reviewer",
+      "grok_critic",
+      "grok_reviewer",
+    ],
+    groupKeys: {
+      peers: "peers",
+      search: "search",
+      workers: "workers",
+      browser: "browser",
+      decide: "decide",
+      fleet: "fleet",
+    },
+  }
+  const summary = buildPeerAwarenessSummary(common)
+  const snippet = buildPeerAwarenessSnippet(common)
+  const roster = ["Explore", "Plan", "general-purpose", "implementer", "reviewer", "brainstorm", "peer-review-coordinator"]
+
+  for (const role of roster) {
+    expect(digest).not.toContain(`\`${role}\``)
+    expect(summary.match(new RegExp(`\\\`${role}\\\``, "g"))?.length).toBe(1)
+  }
+  expect(digest).not.toContain("mcp__")
+  expect(summary).not.toContain("mcp__")
+  expect(snippet).toContain("mcp__peers__*")
+  expect(snippet).toContain("mcp__search__code")
+  expect(snippet).toContain("mcp__browser__*")
+  expect(snippet).toContain("mcp__workers__browse")
+  expect(snippet).toContain("mcp__decide__stand_in")
+  expect(snippet).toContain("mcp__fleet__*")
+  expect(snippet).toContain("artifact_*")
+  expect(Buffer.byteLength(`${digest}\n\n${summary}`)).toBeLessThanOrEqual(2_820)
+  expect(Buffer.byteLength(`${directive}\n\n${snippet}`)).toBeLessThanOrEqual(4_283)
+  expect(`${digest}\n${directive}\n${summary}\n${snippet}`).not.toContain("—")
 })
 
 test("profile:'fast' names exactly the fast roster and never a removed native/tool/skill (drift guard)", () => {
@@ -1148,7 +1217,19 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   const maxDigest = buildOperatingDefaultsDigest({ profile: "max" })
   expect(maxDigest).toContain("Max launch profile")
   expect(maxDigest).toContain("The lead owns the outcome")
-  expect(maxDigest).toContain("Claude Sonnet 5 1M/xhigh")
-  expect(maxDigest).toContain("Claude Opus 5 1M/high")
+  expect(maxDigest).toContain("independent and non-overlapping")
+  expect(maxDigest).toContain("sequence them when one needs another's result")
+  expect(maxDigest).toContain("Agent count and agreement are not evidence")
   expect(maxDigest).toContain("Advisor is optional, non-binding")
+  for (const inventoryDetail of [
+    "`Explore`",
+    "`Plan`",
+    "Claude Sonnet 5",
+    "Claude Opus 5",
+    "gemini_reviewer",
+    "codex_reviewer",
+    "mcp__",
+  ]) {
+    expect(maxDigest).not.toContain(inventoryDetail)
+  }
 })

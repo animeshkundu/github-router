@@ -298,7 +298,9 @@ describe("authenticated fast Advisor route matrix", () => {
           return Promise.resolve(leadCalls === 1 ? leadResponsesSse() : continuationResponsesSse())
         }
         if (requestUrl.includes("/chat/completions")) {
-          if (body.stream === false) return Promise.resolve(advisorChatResponse())
+          if (body.stream === false) {
+            return Promise.resolve(new Response("unexpected non-streaming chat call", { status: 500 }))
+          }
           leadCalls++
           return Promise.resolve(leadCalls === 1 ? leadChatSse() : continuationChatSse())
         }

@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 
 import {
   MAX_LUNA_HIGH_ALIAS_ID,
@@ -20,11 +23,19 @@ import {
   formatMaxPrerequisiteFailure,
   maxAdvisorModelFromPin,
   maxAdvisorPinIsValid,
+  maxCodexReviewerModel,
   maxReviewerModel,
   validateMaxProfilePrerequisites,
 } from "../src/lib/max-profile-contract"
-import { buildPeerAgentDefinitions } from "../src/lib/codex-mcp-config"
-import { buildPeerAwarenessSummary, buildPeerAwarenessSnippet } from "../src/lib/peer-mcp-personas"
+import {
+  buildPeerAgentDefinitions,
+  writePeerMcpRuntimeFiles,
+} from "../src/lib/codex-mcp-config"
+import {
+  buildPeerAwarenessSummary,
+  buildPeerAwarenessSnippet,
+  maxPersonasFor,
+} from "../src/lib/peer-mcp-personas"
 import { preprocessMaxRequest } from "../src/lib/max-request-preprocess"
 import { buildMaxDispatchGuardHookCommand } from "../src/internal-max-dispatch-guard"
 
@@ -102,9 +113,10 @@ describe("max profile contract", () => {
     expect(formatMaxPrerequisiteFailure(failure.missing)).toContain("gpt-5.6-sol")
   })
 
-  test("resolves Max reviewer to Sonnet 5 1M xhigh from capabilities", () => {
+  test("resolves Max native and Codex reviewers from their required capabilities", () => {
     state.models = catalog as never
     expect(maxReviewerModel()).toBe("claude-sonnet-5")
+    expect(maxCodexReviewerModel()).toBe("gpt-5.3-codex")
   })
 
   test("shared native-model defaults match emitted frontmatter", () => {
@@ -152,17 +164,25 @@ describe("max profile contract", () => {
     expect(agents.brainstorm?.effort).toBe("high")
     expect(agents.implementer?.model).toBe("gemini-3.8-flash[1m]")
     expect(agents.implementer?.effort).toBe("high")
-    expect(agents["peer-review-coordinator"]?.prompt).toContain("sol_critic")
-    expect(agents["peer-review-coordinator"]?.prompt).toContain("codex_reviewer")
+    const nativeRoles = ["Explore", "Plan", "general-purpose", "implementer", "reviewer", "brainstorm"] as const
+    for (const role of nativeRoles) {
+      expect(agents[role]?.description).toContain("Use when:")
+      expect(agents[role]?.description).toContain("Not for:")
+      expect(agents[role]?.description).toContain("Returns:")
+      expect(agents[role]?.prompt).toContain("Return")
+      expect(agents[role]?.prompt).toContain("Stop")
+    }
     expect(agents["peer-review-coordinator"]?.tools).toEqual(["mcp__peers__*"])
     for (const role of ["Explore", "Plan", "reviewer", "brainstorm"] as const) {
       expect(agents[role]?.tools).not.toContain("mcp__peers__*")
     }
-    expect(agents.Explore?.description).toContain("Best suited")
-    expect(agents.Plan?.prompt).toContain("the lead owns plan acceptance")
-    expect(agents.implementer?.prompt).toContain("Role: coding implementation")
-    expect(agents.reviewer?.prompt).toContain("distinguish no findings from checks not run")
-    expect(agents.brainstorm?.prompt).toContain("the lead owns the decision")
+    expect(agents.reviewer?.prompt).not.toContain("Edit/Write")
+    expect(agents.reviewer?.prompt).toContain("builds, tests, reproductions")
+    expect(agents["peer-review-coordinator"]?.prompt).toContain("smallest sufficient peer set")
+    expect(agents["peer-review-coordinator"]?.prompt).toContain("non-overlapping lens")
+    expect(agents["peer-review-coordinator"]?.prompt).toContain("Do not count votes")
+    expect(agents["peer-review-coordinator"]?.prompt).not.toContain("sol_critic")
+    expect(agents["peer-review-coordinator"]?.prompt).not.toContain("codex_reviewer")
     expect(agents["peer-review-coordinator"]?.prompt).toContain("Peer output is advisory")
     expect(agents.scout).toBeUndefined()
     expect(agents["worker-browse"]).toBeUndefined()
@@ -304,29 +324,29 @@ describe("max profile contract", () => {
   test("persists the resolved reviewer model and effort in the Max hook command", () => {
     expect(buildMaxDispatchGuardHookCommand(
       { execPath: "/usr/bin/node", scriptPath: "/app/main.js" },
-      { reviewerModel: "gpt-5.6-luna", reviewerEffort: "max" },
+      { reviewerModel: "claude-sonnet-5", reviewerEffort: "xhigh" },
     )).toBe(
-      '"/usr/bin/node" "/app/main.js" internal-max-dispatch-guard --reviewerModel "gpt-5.6-luna" --reviewerEffort max',
+      '"/usr/bin/node" "/app/main.js" internal-max-dispatch-guard --reviewerModel "claude-sonnet-5" --reviewerEffort xhigh',
     )
   })
 
-  test("max dispatch ACL preserves allowed catalog overrides and pins the resolved reviewer fallback effort", () => {
+  test("max dispatch ACL preserves allowed catalog overrides and pins the resolved reviewer effort", () => {
     const allowed = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-5.6-luna[1m]" } }))
     expect(allowed.allowed).toBe(true)
     expect(allowed.updatedInput?.model).toBe("gpt-5.6-luna[1m]")
 
-    const fallback = decideMaxDispatchGuard(
+    const defaultReviewer = decideMaxDispatchGuard(
       { tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "fable" } },
-      { reviewerModel: "gpt-5.6-luna", reviewerEffort: "max" },
+      { reviewerModel: "claude-sonnet-5" },
     )
-    expect(fallback.allowed).toBe(true)
-    expect(fallback.updatedInput).toEqual({ subagent_type: "reviewer", effort: "max" })
+    expect(defaultReviewer.allowed).toBe(true)
+    expect(defaultReviewer.updatedInput).toEqual({ subagent_type: "reviewer", effort: "xhigh" })
 
-    const grok = decideMaxDispatchGuard(
+    const pinnedReviewer = decideMaxDispatchGuard(
       { tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "fable" } },
-      { reviewerModel: "grok-4.6", reviewerEffort: "high" },
+      { reviewerModel: "claude-sonnet-5", reviewerEffort: "xhigh" },
     )
-    expect(grok.updatedInput).toEqual({ subagent_type: "reviewer", effort: "high" })
+    expect(pinnedReviewer.updatedInput).toEqual({ subagent_type: "reviewer", effort: "xhigh" })
 
     const denied = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-5.6-sol[1m]" } }))
     expect(denied.allowed).toBe(false)
@@ -375,14 +395,16 @@ describe("max profile contract", () => {
   test("keeps Max Advisor optional, non-binding, and out of routine workflow gates", () => {
     for (const required of [
       "optional",
-      "not a supervisor",
+      "primary-lead-only",
+      "not an independent repository verifier",
       "You keep decision ownership",
       "focused command or test",
-      "Do not call it automatically before substantive work or completion",
-      "directly verifiable facts",
+      "Evidence-first does not require invoking every role",
+      "initial investigation",
+      "ordinary verification",
       "planner approval",
-      "reviewer verification",
-      "materially new evidence",
+      "reviewer confirmation",
+      "materially new or conflicting evidence",
       "advice, not authority",
     ]) {
       expect(MAX_PROFILE_ADVISOR_INSTRUCTIONS).toContain(required)
@@ -394,14 +416,80 @@ describe("max profile contract", () => {
     const standard = advisorSystemPrompt(false, false, false)
     const fast = advisorSystemPrompt(false, true, false)
     const max = advisorSystemPrompt(false, false, true)
-    expect(max).toContain("non-binding consultant")
-    expect(max).toContain("not an invitation to supervise the whole session")
-    expect(max).toContain("Do not approve, veto, dictate")
+    expect(max).toContain("non-binding, transcript-aware consultant")
+    expect(max).toContain("The transcript may anchor you")
+    expect(max).toContain("evidence that would reverse your recommendation")
+    expect(max).toContain("Do not supervise, approve, veto")
     expect(max).not.toContain("actionable advice on the next step or course-correction")
     expect(max).not.toContain("Give a directive recommendation")
     expect(fast).toContain("non-binding consultant")
     expect(standard).not.toContain("non-binding consultant")
     expect(advisorSystemPrompt(true, false, false)).toContain("Give a directive recommendation")
+  })
+
+  test("keeps generated Max runtime personas aligned with the live peer registry", async () => {
+    const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), "max-persona-runtime-"))
+    const agentsDir = await fs.mkdtemp(path.join(os.tmpdir(), "max-persona-agents-"))
+    try {
+      const runtime = await writePeerMcpRuntimeFiles("http://127.0.0.1:18787", {
+        codexCli: false,
+        geminiAvailable: true,
+        maxProfile: true,
+        selfInvocation: { execPath: "/usr/bin/node", scriptPath: "/app/dist/main.js" },
+        groupKeys: { peers: "peers", search: "search" },
+        nonce: "0".repeat(64),
+        codexHome: "/tmp/codex",
+        runtimeDir,
+        agentsDir,
+        maxPeerModels: {
+          sol: MAX_PROFILE_MODELS.sol,
+          codex: MAX_PROFILE_MODELS.codex,
+          sonnet: MAX_PROFILE_MODELS.sonnet,
+          opus: MAX_PROFILE_MODELS.opus,
+          gemini: MAX_PROFILE_MODELS.gemini,
+          grok: MAX_PROFILE_MODELS.grok,
+        },
+      })
+      try {
+        expect(runtime.personas.map((persona) => persona.toolNameHttp)).toContain("codex_reviewer")
+        expect(runtime.personas.map((persona) => persona.toolNameHttp)).not.toContain("sonnet_reviewer")
+      } finally {
+        await runtime.cleanup()
+      }
+    } finally {
+      await fs.rm(runtimeDir, { recursive: true, force: true })
+      await fs.rm(agentsDir, { recursive: true, force: true })
+    }
+  })
+
+  test("gives every Max peer a cold-start routing and evidence contract", () => {
+    const codexPersonas = maxPersonasFor({
+      solModel: MAX_PROFILE_MODELS.sol,
+      codexModel: MAX_PROFILE_MODELS.codex,
+      sonnetModel: MAX_PROFILE_MODELS.sonnet,
+      opusModel: MAX_PROFILE_MODELS.opus,
+      geminiModel: MAX_PROFILE_MODELS.gemini,
+      grokModel: MAX_PROFILE_MODELS.grok,
+    })
+    expect(codexPersonas.map((persona) => persona.toolNameHttp)).toContain("codex_reviewer")
+    expect(codexPersonas.map((persona) => persona.toolNameHttp)).not.toContain("sonnet_reviewer")
+    for (const persona of codexPersonas) {
+      expect(persona.description).toContain("Use when:")
+      expect(persona.description).toContain("Not for:")
+      expect(persona.description).toContain("Cold-start:")
+      expect(persona.description).toContain("no repository or transcript access")
+      expect(persona.description).toContain("no material finding")
+      expect(persona.baseInstructions).toContain("If material context is missing")
+      expect(persona.baseInstructions).toContain("no material finding")
+      expect(persona.baseInstructions).toContain("Stop when")
+    }
+
+    const fallback = maxPersonasFor({
+      solModel: MAX_PROFILE_MODELS.sol,
+      sonnetModel: MAX_PROFILE_MODELS.sonnet,
+    })
+    expect(fallback.map((persona) => persona.toolNameHttp)).toContain("sonnet_reviewer")
+    expect(fallback.map((persona) => persona.toolNameHttp)).not.toContain("codex_reviewer")
   })
 
   test("validates max advisor pins strictly", () => {
@@ -426,21 +514,26 @@ describe("max profile contract", () => {
       standInAvailable: true,
       browseAvailable: false,
       compoundBrowseAvailable: false,
+      maxPersonaNames: ["sol_critic", "sonnet_reviewer"],
       groupKeys: { peers: "peers", search: "search" },
     })
     expect(snippet).toContain("general-purpose")
-    expect(snippet).toContain("menu of complementary capabilities")
-    expect(snippet).toContain("Small or obvious tasks are often better handled directly")
-    expect(snippet).toContain("evidence to synthesize rather than a vote")
-    expect(snippet).toContain("Advisor is optional, non-binding")
-    expect(snippet).toContain("not a supervisor")
-    expect(snippet).toContain("materially new evidence")
+    expect(snippet).toContain("`sol_critic`")
+    expect(snippet).toContain("`sonnet_reviewer`")
+    expect(snippet).toContain("Available cold-start peers")
+    expect(snippet).toContain("cannot inspect the repository or transcript")
+    expect(snippet).toContain("Use the native `reviewer`")
+    expect(snippet).toContain("peer suits a self-contained artifact")
+    expect(snippet).toContain("Advisor is transcript-aware")
     expect(snippet).not.toContain("orchestrate")
     const summary = buildPeerAwarenessSummary({ profile: "max", workerToolsAvailable: false, standInAvailable: false, browseAvailable: false })
-    expect(summary).toContain("Max launch profile")
-    expect(summary).toContain("Advisor is optional, non-binding")
-    expect(summary).toContain("no approval or workflow authority")
-    expect(summary).toContain("focused consequential uncertainty")
+    expect(summary).toContain("Max native roster")
+    for (const role of ["`Explore`", "`Plan`", "`general-purpose`", "`implementer`", "`reviewer`", "`brainstorm`", "`peer-review-coordinator`"]) {
+      expect(summary).toContain(role)
+    }
+    expect(summary).toContain("Fresh-context peers see only the artifact")
+    expect(summary).toContain("Advisor is transcript-aware, optional, non-binding")
+    expect(summary).not.toContain("mcp__")
     expect(summary).not.toContain("worker-browse")
 
     const browseSummary = buildPeerAwarenessSummary({
@@ -451,9 +544,9 @@ describe("max profile contract", () => {
       browserToolsAvailable: true,
       groupKeys: { browser: "browser", workers: "workers" },
     })
-    expect(browseSummary).toContain("worker-browse")
-    expect(browseSummary).toContain("mcp__workers__browse")
-    expect(browseSummary).toContain("mcp__browser__*")
+    expect(browseSummary).not.toContain("worker-browse")
+    expect(browseSummary).not.toContain("mcp__workers__browse")
+    expect(browseSummary).not.toContain("mcp__browser__*")
     expect(browseSummary).not.toContain("orchestrate")
 
     const workerOnlySummary = buildPeerAwarenessSummary({
@@ -464,7 +557,7 @@ describe("max profile contract", () => {
       browserToolsAvailable: false,
       groupKeys: { browser: "browser", workers: "workers" },
     })
-    expect(workerOnlySummary).toContain("worker-browse")
+    expect(workerOnlySummary).not.toContain("worker-browse")
     expect(workerOnlySummary).not.toContain("mcp__browser__*")
   })
 })

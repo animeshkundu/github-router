@@ -865,6 +865,8 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents.reviewer!.mcpServers).not.toHaveProperty("peers")
       expect(agents.Plan!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything(), search: expect.anything() }))
       expect(agents.reviewer!.prompt).toContain("You do not have Advisor")
+      expect(agents.reviewer!.prompt).not.toContain("Edit/Write")
+      expect(agents.reviewer!.prompt).toContain("builds, tests, reproductions")
       expect(agents.Plan!.prompt).toContain("You do not have Advisor")
       expect(agents.Plan!.prompt).toContain("Oracle")
       expect(agents.reviewer!.prompt).not.toContain("Oracle")
