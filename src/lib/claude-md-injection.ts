@@ -208,11 +208,11 @@ function joinClauses(parts: ReadonlyArray<string>): string {
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
   if (opts.profile === "fast") {
     return joinClauses([
-      "`Explore` for broad discovery and repo investigation",
-      "`Plan` for non-trivial sequencing, interfaces, migration risk, or acceptance criteria",
-      "`general-purpose` for mixed execution tasks",
-      "`implementer` for bounded coding changes",
-      "`reviewer` for repository-aware verification, reproduction, and root-causing",
+      "`Explore` for broad repository discovery, dependency mapping, and convention tracking",
+      "`Plan` for architectural sequencing, interface contracts, migration risk, and runnable acceptance criteria",
+      "`general-purpose` for mixed, iterative, or multi-step execution tasks",
+      "`implementer` for surgical coding changes matching existing conventions",
+      "`reviewer` for independent adversarial verification, reproduction, and root-causing",
     ])
   }
   const clauses: Array<string> = []
@@ -444,7 +444,7 @@ export function buildOperatingDefaultsDigest(
   if (opts.profile === "fast") {
     return (
       "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
-      + "Fast launch profile. The lead coordinates execution across `Explore` (broad discovery), `Plan` (sequencing, interfaces, migration risk, acceptance criteria), `general-purpose` (mixed execution), `implementer` (bounded coding), and `reviewer` (repository-aware verification). `Plan` is an advisory planning capability, not an approval gate. Delegate when work is wide or slow to protect main-thread context; do trivial and surgical work directly. Independent subagents may run in parallel. Stop named teammates when finished.\n\n"
+      + "Fast launch profile. The lead coordinates execution across `Explore` (broad discovery, convention mapping), `Plan` (sequencing, interfaces, migration risk, acceptance criteria), `general-purpose` (mixed execution), `implementer` (bounded coding), and `reviewer` (repository-aware verification). `Plan` is an advisory planning capability, not an approval gate. Delegate when work is wide or slow to protect main-thread context; do trivial and surgical work directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n"
       + "Verify claims against real evidence: run relevant commands and tests. Advisor is optional, non-binding, transcript-aware, and lead-only for consequential unresolved uncertainty, not routine progress or workflow gates. `oracle` (Opus 5 1M/high) is a stateless last resort for the lead and `Plan` when normal paths remain stuck."
     )
   }

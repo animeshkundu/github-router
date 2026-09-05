@@ -498,8 +498,8 @@ describe("fast Advisor request policy", () => {
 
   test.each([
     ["missing model", advisorMetadataTool(), "omitted its fixed model"],
-    ["wrong model", advisorMetadataTool("gemini-3.8-flash-wrong"), "requested"],
-    ["non-Gemini model", advisorMetadataTool("claude-opus-5"), "requested"],
+    ["wrong model", advisorMetadataTool("gpt-5.6-sol-wrong"), "requested"],
+    ["non-Sol model", advisorMetadataTool("claude-opus-5"), "requested"],
   ])("rejects fast native Advisor metadata with %s", async (_label, tool, detail) => {
     const fetchMock = mock(() => Promise.resolve(responsesObjectResponse()))
     globalThis.fetch = fetchMock as unknown as typeof fetch

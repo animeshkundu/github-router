@@ -223,21 +223,20 @@ function continuationMessagesSse(): Response {
   ])
 }
 
-function advisorChatResponse(): Response {
+function advisorResponsesResponse(): Response {
   return new Response(
     JSON.stringify({
-      id: "advisor_chat",
-      object: "chat.completion",
-      created: 0,
+      id: "advisor_resp",
+      object: "response",
       model: ADVISOR_FAST_PROFILE_MODEL,
-      choices: [
+      output: [
         {
-          index: 0,
-          message: { role: "assistant", content: "Advisor advice." },
-          finish_reason: "stop",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Advisor advice." }],
         },
       ],
-      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      usage: { input_tokens: 1, output_tokens: 1 },
     }),
     { status: 200, headers: { "content-type": "application/json" } },
   )
@@ -283,7 +282,7 @@ afterEach(() => {
 })
 
 describe("authenticated fast Advisor route matrix", () => {
-  test("all fixed fast leads preserve their endpoint, model, and Gemini Advisor", async () => {
+  test("all fixed fast leads preserve their endpoint, model, and Sol Advisor", async () => {
     for (const lead of LEADS) {
       const calls: Array<{ url: string; body: Record<string, unknown> }> = []
       let leadCalls = 0
@@ -338,10 +337,9 @@ describe("authenticated fast Advisor route matrix", () => {
         (call) => call.body.model === ADVISOR_FAST_PROFILE_MODEL && call.body.stream === false,
       )
       expect(advisorCall).toBeDefined()
-      expect(advisorCall!.url).toContain("/chat/completions")
-      expect((advisorCall!.body as { reasoning_effort?: string }).reasoning_effort).toBe("high")
-      const advisorMessages = advisorCall!.body.messages as Array<{ role?: string; content?: string }>
-      expect(advisorMessages.find((message) => message.role === "system")?.content)
+      expect(advisorCall!.url).toContain("/responses")
+      expect((advisorCall!.body as { reasoning?: { effort?: string } }).reasoning?.effort).toBe("high")
+      expect((advisorCall!.body as { instructions?: string }).instructions)
         .toContain("non-binding consultant")
 
       const continuationCall = calls.find(
@@ -358,7 +356,7 @@ describe("authenticated fast Advisor route matrix", () => {
     }
   })
 
-  test("explicit Opus environment pin cannot override fixed Gemini", async () => {
+  test("explicit Opus environment pin cannot override fixed Sol", async () => {
     process.env.GH_ROUTER_ADVISOR_MODEL = ADVISOR_ESCALATION_MODEL
     const calls: Array<{ url: string; body: Record<string, unknown> }> = []
     let leadCalls = 0
@@ -368,13 +366,11 @@ describe("authenticated fast Advisor route matrix", () => {
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>
       calls.push({ url: requestUrl, body })
       if (requestUrl.includes("/responses")) {
+        if (body.stream === false) return Promise.resolve(advisorResponsesResponse())
         leadCalls++
         return Promise.resolve(
           leadCalls === 1 ? leadResponsesSse() : continuationResponsesSse(),
         )
-      }
-      if (requestUrl.includes("/chat/completions")) {
-        return Promise.resolve(advisorChatResponse())
       }
       return Promise.resolve(new Response("unexpected endpoint", { status: 500 }))
     }) as unknown as typeof fetch
@@ -395,14 +391,10 @@ describe("authenticated fast Advisor route matrix", () => {
       (call) => call.body.model === ADVISOR_FAST_PROFILE_MODEL && call.body.stream === false,
     )
     expect(advisorCall).toBeDefined()
-    expect(advisorCall!.url).toContain("/chat/completions")
+    expect(advisorCall!.url).toContain("/responses")
     expect(calls.some((call) => call.body.model === ADVISOR_ESCALATION_MODEL))
       .toBe(false)
-    const advisorMessages = advisorCall!.body.messages as Array<{
-      role?: string
-      content?: string
-    }>
-    const system = advisorMessages.find((message) => message.role === "system")?.content
+    const system = (advisorCall!.body as { instructions?: string }).instructions
     expect(system).toContain("non-binding consultant")
     expect(system).toContain("Do not approve, veto, dictate")
     expect(system).not.toContain(

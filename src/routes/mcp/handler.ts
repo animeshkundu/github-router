@@ -319,14 +319,14 @@ function oracleToolEntry(): ToolEntry {
   return {
     name: "oracle",
     description:
-      "Fast-profile last-resort guidance from exact Opus 5 (1M context) at high effort. Available only to the lead and Plan: pass complete context plus one precise consequential question when repository evidence cannot settle it. It is stateless and tool-less; it cannot inspect the repo, execute, merge, or authorize actions.",
+      "Fast-profile last-resort consultant (Opus 5 1M context at high effort) available only to the lead and Plan. Stateless and cold-start: it sees only what you paste, with no repo access, tools, or prior history. Use for conceptual, algorithmic, spec/protocol, or architectural tradeoffs when repository evidence cannot settle them. Pass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question. Not for code discovery, web search, approval, or execution.",
     inputSchema: {
       type: "object",
       required: ["query", "context"],
       additionalProperties: false,
       properties: {
-        query: { type: "string", description: "One precise unresolved question." },
-        context: { type: "string", description: "Complete evidence and constraints needed to answer cold-start." },
+        query: { type: "string", description: "One precise, consequential unresolved question." },
+        context: { type: "string", description: "Complete self-contained evidence, constraints, code excerpts with path:line, and ruled-out alternatives needed to evaluate cold-start." },
       },
     },
   }
