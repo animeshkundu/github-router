@@ -60,9 +60,9 @@ function isMaxAgentSchemaModelAlias(model: unknown): boolean {
 }
 
 export interface MaxDispatchGuardOptions {
-  /** Catalog-resolved reviewer model for this launch (Grok/high or Luna/max). */
+  /** Catalog-resolved reviewer model for this launch (Sonnet 5 1M/xhigh). */
   reviewerModel?: string
-  reviewerEffort?: Extract<Effort, "high" | "max">
+  reviewerEffort?: Extract<Effort, "high" | "xhigh" | "max">
 }
 
 export interface MaxDispatchDecision {
@@ -108,11 +108,11 @@ export function normalizeMaxDispatchEffort(
     ? ["high", "xhigh", "max"]
     : model === "gpt-5.6-luna"
       ? ["none", "low", "medium", "high", "xhigh", "max"]
-      : model === "grok-4.6" || model === "gemini-3.8-flash"
-        // The optional reviewer/brainstorm fallback swaps these two models;
-        // their max-profile effort intersection is deliberately identical.
-        ? ["low", "medium", "high"]
-        : []
+      : model === "claude-sonnet-5" || model === "claude-opus-5"
+        ? ["low", "medium", "high", "xhigh", "max"]
+        : model === "grok-4.6" || model === "gemini-3.8-flash"
+          ? ["low", "medium", "high"]
+          : []
   if (allowed.includes(effort as Effort)) return effort as Effort
   return undefined
 }

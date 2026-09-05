@@ -57,9 +57,11 @@ import {
 import { maxPersonasFor } from "~/lib/peer-mcp-personas"
 import {
   MAX_PROFILE_MODELS,
+  maxCodexReviewerModel,
   maxGeminiModel,
   maxGrokModel,
   maxOpusModel,
+  maxSonnetModel,
 } from "~/lib/max-profile-contract"
 import {
   MAX_INFLIGHT_TOOLS_CALL,
@@ -275,7 +277,8 @@ function activePersonas(launch?: LaunchRegistryEntry): Array<PersonaSpec> {
   if (launch?.profileId === "max") {
     return maxPersonasFor({
       solModel: MAX_PROFILE_MODELS.sol,
-      lunaModel: MAX_PROFILE_MODELS.luna,
+      codexModel: maxCodexReviewerModel(),
+      sonnetModel: maxSonnetModel(),
       opusModel: maxOpusModel(),
       geminiModel: maxGeminiModel(),
       grokModel: maxGrokModel(),

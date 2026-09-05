@@ -14,7 +14,6 @@ import {
   FAST_IMPLEMENTER_EFFORT,
   FAST_REVIEWER_MODEL,
   FAST_REVIEWER_EFFORT,
-  FAST_REVIEWER_MIN_PROMPT_TOKENS,
   FAST_ADVISOR_MODEL,
   FAST_ADVISOR_EFFORT,
   FAST_ORACLE_MODEL,
@@ -145,23 +144,19 @@ test("fast implementer pins to Gemini Flash with tool calls, 1M, high, and chat"
   }
 })
 
-test("fast reviewer pins to Grok 4.6 via max_prompt_tokens and Responses medium", () => {
-  expect(FAST_REVIEWER_MODEL).toBe("grok-4.6")
-  expect(FAST_REVIEWER_EFFORT).toBe("medium")
+test("fast reviewer pins to Sonnet 5 via 1M context, adaptive thinking, tool calls, and Messages xhigh", () => {
+  expect(FAST_REVIEWER_MODEL).toBe("claude-sonnet-5")
+  expect(FAST_REVIEWER_EFFORT).toBe("xhigh")
 
-  setCatalog(entry("grok-4.6", { ctx: 500_000, maxPrompt: 372_000, efforts: ["medium"], endpoints: ["/responses"] }))
-  expect(fastReviewerModel()).toBe("grok-4.6")
+  setCatalog(entry("claude-sonnet-5", { ctx: ONE_M, efforts: ["xhigh"], endpoints: ["/v1/messages"], adaptiveThinking: true }))
+  expect(fastReviewerModel()).toBe("claude-sonnet-5")
 
-  // Below the conservative max_prompt_tokens floor -> dropped.
-  setCatalog(entry("grok-4.6", { ctx: 500_000, maxPrompt: FAST_REVIEWER_MIN_PROMPT_TOKENS - 1, efforts: ["medium"], endpoints: ["/responses"] }))
-  expect(fastReviewerModel()).toBeUndefined()
-
-  // Missing max_prompt_tokens entirely -> fails closed (treated as 0).
-  setCatalog(entry("grok-4.6", { ctx: 500_000, efforts: ["medium"], endpoints: ["/responses"] }))
+  // Below 1M context -> dropped.
+  setCatalog(entry("claude-sonnet-5", { ctx: 500_000, efforts: ["xhigh"], endpoints: ["/v1/messages"], adaptiveThinking: true }))
   expect(fastReviewerModel()).toBeUndefined()
 
   // No tool_calls -> dropped.
-  setCatalog(entry("grok-4.6", { ctx: 500_000, maxPrompt: 372_000, toolCalls: false, efforts: ["medium"], endpoints: ["/responses"] }))
+  setCatalog(entry("claude-sonnet-5", { ctx: ONE_M, toolCalls: false, efforts: ["xhigh"], endpoints: ["/v1/messages"], adaptiveThinking: true }))
   expect(fastReviewerModel()).toBeUndefined()
 
   // Absent entirely -> dropped, no fallback to any other model.
@@ -169,11 +164,11 @@ test("fast reviewer pins to Grok 4.6 via max_prompt_tokens and Responses medium"
   expect(fastReviewerModel()).toBeUndefined()
 })
 
-test("fast Advisor decouples to dedicated Gemini 3.8 Flash 1M high on chat", () => {
-  expect(FAST_ADVISOR_MODEL).toBe("gemini-3.8-flash")
+test("fast Advisor decouples to dedicated GPT-5.6 Sol 1M high on responses", () => {
+  expect(FAST_ADVISOR_MODEL).toBe("gpt-5.6-sol")
   expect(FAST_ADVISOR_EFFORT).toBe("high")
-  setCatalog(entry("gemini-3.8-flash", { ctx: ONE_M, efforts: ["high"], endpoints: ["/chat/completions"] }))
-  expect(fastAdvisorModel()).toBe("gemini-3.8-flash")
+  setCatalog(entry("gpt-5.6-sol", { ctx: ONE_M, efforts: ["high"], endpoints: ["/responses"] }))
+  expect(fastAdvisorModel()).toBe("gpt-5.6-sol")
 })
 
 test("fast Oracle pins to exact Opus 5 1M high on messages with adaptive thinking", () => {

@@ -27,7 +27,7 @@ export function fastEndpointRequirement(modelId: string): FastEndpoint | undefin
   if (id === "gpt-5.6-luna" || id === "gpt-5.6-sol" || id === "grok-4.6") {
     return "responses"
   }
-  if (id === "claude-opus-5") return "messages"
+  if (id === "claude-opus-5" || id === "claude-sonnet-5") return "messages"
   return undefined
 }
 

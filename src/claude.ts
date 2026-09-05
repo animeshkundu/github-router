@@ -81,10 +81,12 @@ import {
 } from "./lib/max-dispatch-acl"
 import {
   MAX_PROFILE_MODELS,
+  maxCodexReviewerModel,
   maxGeminiModel,
   maxGrokModel,
   maxOpusModel,
   maxReviewerModel as resolveMaxReviewerModel,
+  maxSonnetModel,
 } from "./lib/max-profile-contract"
 import { buildArtifactReviewSkill, injectedSkillsForLaunch, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
@@ -149,7 +151,6 @@ import {
 import {
   formatFastPrerequisiteFailure,
   formatMaxPrerequisiteFailure,
-  LUNA_DRIVER_ALIAS_ID,
   profileDescriptor,
   resolveLaunchProfile,
   validateFastProfilePrerequisites,
@@ -585,12 +586,8 @@ export const claude = defineCommand({
       // Standard profile behavior is unchanged. This branch intentionally keeps
       // all ordinary launches on the existing catalog/model flow.
     }
-    let chosenSlug =
-      launchProfileId === "fast"
-        ? (requestedSlug.endsWith("[1m]") ? `${LUNA_DRIVER_ALIAS_ID}[1m]` : LUNA_DRIVER_ALIAS_ID)
-        : requestedSlug
-    let resolvedSlug =
-      launchProfileId === "fast" ? resolveModel(requestedSlug) : resolveModel(chosenSlug)
+    let chosenSlug = requestedSlug
+    let resolvedSlug = resolveModel(chosenSlug)
 
     if (usingDefault && state.models) {
       const inCache = (slug: string) =>
@@ -816,8 +813,8 @@ export const claude = defineCommand({
               Plan: MAX_PROFILE_MODELS.sol,
               "general-purpose": MAX_PROFILE_MODELS.luna,
               implementer: MAX_PROFILE_MODELS.gemini,
-              reviewer: resolvedMaxReviewerModel,
-              brainstorm: maxGrokModel() ?? maxGeminiModel() ?? MAX_PROFILE_MODELS.grok,
+              reviewer: resolvedMaxReviewerModel ?? MAX_PROFILE_MODELS.sonnet,
+              brainstorm: MAX_PROFILE_MODELS.opus,
             }
         : {
             implementer: nativeSubagentModel(),
@@ -992,13 +989,17 @@ export const claude = defineCommand({
                   maxPlanModel: MAX_PROFILE_MODELS.sol,
                   maxGeneralPurposeModel: MAX_PROFILE_MODELS.luna,
                   maxImplementerModel: MAX_PROFILE_MODELS.gemini,
-                  maxReviewerModel: resolvedMaxReviewerModel,
-                  maxReviewerEffort: resolvedMaxReviewerModel === MAX_PROFILE_MODELS.luna ? "max" : "high",
-                  maxBrainstormModel: maxGrokModel() ?? maxGeminiModel() ?? MAX_PROFILE_MODELS.grok,
+                  maxReviewerModel: resolvedMaxReviewerModel ?? MAX_PROFILE_MODELS.sonnet,
+                  maxReviewerEffort: "xhigh",
+                  maxBrainstormModel: MAX_PROFILE_MODELS.opus,
                   maxGeminiModel: maxGeminiModel(),
                   maxGrokModel: maxGrokModel(),
+                  maxCodexModel: maxCodexReviewerModel(),
+                  maxSonnetModel: maxSonnetModel(),
                   maxPeerModels: {
                     sol: MAX_PROFILE_MODELS.sol,
+                    codex: maxCodexReviewerModel(),
+                    sonnet: maxSonnetModel(),
                     luna: MAX_PROFILE_MODELS.luna,
                     opus: maxOpusModel(),
                     gemini: maxGeminiModel(),

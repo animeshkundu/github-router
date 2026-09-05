@@ -1148,6 +1148,7 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   const maxDigest = buildOperatingDefaultsDigest({ profile: "max" })
   expect(maxDigest).toContain("Max launch profile")
   expect(maxDigest).toContain("The lead owns the outcome")
-  expect(maxDigest).toContain("Grok 4.6/high with Luna 1M/max fallback")
+  expect(maxDigest).toContain("Claude Sonnet 5 1M/xhigh")
+  expect(maxDigest).toContain("Claude Opus 5 1M/high")
   expect(maxDigest).toContain("Advisor is optional, non-binding")
 })

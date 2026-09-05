@@ -143,20 +143,20 @@ const ADVISOR_MIN_EFFORT: Effort = "high"
  *  keeps a cross-lab advisor one env var away for anyone who wants it back. */
 export const ADVISOR_ESCALATION_MODEL = "claude-opus-5"
 
-/** The Advisor model for an authenticated fast primary lead. Gemini 3.8 Flash
- * is cross-lab from the OpenAI-backed Luna/Sol leads and is selected only when
- * its live catalog entry advertises the required Chat endpoint. Kept distinct
+/** The Advisor model for an authenticated fast primary lead. GPT-5.6 Sol
+ * is cross-lab from the Google-backed Gemini lead and is selected only when
+ * its live catalog entry advertises the required Responses endpoint. Kept distinct
  * from `ADVISOR_DEFAULT_MODEL` so standard launches remain unchanged. */
 export const ADVISOR_FAST_PROFILE_MODEL = FAST_PROFILE_ADVISOR_MODEL
 
-/** True only when the live Gemini entry satisfies the fixed fast transport.
+/** True only when the live entry satisfies the fixed fast transport.
  * An ID-only presence check is insufficient: selecting a model whose catalog
- * row lost Chat support would silently degrade every fast Advisor call. */
+ * row lost Responses support would silently degrade every fast Advisor call. */
 function fastProfileAdvisorAvailable(): boolean {
   return fastEndpointForCatalogId(
     ADVISOR_FAST_PROFILE_MODEL,
     state.models?.data,
-  ) === "chat"
+  ) === "responses"
 }
 
 /** Output cap for the Anthropic-branch advisor call when the catalog carries no
@@ -354,7 +354,7 @@ export function resolveAdvisorModel(
   if (fastProfile) {
     if (!fastProfileAdvisorAvailable()) {
       throw new Error(
-        `fast Advisor invariant failed: ${ADVISOR_FAST_PROFILE_MODEL} must advertise the Chat endpoint`,
+        `fast Advisor invariant failed: ${ADVISOR_FAST_PROFILE_MODEL} must advertise the Responses endpoint`,
       )
     }
     return {

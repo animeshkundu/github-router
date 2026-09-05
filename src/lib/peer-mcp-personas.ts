@@ -651,7 +651,7 @@ export function buildPeerAwarenessSnippet(opts: {
     return [
       "## Peer review and advisor",
       "",
-      `Max launch profile. The native roster is a menu of complementary capabilities rather than a required workflow: \`Explore\` for broad discovery, \`brainstorm\` for open design choices, \`Plan\` when sequencing or acceptance criteria benefit from a separate view, \`implementer\` for bounded coding, \`general-purpose\` for mixed work, and \`reviewer\` for repository-aware verification. Their frontmatter models are intentional defaults chosen for role fit and cross-lab diversity; overrides are most useful after a concrete mismatch and remain within the max allowlist. Independent work can run in parallel when it improves context isolation or latency. Fresh-context peers can reduce correlated blind spots where deterministic evidence does not settle the issue; \`peer-review-coordinator\` can combine max-profile \`sol_critic\`, \`luna_reviewer\`, and catalog-present \`opus_critic\`, \`gemini_critic\`/\`gemini_reviewer\`, and \`grok_critic\`/\`grok_reviewer\` when the risk merits several lenses. Small or obvious tasks are often better handled directly, and model output remains evidence to synthesize rather than a vote.`,
+      `Max launch profile. The native roster is a menu of complementary capabilities rather than a required workflow: \`Explore\` for broad discovery, \`brainstorm\` (Claude Opus 5 1M/high) for open design choices, \`Plan\` when sequencing or acceptance criteria benefit from a separate view, \`implementer\` for bounded coding, \`general-purpose\` for mixed work, and \`reviewer\` (Claude Sonnet 5 1M/xhigh) for repository-aware verification. Their frontmatter models are intentional defaults chosen for role fit and cross-lab diversity; overrides are most useful after a concrete mismatch and remain within the max allowlist. Independent work can run in parallel when it improves context isolation or latency. Fresh-context peers can reduce correlated blind spots where deterministic evidence does not settle the issue; \`peer-review-coordinator\` can combine reviewer peers (\`gemini_reviewer\`, \`codex_reviewer\`/\`sonnet_reviewer\`, \`grok_reviewer\`) or strategic critics (\`sol_critic\`, \`opus_critic\`, \`gemini_critic\`, \`grok_critic\`) when the risk merits several lenses. Small or obvious tasks are often better handled directly, and model output remains evidence to synthesize rather than a vote.`,
       `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is optional, non-binding, primary-lead-only counsel for a focused consequential uncertainty that direct evidence, Plan, reviewer, or peers cannot settle. It is not a supervisor, approver, or routine workflow/completion gate; consult again only when materially new evidence creates a different question. It remains available across controlled max lead switches, while native subagents and browse workers do not receive it.${opts.standInAvailable ? " Max stand_in uses Sol + Opus 5 + Grok 4.6/high when available, otherwise Gemini 3.8 Flash 1M/high; it never uses Gemini 3.1 Pro." : ""}${opts.agentToolsAvailable ? " Max first-mate replaces any Gemini 3.1 Pro model choice with the same Grok/high → Gemini 3.8 Flash/high fallback." : ""}${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
     ].join("\n")
   }
@@ -853,7 +853,7 @@ export function buildPeerAwarenessSummary(opts: {
     return [
       "## Injected capabilities (summary)",
       "",
-      "Max launch profile. The roster offers complementary capabilities: `Explore` for broad discovery, `brainstorm` for open choices, `Plan` for a separate planning view, `implementer` and `general-purpose` for execution, and `reviewer` for repository-aware verification. Small or obvious tasks can be handled directly; independent work can run in parallel. Configured models are the default best fit, and a fresh-context peer or `peer-review-coordinator` can reduce correlated blind spots when risk and uncertainty justify it. Model output is evidence to synthesize, not a vote. Advisor is optional, non-binding, and primary-lead-only counsel for a focused consequential uncertainty the normal evidence and roles cannot settle; it has no approval or workflow authority. The lead decides. On every retained max path, replace Gemini 3.1 Pro with Grok 4.6/high when available, otherwise Gemini 3.8 Flash 1M/high.",
+      "Max launch profile. The roster offers complementary capabilities: `Explore` for broad discovery, `brainstorm` (Claude Opus 5 1M/high) for open choices, `Plan` for a separate planning view, `implementer` and `general-purpose` for execution, and `reviewer` (Claude Sonnet 5 1M/xhigh) for repository-aware verification. Small or obvious tasks can be handled directly; independent work can run in parallel. Configured models are the default best fit, and a fresh-context peer or `peer-review-coordinator` (coordinating reviewers `gemini-reviewer`, `codex-reviewer`/`sonnet-reviewer`, and `grok-reviewer`) can reduce correlated blind spots when risk and uncertainty justify it. Model output is evidence to synthesize, not a vote. Advisor is optional, non-binding, and primary-lead-only counsel for a focused consequential uncertainty the normal evidence and roles cannot settle; it has no approval or workflow authority. The lead decides. On every retained max path, replace Gemini 3.1 Pro with Grok 4.6/high when available, otherwise Gemini 3.8 Flash 1M/high.",
       `\`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide code and web search.${directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides browser control.` : ""}${opts.browseAvailable ? ` \`worker-browse\` dispatches the browse-only worker through \`mcp__${key("workers")}__browse\`.` : ""}${opts.standInAvailable ? ` \`mcp__${key("decide")}__stand_in\` provides deterministic decision tiebreak.` : ""}${opts.fleetAvailable ? ` \`mcp__${key("fleet")}__*\` provides gated remote sessions.` : ""}${opts.agentToolsAvailable ? " First-mate remains available when its own gate passes." : ""}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
     ].join("\n")
   }
@@ -1055,13 +1055,16 @@ function maxPersona(
 /** Max-only peer registry. It never changes the standard persona registry. */
 export function maxPersonasFor(opts: {
   solModel?: string
+  codexModel?: string
+  sonnetModel?: string
   lunaModel?: string
   opusModel?: string
   geminiModel?: string
   grokModel?: string
 }): Array<PersonaSpec> {
   const sol = opts.solModel ?? MAX_PROFILE_MODELS.sol
-  const luna = opts.lunaModel ?? MAX_PROFILE_MODELS.luna
+  const codex = opts.codexModel
+  const sonnet = opts.sonnetModel ?? MAX_PROFILE_MODELS.sonnet
   const opus = opts.opusModel
   const gemini = opts.geminiModel
   const grok = opts.grokModel
@@ -1076,17 +1079,34 @@ export function maxPersonasFor(opts: {
       ["low", "medium", "high", "xhigh"],
       "xhigh",
     ),
-    maxPersona(
-      "luna-reviewer",
-      "luna_reviewer",
-      luna,
-      "/v1/responses",
-      `Max-profile line-level reviewer backed by ${luna} (OpenAI). Reviews concrete diffs and files for bugs, edge cases, security, concurrency, and resource issues.`,
-      `You are luna_reviewer, a fresh-context line-level code reviewer running on ${luna}. Cite real file:line locations and report severity-ranked findings with minimal fixes.`,
-      ["low", "medium", "high", "xhigh"],
-      "high",
-    ),
   ]
+  if (codex) {
+    result.push(
+      maxPersona(
+        "codex-reviewer",
+        "codex_reviewer",
+        codex,
+        "/v1/responses",
+        `Max-profile line-level reviewer backed by ${codex} (OpenAI). Reviews concrete diffs and files for bugs, edge cases, security, concurrency, and resource issues.`,
+        `You are codex_reviewer, a fresh-context line-level code reviewer running on ${codex}. Cite real file:line locations and report severity-ranked findings with minimal fixes.`,
+        ["low", "medium", "high", "xhigh"],
+        "xhigh",
+      ),
+    )
+  } else if (sonnet) {
+    result.push(
+      maxPersona(
+        "sonnet-reviewer",
+        "sonnet_reviewer",
+        sonnet,
+        "/v1/messages",
+        `Max-profile line-level reviewer backed by ${sonnet} (Anthropic). Reviews concrete diffs and files for bugs, edge cases, security, concurrency, and resource issues.`,
+        `You are sonnet_reviewer, a fresh-context line-level code reviewer running on ${sonnet}. Cite real file:line locations and report severity-ranked findings with minimal fixes.`,
+        ["low", "medium", "high", "xhigh"],
+        "xhigh",
+      ),
+    )
+  }
   if (opus) {
     result.push(maxPersona(
       "opus-critic",

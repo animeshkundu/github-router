@@ -309,23 +309,23 @@ describe("fast Advisor request policy", () => {
 
     globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
       const url = String(_url)
-      if (url.includes("/chat/completions")) {
+      if (url.includes("/responses")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as {
-          messages?: Array<{ role?: string; content?: string }>
-          reasoning_effort?: string
+          instructions?: string
+          reasoning?: { effort?: string }
           model?: string
         }
         expect(body.model).toBe(ADVISOR_FAST_PROFILE_MODEL)
-        advisorSystemPrompt =
-          body.messages?.find((message) => message.role === "system")?.content ?? ""
-        advisorEffort = body.reasoning_effort ?? ""
+        advisorSystemPrompt = body.instructions ?? ""
+        advisorEffort = body.reasoning?.effort ?? ""
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              choices: [
+              output: [
                 {
-                  message: { role: "assistant", content: "Advisor advice." },
-                  finish_reason: "stop",
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: "Advisor advice." }],
                 },
               ],
             }),

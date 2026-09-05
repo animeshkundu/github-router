@@ -24,6 +24,8 @@ export const MAX_PROFILE_MODELS = Object.freeze({
   gemini: "gemini-3.8-flash",
   grok: "grok-4.6",
   opus: "claude-opus-5",
+  sonnet: "claude-sonnet-5",
+  codex: "gpt-5.3-codex",
 } as const)
 
 export const MAX_PROFILE_NATIVE_AGENT_NAMES = [
@@ -44,21 +46,19 @@ export const MAX_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Plan: "high",
   "general-purpose": "max",
   implementer: "high",
-  reviewer: "high",
-  brainstorm: "medium",
+  reviewer: "xhigh",
+  brainstorm: "high",
   "peer-review-coordinator": "max",
 } as const satisfies Record<MaxProfileNativeAgentName, Effort>)
 
-/** Default model family behind each native role's frontmatter. The optional
- * Grok brainstorm path may fall back to Gemini, whose allowed effort ladder is
- * identical for the values accepted by the max dispatch guard. */
+/** Default model family behind each native role's frontmatter. */
 export const MAX_PROFILE_NATIVE_MODELS = Object.freeze({
   Explore: MAX_PROFILE_MODELS.luna,
   Plan: MAX_PROFILE_MODELS.sol,
   "general-purpose": MAX_PROFILE_MODELS.luna,
   implementer: MAX_PROFILE_MODELS.gemini,
-  reviewer: MAX_PROFILE_MODELS.grok,
-  brainstorm: MAX_PROFILE_MODELS.grok,
+  reviewer: MAX_PROFILE_MODELS.sonnet,
+  brainstorm: MAX_PROFILE_MODELS.opus,
   "peer-review-coordinator": MAX_PROFILE_MODELS.luna,
 } as const satisfies Record<MaxProfileNativeAgentName, string>)
 
@@ -133,6 +133,7 @@ export interface MaxProfilePrerequisiteCheck {
     gemini?: Model
     grok?: Model
     opus?: Model
+    sonnet?: Model
     thirdLab?: "gemini" | "grok"
   }
 }
@@ -253,6 +254,7 @@ export function validateMaxProfilePrerequisites(
   const gemini = findModel(catalog, MAX_PROFILE_MODELS.gemini)
   const grok = findModel(catalog, MAX_PROFILE_MODELS.grok)
   const opus = findModel(catalog, MAX_PROFILE_MODELS.opus)
+  const sonnet = findModel(catalog, MAX_PROFILE_MODELS.sonnet)
 
   validateRequiredModel(
     sol,
@@ -295,11 +297,25 @@ export function validateMaxProfilePrerequisites(
     opus,
     MAX_PROFILE_MODELS.opus,
     [
+      ["does not advertise tool_calls", hasToolCalls(opus)],
       ["advertised context window is below 1M", hasContextAtLeast(opus, ONE_M_TOKENS)],
       ["does not advertise adaptive_thinking", opus?.capabilities?.supports?.adaptive_thinking === true],
       ["does not advertise a high reasoning effort", supportsEffort(opus, "high")],
       ["does not advertise a supported Messages endpoint", supportsEndpoint(opus, "messages")],
       ["has no usable max_prompt_tokens/max_output_tokens limits", hasUsableLimits(opus)],
+    ],
+    missing,
+  )
+  validateRequiredModel(
+    sonnet,
+    MAX_PROFILE_MODELS.sonnet,
+    [
+      ["does not advertise tool_calls", hasToolCalls(sonnet)],
+      ["advertised context window is below 1M", hasContextAtLeast(sonnet, ONE_M_TOKENS)],
+      ["does not advertise adaptive_thinking", sonnet?.capabilities?.supports?.adaptive_thinking === true],
+      ["does not advertise an xhigh reasoning effort", supportsEffort(sonnet, "xhigh")],
+      ["does not advertise a supported Messages endpoint", supportsEndpoint(sonnet, "messages")],
+      ["has no usable max_prompt_tokens/max_output_tokens limits", hasUsableLimits(sonnet)],
     ],
     missing,
   )
@@ -319,6 +335,7 @@ export function validateMaxProfilePrerequisites(
       gemini: geminiUsable ? gemini : undefined,
       grok: grokUsable ? grok : undefined,
       opus: opus && !missing.some((entry) => entry.startsWith(`${MAX_PROFILE_MODELS.opus}:`)) ? opus : undefined,
+      sonnet: sonnet && !missing.some((entry) => entry.startsWith(`${MAX_PROFILE_MODELS.sonnet}:`)) ? sonnet : undefined,
       thirdLab: grokUsable && supportsEffort(grok, "high")
         ? "grok"
         : geminiUsable
@@ -415,10 +432,31 @@ export function maxLunaMaxModel(): string | undefined {
     : undefined
 }
 
+export function maxSonnetModel(): string | undefined {
+  const model = catalogModel(MAX_PROFILE_MODELS.sonnet)
+  return model && hasContextAtLeast(model, ONE_M_TOKENS)
+    && model.capabilities?.supports?.tool_calls === true
+    && model.capabilities?.supports?.adaptive_thinking === true
+    && supportsEffort(model, "xhigh")
+    && supportsEndpoint(model, "messages")
+    && hasUsableLimits(model)
+    ? model.id
+    : undefined
+}
+
 export function maxReviewerModel(): string | undefined {
-  const grok = maxGrokHighModel()
-  if (grok) return grok
-  return maxLunaMaxModel()
+  return maxSonnetModel()
+}
+
+export function maxCodexReviewerModel(): string | undefined {
+  const model = catalogModel(MAX_PROFILE_MODELS.codex)
+  return model && hasToolCalls(model)
+    && supportsEffort(model, "xhigh")
+    && supportsEndpoint(model, "responses")
+    && hasUsableLimits(model)
+    && (model.capabilities?.limits?.max_prompt_tokens ?? 0) >= 200_000
+    ? model.id
+    : undefined
 }
 
 export function maxCatalogModel(id: string): Model | undefined {

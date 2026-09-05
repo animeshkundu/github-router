@@ -76,6 +76,8 @@ const catalog = {
     model("gemini-3.8-flash", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["low", "medium", "high"], endpoints: ["/chat/completions"] }),
     model("grok-4.6", { context: 500_000, prompt: 372_000, output: 16_000, efforts: ["low", "medium", "high"], endpoints: ["/responses"] }),
     model("claude-opus-5", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh"], endpoints: ["/messages"], adaptive: true }),
+    model("claude-sonnet-5", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh"], endpoints: ["/messages"], adaptive: true }),
+    model("gpt-5.3-codex", { context: 400_000, prompt: 272_000, output: 32_000, efforts: ["high", "xhigh"], endpoints: ["/responses"] }),
   ],
 }
 
@@ -100,25 +102,9 @@ describe("max profile contract", () => {
     expect(formatMaxPrerequisiteFailure(failure.missing)).toContain("gpt-5.6-sol")
   })
 
-  test("resolves Max reviewer to Grok/high or Luna 1M/max from capabilities", () => {
+  test("resolves Max reviewer to Sonnet 5 1M xhigh from capabilities", () => {
     state.models = catalog as never
-    expect(maxReviewerModel()).toBe("grok-4.6")
-
-    state.models = {
-      ...catalog,
-      data: catalog.data.map((entry) => entry.id === "grok-4.6"
-        ? model("grok-4.6", { context: 500_000, prompt: 372_000, output: 16_000, efforts: ["medium"], endpoints: ["/responses"] })
-        : entry),
-    } as never
-    expect(maxReviewerModel()).toBe("gpt-5.6-luna")
-
-    state.models = {
-      ...catalog,
-      data: catalog.data.map((entry) => entry.id === "grok-4.6"
-        ? model("grok-4.6", { context: 500_000, prompt: 100_000, output: 16_000, efforts: ["medium", "high"], endpoints: ["/responses"] })
-        : entry),
-    } as never
-    expect(maxReviewerModel()).toBe("gpt-5.6-luna")
+    expect(maxReviewerModel()).toBe("claude-sonnet-5")
   })
 
   test("shared native-model defaults match emitted frontmatter", () => {
@@ -134,8 +120,8 @@ describe("max profile contract", () => {
     expect(agents.Plan?.model).toBe("gpt-5.6-sol[1m]")
     expect(agents["general-purpose"]?.model).toBe("gpt-5.6-luna[1m]")
     expect(agents.implementer?.model).toBe("gemini-3.8-flash[1m]")
-    expect(agents.reviewer?.model).toBe("grok-4.6")
-    expect(agents.brainstorm?.model).toBe("grok-4.6")
+    expect(agents.reviewer?.model).toBe("claude-sonnet-5[1m]")
+    expect(agents.brainstorm?.model).toBe("claude-opus-5[1m]")
     expect(agents["peer-review-coordinator"]?.model).toBe("gpt-5.6-luna[1m]")
   })
 
@@ -151,20 +137,23 @@ describe("max profile contract", () => {
       maxPlanModel: MAX_PROFILE_MODELS.sol,
       maxGeneralPurposeModel: MAX_PROFILE_MODELS.luna,
       maxImplementerModel: MAX_PROFILE_MODELS.gemini,
-      maxReviewerModel: MAX_PROFILE_MODELS.grok,
-      maxBrainstormModel: MAX_PROFILE_MODELS.grok,
-      maxPeerModels: { sol: MAX_PROFILE_MODELS.sol, luna: MAX_PROFILE_MODELS.luna, gemini: MAX_PROFILE_MODELS.gemini, grok: MAX_PROFILE_MODELS.grok, opus: MAX_PROFILE_MODELS.opus },
+      maxReviewerModel: MAX_PROFILE_MODELS.sonnet,
+      maxBrainstormModel: MAX_PROFILE_MODELS.opus,
+      maxPeerModels: { sol: MAX_PROFILE_MODELS.sol, codex: MAX_PROFILE_MODELS.codex, sonnet: MAX_PROFILE_MODELS.sonnet, luna: MAX_PROFILE_MODELS.luna, gemini: MAX_PROFILE_MODELS.gemini, grok: MAX_PROFILE_MODELS.grok, opus: MAX_PROFILE_MODELS.opus },
     })
     expect(Object.keys(agents).sort()).toEqual([
       "Explore", "Plan", "brainstorm", "general-purpose", "implementer", "peer-review-coordinator", "reviewer",
     ])
     expect(agents.Plan?.model).toBe("gpt-5.6-sol[1m]")
     expect(agents.Plan?.effort).toBe("high")
-    expect(agents.reviewer?.model).toBe("grok-4.6")
-    expect(agents.reviewer?.effort).toBe("high")
+    expect(agents.reviewer?.model).toBe("claude-sonnet-5[1m]")
+    expect(agents.reviewer?.effort).toBe("xhigh")
+    expect(agents.brainstorm?.model).toBe("claude-opus-5[1m]")
+    expect(agents.brainstorm?.effort).toBe("high")
     expect(agents.implementer?.model).toBe("gemini-3.8-flash[1m]")
     expect(agents.implementer?.effort).toBe("high")
     expect(agents["peer-review-coordinator"]?.prompt).toContain("sol_critic")
+    expect(agents["peer-review-coordinator"]?.prompt).toContain("codex_reviewer")
     expect(agents["peer-review-coordinator"]?.tools).toEqual(["mcp__peers__*"])
     for (const role of ["Explore", "Plan", "reviewer", "brainstorm"] as const) {
       expect(agents[role]?.tools).not.toContain("mcp__peers__*")
@@ -192,7 +181,7 @@ describe("max profile contract", () => {
     for (const role of roles) {
       for (const schemaModel of MAX_AGENT_SCHEMA_MODEL_ALIASES) {
         const reviewerFallback = role === "reviewer"
-          ? { reviewerModel: "gpt-5.6-luna", reviewerEffort: "max" as const }
+          ? { reviewerModel: "claude-sonnet-5", reviewerEffort: "xhigh" as const }
           : undefined
         const decision = decideMaxDispatchGuard({
           tool_name: "Agent",
@@ -206,7 +195,7 @@ describe("max profile contract", () => {
         expect(decision.updatedInput).toEqual({
           subagent_type: role,
           prompt: "smoke test",
-          ...(role === "reviewer" ? { effort: "max" } : {}),
+          ...(role === "reviewer" ? { effort: "xhigh" } : {}),
         })
       }
     }

@@ -140,7 +140,7 @@ mock.module("~/lib/port", () => ({
   // These are real reimplementations rather than stubs: the tests below assert
   // on which lead `-m` resolves to, and a stub that always returned false would
   // make the budget-mode assertions vacuously pass.
-  FAST_LEAD_MODEL: "gpt-5.6-luna",
+  FAST_LEAD_MODEL: "gemini-3.8-flash",
   BUDGET_SMALL_FAST_SLUG: "claude-haiku-4-5",
   BUDGET_SMALL_FAST_CATALOG_ID: "claude-haiku-4.5",
   isBudgetClaudeLead: (slug?: string) =>
@@ -153,7 +153,7 @@ mock.module("~/lib/port", () => ({
       pickClaudeDefaultCalls.push(undefined)
       return pickClaudeDefaultImpl(undefined)
     }
-    if (arg.toLowerCase() === "fast") return leadOneMDecorateImpl("gpt-5.6-luna")
+    if (arg.toLowerCase() === "fast") return leadOneMDecorateImpl("gemini-3.8-flash")
     const shorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
     if (shorthand) {
       pickClaudeDefaultCalls.push(shorthand)
@@ -252,14 +252,14 @@ mock.module("~/lib/mcp-capabilities", () => ({
   fastPlanModel: mock(() => "gpt-5.6-sol"),
   fastGeneralPurposeModel: mock(() => "gpt-5.6-luna"),
   fastImplementerModel: mock(() => "gemini-3.8-flash"),
-  fastReviewerModel: mock(() => "grok-4.6"),
+  fastReviewerModel: mock(() => "claude-sonnet-5"),
   fastAdvisorModel: mock(() => "gemini-3.8-flash"),
   fastOracleModel: mock(() => "claude-opus-5"),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
   FAST_GENERAL_PURPOSE_EFFORT: "max",
   FAST_IMPLEMENTER_EFFORT: "high",
-  FAST_REVIEWER_EFFORT: "medium",
+  FAST_REVIEWER_EFFORT: "xhigh",
   // stand-in.ts (pulled in transitively via handler.ts) imports this;
   // stub it so the module mock doesn't break that import.
   resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),
@@ -688,6 +688,11 @@ describe("claude command", () => {
           capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
           supported_endpoints: ["/v1/chat/completions"],
         },
+        {
+          id: "claude-sonnet-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } },
+          supported_endpoints: ["/v1/messages"],
+        },
       ] as unknown as NonNullable<typeof state.models>["data"],
     }
     const run = getRunFn()
@@ -696,7 +701,7 @@ describe("claude command", () => {
 
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      "gh-router-luna-driver-max",
+      "gemini-3.8-flash",
       "fast",
       [],
     )
@@ -705,7 +710,7 @@ describe("claude command", () => {
       "fast",
     )
     const [, , options] = spawnMock.mock.calls[0]
-    expect(options.env.ANTHROPIC_MODEL).toBe("gh-router-luna-driver-max")
+    expect(options.env.ANTHROPIC_MODEL).toBe("gemini-3.8-flash")
   })
 
   test("`-m fast` overrides mirrored/caller Advisor identity with fixed Gemini", async () => {
@@ -728,9 +733,9 @@ describe("claude command", () => {
           supported_endpoints: ["/v1/messages"],
         },
         {
-          id: "grok-4.6",
-          capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
-          supported_endpoints: ["/responses"],
+          id: "claude-sonnet-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } },
+          supported_endpoints: ["/v1/messages"],
         },
         {
           id: "gemini-3.8-flash",
@@ -751,7 +756,7 @@ describe("claude command", () => {
     const [, args] = spawnMock.mock.calls[0]
     const advisorAt = args.indexOf("--advisor")
     expect(advisorAt).toBeGreaterThanOrEqual(0)
-    expect(args[advisorAt + 1]).toBe("gemini-3.8-flash[1m]")
+    expect(args[advisorAt + 1]).toBe("gpt-5.6-sol[1m]")
     expect(args.filter((arg: string) => arg === "--advisor")).toHaveLength(1)
     expect(args.some((arg: string) => arg.startsWith("--advisor="))).toBe(false)
     expect(args).not.toContain("opus")
@@ -767,7 +772,7 @@ describe("claude command", () => {
         { id: "gpt-5.6-luna", capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } }, supported_endpoints: ["/responses"] },
         { id: "gpt-5.6-sol", capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } }, supported_endpoints: ["/responses"] },
         { id: "claude-opus-5", capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } }, supported_endpoints: ["/v1/messages"] },
-        { id: "grok-4.6", capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } }, supported_endpoints: ["/responses"] },
+        { id: "claude-sonnet-5", capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } }, supported_endpoints: ["/v1/messages"] },
         { id: "gemini-3.8-flash", capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } }, supported_endpoints: ["/v1/chat/completions"] },
       ] as unknown as NonNullable<typeof state.models>["data"],
     }
@@ -784,8 +789,6 @@ describe("claude command", () => {
   })
 
   test("`-m fast` carries the [1m] bracket all the way into ANTHROPIC_MODEL", async () => {
-    // Assert on the spawned child's env rather than only on the resolver: Luna's
-    // live 1M capability must survive the launcher boundary.
     state.models = {
       object: "list",
       data: [
@@ -805,9 +808,9 @@ describe("claude command", () => {
           supported_endpoints: ["/v1/messages"],
         },
         {
-          id: "grok-4.6",
-          capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
-          supported_endpoints: ["/responses"],
+          id: "claude-sonnet-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } },
+          supported_endpoints: ["/v1/messages"],
         },
         {
           id: "gemini-3.8-flash",
@@ -817,19 +820,19 @@ describe("claude command", () => {
       ] as unknown as NonNullable<typeof state.models>["data"],
     }
     leadOneMDecorateImpl = (slug) =>
-      slug === "gpt-5.6-luna" ? "gpt-5.6-luna[1m]" : slug
+      slug === "gemini-3.8-flash" ? "gemini-3.8-flash[1m]" : slug
     const run = getRunFn()
 
     await run({ args: { model: "fast" } })
 
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      "gh-router-luna-driver-max[1m]",
+      "gemini-3.8-flash[1m]",
       "fast",
       [],
     )
     const [, , options] = spawnMock.mock.calls[0]
-    expect(options.env.ANTHROPIC_MODEL).toBe("gh-router-luna-driver-max[1m]")
+    expect(options.env.ANTHROPIC_MODEL).toBe("gemini-3.8-flash[1m]")
   })
 
   test("an explicitly pinned full slug carries [1m] too", async () => {
@@ -1264,6 +1267,11 @@ describe("claude command", () => {
             capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
             supported_endpoints: ["/v1/chat/completions"],
           },
+          {
+            id: "claude-sonnet-5",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } },
+            supported_endpoints: ["/v1/messages"],
+          },
         ] as unknown as NonNullable<typeof state.models>["data"],
       }
       // Prove the hard deny: even though the catalog gate for workers passes,
@@ -1295,7 +1303,7 @@ describe("claude command", () => {
       expect(opts.fastPlanModel).toBe("gpt-5.6-sol")
       expect(opts.fastGeneralPurposeModel).toBe("gpt-5.6-luna")
       expect(opts.fastImplementerModel).toBe("gemini-3.8-flash")
-      expect(opts.fastReviewerModel).toBe("grok-4.6")
+      expect(opts.fastReviewerModel).toBe("claude-sonnet-5")
       expect(opts.plannerModel).toBeUndefined()
       expect(opts.criticModel).toBeUndefined()
       expect(opts.brainstormModel).toBeUndefined()
@@ -1691,6 +1699,11 @@ describe("claude command", () => {
             id: "gemini-3.8-flash",
             capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 900_000, max_output_tokens: 32_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
             supported_endpoints: ["/chat/completions"],
+          },
+          {
+            id: "claude-sonnet-5",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000, max_output_tokens: 32_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } },
+            supported_endpoints: ["/v1/messages"],
           },
         ] as unknown as NonNullable<typeof state.models>["data"],
       }

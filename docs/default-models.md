@@ -11,10 +11,10 @@ row because its advertised context is below 1M.
 
 Max emits the native roles `Explore`, `Plan`, `general-purpose`, `implementer`,
 `reviewer`, `brainstorm`, and `peer-review-coordinator`. Their assignments are
-Luna/high, Sol/high, Luna/max, Gemini 3.8 Flash/high, Grok 4.6/high with exact Luna 1M/max fallback (no Gemini reviewer fallback),
-Grok/medium with Gemini fallback, and Luna/max. Max peer MCP names are
-`sol_critic`, `luna_reviewer`, optional `opus_critic`, Gemini critic/reviewer,
-and Grok critic/reviewer when their catalog capabilities are usable.
+Luna/high, Sol/high, Luna/max, Gemini 3.8 Flash/high, Claude Sonnet 5 1M/xhigh,
+Claude Opus 5 1M/high, and Luna/max. Max peer MCP names are
+`sol_critic`, `codex_reviewer` (or `sonnet_reviewer` if Codex is unavailable), optional `opus_critic`, Gemini critic/reviewer,
+and Grok critic/reviewer when their catalog capabilities are usable. When `peer-review-coordinator` is used for review, it coordinates the three reviewers: `gemini_reviewer`, `codex_reviewer` (or `sonnet_reviewer`), and `grok_reviewer`.
 
 Claude Code's public Agent schema requires a built-in `sonnet|opus|haiku|fable`
 model value even for a custom agent whose frontmatter already pins its model.
@@ -67,17 +67,17 @@ Plain `github-router claude` keeps the standard surface: Opus 5 lead, the full c
 
 ## Fast launch profile (`-m fast`)
 
-Only the trimmed raw alias `fast` selects this profile. It is a Luna-led, role-specialized session with a narrow MCP surface and fixed per-role efforts.
+Only the trimmed raw alias `fast` selects this profile. It is a Gemini-led, role-specialized session with a narrow MCP surface and fixed per-role efforts.
 
 | Surface | Model | Effort | Job |
 |---|---|---:|---|
-| Lead | `gpt-5.6-luna[1m]` | max | Primary working loop |
+| Lead | `gemini-3.8-flash[1m]` | high | Primary working loop |
 | `Explore` | `gpt-5.6-luna[1m]` | high | Broad read-only repository discovery |
 | `Plan` | `gpt-5.6-sol[1m]` | high | Implementation planning consultant (non-mandatory gate) |
 | `general-purpose` | `gpt-5.6-luna[1m]` | max | Fast, economical catch-all for mixed/unusual work |
 | `implementer` | `gemini-3.8-flash[1m]` | high | Bounded coding implementation |
-| `reviewer` | `grok-4.6` | medium | Repository-aware review/reproduction/tests |
-| Advisor | `gemini-3.8-flash` | high | Transcript-aware brainstorming/sounding board/fresh look |
+| `reviewer` | `claude-sonnet-5[1m]` | xhigh | Repository-aware review/reproduction/tests |
+| Advisor | `gpt-5.6-sol[1m]` | high | Transcript-aware brainstorming/sounding board/fresh look |
 | `oracle` | `claude-opus-5[1m]` | high | Stateless last-resort guidance (lead & Plan only) |
 
 All required catalog models are mandatory. Startup fails with an actionable list rather than substituting a model or shipping a partial surface. Grok stays bare because its live limits are 500K total, 372K prompt, and 128K output. There is no separate `critic` subagent in Fast; Gemini 3.8 Flash serves the native `implementer` role at high effort.
@@ -164,7 +164,7 @@ As the recovery half of the fix, the proxy maps an upstream overflow onto Claude
 
 ### Advisor
 
-The user-facing role is Advisor. In an authenticated fast launch it remains available only to the primary lead across every fixed `/model` selection (Luna, Sol, Grok 4.6, Gemini 3.8 Flash, or Opus 5), uses Gemini 3.8 Flash via chat completions at fixed high effort, and sees the lead's bounded recent transcript. The launcher passes `--advisor gemini-3.8-flash[1m]`, overriding a mirrored standard Advisor preference only for this session, so Claude Code's native tool schema, UI label, and JSONL identify the same model the proxy actually dispatches. Fast selection is fixed: `GH_ROUTER_ADVISOR_MODEL` and forwarded `--advisor` values cannot change it, and a missing/wrong-endpoint Gemini runtime invariant fails visibly rather than silently falling back to Sol or Opus. An in-session `/advisor` mismatch is rejected with a restoration command. Standard launches retain operator pins and fallback behavior unchanged. Fast Task subagents have all Advisor tool forms stripped; their narrower transcripts are not the session context Advisor exists to assess. Advisor is optional, non-binding consultation for consequential unresolved uncertainty, conflicting evidence, a genuinely non-converging approach, materially changed assumptions, or an explicit request for a fresh perspective. It is not used for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. The lead retains decision ownership and may consult again when materially new evidence creates a different question. Non-Claude continuations reuse the selected lead's translation shim/endpoint and existing SSE lifecycle.
+The user-facing role is Advisor. In an authenticated fast launch it remains available only to the primary lead across every fixed `/model` selection (Luna, Sol, Grok 4.6, Gemini 3.8 Flash, or Opus 5), uses GPT-5.6 Sol via Responses at fixed high effort, and sees the lead's bounded recent transcript. The launcher passes `--advisor gpt-5.6-sol[1m]`, overriding a mirrored standard Advisor preference only for this session, so Claude Code's native tool schema, UI label, and JSONL identify the same model the proxy actually dispatches. Fast selection is fixed: `GH_ROUTER_ADVISOR_MODEL` and forwarded `--advisor` values cannot change it, and a missing/wrong-endpoint Sol runtime invariant fails visibly rather than silently falling back. An in-session `/advisor` mismatch is rejected with a restoration command. Standard launches retain operator pins and fallback behavior unchanged. Fast Task subagents have all Advisor tool forms stripped; their narrower transcripts are not the session context Advisor exists to assess. Advisor is optional, non-binding consultation for consequential unresolved uncertainty, conflicting evidence, a genuinely non-converging approach, materially changed assumptions, or an explicit request for a fresh perspective. It is not used for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. The lead retains decision ownership and may consult again when materially new evidence creates a different question. Non-Claude continuations reuse the selected lead's translation shim/endpoint and existing SSE lifecycle.
 
 Oracle remains separate and stateless. It is available to the lead and `Plan` as a last resort for one focused unresolved question, and remains unavailable to `reviewer`, `implementer`, `Explore`, and `general-purpose`. Fast launches keep the proxy MCP servers out of the shared mirrored config: the lead receives them through its launch-only MCP config, while `Plan` receives its role-scoped inline servers. This prevents other natives from inheriting Oracle.
 

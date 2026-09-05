@@ -828,7 +828,7 @@ describe("buildPeerAgentDefinitions", () => {
         fastPlanModel: "gpt-5.6-sol",
         fastGeneralPurposeModel: "gpt-5.6-luna",
         fastImplementerModel: "gemini-3.8-flash",
-        fastReviewerModel: "grok-4.6",
+        fastReviewerModel: "claude-sonnet-5",
         ...extra,
       })
     }
@@ -848,13 +848,13 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents.Plan!.model).toBe("gpt-5.6-sol[1m]")
       expect(agents["general-purpose"]!.model).toBe("gpt-5.6-luna[1m]")
       expect(agents.implementer!.model).toBe("gemini-3.8-flash[1m]")
-      expect(agents.reviewer!.model).toBe("grok-4.6")
+      expect(agents.reviewer!.model).toBe("claude-sonnet-5[1m]")
 
       expect(agents.Explore!.effort).toBe("high")
       expect(agents.Plan!.effort).toBe("high")
       expect(agents["general-purpose"]!.effort).toBe("max")
       expect(agents.implementer!.effort).toBe("high")
-      expect(agents.reviewer!.effort).toBe("medium")
+      expect(agents.reviewer!.effort).toBe("xhigh")
 
       expect(agents.Explore!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
       expect(agents.reviewer!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])

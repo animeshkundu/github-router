@@ -187,12 +187,16 @@ interface BuildOpts {
   maxBrainstormModel?: string
   maxGeminiModel?: string
   maxGrokModel?: string
+  maxCodexModel?: string
+  maxSonnetModel?: string
   maxPeerModels?: {
     sol?: string
     luna?: string
     gemini?: string
     grok?: string
     opus?: string
+    codex?: string
+    sonnet?: string
   }
   maxExploreEffort?: SubagentEffort
   maxPlanEffort?: SubagentEffort
@@ -596,10 +600,7 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
   )
   const brainstormModel = modelFor(
     opts.maxBrainstormModel,
-    modelFor(
-      opts.maxGrokModel,
-      modelFor(opts.maxGeminiModel, MAX_PROFILE_NATIVE_MODELS.brainstorm),
-    ),
+    MAX_PROFILE_NATIVE_MODELS.brainstorm,
   )
   const peersKey = peersKeyOf(opts.groupKeys)
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
@@ -637,6 +638,8 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
   const peerNames = opts.maxPersonaNames
     ?? maxPersonasFor({
       solModel: opts.maxPeerModels?.sol,
+      codexModel: opts.maxPeerModels?.codex ?? opts.maxCodexModel,
+      sonnetModel: opts.maxPeerModels?.sonnet ?? opts.maxSonnetModel,
       lunaModel: opts.maxPeerModels?.luna,
       opusModel: opts.maxPeerModels?.opus,
       geminiModel: opts.maxPeerModels?.gemini ?? opts.maxGeminiModel,
@@ -823,7 +826,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description: `Fast-profile repository-aware reviewer running ${reviewerModel} at medium effort. Use for independent verification, test authoring, failure reproduction, or runtime checks.`,
+      description: `Fast-profile repository-aware reviewer running ${reviewerModel} at xhigh effort. Use for independent verification, test authoring, failure reproduction, or runtime checks.`,
       prompt:
         "You are the fast-profile repository-aware reviewer. Verify what is actually true by reading code and running builds, tests, or reproductions. Report severity-ranked findings with `file:line` evidence and a clear go/no-go. You do not have Advisor. "
         + fileToolSteer("builds, tests, and reproductions")
@@ -1230,12 +1233,16 @@ interface WriteOpts {
   maxBrainstormModel?: string
   maxGeminiModel?: string
   maxGrokModel?: string
+  maxCodexModel?: string
+  maxSonnetModel?: string
   maxPeerModels?: {
     sol?: string
     luna?: string
     gemini?: string
     grok?: string
     opus?: string
+    codex?: string
+    sonnet?: string
   }
   maxExploreEffort?: SubagentEffort
   maxPlanEffort?: SubagentEffort
