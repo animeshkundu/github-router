@@ -33,9 +33,14 @@ export const internalMaxDispatchGuard = defineCommand({
     },
   },
   run({ args }) {
+    const reviewerEffort = args.reviewerEffort === "max"
+      ? "max"
+      : args.reviewerEffort === "xhigh"
+        ? "xhigh"
+        : "high"
     const decision = decideMaxDispatchGuard(readStdinSync(), {
       reviewerModel: args.reviewerModel,
-      reviewerEffort: args.reviewerEffort === "max" ? "max" : "high",
+      reviewerEffort,
     })
     if (!decision.allowed && decision.reason) {
       process.stdout.write(maxDispatchDenyOutput(decision.reason))
@@ -48,7 +53,7 @@ export const internalMaxDispatchGuard = defineCommand({
 
 export function buildMaxDispatchGuardHookCommand(
   invocation: SelfInvocation,
-  opts: { reviewerModel?: string; reviewerEffort?: "high" | "max" } = {},
+  opts: { reviewerModel?: string; reviewerEffort?: "high" | "xhigh" | "max" } = {},
 ): string {
   const flags: string[] = []
   if (opts.reviewerModel) flags.push(`--reviewerModel "${opts.reviewerModel}"`)

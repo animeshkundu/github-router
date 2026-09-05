@@ -1074,42 +1074,39 @@ describe("budget-mode lead and small/fast tier", () => {
     }
   }
 
-  test("`-m fast` resolves to the fast (Luna) lead", () => {
+  test("`-m fast` resolves to the fast (Gemini 3.8 Flash) lead", () => {
     withCatalog([], () => {
       expect(resolveLeadSlugArg("fast")).toBe(FAST_LEAD_MODEL)
       expect(resolveLeadSlugArg("FAST")).toBe(FAST_LEAD_MODEL)
     })
   })
 
-  test("`-m fast` carries [1m] when the catalog says gpt-5.6-luna serves 1M", () => {
-    // gpt-5.6-luna ships a single slug advertising 1M, no `-1m` sibling — the
+  test("`-m fast` carries [1m] when the catalog says gemini-3.8-flash serves 1M", () => {
+    // gemini-3.8-flash ships a single slug advertising 1M — the
     // fast lead gets local 1M accounting exactly like every other branch.
     withoutOneMOptOut(() => {
       withCatalog(
-        [...LIVE_SHAPED_CATALOG, ["gpt-5.6-luna", 1_000_000]],
+        [...LIVE_SHAPED_CATALOG, ["gemini-3.8-flash", 1_000_000]],
         () => {
-          expect(resolveLeadSlugArg("fast")).toBe("gpt-5.6-luna[1m]")
+          expect(resolveLeadSlugArg("fast")).toBe("gemini-3.8-flash[1m]")
         },
       )
     })
   })
 
-  test("`-m fast` and the explicit Luna slug agree, so both give the same session", () => {
+  test("`-m fast` and the explicit Gemini 3.8 Flash slug agree, so both give the same session", () => {
     withoutOneMOptOut(() => {
       withCatalog(
-        [...LIVE_SHAPED_CATALOG, ["gpt-5.6-luna", 1_000_000]],
+        [...LIVE_SHAPED_CATALOG, ["gemini-3.8-flash", 1_000_000]],
         () => {
           // Identical STRING, not merely identical resolution: the context
           // budget is part of what "the same session" means.
           expect(resolveLeadSlugArg("fast")).toBe(
-            resolveLeadSlugArg("gpt-5.6-luna"),
+            resolveLeadSlugArg("gemini-3.8-flash"),
           )
-          // gpt-5.6-luna is NOT a Claude model, so the fast profile is NOT a
-          // "budget Claude lead" — that predicate/mechanism is unrelated to
-          // the fast profile (see `resolveLeadSlugArg`'s doc).
           expect(isBudgetClaudeLead(resolveLeadSlugArg("fast"))).toBe(false)
-          expect(isBudgetClaudeLead("gpt-5.6-luna")).toBe(false)
-          expect(isBudgetClaudeLead("gpt-5.6-luna[1m]")).toBe(false)
+          expect(isBudgetClaudeLead("gemini-3.8-flash")).toBe(false)
+          expect(isBudgetClaudeLead("gemini-3.8-flash[1m]")).toBe(false)
         },
       )
     })
@@ -1279,8 +1276,8 @@ describe("budget-mode lead and small/fast tier", () => {
     const prior = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
     process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
     try {
-      withCatalog([...LIVE_SHAPED_CATALOG, ["gpt-5.6-luna", 1_000_000]], () => {
-        expect(resolveLeadSlugArg("fast")).toBe("gpt-5.6-luna")
+      withCatalog([...LIVE_SHAPED_CATALOG, ["gemini-3.8-flash", 1_000_000]], () => {
+        expect(resolveLeadSlugArg("fast")).toBe("gemini-3.8-flash")
         expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
         expect(resolveLeadSlugArg("claude-sonnet-4-6")).toBe(
           "claude-sonnet-4-6",

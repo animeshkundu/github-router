@@ -81,10 +81,13 @@ import {
 } from "./lib/max-dispatch-acl"
 import {
   MAX_PROFILE_MODELS,
+  MAX_PROFILE_NATIVE_EFFORTS,
+  maxCodexReviewerModel,
   maxGeminiModel,
   maxGrokModel,
   maxOpusModel,
   maxReviewerModel as resolveMaxReviewerModel,
+  maxSonnetModel,
 } from "./lib/max-profile-contract"
 import { buildArtifactReviewSkill, injectedSkillsForLaunch, writeInjectedSkill } from "./lib/injected-skills"
 import { shouldUseInsecureTls } from "./lib/artifact/tools"
@@ -149,7 +152,6 @@ import {
 import {
   formatFastPrerequisiteFailure,
   formatMaxPrerequisiteFailure,
-  LUNA_DRIVER_ALIAS_ID,
   profileDescriptor,
   resolveLaunchProfile,
   validateFastProfilePrerequisites,
@@ -585,12 +587,8 @@ export const claude = defineCommand({
       // Standard profile behavior is unchanged. This branch intentionally keeps
       // all ordinary launches on the existing catalog/model flow.
     }
-    let chosenSlug =
-      launchProfileId === "fast"
-        ? (requestedSlug.endsWith("[1m]") ? `${LUNA_DRIVER_ALIAS_ID}[1m]` : LUNA_DRIVER_ALIAS_ID)
-        : requestedSlug
-    let resolvedSlug =
-      launchProfileId === "fast" ? resolveModel(requestedSlug) : resolveModel(chosenSlug)
+    let chosenSlug = requestedSlug
+    let resolvedSlug = resolveModel(chosenSlug)
 
     if (usingDefault && state.models) {
       const inCache = (slug: string) =>
@@ -794,13 +792,15 @@ export const claude = defineCommand({
     const resolvedMaxReviewerModel = launchProfileId === "max"
       ? resolveMaxReviewerModel()
       : undefined
+    const resolvedMaxReviewerEffort = launchProfileId === "max"
+      ? MAX_PROFILE_NATIVE_EFFORTS.reviewer
+      : undefined
     // Three of them are dropped rather than downgraded when their chain misses,
     // and a prompt naming a dropped agent sends the lead at something absent
     // from the Task `subagent_type` enum.
     // Restricted profiles use exact, catalog-validated role resolvers rather
     // than the standard fallback chains. The launch prerequisite checks above
-    // guarantee every mandatory Fast role resolves; Max reviewer alone has the
-    // explicit Grok/high -> Luna 1M/max fallback chosen once per launch.
+    // guarantee every mandatory Fast and Max role resolves.
     const nativeAgentModels: Partial<Record<NativeAgentName, string | undefined>> =
       launchProfileId === "fast"
         ? {
@@ -816,8 +816,8 @@ export const claude = defineCommand({
               Plan: MAX_PROFILE_MODELS.sol,
               "general-purpose": MAX_PROFILE_MODELS.luna,
               implementer: MAX_PROFILE_MODELS.gemini,
-              reviewer: resolvedMaxReviewerModel,
-              brainstorm: maxGrokModel() ?? maxGeminiModel() ?? MAX_PROFILE_MODELS.grok,
+              reviewer: resolvedMaxReviewerModel ?? MAX_PROFILE_MODELS.sonnet,
+              brainstorm: MAX_PROFILE_MODELS.opus,
             }
         : {
             implementer: nativeSubagentModel(),
@@ -992,13 +992,13 @@ export const claude = defineCommand({
                   maxPlanModel: MAX_PROFILE_MODELS.sol,
                   maxGeneralPurposeModel: MAX_PROFILE_MODELS.luna,
                   maxImplementerModel: MAX_PROFILE_MODELS.gemini,
-                  maxReviewerModel: resolvedMaxReviewerModel,
-                  maxReviewerEffort: resolvedMaxReviewerModel === MAX_PROFILE_MODELS.luna ? "max" : "high",
-                  maxBrainstormModel: maxGrokModel() ?? maxGeminiModel() ?? MAX_PROFILE_MODELS.grok,
-                  maxGeminiModel: maxGeminiModel(),
-                  maxGrokModel: maxGrokModel(),
+                  maxReviewerModel: resolvedMaxReviewerModel ?? MAX_PROFILE_MODELS.sonnet,
+                  maxReviewerEffort: resolvedMaxReviewerEffort,
+                  maxBrainstormModel: MAX_PROFILE_MODELS.opus,
                   maxPeerModels: {
                     sol: MAX_PROFILE_MODELS.sol,
+                    codex: maxCodexReviewerModel(),
+                    sonnet: maxSonnetModel(),
                     luna: MAX_PROFILE_MODELS.luna,
                     opus: maxOpusModel(),
                     gemini: maxGeminiModel(),
@@ -1008,6 +1008,9 @@ export const claude = defineCommand({
               : {}),
         })
         if (isFastProfile || isMaxProfile) fastRuntimeCleanup = runtime.cleanup
+        const maxPersonaNames = isMaxProfile
+          ? runtime.personas.map((persona) => persona.toolNameHttp)
+          : undefined
         // Keyed launch registry entry for this session: the `/mcp` nonce
         // (already minted by `writePeerMcpRuntimeFiles`) plus a SEPARATE
         // `/v1/messages` identity-preflight secret, scoped to this launch's
@@ -1158,7 +1161,7 @@ export const claude = defineCommand({
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const guardCommand = buildMaxDispatchGuardHookCommand(selfInvocation, {
               reviewerModel: resolvedMaxReviewerModel,
-              reviewerEffort: resolvedMaxReviewerModel === MAX_PROFILE_MODELS.luna ? "max" : "high",
+              reviewerEffort: resolvedMaxReviewerEffort,
             })
             await injectStopHookIntoSettingsFile(
               settingsPath,
@@ -1609,18 +1612,10 @@ export const claude = defineCommand({
           )
         }
 
-        // Awareness snippet: append a short, descriptive system-prompt
-        // section telling Claude *what* peer-review tools exist — Claude
-        // decides *whether* to call them based on each tool's own
-        // `description` (the routing layer). This is the awareness layer.
-        //
-        // Delivery is dual-surface, both unconditional:
-        //   1. --append-system-prompt — system-turn position, strongest
-        //      attention weight; reaches the main agent only.
-        //   2. <CLAUDE_CONFIG_DIR>/CLAUDE.md (appended) — user-turn
-        //      <claudeMd> wrapper; reaches Agent-tool subagents and
-        //      agent-teams teammates that inherit CLAUDE_CONFIG_DIR but
-        //      not --append-system-prompt.
+        // Awareness has two complementary renderings. The compact summary
+        // joins --append-system-prompt for the main agent; the full, gate-aware
+        // inventory is appended to mirrored CLAUDE.md for the lead and native
+        // descendants. Each role/tool description remains the routing layer.
         //
         // Capability gates: worker_* and stand_in mentions are gated on
         // the same predicates the /mcp tools/list uses (workerToolsEnabled
@@ -1633,6 +1628,7 @@ export const claude = defineCommand({
         // `GH_ROUTER_PEER_AWARENESS=0` shell exports are silent no-ops.
         const peerSnippet = buildPeerAwarenessSnippet({
           codexCli: backend === "cli",
+          maxPersonaNames,
           geminiAvailable: geminiModelsAvailable,
           geminiModel: isMaxProfile
             ? maxGeminiModel()

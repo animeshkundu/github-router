@@ -32,7 +32,6 @@ import {
   FAST_PROFILE_ORACLE_EFFORT,
   FAST_PROFILE_ORACLE_MODEL,
 } from "./fast-profile-contract"
-import { FAST_REVIEWER_MIN_PROMPT_TOKENS } from "./launch-profile"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -388,10 +387,6 @@ export const FAST_REVIEWER_MODEL = FAST_PROFILE_NATIVE_MODELS.reviewer
 export const FAST_ADVISOR_MODEL = FAST_PROFILE_MODELS.advisor
 export const FAST_ORACLE_MODEL = FAST_PROFILE_ORACLE_MODEL
 
-/** Shared with startup validation so the reviewer resolver and fast launch
- * prerequisite cannot drift. */
-export { FAST_REVIEWER_MIN_PROMPT_TOKENS } from "./launch-profile"
-
 /** Fixed effort pins for the fast profile. */
 export const FAST_EXPLORE_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.Explore
 /** @deprecated Fast `scout` was renamed to capitalized `Explore`. */
@@ -452,29 +447,30 @@ export function fastImplementerModel(): string | undefined {
   return found && fastEndpointForModel(found) === "chat" ? id : undefined
 }
 
-/** Gate Grok on the prompt limit that actually constrains pasted review input. */
+/** Sonnet 5 1M xhigh reviewer for Fast profile. */
 export function fastReviewerModel(): string | undefined {
   const models = state.models?.data
   if (!models) return undefined
   const found = models.find((m) => m.id === FAST_REVIEWER_MODEL)
   if (!found) return undefined
   if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < ONE_M_TOKENS) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(FAST_REVIEWER_EFFORT)) return undefined
-  const maxPrompt = found.capabilities?.limits?.max_prompt_tokens ?? 0
-  if (maxPrompt < FAST_REVIEWER_MIN_PROMPT_TOKENS) return undefined
-  if (fastEndpointForModel(found) !== "responses") return undefined
+  if (found.capabilities?.supports?.adaptive_thinking !== true) return undefined
+  if (fastEndpointForModel(found) !== "messages") return undefined
   return FAST_REVIEWER_MODEL
 }
 
-/** Dedicated Gemini 3.8 Flash Advisor check. */
+/** Dedicated GPT-5.6 Sol Advisor check. */
 export function fastAdvisorModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === FAST_ADVISOR_MODEL)
   if (!found) return undefined
   if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < ONE_M_TOKENS) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(FAST_ADVISOR_EFFORT)) return undefined
-  if (fastEndpointForModel(found) !== "chat") return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
   return FAST_ADVISOR_MODEL
 }
 

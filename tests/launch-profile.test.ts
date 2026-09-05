@@ -64,6 +64,14 @@ const fullCatalog = {
     model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["medium"], endpoints: ["/responses"] }),
     model("gemini-3.8-flash", { context: 1_000_000, efforts: ["medium", "high"], endpoints: ["/chat/completions"] }),
     {
+      ...model("claude-sonnet-5", { context: 1_000_000, prompt: 872_000, efforts: ["high", "xhigh", "max"], endpoints: ["/v1/messages"] }),
+      capabilities: {
+        ...model("claude-sonnet-5").capabilities,
+        limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 },
+        supports: { tool_calls: true, reasoning_effort: ["high", "xhigh", "max"], adaptive_thinking: true },
+      },
+    },
+    {
       ...model("claude-opus-5", { context: 1_000_000, prompt: 872_000, efforts: ["high", "max"], endpoints: ["/v1/messages"] }),
       capabilities: {
         ...model("claude-opus-5").capabilities,
@@ -132,7 +140,7 @@ describe("fast startup prerequisites", () => {
     expect(result.missing).toHaveLength(5)
     const message = formatFastPrerequisiteFailure(result.missing)
     expect(message).toContain("gpt-5.6-luna")
-    expect(message).toContain("grok-4.6")
+    expect(message).toContain("claude-sonnet-5")
     expect(message).toContain("gemini-3.8-flash")
     expect(message).toContain("github-router claude")
   })

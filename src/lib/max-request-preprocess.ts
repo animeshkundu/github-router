@@ -88,11 +88,11 @@ export function preprocessMaxRequest(
   }
 
   // Grok is never a max lead because its catalog window is below 1M, while
-  // Luna is both a lead and the capability-safe Max reviewer fallback. Bound
-  // native-subagent traffic receives the role-specific Grok/high or Luna/max
-  // default; lead traffic remains caller-controlled with a high default.
+  // Luna, Sonnet, and Grok serve as bound native-subagents. Bound
+  // native-subagent traffic receives role-specific defaults (Sonnet xhigh,
+  // Grok high, Luna max); lead traffic remains caller-controlled with a high default.
   const allowedSubagentModel = subagentRequest
-    && (base === "grok-4.6" || base === "gpt-5.6-luna")
+    && (base === "grok-4.6" || base === "gpt-5.6-luna" || base === "claude-sonnet-5")
   if (!allowedModel(base) && !allowedSubagentModel) {
     return {
       body: rawBody,
@@ -103,7 +103,7 @@ export function preprocessMaxRequest(
   }
 
   const effort = allowedSubagentModel
-    ? base === "gpt-5.6-luna" ? "max" : "high"
+    ? base === "claude-sonnet-5" ? "xhigh" : base === "gpt-5.6-luna" ? "max" : "high"
     : MAX_MODEL_EFFORTS[base]
   if (!effort) {
     return {

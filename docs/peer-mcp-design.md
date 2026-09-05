@@ -4,16 +4,21 @@
 
 Expose five peer-model review tools - `gpt-5.6-sol` (codex_critic), `gpt-5.3-codex` (codex_reviewer), `gemini-3.1-pro-preview` (gemini_critic and gemini_reviewer), and `claude-opus-5` (opus_critic) - inside Claude Code, used per their strengths to improve quality and reduce blind spots. Capability injection must be auto-injected on `github-router claude` startup with no per-session user action. Reasoning effort is configurable via the MCP tool args within each persona's allowed tiers.
 
-### Five-Server Split
+### Intent-scoped server split
 
-As of the latest architectural change, the original single `gh-router-peers` MCP server was split into **five intent-named MCP servers** to prevent monolithic server congestion and enforce isolation. Each is a distinct `mcpServers` entry pointing at a path-scoped `/mcp/<group>` endpoint (instead of the single `/mcp` union path, which is kept as a fallback for BYO clients).
+The original single `gh-router-peers` MCP server is split into **eight intent-named MCP groups**. Each enabled group is a distinct `mcpServers` entry pointing at `/mcp/<group>`; the single `/mcp` union path remains for BYO clients.
 
-The five scoped servers and their public MCP surfaces are:
-- `peers`   → `/mcp/peers` (the critics: `codex_critic`, `codex_reviewer`, `gemini_critic`, `gemini_reviewer`, `opus_critic` + `codex_implementer` in `--codex-cli` mode)
-- `search`  → `/mcp/search` (`code` [was `code_search`], `web` [was `web_search`])
-- `workers` → `/mcp/workers` (`explore` [was `worker_explore`], `implement` [was `worker_implement`])
-- `browser` → `/mcp/browser` (the browser tools with the `browser_` prefix dropped: `navigate`, `open_tab`, `read_page`, `act`, …; loaded only under `--browse`)
-- `decide`  → `/mcp/decide` (`stand_in` [unchanged name])
+The groups are:
+- `peers` → `/mcp/peers` (model critics/reviewers and profile-specific peer tools)
+- `search` → `/mcp/search` (`code`, `web`)
+- `workers` → `/mcp/workers` (`explore`, `review`, `implement`, `plan`, `test`, `browse`, subject to gates/profile)
+- `orchestrate` → `/mcp/orchestrate` (`decompose`, `verify_workflow`, `run_workflow`, `attest_step`)
+- `browser` → `/mcp/browser` (the browser tools with the `browser_` prefix dropped; loaded only under `--browse`)
+- `decide` → `/mcp/decide` (`stand_in`)
+- `fleet` → `/mcp/fleet` (gated remote-session control)
+- `first-mate` → `/mcp/first-mate` (gated cloud-agent control)
+
+A launch profile projects only the groups it allows; not every session registers all eight.
 
 Under this new topology, the lead model sees names prefixed as `mcp__<group>__<newname>`, e.g., `mcp__search__code`, `mcp__browser__navigate`, `mcp__peers__codex_critic`, `mcp__workers__explore`, `mcp__decide__stand_in`.
 
@@ -23,12 +28,7 @@ Config keys are bare by default (`peers`, `search`, etc.). To prevent a user's o
 
 ## Current Architecture
 
-The proxy at `src/routes/mcp/` exposes five scoped MCP servers on loopback ports:
-
-- `mcp__peers__codex_critic` (gpt-5.6-sol) - adversarial design review
-- `mcp__peers__codex_reviewer` (gpt-5.3-codex) - line-level code review
-- `mcp__peers__gemini_critic` (gemini-3.1-pro-preview) - long-context cross-lab triangulation
-- `mcp__peers__gemini_reviewer` (gemini-3.1-pro-preview) - second-lab line-level code review
+The proxy at `src/routes/mcp/` exposes eight intent-scoped MCP groups on loopback endpoints. Core groups are `peers`, `search`, `workers`, `orchestrate`, `browser`, and `decide`; `fleet` and `first-mate` are optional control-plane groups. A launch profile projects only the groups its policy permits.
 
 Auto-injection: `github-router claude` registers these servers by **merging them into the per-launch mirrored `<CLAUDE_CONFIG_DIR>/.claude.json`'s `mcpServers` map** (`injectPeerMcpIntoMirror` in `src/lib/codex-mcp-config.ts`). This is the load-bearing fix for subagent MCP visibility - subagents (Agent-tool, forks, agent-teams subprocesses) discover MCP servers from `CLAUDE_CONFIG_DIR/.claude.json` user-scope, NOT from a parent-process-only CLI flag, so the mirror approach makes the peer tools visible to every spawned tier. The merge is non-destructive (the user's pre-existing user-scope MCPs are preserved). On collision, we dynamically resolve the server keys using a fallback name (`gh-router-<group>`) as described above; subagents inherit the fallback keys identically. Subagent persona prompts are written to `<CLAUDE_CONFIG_DIR>/agents/peer-<pid>-<rand>-<name>.md` and pass an `--agents`-style discovery path; the frontmatter has **no `tools:` field** so the subagent inherits the parent's full toolset (built-ins + every MCP visible to the parent, incl. our injected tools). Per-launch mirror dir (`<pid>-<rand>` under `~/.local/share/github-router/claude-config/`) means two concurrent launches never race on the `.claude.json` write or share an MCP nonce; orphan dirs from SIGKILL'd proxies are reclaimed by a boot-time PID-alive sweep. Project-scope MCPs (`<workspace>/.mcp.json`) are untouched - the spawned `claude` inherits the parent's cwd via `launchChild`'s no-`cwd:` spawn, so Claude Code reads them directly from the workspace; the proxy never mirrors or sanitizes project-scope. Auth: per-launch random 32-byte nonce as Bearer token + Host header check (loopback only); the proxy validates against the launch nonce regardless of which channel - mirror or `--mcp-config` fallback - the request came through.
 
@@ -210,6 +210,21 @@ The `claude` subcommand auto-injects five peer-model review tools as Claude Code
 **`opus_critic` persona** (Phase B): adversarial same-lab second opinion from fresh-context Opus 5 routed via `/v1/messages`. It reviews plans, designs, and code tradeoffs for cognitive momentum, sunk-cost reasoning, and confabulated assumptions, returning a calibrated objection or `no material objection`. Use it as a quick same-lab sanity check before committing to a controversial decision when the artifact fits comfortably in one shot. **Limited blind-spot diversification** - same training data, same lab, same RLHF priors as the lead, so it does NOT substitute for cross-lab triangulation; reach for `codex_critic` (`high`) or `gemini_critic` for genuine adversarial coverage. Routing reflected in `peer-review-coordinator` (`src/lib/codex-mcp-config.ts`).
 
 **Per-call telemetry log** (`logTelemetry` in `src/routes/mcp/handler.ts`): opt-in via `GH_ROUTER_LOG_PEER_MCP=1` (mirrors the strict `=== "1"` pattern of `GH_ROUTER_LOG_FIELDS`). When enabled, every `tools/call` writes one line directly to stderr - `[peer-mcp] name=<persona> model=<id> duration_ms=<n> result=<ok|isError|exception>` - so a maintainer can grep across sessions to see which personas earn their keep. Default off because the proxy shares a TTY with the Claude TUI under `github-router claude`, and an unconditional stderr write per call shows up as ambient UI noise.
+
+## Max peer selection and synthesis
+
+Max keeps repository-aware verification separate from fresh-context review:
+
+- native `reviewer` can navigate the repository and run commands, tests, and reproductions;
+- peer critics/reviewers are cold-start and see only the supplied prompt, context, and images;
+- `peer-review-coordinator` has peer MCP tools only and cannot retrieve omitted repository facts;
+- Max Advisor sees the lead transcript and can identify framing drift, but it is not independent verification.
+
+Each Max peer MCP description states what the peer does, when and when not to use it, what it cannot see, and what a useful result contains. Strategic critics focus on assumptions, invariants, alternatives, and system failure modes. Line-level reviewers focus on concrete defects and failure scenarios in supplied code or diffs. A clean `no material finding` result is valid; prompts do not reward manufactured objections.
+
+The Max coordinator receives a self-contained artifact and chooses the smallest sufficient set: one peer for one lens, multiple peers only for distinct unresolved risk dimensions. It assigns non-overlapping briefs, batches independent calls when the client permits, avoids same-family duplicate lenses and vote counting, preserves provenance and disagreement, and returns the cheapest repository check or test that can settle each disputed claim. The lead remains responsible for repository verification and go/no-go.
+
+This policy follows the detailed-description and independent-versus-dependent scheduling guidance in [Anthropic tool definitions](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools) and [parallel tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use). The prompt-only Max evaluation protocol is [`review/subagents/MAX-PROMPT-EVAL.md`](review/subagents/MAX-PROMPT-EVAL.md).
 
 ## Code search (`code`)
 

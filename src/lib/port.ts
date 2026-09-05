@@ -95,16 +95,10 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
 const DEFAULT_OPUS_FAMILY = "5"
 
 /**
- * The lead `-m fast` selects. `gpt-5.6-luna` — a distinct Luna-driven
- * profile (see `./launch-profile`), NOT a Claude Sonnet budget lead. This
- * REPLACES the earlier `-m fast` → `claude-sonnet-5` mapping: `fast` now
- * names a deliberately lean Luna surface (five native agents, one peer
- * persona, `peers`/`search` MCP groups only), not "budget Sonnet with the
- * full standard surface". `resolveLaunchProfile` in `./launch-profile`
- * keys off the same raw `-m` argument this constant is selected by, so the
- * two can never disagree about which launches count as "fast".
+ * The lead `-m fast` selects. `gemini-3.8-flash` [1m] at high effort — a fast
+ * Gemini-driven profile (see `./launch-profile`).
  */
-export const FAST_LEAD_MODEL = FAST_PROFILE_MODELS.luna
+export const FAST_LEAD_MODEL = FAST_PROFILE_MODELS.lead
 
 /** Small/fast tier for a budget lead, in the two forms this codebase needs.
  *

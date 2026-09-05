@@ -4,6 +4,7 @@ import path from "node:path"
 
 import consola from "consola"
 
+import { MAX_PARALLELISM_RULE } from "./max-profile-prompts"
 import { isUnderClaudeConfigMirror, PATHS } from "./paths"
 
 /**
@@ -208,11 +209,11 @@ function joinClauses(parts: ReadonlyArray<string>): string {
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
   if (opts.profile === "fast") {
     return joinClauses([
-      "`Explore` for broad discovery and repo investigation",
-      "`Plan` for non-trivial sequencing, interfaces, migration risk, or acceptance criteria",
-      "`general-purpose` for mixed execution tasks",
-      "`implementer` for bounded coding changes",
-      "`reviewer` for repository-aware verification, reproduction, and root-causing",
+      "`Explore` for broad repository discovery, dependency mapping, and convention tracking",
+      "`Plan` for architectural sequencing, interface contracts, migration risk, and runnable acceptance criteria",
+      "`general-purpose` for mixed, iterative, or multi-step execution tasks",
+      "`implementer` for surgical coding changes matching existing conventions",
+      "`reviewer` for independent adversarial verification, reproduction, and root-causing",
     ])
   }
   const clauses: Array<string> = []
@@ -347,7 +348,9 @@ export function buildOperatingDefaultsDirective(
       : ""
     return (
       "## Operating defaults (apply when the user has not specified otherwise; the user's explicit direction and the domain's own standards always override)\n\n"
-      + "Max launch profile. The lead owns the outcome and may use the roster as a set of complementary capabilities, not a required sequence: direct tools suit narrow facts; `Explore` broad discovery; `brainstorm` open design choices; `Plan` changes where sequencing, interfaces, or acceptance criteria benefit from a separate view; `implementer` bounded coding; `general-purpose` mixed work; and `reviewer` (Grok 4.6/high with Luna 1M/max fallback) repository-aware verification. Independent work can run in parallel when that improves context isolation or latency. A fresh-context peer from another model family can be useful where correlated blind spots matter and deterministic evidence does not settle the issue; `peer-review-coordinator` is available when the risk justifies several lenses. Small or obvious tasks are often better handled directly, and model output remains evidence to synthesize rather than a vote. Each role's configured model is the deliberate default for role fit and diversity; overrides are most useful after a concrete mismatch. On every retained max surface, Gemini 3.1 Pro is replaced by Grok 4.6/high when available, otherwise Gemini 3.8 Flash 1M/high. Advisor is optional, non-binding counsel for one focused consequential uncertainty that the normal evidence and roles cannot settle; it has no approval or workflow authority, and a further consultation is useful only when materially new evidence changes the question."
+      + "Max launch profile. The lead owns the outcome. Start with direct repository or runtime evidence. Handle narrow, obvious, surgical, and single-command work directly; delegate a bounded workstream when it is broad, slow, context-heavy, or benefits from a genuinely independent perspective. "
+      + MAX_PARALLELISM_RULE
+      + " Brief each role with the desired outcome, relevant context, constraints, expected evidence, and verification. Use the roster as complementary capabilities, never as a required Explore → Plan → implement → review sequence. Avoid overlapping assignments and do not ask several models the same generic question. Synthesize results against the repository and executable checks: model agreement is not verification. Use one fresh-context peer only when a consequential judgment remains after direct checks; use the coordinator only when several distinct lenses could change the decision. Advisor is optional, non-binding counsel for one focused consequential uncertainty that evidence and the appropriate roles cannot settle; it has no approval or workflow authority, and a further consultation requires materially new or conflicting evidence."
       + artifactClause
     )
   }
@@ -436,15 +439,16 @@ export function buildOperatingDefaultsDigest(
   if (opts.profile === "max") {
     return (
       "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
-      + "Max launch profile. The lead owns the outcome and may use the roster as complementary capabilities: direct tools for narrow facts, `Explore` for broad discovery, `brainstorm` for open choices, `Plan` for a separate planning view, `implementer` and `general-purpose` for execution, and `reviewer` (Grok 4.6/high with Luna 1M/max fallback) for repository-aware verification. Delegate when work is wide or slow to protect the main thread's finite context; do trivial and surgical work directly. Prefer parallel delegation for independent work. Stop named teammates when finished.\n\n"
-      + "Verify claims against real evidence: run the code, check outputs and test results. Model output is evidence to synthesize rather than a vote. A fresh-context peer or `peer-review-coordinator` can reduce correlated blind spots on consequential decisions where judgment remains after direct evidence is in.\n\n"
-      + "Advisor is optional, non-binding, primary-lead-only counsel for focused consequential uncertainty that direct evidence, Plan, reviewer, or peers cannot settle. It has no approval or workflow authority."
+      + "Max launch profile. The lead owns the outcome. Start with direct repository or runtime evidence. Do narrow, obvious, surgical, and single-command work directly; delegate bounded work that is broad, slow, context-heavy, or independently valuable. "
+      + MAX_PARALLELISM_RULE
+      + " Give delegated workstreams non-overlapping scopes and state the outcome, constraints, evidence, and verification expected.\n\n"
+      + "Synthesize and verify: run the code, inspect outputs, and check tests. Agent count and agreement are not evidence. Use a fresh-context peer only for consequential judgment that remains after direct checks, and use the coordinator only when several distinct lenses could change the decision. Advisor is optional, non-binding, primary-lead-only counsel for one focused consequential uncertainty; it is not an approval or completion gate."
     )
   }
   if (opts.profile === "fast") {
     return (
       "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
-      + "Fast launch profile. The lead coordinates execution across `Explore` (broad discovery), `Plan` (sequencing, interfaces, migration risk, acceptance criteria), `general-purpose` (mixed execution), `implementer` (bounded coding), and `reviewer` (repository-aware verification). `Plan` is an advisory planning capability, not an approval gate. Delegate when work is wide or slow to protect main-thread context; do trivial and surgical work directly. Independent subagents may run in parallel. Stop named teammates when finished.\n\n"
+      + "Fast launch profile. The lead coordinates execution across `Explore` (broad discovery, convention mapping), `Plan` (sequencing, interfaces, migration risk, acceptance criteria), `general-purpose` (mixed execution), `implementer` (bounded coding), and `reviewer` (repository-aware verification). `Plan` is an advisory planning capability, not an approval gate. Delegate when work is wide or slow to protect main-thread context; do trivial and surgical work directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n"
       + "Verify claims against real evidence: run relevant commands and tests. Advisor is optional, non-binding, transcript-aware, and lead-only for consequential unresolved uncertainty, not routine progress or workflow gates. `oracle` (Opus 5 1M/high) is a stateless last resort for the lead and `Plan` when normal paths remain stuck."
     )
   }

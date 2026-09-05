@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import {
+  advertisesEndpoint,
   fastEndpointForModel,
   fastEndpointRequirement,
 } from "~/lib/fast-endpoint"
@@ -39,6 +40,13 @@ describe("fast endpoint policy", () => {
     expect(
       fastEndpointForModel(model("gemini-3.8-flash", ["/responses", "/chat/completions"])),
     ).toBe("chat")
+  })
+
+  test("checks arbitrary catalog entries against normalized endpoint names", () => {
+    expect(advertisesEndpoint(model("gpt-5.3-codex", ["/responses"]), "responses")).toBe(true)
+    expect(advertisesEndpoint(model("gpt-5.3-codex", ["/v1/responses"]), "responses")).toBe(true)
+    expect(advertisesEndpoint(model("gpt-5.3-codex", ["/chat/completions"]), "responses")).toBe(false)
+    expect(advertisesEndpoint(undefined, "responses")).toBe(false)
   })
 
   test("rejects a missing required endpoint", () => {
