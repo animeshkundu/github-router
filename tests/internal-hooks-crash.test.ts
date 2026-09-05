@@ -74,7 +74,13 @@ beforeAll(() => {
 /** Payloads that hit the FAST-RETURN paths (the ones that crashed pre-fix). None
  *  reach the network — they stand down before any proxy call — so this stays a
  *  pure process-teardown test. */
-const CASES: ReadonlyArray<{ cmd: string; label: string; stdin: string }> = [
+const CASES: ReadonlyArray<{
+  cmd: string
+  label: string
+  stdin: string
+  args?: ReadonlyArray<string>
+  expectedUpdatedInput?: Record<string, unknown>
+}> = [
   // internal-stop-hook: SubagentStop is the real-world trigger.
   { cmd: "internal-stop-hook", label: "subagent", stdin: JSON.stringify({ cwd: "/x", agent_type: "Explore" }) },
   { cmd: "internal-stop-hook", label: "empty-stdin", stdin: "" },
@@ -98,7 +104,8 @@ const CASES: ReadonlyArray<{ cmd: string; label: string; stdin: string }> = [
   // internal-max-dispatch-guard: the public Agent schema requires a built-in
   // model alias. The hook must strip that placeholder and emit an allow rewrite
   // so the custom role's frontmatter model can take effect.
-  { cmd: "internal-max-dispatch-guard", label: "schema-model-placeholder", stdin: JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "implementer", prompt: "smoke", model: "fable" } }) },
+  { cmd: "internal-max-dispatch-guard", label: "schema-model-placeholder", stdin: JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "implementer", prompt: "smoke", model: "fable" } }), expectedUpdatedInput: { subagent_type: "implementer", prompt: "smoke" } },
+  { cmd: "internal-max-dispatch-guard", label: "sonnet-reviewer-xhigh", args: ["--reviewerModel", "claude-sonnet-5", "--reviewerEffort", "xhigh"], stdin: JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", prompt: "smoke", model: "sonnet" } }), expectedUpdatedInput: { subagent_type: "reviewer", prompt: "smoke", effort: "xhigh" } },
 ]
 
 describe("internal hook subcommands: Windows libuv teardown regression", () => {
@@ -109,7 +116,7 @@ describe("internal hook subcommands: Windows libuv teardown regression", () => {
   for (const c of CASES) {
     test(`${c.cmd} [${c.label}] exits cleanly with no libuv assertion`, () => {
       if (!bundleExists || !nodeOk) return // skip when not built / no node
-      const res = spawnSync("node", [DIST_PATH, c.cmd], {
+      const res = spawnSync("node", [DIST_PATH, c.cmd, ...(c.args ?? [])], {
         input: c.stdin,
         encoding: "utf8",
         // Strip the hook reach-back env so these fast-return paths never attempt
@@ -131,10 +138,7 @@ describe("internal hook subcommands: Windows libuv teardown regression", () => {
         )
         const output = JSON.parse(jsonLine ?? "{}")
         expect(output.hookSpecificOutput?.permissionDecision).toBe("allow")
-        expect(output.hookSpecificOutput?.updatedInput).toEqual({
-          subagent_type: "implementer",
-          prompt: "smoke",
-        })
+        expect(output.hookSpecificOutput?.updatedInput).toEqual(c.expectedUpdatedInput)
       }
     }, SPAWN_TEST_TIMEOUT_MS)
   }

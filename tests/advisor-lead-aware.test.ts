@@ -223,7 +223,7 @@ describe("resolveAdvisorModel — authenticated fast profile", () => {
     "gemini-3.8-flash",
     "claude-opus-5",
   ]) {
-    test(`${lead} picks the fast-profile Gemini advisor`, () => {
+    test(`${lead} picks the fast-profile Sol advisor`, () => {
       expect(resolveAdvisorModel(lead, true)).toEqual({
         model: ADVISOR_FAST_PROFILE_MODEL,
         escalated: false,
@@ -232,25 +232,22 @@ describe("resolveAdvisorModel — authenticated fast profile", () => {
     })
   }
 
-  test("fails closed when Gemini is absent", () => {
+  test("fails closed when Sol is absent", () => {
     setCatalog(
-      model("gpt-5.6-sol", "openai", SOL_EFFORTS, {}, ["/responses"]),
-      model(ADVISOR_DEFAULT_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
+      model("gemini-3.8-flash", "google", GEMINI_EFFORTS, {}, ["/chat/completions"]),
     )
-    expect(() => resolveAdvisorModel("gpt-5.6-sol", true)).toThrow(
+    expect(() => resolveAdvisorModel("gemini-3.8-flash", true)).toThrow(
       "fast Advisor invariant failed",
     )
   })
 
-  test("fails closed when Gemini does not advertise Chat", () => {
+  test("fails closed when Sol does not advertise Responses", () => {
     setCatalog(
-      model("gpt-5.6-sol", "openai", SOL_EFFORTS, {}, ["/responses"]),
-      model(ADVISOR_DEFAULT_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
-      model(ADVISOR_FAST_PROFILE_MODEL, "google", GEMINI_EFFORTS, {}, [
-        "/responses",
+      model(ADVISOR_FAST_PROFILE_MODEL, "openai", SOL_EFFORTS, {}, [
+        "/chat/completions",
       ]),
     )
-    expect(() => resolveAdvisorModel("gpt-5.6-sol", true)).toThrow(
+    expect(() => resolveAdvisorModel("gemini-3.8-flash", true)).toThrow(
       "fast Advisor invariant failed",
     )
   })
@@ -285,17 +282,9 @@ describe("advisorTransport", () => {
     expect(advisorTransport(ADVISOR_DEFAULT_MODEL)).toBe("responses")
   })
 
-  test("a /chat/completions-only advisor model uses chat", () => {
-    expect(advisorTransport(ADVISOR_FAST_PROFILE_MODEL)).toBe("chat")
-  })
-
-  test("fast Advisor stays on chat when Gemini advertises both endpoints", () => {
-    const gemini = state.models?.data.find((entry) => entry.id === ADVISOR_FAST_PROFILE_MODEL)
-    if (!gemini) throw new Error("missing Gemini fixture")
-    gemini.supported_endpoints = ["/responses", "/chat/completions"]
-
+  test("fast Advisor model uses responses", () => {
     expect(advisorTransport(ADVISOR_FAST_PROFILE_MODEL)).toBe("responses")
-    expect(advisorTransport(ADVISOR_FAST_PROFILE_MODEL, true)).toBe("chat")
+    expect(advisorTransport(ADVISOR_FAST_PROFILE_MODEL, true)).toBe("responses")
   })
 })
 

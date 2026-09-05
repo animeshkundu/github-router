@@ -12,12 +12,14 @@ export const FAST_PROFILE_MODELS = Object.freeze({
   gemini: "gemini-3.8-flash",
   grok: "grok-4.6",
   opus: "claude-opus-5",
+  sonnet: "claude-sonnet-5",
+  lead: "gemini-3.8-flash",
   explore: "gpt-5.6-luna",
   plan: "gpt-5.6-sol",
   "general-purpose": "gpt-5.6-luna",
   implementer: "gemini-3.8-flash",
-  reviewer: "grok-4.6",
-  advisor: "gemini-3.8-flash",
+  reviewer: "claude-sonnet-5",
+  advisor: "gpt-5.6-sol",
   oracle: "claude-opus-5",
 } as const)
 
@@ -47,7 +49,7 @@ export const FAST_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Plan: "high",
   "general-purpose": "max",
   implementer: "high",
-  reviewer: "medium",
+  reviewer: "xhigh",
 } as const)
 
 export const FAST_PROFILE_ADVISOR_MODEL = FAST_PROFILE_MODELS.advisor

@@ -10,6 +10,7 @@ import {
 import { LAUNCH_SECRET_HEADER } from "~/lib/messages-identity-preflight"
 import { state } from "~/lib/state"
 import { server } from "~/server"
+import { MAX_PROFILE_ADVISOR_INSTRUCTIONS } from "~/lib/max-profile-contract"
 import {
   ADVISOR_FAST_PROFILE_MODEL,
   ADVISOR_INTERNAL_TOOL_NAME,
@@ -23,6 +24,7 @@ const savedModels = state.models
 const savedCopilotToken = state.copilotToken
 const savedVsCodeVersion = state.vsCodeVersion
 const FAST_SECRET = "f".repeat(64)
+const MAX_SECRET = "a".repeat(64)
 
 function catalogModel(id: string) {
   const isClaude = id.startsWith("claude")
@@ -260,6 +262,52 @@ describe("fast Advisor request policy", () => {
     expect(forwarded).not.toContain("Call advisor BEFORE substantive work")
   })
 
+  test("authenticated Max lead receives the Max Advisor contract while subagents do not", async () => {
+    clearLaunchRegistry()
+    registerLaunch({
+      profileId: "max",
+      nonce: "m".repeat(64),
+      secret: MAX_SECRET,
+    })
+    state.models = {
+      object: "list",
+      data: [
+        catalogModel("gpt-5.6-sol"),
+        catalogModel("claude-opus-5"),
+      ] as never,
+    }
+    const forwarded: Array<string> = []
+    globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
+      forwarded.push(String(init?.body ?? ""))
+      return Promise.resolve(standardMessagesResponse())
+    }) as unknown as typeof fetch
+    const options = (agentId?: string) => ({
+      method: "POST" as const,
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+        [LAUNCH_SECRET_HEADER]: MAX_SECRET,
+        ...(agentId ? { "x-claude-code-agent-id": agentId } : {}),
+      },
+      body: requestBody("claude-opus-5"),
+    })
+
+    const lead = await server.request("/v1/messages", options())
+    expect(lead.status).toBe(200)
+    const subagent = await server.request("/v1/messages", options("implementer"))
+    expect(subagent.status).toBe(200)
+
+    expect(forwarded).toHaveLength(2)
+    const leadPayload = JSON.parse(forwarded[0]) as {
+      tools?: Array<{ name?: string; description?: string }>
+    }
+    const advisor = leadPayload.tools?.find((tool) => tool.name === ADVISOR_INTERNAL_TOOL_NAME)
+    expect(advisor?.description).toBe(MAX_PROFILE_ADVISOR_INSTRUCTIONS)
+    expect(forwarded[1]).not.toContain(ADVISOR_INTERNAL_TOOL_NAME)
+    expect(forwarded[1]).not.toContain("advisor_20260301")
+    expect(forwarded[1]).not.toContain(MAX_PROFILE_ADVISOR_INSTRUCTIONS)
+  })
+
   test("every authenticated fast Task subagent has all Advisor tool forms stripped", async () => {
     const forwarded: Array<string> = []
     globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
@@ -309,23 +357,23 @@ describe("fast Advisor request policy", () => {
 
     globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
       const url = String(_url)
-      if (url.includes("/chat/completions")) {
+      if (url.includes("/responses")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as {
-          messages?: Array<{ role?: string; content?: string }>
-          reasoning_effort?: string
+          instructions?: string
+          reasoning?: { effort?: string }
           model?: string
         }
         expect(body.model).toBe(ADVISOR_FAST_PROFILE_MODEL)
-        advisorSystemPrompt =
-          body.messages?.find((message) => message.role === "system")?.content ?? ""
-        advisorEffort = body.reasoning_effort ?? ""
+        advisorSystemPrompt = body.instructions ?? ""
+        advisorEffort = body.reasoning?.effort ?? ""
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              choices: [
+              output: [
                 {
-                  message: { role: "assistant", content: "Advisor advice." },
-                  finish_reason: "stop",
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: "Advisor advice." }],
                 },
               ],
             }),
@@ -498,8 +546,8 @@ describe("fast Advisor request policy", () => {
 
   test.each([
     ["missing model", advisorMetadataTool(), "omitted its fixed model"],
-    ["wrong model", advisorMetadataTool("gemini-3.8-flash-wrong"), "requested"],
-    ["non-Gemini model", advisorMetadataTool("claude-opus-5"), "requested"],
+    ["wrong model", advisorMetadataTool("gpt-5.6-sol-wrong"), "requested"],
+    ["non-Sol model", advisorMetadataTool("claude-opus-5"), "requested"],
   ])("rejects fast native Advisor metadata with %s", async (_label, tool, detail) => {
     const fetchMock = mock(() => Promise.resolve(responsesObjectResponse()))
     globalThis.fetch = fetchMock as unknown as typeof fetch

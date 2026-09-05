@@ -60,16 +60,17 @@ export function preprocessFastRequest(
     effort = alias.absentEffortDefault
     parsed.model = canonicalizeAliasModel(originalModel)
   } else if (bare === "gpt-5.6-luna") {
-    // The curated model picker exposes bare Luna. Within an authenticated fast
-    // launch that selection is the lead/driver role, fixed at max; role-specific
-    // Explore/implementer traffic uses private aliases above.
     effort = "max"
   } else if (bare === "gpt-5.6-sol") {
     effort = "high"
   } else if (bare === "grok-4.6") {
     effort = "medium"
   } else if (bare === "gemini-3.8-flash") {
+    // The curated model picker exposes Gemini 3.8 Flash. Within an authenticated fast
+    // launch that selection is the lead/driver role, fixed at high.
     effort = "high"
+  } else if (bare === "claude-sonnet-5") {
+    effort = "xhigh"
   } else if (bare === "claude-opus-5") {
     effort = "high"
   }

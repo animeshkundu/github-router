@@ -1723,7 +1723,7 @@ export async function sweepStalePeerAgentMdFiles(): Promise<void> {
  * the alternation is case-sensitive and those two are capitalized at the source.
  */
 export const PEER_AGENT_MD_FILENAME =
-  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|gemini-critic|gemini-reviewer|opus-critic|sol-critic|luna-reviewer|grok-critic|grok-reviewer|codex-implementer|peer-review-coordinator|implementer-fast|implementer|planner|reviewer|reviewer-fast|brainstorm|scout|scribe|general-purpose-fast|critic|generic-fast|generic-cheap|generic|debugger|qa-engineer|general-purpose|Explore|Plan|worker-explore|worker-implement|worker-review|worker-plan|worker-test|worker-browse)\.md$/
+  /^peer-(\d+)-[0-9a-f]{8}-(?:codex-critic|codex-reviewer|sonnet-reviewer|gemini-critic|gemini-reviewer|opus-critic|sol-critic|luna-reviewer|grok-critic|grok-reviewer|codex-implementer|peer-review-coordinator|implementer-fast|implementer|planner|reviewer|reviewer-fast|brainstorm|scout|scribe|general-purpose-fast|critic|generic-fast|generic-cheap|generic|debugger|qa-engineer|general-purpose|Explore|Plan|worker-explore|worker-implement|worker-review|worker-plan|worker-test|worker-browse)\.md$/
 
 /**
  * Strict regex matching only per-launch claude-config mirror dirs this

@@ -86,7 +86,8 @@ export const MAX_PROFILE: LaunchProfileDescriptor = Object.freeze({
   nativeRoster: new Set(MAX_PROFILE_NATIVE_AGENT_NAMES),
   personaAllowlist: new Set([
     "sol_critic",
-    "luna_reviewer",
+    "codex_reviewer",
+    "sonnet_reviewer",
     "opus_critic",
     "gemini_critic",
     "gemini_reviewer",
@@ -347,11 +348,6 @@ function hasUsablePromptMetadata(model: Model | undefined): boolean {
   return typeof prompt === "number" && Number.isFinite(prompt) && prompt > 0
 }
 
-function hasPromptAtLeast(model: Model | undefined, tokens: number): boolean {
-  const prompt = model?.capabilities?.limits?.max_prompt_tokens
-  return typeof prompt === "number" && Number.isFinite(prompt) && prompt >= tokens
-}
-
 /**
  * Validate the live Copilot catalog carries every model the fast profile's
  * EXACT roster depends on, with the specific capabilities each assignment
@@ -409,38 +405,42 @@ export function validateFastProfilePrerequisites(
     }
   }
 
-  const grok = findModel(catalog, FAST_PROFILE_MODELS.reviewer)
-  if (!grok) {
+  const sonnet = findModel(catalog, FAST_PROFILE_MODELS.reviewer)
+  if (!sonnet) {
     missing.push(`${FAST_PROFILE_MODELS.reviewer}: absent from the live catalog`)
   } else {
-    if (!hasToolCalls(grok)) {
+    if (!hasToolCalls(sonnet)) {
       missing.push(`${FAST_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
     }
-    if (!supportsEffort(grok, "medium")) {
-      missing.push(`${FAST_PROFILE_MODELS.reviewer}: does not advertise a "medium" reasoning effort`)
+    if (!hasContextAtLeast(sonnet, FAST_REQUIRED_CONTEXT_TOKENS)) {
+      missing.push(`${FAST_PROFILE_MODELS.reviewer}: advertised context window is below 1M`)
     }
-    if (!hasPromptAtLeast(grok, FAST_REVIEWER_MIN_PROMPT_TOKENS)) {
-      missing.push(
-        `${FAST_PROFILE_MODELS.reviewer}: advertised max_prompt_tokens is below ${FAST_REVIEWER_MIN_PROMPT_TOKENS}`,
-      )
+    if (!supportsEffort(sonnet, "xhigh")) {
+      missing.push(`${FAST_PROFILE_MODELS.reviewer}: does not advertise an "xhigh" reasoning effort`)
     }
-    if (!supportsEndpoint(grok, "responses")) {
-      missing.push(`${FAST_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`)
+    if (sonnet.capabilities?.supports?.adaptive_thinking !== true) {
+      missing.push(`${FAST_PROFILE_MODELS.reviewer}: does not advertise adaptive_thinking`)
+    }
+    if (!hasUsablePromptMetadata(sonnet)) {
+      missing.push(`${FAST_PROFILE_MODELS.reviewer}: no usable max_prompt_tokens metadata`)
+    }
+    if (!supportsEndpoint(sonnet, "messages")) {
+      missing.push(`${FAST_PROFILE_MODELS.reviewer}: does not advertise a supported Messages endpoint`)
     }
   }
 
-  const gemini = findModel(catalog, FAST_PROFILE_MODELS.advisor)
+  const gemini = findModel(catalog, FAST_PROFILE_MODELS.implementer)
   if (!gemini) {
-    missing.push(`${FAST_PROFILE_MODELS.advisor}: absent from the live catalog`)
+    missing.push(`${FAST_PROFILE_MODELS.implementer}: absent from the live catalog`)
   } else {
     if (!hasToolCalls(gemini)) {
-      missing.push(`${FAST_PROFILE_MODELS.advisor}: does not advertise tool_calls`)
+      missing.push(`${FAST_PROFILE_MODELS.implementer}: does not advertise tool_calls`)
     }
     if (!hasContextAtLeast(gemini, FAST_REQUIRED_CONTEXT_TOKENS)) {
-      missing.push(`${FAST_PROFILE_MODELS.advisor}: advertised context window is below 1M`)
+      missing.push(`${FAST_PROFILE_MODELS.implementer}: advertised context window is below 1M`)
     }
     if (!supportsEffort(gemini, "high")) {
-      missing.push(`${FAST_PROFILE_MODELS.advisor}: does not advertise a "high" reasoning effort`)
+      missing.push(`${FAST_PROFILE_MODELS.implementer}: does not advertise a "high" reasoning effort`)
     }
     // Reuse the canonical catalog endpoint resolver. Copilot's live catalog
     // uses bare `/chat/completions`, while fixtures and older snapshots may use
@@ -448,7 +448,7 @@ export function validateFastProfilePrerequisites(
     // fully-capable live catalog fail the whole launch.
     if (!supportsEndpoint(gemini, "chat")) {
       missing.push(
-        `${FAST_PROFILE_MODELS.advisor}: does not advertise a supported chat-completions endpoint`,
+        `${FAST_PROFILE_MODELS.implementer}: does not advertise a supported chat-completions endpoint`,
       )
     }
   }

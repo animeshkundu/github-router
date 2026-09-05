@@ -1509,6 +1509,88 @@ describe("/mcp stand_in tool", () => {
     maxLaunchId = undefined
   })
 
+  test("bound max peers list exposes only the allowed cold-start contracts", async () => {
+    const capable = (
+      id: string,
+      context: number,
+      endpoint: string,
+      vendor: string,
+      adaptive = false,
+    ) => ({
+      ...fakeModel(id, [endpoint]),
+      vendor,
+      capabilities: {
+        ...fakeModel(id, [endpoint]).capabilities,
+        limits: {
+          max_context_window_tokens: context,
+          max_prompt_tokens: Math.max(1, context - 20_000),
+          max_output_tokens: 16_000,
+        },
+        supports: {
+          tool_calls: true,
+          reasoning_effort: ["medium", "high", "xhigh"],
+          ...(adaptive ? { adaptive_thinking: true } : {}),
+        },
+      },
+    })
+    state.models = {
+      object: "list",
+      data: [
+        capable("gpt-5.6-sol", 1_050_000, "/responses", "openai"),
+        capable("gpt-5.3-codex", 400_000, "/responses", "openai"),
+        capable("claude-opus-5", 1_000_000, "/v1/messages", "anthropic", true),
+        capable("claude-sonnet-5", 1_000_000, "/v1/messages", "anthropic", true),
+        capable("gemini-3.8-flash", 1_000_000, "/chat/completions", "google"),
+        capable("grok-4.6", 500_000, "/responses", "xai"),
+      ] as never,
+    }
+    const expectedPersonas = new Set([
+      "sol_critic",
+      "codex_reviewer",
+      "opus_critic",
+      "gemini_critic",
+      "gemini_reviewer",
+      "grok_critic",
+      "grok_reviewer",
+    ])
+    maxLaunchId = registerLaunch({
+      profileId: "max",
+      nonce: MAX_NONCE,
+      secret: "max-secret",
+      allowedGroups: new Set(["peers"]),
+      allowedPersonas: new Set([...expectedPersonas, "sonnet_reviewer"]),
+    }).launchId
+
+    const listed = await scopedRpc("peers", {
+      jsonrpc: "2.0",
+      id: 3998,
+      method: "tools/list",
+    }, { auth: `Bearer ${MAX_NONCE}` })
+    expect(listed.status).toBe(200)
+    const tools = (listed.json.result as { tools: Array<{ name: string; description: string }> }).tools
+    expect(new Set(tools.map((tool) => tool.name))).toEqual(expectedPersonas)
+    for (const tool of tools) {
+      expect(tool.description).toContain("Use when:")
+      expect(tool.description).toContain("Not for:")
+      expect(tool.description).toContain("Cold-start:")
+      expect(tool.description).toContain("no repository or transcript access")
+    }
+
+    state.models = {
+      ...state.models!,
+      data: state.models!.data.filter((model) => model.id !== "gpt-5.3-codex"),
+    }
+    const fallback = await scopedRpc("peers", {
+      jsonrpc: "2.0",
+      id: 3999,
+      method: "tools/list",
+    }, { auth: `Bearer ${MAX_NONCE}` })
+    const fallbackNames = (fallback.json.result as { tools: Array<{ name: string }> })
+      .tools.map((tool) => tool.name)
+    expect(fallbackNames).toContain("sonnet_reviewer")
+    expect(fallbackNames).not.toContain("codex_reviewer")
+  })
+
   test("bound max call advertises and dispatches Grok/high instead of Gemini Pro", async () => {
     const capable = (
       id: string,

@@ -25,36 +25,41 @@ import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
  * because absence there proves nothing.
  */
 
-/** Marker strings that must still be present in the installed build. */
-const REQUIRED_MARKERS: ReadonlyArray<{ needle: string; why: string }> = [
+/** Stable marker strings that must still be present in the installed build. */
+const REQUIRED_MARKERS: ReadonlyArray<{ needles: Array<string>; why: string }> = [
   {
-    needle: "capability_rejected: ",
+    needles: ["capability_rejected: "],
     why: "the gateway capability-rejection token prefix our overflow envelope emits",
   },
   {
-    needle: "prompt is too long",
+    needles: ["prompt is too long"],
     why: "the client's wording matcher, the second half of our belt-and-braces envelope",
   },
   {
-    needle: "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    needles: ["CLAUDE_CODE_AUTO_COMPACT_WINDOW"],
     why: "the env var the derived compaction window is exported through",
   },
-  // 2.1.260 renamed the minified floor/cap bindings (2.1.251: ike/JNe;
-  // 2.1.258: yCe/KUe) but kept the same 1e5 floor, 1e6 cap, parseInt
-  // fallback, and Math.max raise. "1m" still parses to 1 and is raised
-  // to 100,000. No change to src/lib/error.ts or src/lib/grok-context.ts.
-  {
-    needle: "QTe=1e5,ZUe=1e6",
-    why: "the 100,000 floor and 1,000,000 cap used by the auto-compact env parser",
-  },
-  {
-    needle: "Uee(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,QTe,ZUe)",
-    why: "the auto-compact env parser receiving those floor and cap constants",
-  },
-  {
-    needle: "Math.max(QTe,N.effective)",
-    why: "the parsed auto-compact window being raised to the 100,000 floor",
-  },
+]
+
+/**
+ * Minified identifiers change between client builds even when the parser's
+ * behavior does not. Keep each known contract as a coherent pair: one marker
+ * proves the 100K/1M constants, the other proves those same bindings feed the
+ * env parser and that its effective value is raised to the 100K floor.
+ */
+const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
+  [
+    "ike=1e5,JNe=1e6",
+    "cee(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,ike,JNe);if(A.status!==\"invalid\"){let x=Math.max(ike,A.effective)",
+  ],
+  [
+    "QTe=1e5,ZUe=1e6",
+    "Uee(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,QTe,ZUe);if(N.status!==\"invalid\"){let F=Math.max(QTe,N.effective)",
+  ],
+  [
+    "JCe=1e5,ABe=1e6",
+    "vte(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,JCe,ABe);if(N.status!==\"invalid\"){let F=Math.max(JCe,N.effective)",
+  ],
 ]
 
 describe("client overflow-contract canary", () => {
@@ -85,12 +90,12 @@ describe("client overflow-contract canary", () => {
       )
       return
     }
-    for (const { needle, why } of REQUIRED_MARKERS) {
-      const present = await bundleContainsAny(bundle, [needle])
+    for (const { needles, why } of REQUIRED_MARKERS) {
+      const present = await bundleContainsAny(bundle, needles)
       if (!present) {
         throw new Error(
           `Overflow-contract marker no longer present in ${bundle}.\n`
-            + `Missing: ${JSON.stringify(needle)} (${why})\n`
+            + `Missing: ${JSON.stringify(needles)} (${why})\n`
             + "Re-derive it from the installed bundle and update "
             + "src/lib/error.ts / src/lib/grok-context.ts. Until then a long "
             + "session can strand on an unrecognised context overflow.",
@@ -98,5 +103,22 @@ describe("client overflow-contract canary", () => {
       }
       expect(present).toBe(true)
     }
+
+    const parserContractPresent = await Promise.all(
+      AUTO_COMPACT_CONTRACTS.map(async (markers) =>
+        (await Promise.all(markers.map((marker) => bundleContainsAny(bundle, [marker]))))
+          .every(Boolean)),
+    ).then((matches) => matches.some(Boolean))
+    if (!parserContractPresent) {
+      throw new Error(
+        `Auto-compact parser contract no longer appears in ${bundle}.\n`
+          + "Expected one known binding set to preserve the 100,000 floor, "
+          + "1,000,000 cap, env parser bounds, and Math.max floor.\n"
+          + "Re-derive it from the installed bundle and update "
+          + "src/lib/error.ts / src/lib/grok-context.ts. Until then a long "
+          + "session can strand on an unrecognised context overflow.",
+      )
+    }
+    expect(parserContractPresent).toBe(true)
   }, 120_000)
 })

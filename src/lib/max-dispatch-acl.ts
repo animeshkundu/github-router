@@ -1,5 +1,6 @@
 import {
   MAX_PROFILE_NATIVE_AGENT_NAMES,
+  MAX_PROFILE_NATIVE_EFFORTS,
   MAX_PROFILE_NATIVE_MODELS,
   type MaxProfileNativeAgentName,
 } from "./max-profile-contract"
@@ -60,9 +61,9 @@ function isMaxAgentSchemaModelAlias(model: unknown): boolean {
 }
 
 export interface MaxDispatchGuardOptions {
-  /** Catalog-resolved reviewer model for this launch (Grok/high or Luna/max). */
+  /** Catalog-resolved reviewer model for this launch (Sonnet 5 1M/xhigh). */
   reviewerModel?: string
-  reviewerEffort?: Extract<Effort, "high" | "max">
+  reviewerEffort?: Extract<Effort, "high" | "xhigh" | "max">
 }
 
 export interface MaxDispatchDecision {
@@ -108,11 +109,11 @@ export function normalizeMaxDispatchEffort(
     ? ["high", "xhigh", "max"]
     : model === "gpt-5.6-luna"
       ? ["none", "low", "medium", "high", "xhigh", "max"]
-      : model === "grok-4.6" || model === "gemini-3.8-flash"
-        // The optional reviewer/brainstorm fallback swaps these two models;
-        // their max-profile effort intersection is deliberately identical.
-        ? ["low", "medium", "high"]
-        : []
+      : model === "claude-sonnet-5" || model === "claude-opus-5"
+        ? ["low", "medium", "high", "xhigh", "max"]
+        : model === "grok-4.6" || model === "gemini-3.8-flash"
+          ? ["low", "medium", "high"]
+          : []
   if (allowed.includes(effort as Effort)) return effort as Effort
   return undefined
 }
@@ -178,7 +179,7 @@ export function decideMaxDispatchGuard(
   const fixedReviewerEffort = nativeTarget === "reviewer"
     && !normalizedModel
     && opts.reviewerModel
-    ? opts.reviewerEffort ?? (baseModel(opts.reviewerModel) === "gpt-5.6-luna" ? "max" : "high")
+    ? opts.reviewerEffort ?? MAX_PROFILE_NATIVE_EFFORTS.reviewer
     : undefined
   const effectiveEffort = fixedReviewerEffort ?? effort
   const updatedInput = { ...toolInput }
@@ -186,8 +187,8 @@ export function decideMaxDispatchGuard(
   else delete updatedInput.model
   if (effectiveEffort) {
     // Claude Code's native Agent payload uses `model` and `effort`; preserve
-    // an explicit field when possible, and emit the catalog-resolved reviewer
-    // fallback effort so Luna cannot inherit Grok's high frontmatter default.
+    // an explicit field when possible, and emit the launch-resolved reviewer
+    // effort so the dispatch cannot drift from the generated frontmatter.
     if (toolInput.thinking !== undefined) updatedInput.thinking = effectiveEffort
     else updatedInput.effort = effectiveEffort
   }

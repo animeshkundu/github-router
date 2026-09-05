@@ -20,7 +20,8 @@ const REQUIRED_MARKERS = [
   "Advising",
   " using ",
   "updatedInput",
-  'check:_((e)=>ut(e,"{ model }",(t)=>typeof t.model==="string"))',
+  // 2.1.260+: check: ...; 2.1.258-: "a rewrite changes model alone"
+  ["check:_((e)=>ut(e,\"{ model }\",(t)=>typeof t.model===\"string\"))", "a rewrite changes model alone"],
   'agentType:"Explore"',
   "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP",
 ] as const
@@ -34,7 +35,8 @@ describe("fast-profile client contract canary", () => {
       return
     }
     for (const marker of REQUIRED_MARKERS) {
-      const present = await bundleContainsAny(bundle, [marker])
+      const candidates: Array<string> = Array.isArray(marker) ? [...marker] : [marker]
+      const present = await bundleContainsAny(bundle, candidates)
       if (!present) {
         throw new Error(
           `Fast-profile client marker no longer present in ${bundle}.\n`

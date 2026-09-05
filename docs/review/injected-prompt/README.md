@@ -2,7 +2,7 @@
 
 github-router's `claude` subcommand injects several system-prompt / CLAUDE.md text blocks into the spawned Claude Code session. This directory reviews each block against current Anthropic prompt-engineering guidance, under the governing lens: **raise the floor, never nerf** and **the right thing, at the right time, in the right amount**.
 
-The assessments are grounded in the current [Prompting best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-4-best-practices) page (the classic `docs.claude.com/.../claude-4-best-practices` and `.../be-clear-and-direct` URLs now 302-redirect to this consolidated page). The load-bearing guidance:
+The assessments are grounded in current first-party guidance from [Anthropic prompting](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices), [Anthropic tool definitions](https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools), [Anthropic parallel tool use](https://platform.claude.com/docs/en/agents-and-tools/tool-use/parallel-tool-use), [OpenAI reasoning](https://developers.openai.com/api/docs/guides/reasoning-best-practices), [OpenAI prompting](https://developers.openai.com/api/docs/guides/prompting), [Google prompting](https://ai.google.dev/gemini-api/docs/prompting-strategies), and [xAI multi-agent guidance](https://docs.x.ai/developers/model-capabilities/text/multi-agent). The load-bearing guidance:
 
 - **Golden rule**: "Show your prompt to a colleague with minimal context on the task and ask them to follow it. If they'd be confused, Claude will be too." Every injected block is checked against this, a context-free colleague should be able to act on it.
 - **Positive over prohibitive**: "Tell Claude what to do instead of what not to do" (example: "Do not use markdown" → "compose smoothly flowing prose paragraphs").
@@ -11,6 +11,11 @@ The assessments are grounded in the current [Prompting best practices](https://p
 - **Precise instruction following**: "Claude's latest models are trained for precise instruction following" and benefit from explicit direction and specificity ("Being specific about your desired output can help enhance results").
 - **Role framing is functional**: "Setting a role ... Even a single sentence makes a difference", worked example a functional specialization, not a named persona. No official page addresses named-celebrity framing, so that critique rests on the general specificity principle.
 - **Enforcement vs context**: an injected system-prompt / CLAUDE.md block STEERS behavior; it is not a hard guardrail. None of these blocks is validated by a hook (the one deterministic artifact lever is a separate `PostToolUse(ExitPlanMode)` hook, not this text), so none should, and none does, claim an enforcement guarantee.
+- **Layer ownership**: stable decision policy belongs in the system-level digest; a compact native roster remains resident for routing salience; detailed what/when/when-not/caveat contracts belong in Agent or MCP descriptions; execution prompts specify scope, output, stop conditions, and verification. The mirrored awareness block is the only full, gate-aware capability inventory.
+- **Parallelism is conditional**: independent, non-overlapping read or analysis work can be issued together; true dependencies, shared state, and conflicting side effects stay sequential. Multi-agent breadth is selective because it consumes more tokens and can add latency.
+- **Evidence, not reasoning theater**: prompts ask for outcomes, checkable evidence, success criteria, and calibrated findings rather than visible chain-of-thought or agreement counts.
+
+The Max-specific preregistered behavior protocol is [`../subagents/MAX-PROMPT-EVAL.md`](../subagents/MAX-PROMPT-EVAL.md). It separates headless routing and restraint from interactive batching and full-outcome quality.
 
 Per-block docs:
 
@@ -24,32 +29,32 @@ Per-block docs:
 
 | Block | Builder / constant | System prompt (`--append-system-prompt`) | Mirrored CLAUDE.md | Gate | Size |
 |---|---|---|---|---|---|
-| OPERATING_DEFAULTS_DIRECTIVE / `buildOperatingDefaultsDirective` | `claude-md-injection.ts:143-266` | Digest only, leads the arg (`claude.ts:1229-1234`), unconditional (even `--no-codex-mcp`) | Full availability-aware directive, top (`claude.ts:1236-1238`) | digest always; full directive uses the launch's native availability | variable |
-| STYLE_DIRECTIVE | `claude-md-injection.ts:73-78` | No | Yes, top (`claude.ts:1057`) | codex-mcp block; best-effort | 192 B |
-| ARTIFACT_PANEL_DIRECTIVE | `claude-md-injection.ts:48-58` | No | Yes, top (`claude.ts:811`) | `AIORDIE_SESSION_ID` set (`claude.ts:807`) | 2148 B |
-| Toolbelt awareness | `toolbelt/index.ts:89-97` | No | Yes, bottom (`claude.ts:470`) | `toolbeltEnabled()` + non-empty tool list | 1 line |
-| Peer-awareness snippet | `peer-mcp-personas.ts:555-646` | Yes, rides after OPERATING_DEFAULTS (`claude.ts:1086-1087`) | Yes, bottom (`claude.ts:1042`) | codex-mcp block; contents gated per live catalog | < 4900 B (max) |
+| Operating defaults | `buildOperatingDefaultsDirective` / `buildOperatingDefaultsDigest` in `src/lib/claude-md-injection.ts` | Digest only, first in the single argument | Full directive, top | Digest always; full directive uses launch availability | Variable |
+| Style | `STYLE_DIRECTIVE` in `src/lib/claude-md-injection.ts` | No | Yes, top | Peer-MCP block; best-effort | Small |
+| Artifact panel | `ARTIFACT_PANEL_DIRECTIVE` in `src/lib/claude-md-injection.ts` | No | Yes, top | ai-or-die session | Variable |
+| Toolbelt awareness | `buildToolbeltAwareness` in `src/lib/toolbelt/index.ts` | No | Yes, bottom | Toolbelt enabled and non-empty | One line |
+| Peer awareness | `buildPeerAwarenessSnippet` / `buildPeerAwarenessSummary` in `src/lib/peer-mcp-personas.ts` | Compact native roster and epistemic boundaries after the operating digest | Full gate-aware inventory, bottom | Peer-MCP block; full inventory follows live gates | Max resident digest+summary ≤ 2820 B and mirrored directive+snippet ≤ 4283 B (pre-change ceilings) |
 
 ## Assembly and order map
 
 ### The single `--append-system-prompt` arg
 
-Exactly one `--append-system-prompt` is pushed per session (pinned at `tests/isolated/cli-claude.test.ts:969-979`). It carries, in order:
+Exactly one `--append-system-prompt` is pushed per session (pinned in `tests/isolated/cli-claude.test.ts`). It carries, in order:
 
 ```
 OPERATING_DEFAULTS_DIGEST  +  "\n\n"  +  peerAwarenessSummary   (when the peer summary was built)
 OPERATING_DEFAULTS_DIGEST                                      (when it was not, e.g. --no-codex-mcp)
 ```
 
-Assembly is at `src/claude.ts:1229-1234`. The digest leads at highest attention weight; the peer-awareness summary rides along only when codex-mcp wiring built it. The full availability-aware directive, STYLE, ARTIFACT, and the toolbelt line are never on this surface.
+Assembly is in the `github-router claude` launch path in `src/claude.ts`. The digest leads at highest attention weight; the peer-awareness summary rides along only when peer-MCP wiring built it. The full directive, style, Artifact, and toolbelt blocks are never on this surface.
 
-The full directive is instead rendered for the mirrored CLAUDE.md with `buildOperatingDefaultsDirective(nativeAvailability)`. This distinction is intentional: the digest is roster-neutral and always safe for the main agent, while the full directive names only the conditional native agents this launch actually emitted.
+The full directive is instead rendered for the mirrored CLAUDE.md with `buildOperatingDefaultsDirective(nativeAvailability)`. This distinction is intentional: the digest is roster-neutral and always safe for the main agent, while the adjacent summary carries the compact profile roster and the full awareness snippet carries launch-gated capabilities.
 
 ### The mirrored CLAUDE.md, top-to-bottom
 
 Three blocks prepend to the top, two append to the bottom, each with its own idempotent marker fence (so they coexist and are regenerated per launch). Because each prepend takes the very top slot, the LAST prepend to run ends up topmost; appends stack in call order.
 
-Call order in the handler: toolbelt-append (`470`) → artifact-prepend (`811`) → peer-append (`1042`) → style-prepend (`1057`) → operating-defaults-prepend (`1091`).
+The launch handler appends toolbelt awareness, prepends the conditional Artifact block, appends peer awareness, prepends style, and finally prepends operating defaults. The resulting order is pinned by the injection and CLI-launch tests rather than by brittle source-line references.
 
 Resulting file, top to bottom:
 
@@ -79,9 +84,9 @@ The other three blocks are single-surface: STYLE and ARTIFACT are CLAUDE.md-top 
 
 ### 1. Availability-aware operating defaults are now aligned
 
-The full operating directive no longer describes a fixed roster. Its builder accepts the same `NativeAgentAvailability` flags that the launch path derives from the emitted definitions and passes to `buildPeerAwarenessSnippet`. That closes the prior class of routing drift where an instruction named an agent absent from the Task `subagent_type` enum.
+The full operating directive carries policy rather than a duplicated roster. Standard-profile conditional roles still use the same `NativeAgentAvailability` flags as generation; fixed Fast/Max rosters appear once in their resident awareness summaries. This closes the prior class of routing drift where an instruction named an agent absent from the Task `subagent_type` enum.
 
-The system-prompt digest intentionally does not list agents. It remains valid when peer-MCP setup is unavailable and keeps the primary behavioral defaults at high salience without creating a dangling roster reference.
+The operating digest intentionally does not list agents. When peer-MCP wiring succeeds, the adjacent awareness summary names the fixed Max/Fast roster once so routing remains salient; when it fails, the digest remains valid without inventing unavailable MCP capabilities.
 
 ### 2. The artifact directive follows resolved group keys
 
