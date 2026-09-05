@@ -50,7 +50,7 @@ let baseUrl = ""
 
 const LUNA_MODEL = "gpt-5.6-luna"
 const LUNA_DRIVER_ALIAS = "gh-router-luna-driver-max[1m]"
-const GEMINI_ADVISOR_MODEL = "gemini-3.8-flash"
+const FAST_ADVISOR_MODEL = "gpt-5.6-sol"
 const FAST_SECRET = "f".repeat(64)
 
 function resetState() {
@@ -83,7 +83,7 @@ function resetState() {
         supported_endpoints: ["/responses"],
       },
       {
-        id: GEMINI_ADVISOR_MODEL,
+        id: "gemini-3.8-flash",
         name: "Gemini 3.8 Flash",
         vendor: "Google",
         version: "1",
@@ -99,6 +99,24 @@ function resetState() {
           supports: { tool_calls: true },
         },
         supported_endpoints: ["/chat/completions"],
+      },
+      {
+        id: "gpt-5.6-sol",
+        name: "GPT-5.6 Sol",
+        vendor: "OpenAI",
+        version: "1",
+        preview: false,
+        model_picker_enabled: true,
+        object: "model",
+        capabilities: {
+          type: "chat",
+          family: "gpt-5.6",
+          object: "model_capabilities",
+          tokenizer: "o200k_base",
+          limits: { max_context_window_tokens: 1_050_000 },
+          supports: { tool_calls: true },
+        },
+        supported_endpoints: ["/responses"],
       },
     ],
   }
@@ -196,7 +214,7 @@ function buildChatSse(
 }
 
 test(
-  "Gemini lead reaches Gemini Advisor and consumer cancel aborts it before continuation",
+  "Gemini lead reaches Sol Advisor and consumer cancel aborts it before continuation",
   async () => {
     // Same provider endpoint, two distinct wire shapes: lead is streaming Chat,
     // Advisor is non-streaming Chat. This is the route Luna's Responses test
@@ -212,6 +230,33 @@ test(
     globalThis.fetch = mock((url: string | URL, init?: RequestInit) => {
       const u = typeof url === "string" ? url : url.toString()
       if (u.startsWith(baseUrl)) return realFetch(url, init)
+      if (u.includes("/responses")) {
+        advisorChatCalls++
+        if (cancelObservedAt > 0) advisorStartedAfterCancel = true
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            resolve(
+              new Response(
+                JSON.stringify({
+                  output: [
+                    {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "output_text", text: "advice" }],
+                    },
+                  ],
+                }),
+                { headers: { "content-type": "application/json" } },
+              ),
+            )
+          }, 500)
+          init?.signal?.addEventListener("abort", () => {
+            advisorSignalAborted = true
+            clearTimeout(timer)
+            reject(new DOMException("Aborted", "AbortError"))
+          })
+        })
+      }
       if (!u.includes("/chat/completions")) {
         return new Response("unexpected endpoint", { status: 500 })
       }
@@ -287,13 +332,13 @@ test(
         [LAUNCH_SECRET_HEADER]: FAST_SECRET,
       },
       body: JSON.stringify({
-        model: GEMINI_ADVISOR_MODEL,
+        model: "gemini-3.8-flash",
         max_tokens: 100,
         messages: [{ role: "user", content: "hi" }],
         tools: [{
           type: "advisor_20260301",
           name: "advisor",
-          model: `${GEMINI_ADVISOR_MODEL}[1m]`,
+          model: `${FAST_ADVISOR_MODEL}[1m]`,
         }],
         stream: true,
       }),
@@ -340,12 +385,12 @@ test(
 )
 
 test(
-  "aliased Luna lead reaches Gemini Advisor and consumer cancel aborts it before continuation",
+  "aliased Luna lead reaches Sol Advisor and consumer cancel aborts it before continuation",
   async () => {
     // Model choice and role policy are independent: pinning the same model
     // must not make an authenticated fast lead receive the standard directive
     // Advisor prompt.
-    process.env.GH_ROUTER_ADVISOR_MODEL = GEMINI_ADVISOR_MODEL
+    process.env.GH_ROUTER_ADVISOR_MODEL = FAST_ADVISOR_MODEL
     let lunaResponsesCallCount = 0
     let advisorChatCallCount = 0
     let advisorSignalAborted = false
@@ -360,52 +405,41 @@ test(
         return realFetch(url, init)
       }
 
-      if (u.includes("/chat/completions")) {
-        // Advisor call (gemini-3.8-flash). Slow, so the abort signal has time
-        // to fire through the threaded callerSignal — same pattern as the
-        // Claude-lead twin test's /responses advisor mock.
-        advisorChatCallCount++
-        const advisorBody = JSON.parse(String(init?.body ?? "{}")) as {
-          messages?: Array<{ role?: string; content?: string }>
-        }
-        advisorSystemPrompt =
-          advisorBody.messages?.find((message) => message.role === "system")?.content
-          ?? ""
-        if (cancelObservedAt > 0) advisorCallStartedAfterCancel = true
-        return new Promise((resolve, reject) => {
-          const sig = init?.signal
-          const t = setTimeout(() => {
-            resolve(
-              new Response(
-                JSON.stringify({
-                  id: "advisor_chat_resp",
-                  object: "chat.completion",
-                  created: 0,
-                  model: GEMINI_ADVISOR_MODEL,
-                  choices: [
-                    {
-                      index: 0,
-                      message: { role: "assistant", content: "Advisor reply." },
-                      logprobs: null,
-                      finish_reason: "stop",
-                    },
-                  ],
-                }),
-                { status: 200, headers: { "content-type": "application/json" } },
-              ),
-            )
-          }, 500)
-          if (sig) {
-            sig.addEventListener("abort", () => {
-              advisorSignalAborted = true
-              clearTimeout(t)
-              reject(new DOMException("Aborted", "AbortError"))
-            })
-          }
-        })
-      }
+
 
       if (u.includes("/responses")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { stream?: boolean; instructions?: string }
+        if (body.stream === false) {
+          advisorChatCallCount++
+          advisorSystemPrompt = body.instructions ?? ""
+          if (cancelObservedAt > 0) advisorCallStartedAfterCancel = true
+          return new Promise((resolve, reject) => {
+            const sig = init?.signal
+            const t = setTimeout(() => {
+              resolve(
+                new Response(
+                  JSON.stringify({
+                    output: [
+                      {
+                        type: "message",
+                        role: "assistant",
+                        content: [{ type: "output_text", text: "Advisor reply." }],
+                      },
+                    ],
+                  }),
+                  { status: 200, headers: { "content-type": "application/json" } },
+                ),
+              )
+            }, 500)
+            if (sig) {
+              sig.addEventListener("abort", () => {
+                advisorSignalAborted = true
+                clearTimeout(t)
+                reject(new DOMException("Aborted", "AbortError"))
+              })
+            }
+          })
+        }
         lunaResponsesCallCount++
         if (cancelObservedAt > 0) responsesCallStartedAfterCancel = true
         if (lunaResponsesCallCount === 1) {
@@ -497,7 +531,7 @@ test(
         tools: [{
           type: "advisor_20260301",
           name: "advisor",
-          model: `${GEMINI_ADVISOR_MODEL}[1m]`,
+          model: `${FAST_ADVISOR_MODEL}[1m]`,
         }],
         stream: true,
       }),
@@ -647,7 +681,7 @@ describe("Luna-lead advisor: initial /responses fetch is itself cancellable", ()
           tools: [{
             type: "advisor_20260301",
             name: "advisor",
-            model: `${GEMINI_ADVISOR_MODEL}[1m]`,
+            model: `${FAST_ADVISOR_MODEL}[1m]`,
           }],
           stream: true,
         }),

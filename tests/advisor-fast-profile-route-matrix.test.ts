@@ -293,6 +293,7 @@ describe("authenticated fast Advisor route matrix", () => {
         calls.push({ url: requestUrl, body })
 
         if (requestUrl.includes("/responses")) {
+          if (body.stream === false) return Promise.resolve(advisorResponsesResponse())
           leadCalls++
           return Promise.resolve(leadCalls === 1 ? leadResponsesSse() : continuationResponsesSse())
         }
