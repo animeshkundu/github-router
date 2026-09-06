@@ -380,13 +380,15 @@ export function buildOperatingDefaultsDirective(
       + "user's explicit direction and the domain's own standards always override)\n\n"
       + "Fast launch profile. The lead coordinates execution across specialized native roles: "
       + buildNativeReachClauses(opts)
-      + ". `Plan` is an advisory planning capability for nontrivial sequencing, interfaces, migration risk, or acceptance criteria, not an approval gate. "
-      + "Delegate only when work is wide, slow, or benefits from context isolation; do trivial, surgical, and narrow work directly. "
-      + "Independent Task subagents may run in parallel. Delegation graph: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
-      + "Advisor is an optional, non-binding, lead-only transcript-aware sounding board for consequential unresolved uncertainty, conflicting evidence, or a genuinely stuck path; never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
-      + `\`mcp__${peersKey}__oracle\` is exact Opus 5 (1M/high), a stateless last-resort consultant available to the lead and \`Plan\` when required; \`reviewer\` and other subagents cannot call Oracle. `
+      + ". In plan mode or when designing changes with complex sequencing, interface contracts, or acceptance criteria, delegate architectural planning to `Plan` (in plan mode, produce the plan and acceptance criteria; do not edit files). "
+      + "After behavior-changing, cross-boundary, or risk-sensitive implementation, run relevant build/tests then invoke `reviewer` before declaring done. "
+      + "Handle trivial, surgical, single-file, or single-command tasks directly; you do not need to justify skipping delegation. "
+      + "`Explore` is cheap and may be launched in parallel across independent discovery questions. Send independent subagent calls in parallel within a single turn. "
+      + "Delegation graph: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
+      + "Consultation guidance: Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance, framing drift, or conflicting signals; take advice as direction, not dictation, and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
+      + `\`mcp__${peersKey}__oracle\` is exact Opus 5 (1M/high), an expert consultant available to the lead and \`Plan\`, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. `
       + `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable sources.${browserClause}${workerBrowseClause}${artifactClause}\n\n`
-      + "Verify claims with concrete repository evidence and tests before declaring work done. Stop named teammates when finished."
+      + "Verify claims with concrete repository evidence and tests before declaring work done. User instructions outrank delegation triggers. Stop named teammates when finished."
     )
   }
   return (
@@ -448,8 +450,8 @@ export function buildOperatingDefaultsDigest(
   if (opts.profile === "fast") {
     return (
       "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
-      + "Fast launch profile. The lead coordinates execution across `Explore` (broad discovery, convention mapping), `Plan` (sequencing, interfaces, migration risk, acceptance criteria), `general-purpose` (mixed execution), `implementer` (bounded coding), and `reviewer` (repository-aware verification). `Plan` is an advisory planning capability, not an approval gate. Delegate when work is wide or slow to protect main-thread context; do trivial and surgical work directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n"
-      + "Verify claims against real evidence: run relevant commands and tests. Advisor is optional, non-binding, transcript-aware, and lead-only for consequential unresolved uncertainty, not routine progress or workflow gates. `oracle` (Opus 5 1M/high) is a stateless last resort for the lead and `Plan` when normal paths remain stuck."
+      + "Fast launch profile. The lead coordinates execution across specialized roles: delegate to `Plan` in plan mode or when structuring complex multi-step sequencing (`Plan` is an advisory planning capability, not an approval gate); delegate to `reviewer` after behavior-changing or risk-sensitive implementation to verify correctness before declaring done; `Explore` is cheap and may be launched in parallel for broad discovery; use `implementer` or `general-purpose` for execution; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n"
+      + "Verify claims against real evidence: run relevant commands and tests. Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). `oracle` (Opus 5 1M/high) is an expert consultant for the lead and `Plan`, preferred over advisor for substantive architectural or algorithmic trade-offs."
     )
   }
   return STANDARD_OPERATING_DEFAULTS_DIGEST
