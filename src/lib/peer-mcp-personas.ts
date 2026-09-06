@@ -685,9 +685,9 @@ export function buildPeerAwarenessSnippet(opts: {
     return [
       "## Peer review and advisor",
       "",
-      `This is the fast launch profile. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for consequential unresolved uncertainty, conflicting evidence, or a genuinely stuck path, not routine progress, waiting, verification, or completion. \`mcp__${fastPeersKey}__oracle\` is exact Opus 5 (1M/high), a stateless last-resort consultant available to the lead and \`Plan\` when required; \`reviewer\` and other subagents cannot call Oracle.`,
+      `This is the fast launch profile. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance, framing checks, or conflicting signals (direction, not dictation), not routine progress, waiting, verification, or completion. \`mcp__${fastPeersKey}__oracle\` is exact Opus 5 (1M/high), an expert consultant available to the lead and \`Plan\`, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle.`,
       "",
-      `\`mcp__${fastSearchKey}__code\` is semantic-first code search and \`mcp__${fastSearchKey}__web\` surfaces citable sources. Native Task roster: \`Explore\` (broad discovery), \`Plan\` (sequencing, interfaces, migration risk, acceptance criteria), \`general-purpose\` (mixed execution), \`implementer\` (bounded coding), and \`reviewer\` (repo-aware verification/reproduction). \`Plan\` is an advisory planning capability, not an approval gate. Verify claims with concrete repository evidence and tests before declaring done.${browserClause}${workerBrowseClause}${artifactClause}`,
+      `\`mcp__${fastSearchKey}__code\` is semantic-first code search and \`mcp__${fastSearchKey}__web\` surfaces citable sources. Native Task roster: \`Explore\` (cheap broad discovery, launch in parallel), \`Plan\` (sequencing, interfaces, migration risk, acceptance criteria in plan mode), \`general-purpose\` (mixed execution), \`implementer\` (bounded coding), and \`reviewer\` (repo-aware verification after non-trivial changes). In plan mode, delegate planning to \`Plan\` and do not edit files. Verify claims with concrete repository evidence and tests before declaring done.${browserClause}${workerBrowseClause}${artifactClause}`,
       "Native delegation is ACL-scoped: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
     ].join("\n")
   }
@@ -877,9 +877,9 @@ export function buildPeerAwarenessSummary(opts: {
     return [
       "## Injected capabilities (summary)",
       "",
-      "Fast launch profile. Task roster: `Explore`, `Plan`, `general-purpose`, `implementer`, `reviewer`. `Plan` is an advisory planning capability, not an approval gate. Verify claims with concrete repository evidence and tests before declaring done.",
+      "Fast launch profile. Task roster: `Explore` (cheap discovery in parallel), `Plan` (planning in plan mode), `general-purpose`, `implementer`, `reviewer` (verification after implementation). Verify claims with concrete repository evidence and tests before declaring done.",
       "Native delegation is ACL-scoped: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
-      `Advisor is optional, non-binding, transcript-aware, and lead-only; use it for consequential unresolved uncertainty, not routine progress or workflow gates. \`mcp__${key("peers")}__oracle\` is exact Opus 5 (1M/high), stateless and last resort for the lead and \`Plan\`. \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
+      `Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). \`mcp__${key("peers")}__oracle\` is exact Opus 5 (1M/high), an expert consultant for the lead and \`Plan\`, preferred over advisor for substantive trade-offs. \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
     ].join("\n")
   }
   const renderNative = (name: NativeAgentName): string => {

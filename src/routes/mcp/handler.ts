@@ -319,13 +319,13 @@ function oracleToolEntry(): ToolEntry {
   return {
     name: "oracle",
     description:
-      "Fast-profile last-resort consultant (Opus 5 1M context at high effort) available only to the lead and Plan. Stateless and cold-start: it sees only what you paste, with no repo access, tools, or prior history. Use for conceptual, algorithmic, spec/protocol, or architectural tradeoffs when repository evidence cannot settle them. Pass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question. Not for code discovery, web search, approval, or execution.",
+      "Fast-profile expert consultant (Opus 5 1M context at high effort) available to the lead and Plan. Stateless and cold-start: it sees only what you paste, with no repo access, tools, or prior history.\n\nWhen to invoke: preferred for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs when repository evidence alone cannot settle them, or when multiple viable designs conflict. Preferred over advisor for substantive technical decisions that can be evaluated in a self-contained brief.\n\nWhen NOT to invoke: not for routine code lookup, web search, execution, approval, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.",
     inputSchema: {
       type: "object",
       required: ["query", "context"],
       additionalProperties: false,
       properties: {
-        query: { type: "string", description: "One precise, consequential unresolved question." },
+        query: { type: "string", description: "One precise, consequential unresolved question or architectural decision." },
         context: { type: "string", description: "Complete self-contained evidence, constraints, code excerpts with path:line, and ruled-out alternatives needed to evaluate cold-start." },
       },
     },
@@ -1226,7 +1226,7 @@ async function handleToolsCall(
       endpoint: "/v1/messages",
       description: "Fast-profile Oracle",
       baseInstructions:
-        "You are Oracle, a stateless last-resort consultant. You have no tools or repository access. Answer only from the supplied context. Give focused guidance or ask for the exact missing information. Never claim to execute, approve, merge, or authorize an action.",
+        "You are Oracle, an expert architectural and technical consultant running on Opus 5. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.",
       agentPrompt: "",
       writeCapable: false,
       requiresHttp: true,

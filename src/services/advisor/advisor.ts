@@ -481,11 +481,21 @@ export const FAST_ADVISOR_TOOL_INSTRUCTIONS = `# Advisor Tool
 
 You have access to an optional, transcript-aware \`advisor\` tool. It takes no parameters and returns non-binding consultation. You remain responsible for every decision.
 
-Use advisor only when a focused, consequential uncertainty remains after direct investigation: conflicting evidence, a materially changed assumption, a genuinely non-converging approach, a hard-to-reverse trade-off, or an explicit request for a fresh perspective. State the precise uncertainty in your response immediately before calling it.
+When to consult advisor:
+- Framing or assumption drift: when you suspect session momentum may have drifted from the user's core intent.
+- Trajectory guidance: when evaluating overall approach direction or when an approach is not converging.
+- Conflicting signals: when tool outputs or user feedback conflict and transcript context is required to evaluate why.
 
-Do not call advisor for routine progress, while waiting on a subagent, after ordinary tool output, for a fact that code or a command can verify, to obtain planner approval or reviewer verification, or as a ritual before implementation or completion.
+Discriminator vs. Oracle:
+- If the question requires knowing what happened in this session -> consult Advisor.
+- If the question is a technical, algorithmic, spec/protocol, or architectural fork that can be evaluated from a self-contained brief -> prefer Oracle.
 
-Treat the result as advice, not authority. Weigh it against the user's intent, verified repository evidence, planner output, and reviewer findings. You may consult again when materially new evidence creates a different question or directly conflicts with earlier advice.`
+When NOT to consult advisor:
+- For simple routine progress updates.
+- For factual questions that code search, tests, or compiler/linter commands can settle.
+- As a ritual or mandatory gate before trivial edits or completion.
+
+Treat the result as advisory guidance and direction, not dictation. Weigh it against verified repository evidence. You may consult again when materially new evidence creates a distinct question.`
 
 const ADVISOR_OPT_OUT_ENV = "CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
 
