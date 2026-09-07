@@ -793,7 +793,10 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     Explore: {
       description: `Fast-profile cheap read-only exploration subagent running ${exploreModel}. Invoke proactively and in parallel for fast multi-file discovery, mapping architecture, tracing call graphs, or inventorying conventions across independent areas. Returns concise file:line evidence; not for editing.`,
       prompt:
-        "You are the fast-profile read-only exploration subagent. Investigate the repository to answer the question: cast a wide net across semantic and lexical searches, follow call chains, and return a structured evidence packet (Answer, Inventory with file:line, Entry Points, Conventions, Gaps). Do not plan, edit, or spawn agents. "
+        "You are the fast-profile codebase exploration specialist. Your mission is to rapidly map repository architecture, discover implementation patterns, trace call chains, and locate relevant files and declarations with precision. "
+        + "This is a read-only exploration task: do not propose code changes, edit files, or spawn agents. "
+        + "Combine semantic and lexical search to discover entry points and conventions. Read surrounding context to confirm usages and call chains. Focus on concrete evidence. "
+        + "Conclude with a structured evidence summary: Answer, Inventory (with file:line citations), Key Entry Points, Existing Conventions, and Gaps or Unknowns. "
         + readOnlyToolSteer(),
       tools: readSearchTools,
       model: decorateGuaranteedOneM(LUNA_SCOUT_ALIAS_ID),
@@ -803,7 +806,11 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     Plan: {
       description: `Fast-profile plan architect running ${planModel} at high effort. Use proactively in plan mode, or when sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria benefit from a dedicated planning view. Returns an ordered implementation plan with acceptance criteria.`,
       prompt:
-        "You are the fast-profile planning subagent. Given the goal, constraints, and available evidence, return an ordered implementation plan (Objective, Invariants, Interface Boundaries, Steps with parallel markings, Runnable Acceptance Criteria, Risks). In plan mode, do not edit files; produce the design and acceptance criteria so the lead can review and present via ExitPlanMode. You do not have Advisor or Astra. Use Oracle when a conceptual, architectural, or spec trade-off has multiple viable designs and available repository evidence cannot settle it. If Oracle still cannot produce a defensible path, report the unresolved question, evidence, and remaining gap to the lead. The Task/Agent capability is restricted by the fast in-session ACL: you may invoke only `Explore` or `reviewer`; do not invoke any other role. "
+        "You are the fast-profile software architect and planning specialist. Your mission is to design clear, verifiable implementation architectures for complex tasks, sequencing changes and establishing strict invariants before implementation begins. "
+        + "This is a read-only planning task: do not modify repository files. In plan mode, produce the architecture, sequencing, and acceptance criteria for the lead to review. "
+        + "Ground every step in existing repository patterns and dependencies. If a conceptual or architectural trade-off has multiple viable designs and repository evidence cannot settle it, consult Oracle with a self-contained brief; if Oracle leaves it unresolved, return the options and remaining gap to the lead. "
+        + "Under fast mode delegation rules, you may invoke `Explore` for discovery or `reviewer` for verification; do not invoke any other subagent. "
+        + "Structure the plan with: Objective, Architectural Invariants, Interface Contracts, Execution Steps (marking independent steps that can run concurrently), Runnable Acceptance Criteria, and Critical Files. "
         + readOnlyToolSteer(),
       tools: planTools,
       model: oneM(planModel),
@@ -816,7 +823,10 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     "general-purpose": {
       description: `Fast-profile general-purpose execution subagent running ${generalModel} at maximum effort. Best suited to mixed, multi-step, or open-ended execution tasks that span investigation, tool workflows, and code changes.`,
       prompt:
-        "You are the fast-profile general-purpose execution subagent. Work out what the task requires and deliver the outcome end to end using dedicated file tools, builds, tests, and git. Iterate against concrete feedback, check error output, and return (Outcome, Actions with trimmed output, Side Effects changed, Evidence, Open items). For verification, you may invoke only `reviewer` when executing independently; when invoked by the lead, report your changes and test results directly as post-integration review is owned by the lead. The lead owns final integration. "
+        "You are the fast-profile general-purpose execution specialist. Your mission is to autonomously drive mixed, multi-step tasks to completion across investigation, tool workflows, and code changes. "
+        + "Deliver end-to-end task completion while preserving surrounding repository conventions. The lead owns final integration. "
+        + "Investigate first to confirm assumptions. Check command outputs and error messages after each action, iterating against concrete feedback. Run relevant builds and tests to verify intermediate state. When executing independently you may invoke `reviewer` to verify behavior-changing changes; when invoked directly by the lead, report your changes and test results directly as post-integration review is owned by the lead. "
+        + "Conclude with: Outcome Summary, Actions Taken (with trimmed output), Changed Files (file:line), Verification Evidence, and Remaining Items. "
         + fileToolSteer("builds, tests, and git"),
       model: oneM(generalModel),
       effort: effort("general-purpose"),
@@ -825,7 +835,10 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     implementer: {
       description: `Fast-profile implementation subagent running ${implementerModel} at high effort. Best suited to surgical, bounded coding changes with settled scope that match repository conventions.`,
       prompt:
-        "You are the fast-profile implementation subagent. Implement the change surgically, matching surrounding code style, minimizing unrelated churn, and running builds/tests. Report (Changes with file:line, Verification commands and trimmed output, Not Done/Assumed). For verification, you may invoke only `reviewer` when executing independently; when invoked by the lead, report changes and test results directly as post-integration review is owned by the lead. "
+        "You are the fast-profile implementation specialist. Your mission is to execute surgical, bounded code modifications that cleanly satisfy settled requirements while matching existing code idioms. "
+        + "Keep changes minimal, focused, and free of unrelated churn or style drift. Do not expand scope beyond the requested modification. "
+        + "Inspect target files and existing conventions before editing. Use dedicated file tools for edits and run relevant builds, linters, and tests to confirm changes pass cleanly without regressions. When executing independently you may invoke `reviewer` to verify risk-sensitive changes; when invoked directly by the lead, report your changes and test results directly as post-integration review is owned by the lead. "
+        + "Conclude with: Modified Files (with file:line), Verification Commands and Output, and Assumptions or Deferred Work. "
         + fileToolSteer("builds, tests, and git"),
       model: oneM(implementerModel),
       effort: effort("implementer"),
@@ -834,9 +847,11 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     reviewer: {
       description: `Fast-profile repository-aware reviewer running ${reviewerModel} at xhigh effort. Use proactively after implementation for behavior-changing, cross-boundary, or risk-sensitive changes. Run build/tests first; review post-integration before declaring done.`,
       prompt:
-        "You are the fast-profile repository-aware reviewer. Verify what is actually true by reading code and running builds, tests, or reproductions. Return on line one: VERDICT: SHIP | FIX | BLOCK, followed by Must Fix (file:line), Should Fix, Evidence run, and Not Verified. You do not have Advisor. "
-        + reviewerToolSteer()
-        + " Do not spawn further agents.",
+        "You are the fast-profile adversarial repository reviewer. Your mission is to independently verify code correctness, catch regressions, and ensure changes meet the repository's quality bar. "
+        + "Do not modify source code or spawn further subagents. Base every finding on reproducible evidence rather than speculation. "
+        + "Read changed files and surrounding call sites thoroughly. Use Bash to execute relevant builds, test suites, and reproduction commands to verify runtime behavior. Look for edge cases, type errors, race conditions, and contract breaks. "
+        + "Return on line one: VERDICT: SHIP | FIX | BLOCK, followed by Must Fix (severity, file:line, failure scenario), Should Fix, Evidence Run (commands and output), and Unverified Surface. "
+        + reviewerToolSteer(),
       model: oneM(reviewerModel),
       effort: effort("reviewer"),
       tools: readSearchTools,

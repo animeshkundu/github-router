@@ -3596,10 +3596,22 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
 
       // 4. tools/call under lead-peers nonce dispatches to /v1/responses with gpt-6-astra
       let dispatchedUrl = ""
-      let dispatchedBody: Record<string, unknown> | null = null
+      let dispatchedBody: {
+        model?: string
+        reasoning?: { effort?: string }
+        instructions?: string
+        input?: Array<{ content: Array<{ text: string }> }>
+      } | null = null
       globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
         dispatchedUrl = input.toString()
-        if (init?.body) dispatchedBody = JSON.parse(init.body.toString()) as Record<string, unknown>
+        if (init?.body) {
+          dispatchedBody = JSON.parse(init.body.toString()) as {
+            model?: string
+            reasoning?: { effort?: string }
+            instructions?: string
+            input?: Array<{ content: Array<{ text: string }> }>
+          }
+        }
         return Response.json({
           id: "resp-123",
           output: [

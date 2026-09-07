@@ -1749,7 +1749,10 @@ export const claude = defineCommand({
     // If the CLAUDE.md append happened to fail, the agent still has every tool's
     // own description in tools/list (the real routing signal); it just loses this
     // higher-level overview.
-    const operatingDefaultsDigest = buildOperatingDefaultsDigest({ profile: launchProfileId })
+    const operatingDefaultsDigest = buildOperatingDefaultsDigest({
+      profile: launchProfileId,
+      astraAvailable,
+    })
     extraArgs.push(
       "--append-system-prompt",
       peerAwarenessSnippet && peerAwarenessSummary
