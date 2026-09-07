@@ -3596,16 +3596,18 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
 
       // 4. tools/call under lead-peers nonce dispatches to /v1/responses with gpt-6-astra
       let dispatchedUrl = ""
-      let dispatchedBody: {
-        model?: string
-        reasoning?: { effort?: string }
-        instructions?: string
-        input?: Array<{ content: Array<{ text: string }> }>
-      } | null = null
+      const dispatchedCapture: {
+        body?: {
+          model?: string
+          reasoning?: { effort?: string }
+          instructions?: string
+          input?: Array<{ content: Array<{ text: string }> }>
+        }
+      } = {}
       globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
         dispatchedUrl = input.toString()
         if (init?.body) {
-          dispatchedBody = JSON.parse(init.body.toString()) as {
+          dispatchedCapture.body = JSON.parse(init.body.toString()) as {
             model?: string
             reasoning?: { effort?: string }
             instructions?: string
@@ -3638,10 +3640,10 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       const text = content[0]?.text ?? ""
       expect(text).toContain("PATH_FOUND")
       expect(dispatchedUrl).toContain("/responses")
-      expect(dispatchedBody?.model).toBe("gpt-6-astra")
-      expect(dispatchedBody?.reasoning).toEqual({ effort: "high" })
-      expect(dispatchedBody?.instructions).toContain("You are Astra")
-      const firstInput = (dispatchedBody?.input as Array<{ content: Array<{ text: string }> }>)?.[0]
+      expect(dispatchedCapture.body?.model).toBe("gpt-6-astra")
+      expect(dispatchedCapture.body?.reasoning).toEqual({ effort: "high" })
+      expect(dispatchedCapture.body?.instructions).toContain("You are Astra")
+      const firstInput = (dispatchedCapture.body?.input as Array<{ content: Array<{ text: string }> }>)?.[0]
       expect(firstInput?.content[0]?.text).toContain("<query>Which approach?</query>")
     } finally {
       state.models = saved
