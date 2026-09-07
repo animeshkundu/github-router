@@ -178,6 +178,7 @@ export interface NativeAgentAvailability {
   fleetAvailable?: boolean
   agentToolsAvailable?: boolean
   artifactAvailable?: boolean
+  astraAvailable?: boolean
   groupKeys?: Partial<Record<string, string>>
   peersKey?: string
 }
@@ -375,6 +376,10 @@ export function buildOperatingDefaultsDirective(
       ? ` \`mcp__${peersKey}__artifact_*\` provides human review in the artifact panel with auto-open on plan completion.`
       : ""
 
+    const astraClause = opts.astraAvailable
+      ? ` \`mcp__${peersKey}__astra\` (GPT-6 Astra 200K/high) is the terminal escalation consultant for the lead only, reserved strictly for the hardest dead ends when direct evidence, Advisor, and Oracle have all failed to produce a defensible path (consulted at most 1-2 times per decision with concise context and specific questions).`
+      : ""
+
     return (
       "## Operating defaults (apply when the user has not specified otherwise; the "
       + "user's explicit direction and the domain's own standards always override)\n\n"
@@ -385,8 +390,8 @@ export function buildOperatingDefaultsDirective(
       + "Handle trivial, surgical, single-file, or single-command tasks directly; you do not need to justify skipping delegation. "
       + "`Explore` is cheap and may be launched in parallel across independent discovery questions. Send independent subagent calls in parallel within a single turn. "
       + "Delegation graph: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
-      + "Consultation guidance: Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance, framing drift, or conflicting signals; take advice as direction, not dictation, and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
-      + `\`mcp__${peersKey}__oracle\` is exact Opus 5 (1M/high), an expert consultant available to the lead and \`Plan\`, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. `
+      + "Consultation guidance: Follow an evidence-first escalation ladder. Direct empirical evidence (search, code, tests, builds) settles factual questions first. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance or framing checks (direction, not dictation), and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
+      + `\`mcp__${peersKey}__oracle\` is exact Opus 5 (1M/high), an expert consultant available to the lead and \`Plan\`, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. \`Plan\` has neither Advisor nor Astra; if Oracle leaves Plan blocked, Plan reports the unresolved question and evidence back to the lead.${astraClause} `
       + `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable sources.${browserClause}${workerBrowseClause}${artifactClause}\n\n`
       + "Verify claims with concrete repository evidence and tests before declaring work done. User instructions outrank delegation triggers. Stop named teammates when finished."
     )
@@ -451,7 +456,7 @@ export function buildOperatingDefaultsDigest(
     return (
       "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
       + "Fast launch profile. The lead coordinates execution across specialized roles: delegate to `Plan` in plan mode or when structuring complex multi-step sequencing (`Plan` is an advisory planning capability, not an approval gate); delegate to `reviewer` after behavior-changing or risk-sensitive implementation to verify correctness before declaring done; `Explore` is cheap and may be launched in parallel for broad discovery; use `implementer` or `general-purpose` for execution; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n"
-      + "Verify claims against real evidence: run relevant commands and tests. Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). `oracle` (Opus 5 1M/high) is an expert consultant for the lead and `Plan`, preferred over advisor for substantive architectural or algorithmic trade-offs."
+      + "Verify claims against real evidence: run relevant commands and tests. Follow a disciplined consultation ladder for unresolved decisions: (1) direct code inspection, search, builds, and tests settle factual questions; (2) `advisor` (Sol/high, lead-only) for transcript-aware framing checks or trajectory guidance; (3) `oracle` (Opus 5 1M/high, lead and Plan) for self-contained technical/architectural trade-offs; (4) `astra` (GPT-6 Astra 200K/high, lead-only) only as a last resort when direct evidence, Advisor, and Oracle cannot produce a defensible path (at most 1-2 calls per decision)."
     )
   }
   return STANDARD_OPERATING_DEFAULTS_DIGEST

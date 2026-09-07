@@ -260,6 +260,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   fastReviewerModel: mock(() => "claude-sonnet-5"),
   fastAdvisorModel: mock(() => "gemini-3.8-flash"),
   fastOracleModel: mock(() => "claude-opus-5"),
+  fastAstraModel: mock(() => undefined),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
   FAST_GENERAL_PURPOSE_EFFORT: "max",

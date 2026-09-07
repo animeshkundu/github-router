@@ -70,7 +70,7 @@ export const STANDARD_PROFILE: LaunchProfileDescriptor = Object.freeze({
 export const FAST_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "fast",
   nativeRoster: new Set(FAST_PROFILE_NATIVE_AGENT_NAMES),
-  personaAllowlist: new Set(["oracle"]),
+  personaAllowlist: new Set(["oracle", "astra"]),
   allowedGroups: new Set(["peers", "search", "workers", "browser"]),
   hasCoordinator: false,
 })

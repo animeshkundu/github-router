@@ -613,6 +613,8 @@ export function buildPeerAwarenessSnippet(opts: {
   agentToolsAvailable?: boolean
   /** Whether the ai-or-die Artifact review tools are enabled for this launch. */
   artifactToolsAvailable?: boolean
+  /** Whether GPT-6 Astra is available for the fast profile. */
+  astraAvailable?: boolean
   /** Whether `scout` resolved a cheap-tier model and was therefore emitted.
    *  Unlike the other natives it is dropped rather than downgraded to the lead's
    *  model, so naming it unconditionally here would advertise an agent that is
@@ -682,10 +684,13 @@ export function buildPeerAwarenessSnippet(opts: {
     const artifactClause = opts.artifactToolsAvailable
       ? ` \`mcp__${fastPeersKey}__artifact_*\` provides artifact review with auto-open on plan completion.`
       : ""
+    const astraClause = opts.astraAvailable
+      ? ` \`mcp__${fastPeersKey}__astra\` is GPT-6 Astra (200K/high), an expensive terminal escalation consultant available to the lead only for hardest dead ends.`
+      : ""
     return [
       "## Peer review and advisor",
       "",
-      `This is the fast launch profile. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance, framing checks, or conflicting signals (direction, not dictation), not routine progress, waiting, verification, or completion. \`mcp__${fastPeersKey}__oracle\` is exact Opus 5 (1M/high), an expert consultant available to the lead and \`Plan\`, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle.`,
+      `This is the fast launch profile. Follow an evidence-first escalation ladder: settle factual claims directly through code, tests, and builds. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance, framing checks, or conflicting signals (direction, not dictation), not routine progress, waiting, verification, or completion. \`mcp__${fastPeersKey}__oracle\` is exact Opus 5 (1M/high), an expert consultant available to the lead and \`Plan\`, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle.${astraClause}`,
       "",
       `\`mcp__${fastSearchKey}__code\` is semantic-first code search and \`mcp__${fastSearchKey}__web\` surfaces citable sources. Native Task roster: \`Explore\` (cheap broad discovery, launch in parallel), \`Plan\` (sequencing, interfaces, migration risk, acceptance criteria in plan mode), \`general-purpose\` (mixed execution), \`implementer\` (bounded coding), and \`reviewer\` (repo-aware verification after non-trivial changes). In plan mode, delegate planning to \`Plan\` and do not edit files. Verify claims with concrete repository evidence and tests before declaring done.${browserClause}${workerBrowseClause}${artifactClause}`,
       "Native delegation is ACL-scoped: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
@@ -855,6 +860,8 @@ export function buildPeerAwarenessSummary(opts: {
    *  decision surface. */
   nativeAgentModels?: Partial<Record<NativeAgentName, string | undefined>>
   groupKeys?: Partial<Record<McpGroup, string>>
+  /** Whether GPT-6 Astra is available for the fast profile. */
+  astraAvailable?: boolean
   /** `"fast"` for the fast launch profile: a hard roster restriction (see the
    *  matching option on `buildPeerAwarenessSnippet`). Every other flag on
    *  this call is ignored in favor of a short fast-profile rendering. Same
@@ -874,12 +881,15 @@ export function buildPeerAwarenessSummary(opts: {
     const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
     const browserClause = directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""
     const workerBrowseClause = opts.browseAvailable ? ` \`worker-browse\` runs delegated browsing tasks through \`mcp__${key("workers")}__browse\`.` : ""
+    const astraClause = opts.astraAvailable
+      ? ` \`mcp__${key("peers")}__astra\` is GPT-6 Astra (200K/high), lead-only escalation for hardest dead ends.`
+      : ""
     return [
       "## Injected capabilities (summary)",
       "",
       "Fast launch profile. Task roster: `Explore` (cheap discovery in parallel), `Plan` (planning in plan mode), `general-purpose`, `implementer`, `reviewer` (verification after implementation). Verify claims with concrete repository evidence and tests before declaring done.",
       "Native delegation is ACL-scoped: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
-      `Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). \`mcp__${key("peers")}__oracle\` is exact Opus 5 (1M/high), an expert consultant for the lead and \`Plan\`, preferred over advisor for substantive trade-offs. \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
+      `Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). \`mcp__${key("peers")}__oracle\` is exact Opus 5 (1M/high), an expert consultant for the lead and \`Plan\`, preferred over advisor for substantive trade-offs.${astraClause} \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
     ].join("\n")
   }
   const renderNative = (name: NativeAgentName): string => {

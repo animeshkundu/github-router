@@ -142,6 +142,7 @@ import {
   fastReviewerModel,
   fastAdvisorModel,
   fastOracleModel,
+  fastAstraModel,
 } from "./lib/mcp-capabilities"
 import {
   getClaudeCodeEnvVars,
@@ -786,6 +787,7 @@ export const claude = defineCommand({
     let peerAwarenessSummary: string | undefined
     let operatingGroupKeys: Partial<Record<McpGroup, string>> = {}
     let fastWiringComplete = launchProfileId !== "fast"
+    const astraAvailable = launchProfileId === "fast" && Boolean(fastAstraModel())
     const browseAgentAvailable = browseAgentEnabled()
     const directBrowserAvailable = browserToolsEnabled()
     const artifactAvailable = artifactToolsEnabled()
@@ -948,6 +950,9 @@ export const claude = defineCommand({
         ) {
           throw new Error("fast profile prerequisite drift: exact Oracle, Advisor, or implementer model no longer resolves")
         }
+        const leadPeersNonce = isFastProfile && astraAvailable
+          ? randomBytes(32).toString("hex")
+          : undefined
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
           codexCli: backend === "cli",
           selfInvocation,
@@ -956,6 +961,7 @@ export const claude = defineCommand({
             ? maxGeminiModel()
             : resolveGeminiReviewModel(),
           groupKeys,
+          parentGroupNonceOverrides: leadPeersNonce ? { peers: leadPeersNonce } : undefined,
           workerToolsAvailable: !isFastProfile && !isMaxProfile && workerToolsEnabled(),
           browseAvailable: browseAgentAvailable,
           nativeSubagentModel: nativeAgentModels.implementer,
@@ -1023,6 +1029,7 @@ export const claude = defineCommand({
         const launchEntry = registerLaunch({
           profileId: launchProfileId,
           nonce: runtime.nonce,
+          leadPeersNonce,
           secret: launchSecret,
           allowedGroups: fastDescriptor.allowedGroups,
           allowedPersonas: fastDescriptor.personaAllowlist,
@@ -1644,6 +1651,7 @@ export const claude = defineCommand({
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
           artifactToolsAvailable: artifactAvailable,
+          astraAvailable,
           ...nativeAvailability,
           profile: launchProfileId,
           groupKeys,
@@ -1662,6 +1670,7 @@ export const claude = defineCommand({
           fleetAvailable: fleetToolsEnabled(),
           agentToolsAvailable: agentToolsEnabled(),
           artifactToolsAvailable: artifactAvailable,
+          astraAvailable,
           ...nativeAvailability,
           profile: launchProfileId,
           nativeAgentModels,
@@ -1755,6 +1764,7 @@ export const claude = defineCommand({
           browseAvailable: browseAgentAvailable,
           browserToolsAvailable: directBrowserAvailable,
           artifactAvailable,
+          astraAvailable,
           groupKeys: operatingGroupKeys,
           peersKey: operatingGroupKeys.peers,
         }),

@@ -123,6 +123,8 @@ interface BuildOpts {
   codexHome: string
   /** headersHelper command emitted on each HTTP entry for per-session workspace routing. */
   workspaceHeaderCmd?: string
+  /** Optional group nonce overrides for parent config (e.g. fast profile lead peers nonce). */
+  parentGroupNonceOverrides?: Partial<Record<McpGroup, string>>
   /** Base proxy URL (e.g. `http://127.0.0.1:PORT`). Needed by
    *  `buildPeerAgentDefinitions` to inline each subagent's scoped HTTP MCP
    *  server config into its `.md` frontmatter (claude-code#30280 workaround).
@@ -286,7 +288,8 @@ export function buildPeerMcpConfig(
   for (const group of MCP_GROUPS) {
     const key = opts.groupKeys[group]
     if (!key) continue // group disabled at launch, or both keys collided
-    mcpServers[key] = httpEntryFor(serverUrl, group, opts.nonce, workspaceHeaderCmd)
+    const groupNonce = opts.parentGroupNonceOverrides?.[group] ?? opts.nonce
+    mcpServers[key] = httpEntryFor(serverUrl, group, groupNonce, workspaceHeaderCmd)
   }
 
   if (opts.codexCli) {
@@ -800,7 +803,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     Plan: {
       description: `Fast-profile plan architect running ${planModel} at high effort. Use proactively in plan mode, or when sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria benefit from a dedicated planning view. Returns an ordered implementation plan with acceptance criteria.`,
       prompt:
-        "You are the fast-profile planning subagent. Given the goal, constraints, and available evidence, return an ordered implementation plan (Objective, Invariants, Interface Boundaries, Steps with parallel markings, Runnable Acceptance Criteria, Risks). In plan mode, do not edit files; produce the design and acceptance criteria so the lead can review and present via ExitPlanMode. You do not have Advisor. Use Oracle when a conceptual, architectural, or spec trade-off has multiple viable designs and available repository evidence cannot settle it. The Task/Agent capability is restricted by the fast in-session ACL: you may invoke only `Explore` or `reviewer`; do not invoke any other role. "
+        "You are the fast-profile planning subagent. Given the goal, constraints, and available evidence, return an ordered implementation plan (Objective, Invariants, Interface Boundaries, Steps with parallel markings, Runnable Acceptance Criteria, Risks). In plan mode, do not edit files; produce the design and acceptance criteria so the lead can review and present via ExitPlanMode. You do not have Advisor or Astra. Use Oracle when a conceptual, architectural, or spec trade-off has multiple viable designs and available repository evidence cannot settle it. If Oracle still cannot produce a defensible path, report the unresolved question, evidence, and remaining gap to the lead. The Task/Agent capability is restricted by the fast in-session ACL: you may invoke only `Explore` or `reviewer`; do not invoke any other role. "
         + readOnlyToolSteer(),
       tools: planTools,
       model: oneM(planModel),
@@ -1263,6 +1266,8 @@ interface WriteOpts {
   runtimeDir?: string
   /** Override for tests. Defaults to a fresh 32-byte hex nonce. */
   nonce?: string
+  /** Optional group nonce overrides for parent config (e.g. fast profile lead peers nonce). */
+  parentGroupNonceOverrides?: Partial<Record<McpGroup, string>>
   /** Override for tests. Defaults to ~/.claude/agents (where Claude Code
    *  reads subagent .md files at session start). */
   agentsDir?: string
@@ -1762,6 +1767,7 @@ export async function writePeerMcpRuntimeFiles(
     geminiModel: opts.geminiModel,
     groupKeys: opts.groupKeys,
     nonce,
+    parentGroupNonceOverrides: opts.parentGroupNonceOverrides,
     codexHome,
     workspaceHeaderCmd: buildWorkspaceHeaderHelperCommand(opts.selfInvocation),
   })
