@@ -107,6 +107,7 @@ Only the trimmed raw alias `fast` selects this profile. It is a Gemini-led, role
 | `reviewer` | `claude-sonnet-5[1m]` | xhigh | Repository-aware review/reproduction/tests |
 | Advisor | `gpt-5.6-sol[1m]` | high | Transcript-aware brainstorming/sounding board/fresh look |
 | `oracle` | `claude-opus-5[1m]` | high | Stateless last-resort guidance (lead & Plan only) |
+| `astra` | `gpt-6-astra` | high | Stateless terminal escalation (200K window, lead only) |
 
 All required catalog models are mandatory. Startup fails with an actionable list rather than substituting a model or shipping a partial surface. Grok stays bare because its live limits are 500K total, 372K prompt, and 128K output. There is no separate `critic` subagent in Fast; Gemini 3.8 Flash serves the native `implementer` role at high effort.
 
@@ -128,7 +129,7 @@ Fast mode structures delegation as complementary affordances (a menu of capabili
 Fast mode serves:
 
 - `search`: `code` and `web`;
-- `peers`: only `oracle` (scoped to lead and `Plan`);
+- `peers`: `oracle` (scoped to lead and `Plan`), plus `astra` when present (scoped strictly to the lead);
 - `workers`: conditional `worker-browse` when the browser gate passes;
 - `artifact`: `artifact_*` panel tools and `PostToolUse(ExitPlanMode)` auto-open when inside an ai-or-die tab environment;
 - `browser`: only when `--browse` and installed browser gates pass.
@@ -136,6 +137,8 @@ Fast mode serves:
 It hard-denies core filesystem workers (explore, implement, review, plan, test), orchestrate, decide (`stand_in`), fleet, first-mate, standard peer critics, the coordinator, non-browser dispatcher agents, and related skills. `--codex-cli` is ignored with a visible note so it cannot widen the profile.
 
 `oracle` is exact Opus 5 with native 1M context and high effort. Its schema is only required `query` and `context`; it receives no transcript, tools, images, continuation loop, or execution authority. Input over 256 KiB is refused rather than truncated.
+
+`astra` is OpenAI GPT-6 Astra at fixed high reasoning effort via `/responses`. It enforces a 200,000-token policy window and is strictly lead-only. Consulted as a last resort only when direct empirical evidence, Advisor, and Oracle cannot produce a defensible path. Returns concise, structured Markdown (`PATH_FOUND` | `NEED_EVIDENCE` | `NO_DEFENSIBLE_PATH`). Expected consultation: at most 1-2 calls per decision.
 
 ### Prompt engineering and official guidance sources
 

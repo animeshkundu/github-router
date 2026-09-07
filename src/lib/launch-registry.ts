@@ -6,6 +6,13 @@ import { state, type LaunchRegistryEntry } from "./state"
 
 export type { LaunchRegistryEntry }
 
+export type McpAudience = "shared" | "lead-peers"
+
+export interface McpAuthContext {
+  launch: LaunchRegistryEntry
+  audience: McpAudience
+}
+
 /**
  * Register a new authenticated launch (a `github-router claude` process, or
  * `serve`'s per-repo session) in the keyed registry. Returns the stored
@@ -20,14 +27,19 @@ export type { LaunchRegistryEntry }
 export function registerLaunch(params: {
   profileId: LaunchProfileId
   nonce: string
+  leadPeersNonce?: string
   secret: string
   allowedGroups?: ReadonlySet<string>
   allowedPersonas?: ReadonlySet<string>
   launchId?: string
 }): LaunchRegistryEntry {
+  if (params.leadPeersNonce && constantTimeStringEqual(params.nonce, params.leadPeersNonce)) {
+    throw new Error("registerLaunch: leadPeersNonce must be distinct from nonce")
+  }
   const entry: LaunchRegistryEntry = {
     launchId: params.launchId ?? randomUUID(),
     nonce: params.nonce,
+    leadPeersNonce: params.leadPeersNonce,
     secret: params.secret,
     profileId: params.profileId,
     allowedGroups: params.allowedGroups,
@@ -66,17 +78,30 @@ function constantTimeStringEqual(a: string, b: string): boolean {
 }
 
 /**
- * Find the launch whose `/mcp` bearer (`nonce`) matches. Linear scan over
+ * Find the launch whose `/mcp` bearer (`nonce` or `leadPeersNonce`) matches,
+ * returning the launch entry and the identified audience ("shared" vs "lead-peers").
+ */
+export function findLaunchMcpAuthByNonce(nonce: string): McpAuthContext | undefined {
+  for (const entry of state.launchRegistry.values()) {
+    if (entry.leadPeersNonce && constantTimeStringEqual(entry.leadPeersNonce, nonce)) {
+      return { launch: entry, audience: "lead-peers" }
+    }
+    if (constantTimeStringEqual(entry.nonce, nonce)) {
+      return { launch: entry, audience: "shared" }
+    }
+  }
+  return undefined
+}
+
+/**
+ * Find the launch whose `/mcp` bearer (`nonce` or `leadPeersNonce`) matches. Linear scan over
  * `state.launchRegistry` — expected to hold a handful of entries at most
  * (one per concurrently running `claude`/`serve` session), so this is not a
  * hot-path concern. Returns undefined (never throws) when nothing matches,
  * including when the registry is empty (the "not enabled" case).
  */
 export function findLaunchByNonce(nonce: string): LaunchRegistryEntry | undefined {
-  for (const entry of state.launchRegistry.values()) {
-    if (constantTimeStringEqual(entry.nonce, nonce)) return entry
-  }
-  return undefined
+  return findLaunchMcpAuthByNonce(nonce)?.launch
 }
 
 /** Find the launch whose `/v1/messages` identity-preflight bearer

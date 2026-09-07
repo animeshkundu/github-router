@@ -30,6 +30,11 @@ export interface LaunchRegistryEntry {
   launchId: string
   /** `/mcp` Streamable HTTP bearer for this launch. */
   nonce: string
+  /**
+   * Optional lead-only `/mcp` bearer for fast profile.
+   * Grants access to lead-only tools such as `astra`.
+   */
+  leadPeersNonce?: string
   /** `/v1/messages` identity-preflight bearer for this launch. */
   secret: string
   /** Which launch profile authenticated this entry. */

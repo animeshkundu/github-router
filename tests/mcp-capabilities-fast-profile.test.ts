@@ -18,6 +18,8 @@ import {
   FAST_ADVISOR_EFFORT,
   FAST_ORACLE_MODEL,
   FAST_ORACLE_EFFORT,
+  FAST_PROFILE_ASTRA_MODEL,
+  FAST_PROFILE_ASTRA_EFFORT,
   fastScoutModel,
   fastPlanModel,
   fastGeneralPurposeModel,
@@ -25,6 +27,7 @@ import {
   fastReviewerModel,
   fastAdvisorModel,
   fastOracleModel,
+  fastAstraModel,
 } from "~/lib/mcp-capabilities"
 import { state } from "~/lib/state"
 
@@ -40,6 +43,7 @@ function entry(
     efforts?: string[]
     endpoints?: string[]
     adaptiveThinking?: boolean
+    tokenizer?: string
   },
 ) {
   return {
@@ -53,7 +57,7 @@ function entry(
     capabilities: {
       family: id,
       object: "model_capabilities",
-      tokenizer: "o200k_base",
+      tokenizer: opts?.tokenizer ?? "o200k_base",
       type: "chat",
       limits: {
         ...(opts?.ctx === undefined ? {} : { max_context_window_tokens: opts.ctx }),
@@ -184,4 +188,55 @@ test("fast Oracle pins to exact Opus 5 1M high on messages with adaptive thinkin
     }),
   )
   expect(fastOracleModel()).toBe("claude-opus-5")
+})
+
+test("fast Astra pins to exact gpt-6-astra 200k high on responses", () => {
+  expect(FAST_PROFILE_ASTRA_MODEL).toBe("gpt-6-astra")
+  expect(FAST_PROFILE_ASTRA_EFFORT).toBe("high")
+  setCatalog(
+    entry("gpt-6-astra", {
+      ctx: 200_000,
+      maxPrompt: 200_000,
+      efforts: ["high"],
+      endpoints: ["/responses"],
+      tokenizer: "o200k_base",
+    }),
+  )
+  expect(fastAstraModel()).toBe("gpt-6-astra")
+
+  // Under 200k tokens context/prompt rejects
+  setCatalog(
+    entry("gpt-6-astra", {
+      ctx: 100_000,
+      maxPrompt: 200_000,
+      efforts: ["high"],
+      endpoints: ["/responses"],
+      tokenizer: "o200k_base",
+    }),
+  )
+  expect(fastAstraModel()).toBeUndefined()
+
+  // Missing high effort rejects
+  setCatalog(
+    entry("gpt-6-astra", {
+      ctx: 200_000,
+      maxPrompt: 200_000,
+      efforts: ["low"],
+      endpoints: ["/responses"],
+      tokenizer: "o200k_base",
+    }),
+  )
+  expect(fastAstraModel()).toBeUndefined()
+
+  // Wrong endpoint rejects
+  setCatalog(
+    entry("gpt-6-astra", {
+      ctx: 200_000,
+      maxPrompt: 200_000,
+      efforts: ["high"],
+      endpoints: ["/v1/chat/completions"],
+      tokenizer: "o200k_base",
+    }),
+  )
+  expect(fastAstraModel()).toBeUndefined()
 })

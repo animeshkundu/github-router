@@ -3530,4 +3530,124 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
     expect(names).toContain("gemini_critic")
     expect(names).toContain("opus_critic")
   })
+
+  test("fast Astra: lead-peers audience lists and dispatches gpt-6-astra; shared audience rejects with -32601", async () => {
+    const FAST_LEAD_NONCE = "l".repeat(64)
+    const FAST_SHARED_NONCE = "s".repeat(64)
+    const dualLaunch = registerLaunch({
+      profileId: "fast",
+      nonce: FAST_SHARED_NONCE,
+      leadPeersNonce: FAST_LEAD_NONCE,
+      secret: "fast-dual-secret",
+      allowedGroups: new Set(["peers", "search"]),
+      allowedPersonas: new Set(["oracle", "astra"]),
+    })
+    const saved = state.models
+    try {
+      state.models = {
+        object: "list",
+        data: [{
+          id: "gpt-6-astra",
+          name: "gpt-6-astra",
+          object: "model",
+          vendor: "openai",
+          version: "1",
+          preview: false,
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: {
+            family: "gpt-6-astra",
+            object: "model_capabilities",
+            tokenizer: "o200k_base",
+            type: "chat",
+            limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 1_000_000 },
+            supports: { reasoning_effort: ["high", "max"] },
+          },
+        }],
+      } as never
+
+      // 1. tools/list under shared nonce (Plan/subagents) does NOT list astra
+      const sharedList = await rpc(
+        { jsonrpc: "2.0", id: 10, method: "tools/list" },
+        { auth: `Bearer ${FAST_SHARED_NONCE}` },
+      )
+      const sharedNames = (sharedList.json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+      expect(sharedNames).not.toContain("astra")
+
+      // 2. tools/list under lead-peers nonce (Lead model) DOES list astra
+      const leadList = await rpc(
+        { jsonrpc: "2.0", id: 11, method: "tools/list" },
+        { auth: `Bearer ${FAST_LEAD_NONCE}` },
+      )
+      const leadNames = (leadList.json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+      expect(leadNames).toContain("astra")
+
+      // 3. tools/call under shared nonce rejects with -32601
+      const sharedCall = await rpc(
+        {
+          jsonrpc: "2.0",
+          id: 12,
+          method: "tools/call",
+          params: { name: "astra", arguments: { query: "How to resolve?", context: "Some context" } },
+        },
+        { auth: `Bearer ${FAST_SHARED_NONCE}` },
+      )
+      expect((sharedCall.json.error as { code: number }).code).toBe(-32601)
+
+      // 4. tools/call under lead-peers nonce dispatches to /v1/responses with gpt-6-astra
+      let dispatchedUrl = ""
+      const dispatchedCapture: {
+        body?: {
+          model?: string
+          reasoning?: { effort?: string }
+          instructions?: string
+          input?: Array<{ content: Array<{ text: string }> }>
+        }
+      } = {}
+      globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+        dispatchedUrl = input.toString()
+        if (init?.body) {
+          dispatchedCapture.body = JSON.parse(init.body.toString()) as {
+            model?: string
+            reasoning?: { effort?: string }
+            instructions?: string
+            input?: Array<{ content: Array<{ text: string }> }>
+          }
+        }
+        return Response.json({
+          id: "resp-123",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "## Status\nPATH_FOUND\n\n## Recommendation\nUse approach A." }],
+            },
+          ],
+        })
+      }) as unknown as typeof fetch
+
+      const leadCall = await rpc(
+        {
+          jsonrpc: "2.0",
+          id: 13,
+          method: "tools/call",
+          params: { name: "astra", arguments: { query: "Which approach?", context: "Approach A vs B" } },
+        },
+        { auth: `Bearer ${FAST_LEAD_NONCE}` },
+      )
+      expect(leadCall.status).toBe(200)
+      const content = (leadCall.json.result as { content: Array<{ type: string; text: string }> }).content
+      const text = content[0]?.text ?? ""
+      expect(text).toContain("PATH_FOUND")
+      expect(dispatchedUrl).toContain("/responses")
+      expect(dispatchedCapture.body?.model).toBe("gpt-6-astra")
+      expect(dispatchedCapture.body?.reasoning).toEqual({ effort: "high" })
+      expect(dispatchedCapture.body?.instructions).toContain("You are Astra")
+      const firstInput = (dispatchedCapture.body?.input as Array<{ content: Array<{ text: string }> }>)?.[0]
+      expect(firstInput?.content[0]?.text).toContain("<query>Which approach?</query>")
+    } finally {
+      state.models = saved
+      unregisterLaunch(dualLaunch.launchId)
+    }
+  })
 })

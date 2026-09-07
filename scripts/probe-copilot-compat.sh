@@ -250,6 +250,7 @@ declare -a PROBE_REGISTRY=(
   "fast_grok46_responses_reasoning_medium|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'medium'} (the fast profile's reviewer assignment)"
   "max_grok46_responses_reasoning_high|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the max profile's reviewer assignment)"
   "max_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the max profile's reviewer fallback assignment)"
+  "fast_astra_responses_reasoning_high|exploratory|gpt-6-astra on /v1/responses accepts reasoning:{effort:'high'} (the fast profile's terminal Astra escalation assignment)"
   "shim_grok46_messages|exploratory|grok-4.6 on /v1/messages (→ /responses shim, generic supported_endpoints routing — no shim code change needed): 200 + well-formed Anthropic message (the translated Grok lead path)"
   "shim_grok46_messages_tool_use|exploratory|grok-4.6 on /v1/messages with forced tool_choice (→ /responses shim): 200 + tool_use block with non-empty input (the translated Grok tool path)"
 )
@@ -1627,6 +1628,19 @@ probe_max_luna_responses_reasoning_max() {
     "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
     "tool_choice": "auto",
     "reasoning": {"effort":"max"},
+    "max_output_tokens": 50
+  }'
+  assert_status 200
+}
+
+probe_fast_astra_responses_reasoning_high() {
+  # gpt-6-astra on /v1/responses at reasoning.effort:"high" — the fast profile's
+  # expensive terminal escalation consultant.
+  do_request POST /v1/responses '{
+    "model": "gpt-6-astra",
+    "instructions": "You are Astra. Answer concisely.",
+    "input": "reply with the literal string ok",
+    "reasoning": {"effort":"high"},
     "max_output_tokens": 50
   }'
   assert_status 200

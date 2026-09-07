@@ -21,6 +21,7 @@ export const FAST_PROFILE_MODELS = Object.freeze({
   reviewer: "claude-sonnet-5",
   advisor: "gpt-5.6-sol",
   oracle: "claude-opus-5",
+  astra: "gpt-6-astra",
 } as const)
 
 export const FAST_PROFILE_NATIVE_AGENT_NAMES = [
@@ -58,6 +59,13 @@ export const FAST_PROFILE_ADVISOR_CLIENT_MODEL =
 export const FAST_PROFILE_ADVISOR_EFFORT = "high" as const
 export const FAST_PROFILE_ORACLE_MODEL = FAST_PROFILE_MODELS.oracle
 export const FAST_PROFILE_ORACLE_EFFORT = "high" as const
+export const FAST_PROFILE_ASTRA_MODEL = FAST_PROFILE_MODELS.astra
+export const FAST_PROFILE_ASTRA_EFFORT = "high" as const
+export const FAST_PROFILE_ASTRA_PROMPT_TOKENS = 200_000 as const
+
+/** Synthesized MCP consultant tools specific to the fast profile. */
+export const FAST_PROFILE_SYNTHESIZED_PEERS = ["oracle", "astra"] as const
+export type FastProfileSynthesizedPeer = (typeof FAST_PROFILE_SYNTHESIZED_PEERS)[number]
 
 /** Each native role's permitted native-agent targets. The lead gets the roster. */
 export const FAST_PROFILE_DELEGATION_GRAPH = Object.freeze({

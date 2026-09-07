@@ -26,6 +26,9 @@ import { maxProReplacementModel } from "./max-profile-contract"
 import { fastEndpointForModel } from "./fast-endpoint"
 import {
   FAST_PROFILE_ADVISOR_EFFORT,
+  FAST_PROFILE_ASTRA_EFFORT,
+  FAST_PROFILE_ASTRA_MODEL,
+  FAST_PROFILE_ASTRA_PROMPT_TOKENS,
   FAST_PROFILE_MODELS,
   FAST_PROFILE_NATIVE_EFFORTS,
   FAST_PROFILE_NATIVE_MODELS,
@@ -397,6 +400,9 @@ export const FAST_IMPLEMENTER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.implementer
 export const FAST_REVIEWER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.reviewer
 export const FAST_ORACLE_EFFORT = FAST_PROFILE_ORACLE_EFFORT
 export const FAST_ADVISOR_EFFORT = FAST_PROFILE_ADVISOR_EFFORT
+export const FAST_ASTRA_MODEL = FAST_PROFILE_ASTRA_MODEL
+export const FAST_ASTRA_EFFORT = FAST_PROFILE_ASTRA_EFFORT
+export { FAST_PROFILE_ASTRA_MODEL, FAST_PROFILE_ASTRA_EFFORT }
 
 export function fastScoutModel(): string | undefined {
   const id = firstPresentInCatalog(
@@ -486,6 +492,20 @@ export function fastOracleModel(): string | undefined {
   if (found.capabilities?.supports?.adaptive_thinking !== true) return undefined
   if (fastEndpointForModel(found) !== "messages") return undefined
   return FAST_ORACLE_MODEL
+}
+
+/** Exact GPT-6 Astra only: expensive fast escalation consultant with 200K window at high effort. */
+export function fastAstraModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === FAST_PROFILE_ASTRA_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < FAST_PROFILE_ASTRA_PROMPT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) < FAST_PROFILE_ASTRA_PROMPT_TOKENS) return undefined
+  const tokenizer = found.capabilities?.tokenizer
+  if (tokenizer && tokenizer !== "o200k_base") return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(FAST_PROFILE_ASTRA_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return FAST_PROFILE_ASTRA_MODEL
 }
 
 // Compatibility aliases for tests and callers on the first fast-profile commit.
