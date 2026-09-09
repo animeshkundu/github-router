@@ -10,7 +10,7 @@ import {
 } from "../src/lib/tool-loop-guard"
 
 const MARKER = [...CLIENT_REDUNDANCY_MARKERS][0]!
-const THRESHOLDS = { nudgeAt: 4, abortAt: 7 }
+const THRESHOLDS = { nudgeAt: 3, warnAt: 7, abortAt: 17 }
 
 interface CallSpec {
   id: string
@@ -71,20 +71,22 @@ function loopBody(
 }
 
 describe("tool loop guard — the incident", () => {
-  test("escalates none → nudge → abort as the run grows", () => {
+  test("escalates none → nudge → warn → abort as the run grows", () => {
     const at = (n: number) =>
       detectToolLoop(extractAnthropicTurns(loopBody(n)), THRESHOLDS)
 
-    expect(at(3).action).toBe("none")
-    expect(at(4).action).toBe("nudge")
+    expect(at(2).action).toBe("none")
+    expect(at(3).action).toBe("nudge")
     expect(at(6).action).toBe("nudge")
+    expect(at(7).action).toBe("warn")
+    expect(at(16).action).toBe("warn")
 
-    const aborted = at(7)
+    const aborted = at(17)
     expect(aborted.action).toBe("abort")
     // Tier A: the client itself declared the call redundant, so no silence
     // test was needed to reach this verdict.
     expect(aborted.tier).toBe("A")
-    expect(aborted.repeats).toBe(7)
+    expect(aborted.repeats).toBe(17)
     expect(aborted.toolName).toBe("Read")
   })
 
@@ -97,14 +99,14 @@ describe("tool loop guard — the incident", () => {
       THRESHOLDS,
     )
     expect(verdict.action).toBe("abort")
-    expect(verdict.repeats).toBe(7)
+    expect(verdict.repeats).toBe(17)
   })
 })
 
 describe("tool loop guard — false negatives that the per-call design missed", () => {
   test("a repeated PARALLEL batch trips (flattening would give A,B,A,B and never fire)", () => {
     const messages: Array<unknown> = [{ role: "user", content: "go" }]
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 17; i++) {
       messages.push(
         ...anthropicTurn([
           { id: `a_${i}`, name: "Read", input: { file_path: "a.js" } },
@@ -117,12 +119,12 @@ describe("tool loop guard — false negatives that the per-call design missed", 
       THRESHOLDS,
     )
     expect(verdict.action).toBe("abort")
-    expect(verdict.repeats).toBe(7)
+    expect(verdict.repeats).toBe(17)
   })
 
   test("results serialized in a different order still compare equal", () => {
     const messages: Array<unknown> = [{ role: "user", content: "go" }]
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 17; i++) {
       messages.push(
         ...anthropicTurn(
           [
@@ -141,7 +143,7 @@ describe("tool loop guard — false negatives that the per-call design missed", 
   })
 
   test("Tier B catches a silent loop with no client marker", () => {
-    const body = loopBody(7, { result: () => "identical bash output" })
+    const body = loopBody(17, { result: () => "identical bash output" })
     const verdict = detectToolLoop(extractAnthropicTurns(body), THRESHOLDS)
     expect(verdict.action).toBe("abort")
     expect(verdict.tier).toBe("B")
@@ -169,7 +171,7 @@ describe("tool loop guard — false positives that must never fire", () => {
       result: () => '{"status":"queued"}',
     })
     const verdict = detectToolLoop(extractAnthropicTurns(body), THRESHOLDS)
-    expect(verdict.action).toBe("nudge")
+    expect(verdict.action).toBe("warn")
     expect(verdict.action).not.toBe("abort")
   })
 
@@ -179,29 +181,30 @@ describe("tool loop guard — false positives that must never fire", () => {
     // wedged model: both repeat the same call, get the same bytes back, and
     // say nothing. Narration is the only signal that separates them, so a
     // poller that narrates is safe (test above) and one that does not is
-    // stopped at 7. Operators who genuinely need silent long-polling raise or
+    // stopped at 17. Operators who genuinely need silent long-polling raise or
     // disable GH_ROUTER_LOOP_ABORT_AT.
-    const body = loopBody(7, { result: () => '{"status":"queued"}' })
+    const body = loopBody(17, { result: () => '{"status":"queued"}' })
     const verdict = detectToolLoop(extractAnthropicTurns(body), THRESHOLDS)
     expect(verdict.action).toBe("abort")
     expect(verdict.tier).toBe("B")
 
     // ...and the escape hatch actually works.
     expect(
-      detectToolLoop(extractAnthropicTurns(body), { nudgeAt: 4, abortAt: 0 })
+      detectToolLoop(extractAnthropicTurns(body), { nudgeAt: 3, warnAt: 7, abortAt: 0 })
         .action,
-    ).toBe("nudge")
+    ).toBe("warn")
   })
 
-  test("varying results never trip, however many times the call repeats", () => {    const body = loopBody(20, { result: (i) => `elapsed ${i}s` })
+  test("varying results never trip, however many times the call repeats", () => {
+    const body = loopBody(20, { result: (i) => `elapsed ${i}s` })
     expect(detectToolLoop(extractAnthropicTurns(body), THRESHOLDS).action).toBe(
       "none",
     )
   })
 
-  test("a run of exactly 3 — the worst healthy run observed — does nothing", () => {
+  test("a run of exactly 2 — a short healthy run — does nothing", () => {
     expect(
-      detectToolLoop(extractAnthropicTurns(loopBody(3)), THRESHOLDS).action,
+      detectToolLoop(extractAnthropicTurns(loopBody(2)), THRESHOLDS).action,
     ).toBe("none")
   })
 
@@ -215,7 +218,7 @@ describe("tool loop guard — false positives that must never fire", () => {
     })
     const verdict = detectToolLoop(extractAnthropicTurns(body), THRESHOLDS)
     expect(verdict.tier).not.toBe("A")
-    expect(verdict.action).toBe("nudge")
+    expect(verdict.action).toBe("warn")
   })
 
   test("is_error makes an otherwise identical result distinct", () => {    const messages: Array<unknown> = [{ role: "user", content: "go" }]
@@ -288,14 +291,14 @@ describe("tool loop guard — false positives that must never fire", () => {
     }
     expect(
       detectToolLoop(extractChatTurns({ messages }), THRESHOLDS).action,
-    ).toBe("nudge")
+    ).toBe("warn")
   })
 
   test("a partially-answered batch repeated forever is still caught", () => {
     // Only one of the two parallel calls gets a result. Dropping the whole
     // turn on a partial batch would blind the guard to this loop entirely.
     const messages: Array<unknown> = [{ role: "user", content: "go" }]
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 17; i++) {
       messages.push(
         {
           role: "assistant",
@@ -319,19 +322,22 @@ describe("tool loop guard — false positives that must never fire", () => {
 
   test("thresholds of 0 disable each stage", () => {
     const turns = extractAnthropicTurns(loopBody(20))
-    expect(detectToolLoop(turns, { nudgeAt: 0, abortAt: 7 }).action).toBe(
+    expect(detectToolLoop(turns, { nudgeAt: 0, warnAt: 0, abortAt: 7 }).action).toBe(
       "abort",
     )
-    expect(detectToolLoop(turns, { nudgeAt: 4, abortAt: 0 }).action).toBe(
+    expect(detectToolLoop(turns, { nudgeAt: 4, warnAt: 0, abortAt: 0 }).action).toBe(
       "nudge",
     )
-    expect(detectToolLoop(turns, { nudgeAt: 0, abortAt: 0 }).action).toBe("none")
+    expect(detectToolLoop(turns, { nudgeAt: 0, warnAt: 6, abortAt: 0 }).action).toBe(
+      "warn",
+    )
+    expect(detectToolLoop(turns, { nudgeAt: 0, warnAt: 0, abortAt: 0 }).action).toBe("none")
   })
 })
 
 describe("tool loop guard — body handling", () => {
   test("detection alone never re-serializes the body", () => {
-    const raw = JSON.stringify(loopBody(3))
+    const raw = JSON.stringify(loopBody(2))
     const outcome = guardAnthropicBody(raw)
     expect(outcome.action).toBe("none")
     expect(outcome.body).toBeUndefined()
@@ -346,7 +352,7 @@ describe("tool loop guard — body handling", () => {
   })
 
   test("the nudge is a sibling block and leaves every tool_result untouched", () => {
-    const raw = JSON.stringify(loopBody(4))
+    const raw = JSON.stringify(loopBody(3))
     const outcome = guardAnthropicBody(raw)
     expect(outcome.action).toBe("nudge")
 
@@ -380,7 +386,7 @@ describe("tool loop guard — body handling", () => {
 describe("tool loop guard — other wire formats", () => {
   test("OpenAI Chat tool_calls are extracted and trip", () => {
     const messages: Array<unknown> = [{ role: "user", content: "go" }]
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 17; i++) {
       messages.push(
         {
           role: "assistant",
@@ -403,7 +409,7 @@ describe("tool loop guard — other wire formats", () => {
 
   test("OpenAI Chat assistant narration blocks the Tier B abort", () => {
     const messages: Array<unknown> = [{ role: "user", content: "go" }]
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 17; i++) {
       messages.push(
         {
           role: "assistant",
@@ -421,12 +427,12 @@ describe("tool loop guard — other wire formats", () => {
     }
     expect(
       detectToolLoop(extractChatTurns({ messages }), THRESHOLDS).action,
-    ).toBe("nudge")
+    ).toBe("warn")
   })
 
   test("Responses function_call / function_call_output pairs trip", () => {
     const input: Array<unknown> = []
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 17; i++) {
       input.push(
         {
           type: "function_call",
