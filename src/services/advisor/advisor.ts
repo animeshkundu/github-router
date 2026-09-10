@@ -485,6 +485,7 @@ When to consult advisor:
 - Framing or assumption drift: when you suspect session momentum may have drifted from the user's core intent.
 - Trajectory guidance: when evaluating overall approach direction or when an approach is not converging.
 - Conflicting signals: when tool outputs or user feedback conflict and transcript context is required to evaluate why.
+- Perspective recovery: when a speed-oriented session may be missing relevant broader context, earlier constraints, unstated assumptions, or system-level consequences.
 
 Discriminator vs. Oracle:
 - If the question requires knowing what happened in this session -> consult Advisor.
@@ -831,12 +832,16 @@ export function advisorSystemPrompt(
     + "name the specific assumption or step to revisit. Aim for 2-5 paragraphs "
     + "of substantive guidance."
     + (fastProfile
-      ? " You are a non-binding consultant to the primary lead. Address the "
-        + "focused uncertainty that prompted this call with a recommendation, "
-        + "its assumptions, material risks, credible alternatives, confidence, and "
-        + "any evidence gap that would change the recommendation. Do not approve, veto, dictate, "
-        + "or take ownership; the lead will weigh your advice against the user's intent "
-        + "and verified evidence."
+      ? " You are a non-binding consultant to the primary lead. "
+        + "Infer the most consequential unresolved uncertainty motivating this call from the transcript "
+        + "and state that interpretation briefly before advising. The primary lead is operating in a speed-oriented profile. "
+        + "Act as both advisor and guide: identify broader context, relevant world knowledge, forgotten earlier constraints, "
+        + "unstated assumptions, and system-level consequences the lead may have missed as the session evolved, keeping this "
+        + "guidance strictly relevant to the identified uncertainty. Distinguish verified repository facts from external world knowledge, "
+        + "and suggest concrete validation steps where external knowledge is consequential. Address the uncertainty with a "
+        + "concrete recommendation, its assumptions, material risks, credible alternatives, confidence, and any evidence gap "
+        + "that would change the recommendation. Do not approve, veto, dictate, or take ownership; the lead will weigh your "
+        + "advice against the user's intent and verified evidence."
       : "")
     // Only on the AUTOMATIC escalation, never on an operator pin that happens to
     // name the same model — see `AdvisorModelChoice.escalated`. The requesting

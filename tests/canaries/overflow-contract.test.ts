@@ -49,6 +49,10 @@ const REQUIRED_MARKERS: ReadonlyArray<{ needles: Array<string>; why: string }> =
  */
 const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
   [
+    "hPe=1e5,dze=1e6",
+    "Bne(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,hPe,dze);if(N.status!==\"invalid\"){let F=Math.max(hPe,N.effective)",
+  ],
+  [
     "ike=1e5,JNe=1e6",
     "cee(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,ike,JNe);if(A.status!==\"invalid\"){let x=Math.max(ike,A.effective)",
   ],

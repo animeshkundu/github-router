@@ -120,7 +120,7 @@ afterEach(() => {
 describe("loop guard at the route boundary", () => {
   test("/v1/messages aborts with the Anthropic envelope and calls no upstream", async () => {
     const record = installFetchMock()
-    const response = await post("/v1/messages", anthropicLoopBody(7))
+    const response = await post("/v1/messages", anthropicLoopBody(17))
 
     expect(response.status).toBe(400)
     const body = (await response.json()) as {
@@ -142,11 +142,11 @@ describe("loop guard at the route boundary", () => {
     // loop instead — the same bug wearing a different hat.
     installFetchMock()
     const cases: Array<[string, string]> = [
-      ["/v1/messages", anthropicLoopBody(7)],
-      ["/v1/chat/completions", chatLoopBody(7)],
+      ["/v1/messages", anthropicLoopBody(17)],
+      ["/v1/chat/completions", chatLoopBody(17)],
       [
         "/v1/responses",
-        JSON.stringify({ model: "gpt-5.5", input: responsesLoopInput(7) }),
+        JSON.stringify({ model: "gpt-5.5", input: responsesLoopInput(17) }),
       ],
     ]
     for (const [path, body] of cases) {
@@ -158,7 +158,7 @@ describe("loop guard at the route boundary", () => {
 
   test("/v1/chat/completions aborts with the OpenAI envelope, not the Anthropic one", async () => {
     const record = installFetchMock()
-    const response = await post("/v1/chat/completions", chatLoopBody(7))
+    const response = await post("/v1/chat/completions", chatLoopBody(17))
 
     expect(response.status).toBe(400)
     const body = (await response.json()) as Record<string, unknown>
@@ -173,7 +173,7 @@ describe("loop guard at the route boundary", () => {
     const record = installFetchMock()
     const response = await post(
       "/v1/responses",
-      JSON.stringify({ model: "gpt-5.5", input: responsesLoopInput(7) }),
+      JSON.stringify({ model: "gpt-5.5", input: responsesLoopInput(17) }),
     )
 
     expect(response.status).toBe(400)

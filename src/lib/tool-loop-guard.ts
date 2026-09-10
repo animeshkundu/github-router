@@ -23,8 +23,9 @@ export const CLIENT_REDUNDANCY_MARKERS: ReadonlySet<string> = new Set([
   "Wasted call — file unchanged since your last Read. Refer to that earlier tool_result instead.",
 ])
 
-const DEFAULT_NUDGE_AT = 4
-const DEFAULT_ABORT_AT = 7
+const DEFAULT_NUDGE_AT = 3
+const DEFAULT_WARN_AT = 7
+const DEFAULT_ABORT_AT = 17
 
 /**
  * Results are compared by equality, and a single `read` can return megabytes.
@@ -55,6 +56,10 @@ function envThreshold(key: string, fallback: number): number {
 
 export function loopNudgeAt(): number {
   return envThreshold("GH_ROUTER_LOOP_NUDGE_AT", DEFAULT_NUDGE_AT)
+}
+
+export function loopWarnAt(): number {
+  return envThreshold("GH_ROUTER_LOOP_WARN_AT", DEFAULT_WARN_AT)
 }
 
 export function loopAbortAt(): number {
@@ -93,7 +98,7 @@ export interface NormalizedTurn {
   hasNarration: boolean
 }
 
-export type LoopAction = "none" | "nudge" | "abort"
+export type LoopAction = "none" | "nudge" | "warn" | "abort"
 
 export interface LoopVerdict {
   action: LoopAction
@@ -213,15 +218,16 @@ function turnSignature(turn: NormalizedTurn): string {
  */
 export function detectToolLoop(
   turns: Array<NormalizedTurn>,
-  options: { nudgeAt?: number; abortAt?: number } = {},
+  options: { nudgeAt?: number; warnAt?: number; abortAt?: number } = {},
 ): LoopVerdict {
   const nudgeAt = options.nudgeAt ?? loopNudgeAt()
+  const warnAt = options.warnAt ?? loopWarnAt()
   const abortAt = options.abortAt ?? loopAbortAt()
-  const active = [nudgeAt, abortAt].filter((n) => n > 0)
+  const active = [nudgeAt, warnAt, abortAt].filter((n) => n > 0)
   if (active.length === 0 || turns.length === 0) return NO_LOOP
 
   // Only ever needs the tail, and stops at the first mismatch: at most
-  // `max(nudgeAt, abortAt)` turns are inspected however long the history is.
+  // `max(nudgeAt, warnAt, abortAt)` turns are inspected however long the history is.
   const limit = Math.max(...active)
   const last = turns[turns.length - 1]
   if (!last || last.calls.length === 0) return NO_LOOP
@@ -254,6 +260,9 @@ export function detectToolLoop(
       return { action: "abort", tier: "B", repeats, toolName }
     }
   }
+  if (warnAt > 0 && repeats >= warnAt) {
+    return { action: "warn", tier: markerRun ? "A" : "B", repeats, toolName }
+  }
   if (nudgeAt > 0 && repeats >= nudgeAt) {
     return { action: "nudge", tier: markerRun ? "A" : "B", repeats, toolName }
   }
@@ -269,10 +278,19 @@ function uniqueToolName(turn: NormalizedTurn): string | undefined {
 export function nudgeText(verdict: LoopVerdict): string {
   const what = verdict.toolName ? `\`${verdict.toolName}\` call` : "tool call"
   return (
-    `[github-router] The same ${what} has now been repeated ${verdict.repeats}× `
-    + "in a row with an identical result. Nothing has changed and nothing will "
-    + "change by repeating it. Use the result you already have, try a materially "
-    + "different approach, or stop and report what you found."
+    `[github-router loop-guard] You have repeated the same ${what} ${verdict.repeats}× in a row with an identical result. `
+    + "Pause and ask yourself: Are you doing the right thing? What is your hypothesis? "
+    + "If the current approach is not producing new information, vary your parameters, use a different tool, or inspect surrounding context."
+  )
+}
+
+/** Text injected as a stronger warning sibling block before halting. */
+export function warnText(verdict: LoopVerdict): string {
+  const what = verdict.toolName ? `\`${verdict.toolName}\` call` : "tool call"
+  return (
+    `[github-router loop-guard WARNING] You have now repeated the exact same ${what} ${verdict.repeats}× with zero change in outcome. `
+    + "Continuing to repeat this call is actively failing. Stop repeating this action immediately. "
+    + "Step back, re-evaluate your assumptions, switch to an alternative tool or approach, or state what is blocking you."
   )
 }
 
@@ -280,11 +298,10 @@ export function nudgeText(verdict: LoopVerdict): string {
 export function abortMessage(verdict: LoopVerdict): string {
   const what = verdict.toolName ? `\`${verdict.toolName}\` call` : "tool call"
   return (
-    `Request blocked by github-router: the same ${what} has been repeated `
-    + `${verdict.repeats}× consecutively with an identical result and no `
-    + "intervening progress. Continuing would burn inference with no possible "
-    + "change in outcome. Vary the call or end the turn. Tune or disable this "
-    + "with GH_ROUTER_LOOP_ABORT_AT."
+    `Request halted by github-router loop-guard: the same ${what} has been repeated `
+    + `${verdict.repeats}× consecutively with no progress. github-router has halted this turn to prevent runaway token burn `
+    + "and preserve your session. Continuing would burn inference with no possible change in outcome. "
+    + "Resume immediately by typing a new direction in the prompt. Tune or disable with GH_ROUTER_LOOP_ABORT_AT."
   )
 }
 
@@ -626,8 +643,9 @@ export function guardAnthropicBody(rawBody: string): GuardOutcome {
   if (verdict.action === "abort") {
     return { action: "abort", message: abortMessage(verdict), verdict }
   }
-  if (!injectAnthropicNudge(parsed, nudgeText(verdict))) return NO_ACTION
-  return { action: "nudge", body: JSON.stringify(parsed), verdict }
+  const text = verdict.action === "warn" ? warnText(verdict) : nudgeText(verdict)
+  if (!injectAnthropicNudge(parsed, text)) return NO_ACTION
+  return { action: verdict.action, body: JSON.stringify(parsed), verdict }
 }
 
 /** OpenAI Chat Completions. Mutates the already-parsed payload in place. */
@@ -638,8 +656,9 @@ export function guardChatPayload(payload: unknown): GuardOutcome {
   if (verdict.action === "abort") {
     return { action: "abort", message: abortMessage(verdict), verdict }
   }
-  if (!injectChatNudge(payload, nudgeText(verdict))) return NO_ACTION
-  return { action: "nudge", verdict }
+  const text = verdict.action === "warn" ? warnText(verdict) : nudgeText(verdict)
+  if (!injectChatNudge(payload, text)) return NO_ACTION
+  return { action: verdict.action, verdict }
 }
 
 /** OpenAI Responses. Mutates the already-parsed payload in place. */
@@ -650,7 +669,8 @@ export function guardResponsesPayload(payload: unknown): GuardOutcome {
   if (verdict.action === "abort") {
     return { action: "abort", message: abortMessage(verdict), verdict }
   }
-  if (!injectResponsesNudge(payload, nudgeText(verdict))) return NO_ACTION
-  return { action: "nudge", verdict }
+  const text = verdict.action === "warn" ? warnText(verdict) : nudgeText(verdict)
+  if (!injectResponsesNudge(payload, text)) return NO_ACTION
+  return { action: verdict.action, verdict }
 }
 

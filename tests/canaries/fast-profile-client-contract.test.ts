@@ -20,8 +20,12 @@ const REQUIRED_MARKERS = [
   "Advising",
   " using ",
   "updatedInput",
-  // 2.1.260+: check: ...; 2.1.258-: "a rewrite changes model alone"
-  ["check:_((e)=>ut(e,\"{ model }\",(t)=>typeof t.model===\"string\"))", "a rewrite changes model alone"],
+  // 2.1.266+: it(e,"{ model }",(t)=>typeof t.model==="string"); 2.1.260: ut; 2.1.258-: "a rewrite changes model alone"
+  [
+    'check:A((e)=>it(e,"{ model }",(t)=>typeof t.model==="string"))',
+    'check:_((e)=>ut(e,"{ model }",(t)=>typeof t.model==="string"))',
+    "a rewrite changes model alone",
+  ],
   'agentType:"Explore"',
   "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP",
 ] as const
