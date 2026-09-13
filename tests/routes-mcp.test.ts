@@ -3716,6 +3716,11 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       expect(sharedNames).toContain("oracle")
       expect(sharedNames).not.toContain("astra")
 
+      // 1b. Astra IS wired here (catalog serves it), so the Oracle
+      // description keeps routing terminal dead ends to Astra.
+      const sharedTools = (sharedList.json.result as { tools: Array<{ name: string; description?: string }> }).tools
+      expect(sharedTools.find((t) => t.name === "oracle")?.description).toContain("consult Astra")
+
       // 2. tools/list under lead-peers nonce DOES list astra
       const leadList = await rpc(
         { jsonrpc: "2.0", id: 21, method: "tools/list" },
@@ -3846,6 +3851,13 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       const names = (listJson.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
       expect(names).toContain("oracle")
       expect(names).not.toContain("astra")
+
+      // tools/list Oracle description must not route terminal dead ends to
+      // Astra — unwired on `-m cheap`, so that would be a -32601.
+      const listTools = (listJson.result as { tools: Array<{ name: string; description?: string }> }).tools
+      const oracleDesc = listTools.find((t) => t.name === "oracle")?.description ?? ""
+      expect(oracleDesc).not.toContain("Astra")
+      expect(oracleDesc).toContain("no escalation peer")
 
       // tools/call oracle dispatches grok-4.6 via /responses at MEDIUM effort.
       let oracleUrl = ""

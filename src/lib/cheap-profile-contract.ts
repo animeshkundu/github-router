@@ -11,10 +11,17 @@
  * the `astra` peer (`gpt-6-astra`) remains available next to Oracle — still
  * at the 200K default window and medium effort.
  *
- * This module is deliberately dependency-free. Launch validation, request
- * routing, native-agent generation, and the PreToolUse ACL all import the same
- * literals so a role cannot silently mean different things at each boundary.
+ * This module is deliberately dependency-free, except for the delegation
+ * graph below: the cheap family shares fast's exact authority structure, so
+ * it aliases `FAST_PROFILE_DELEGATION_GRAPH` rather than restating it. A
+ * duplicated literal here would be unenforced (the PreToolUse ACL reads the
+ * fast graph for both profiles) and could silently disagree with it.
+ * Launch validation, request routing, native-agent generation, and the
+ * PreToolUse ACL all import the same literals so a role cannot silently
+ * mean different things at each boundary.
  */
+
+import { FAST_PROFILE_DELEGATION_GRAPH } from "./fast-profile-contract"
 
 export const CHEAP_PROFILE_MODELS = Object.freeze({
   lead: "gemini-3.8-flash",
@@ -111,14 +118,7 @@ export type CheapProfileSynthesizedPeer =
 /** Peer set for the `-m cheap1m` successor (Oracle + Astra). */
 export const CHEAP1M_PROFILE_SYNTHESIZED_PEERS = ["oracle", "astra"] as const
 
-/** Each native role's permitted native-agent targets. The lead gets the roster. */
-export const CHEAP_PROFILE_DELEGATION_GRAPH = Object.freeze({
-  Explore: Object.freeze([]),
-  Plan: Object.freeze(["Explore", "reviewer"]),
-  "general-purpose": Object.freeze(["reviewer"]),
-  implementer: Object.freeze(["reviewer"]),
-  reviewer: Object.freeze([]),
-} as const satisfies Record<
-  CheapProfileNativeAgentName,
-  ReadonlyArray<CheapProfileNativeAgentName>
->)
+/** Each native role's permitted native-agent targets. Aliased from the fast
+ *  profile (not restated): the PreToolUse ACL enforces the fast graph for
+ *  both profiles, so a separate literal here would be dead and drift-prone. */
+export const CHEAP_PROFILE_DELEGATION_GRAPH = FAST_PROFILE_DELEGATION_GRAPH

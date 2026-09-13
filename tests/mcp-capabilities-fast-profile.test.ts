@@ -28,6 +28,7 @@ import {
   fastAdvisorModel,
   fastOracleModel,
   fastAstraModel,
+  cheapAdvisorModel,
   cheapOracleModel,
   cheapReviewerModel,
   cheapAstraModel,
@@ -186,6 +187,27 @@ test("fast Advisor decouples to dedicated GPT-5.6 Sol 1M high on responses", () 
   expect(FAST_ADVISOR_EFFORT).toBe("high")
   setCatalog(entry("gpt-5.6-sol", { ctx: ONE_M, efforts: ["high"], endpoints: ["/responses"] }))
   expect(fastAdvisorModel()).toBe("gpt-5.6-sol")
+})
+
+test("cheap Advisor pins to Sol/high at the 200K default window on responses (no 1M gate)", () => {
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["high"], endpoints: ["/responses"] }))
+  expect(cheapAdvisorModel()).toBe("gpt-5.6-sol")
+
+  // Below the 200K subagent floor -> dropped.
+  setCatalog(entry("gpt-5.6-sol", { ctx: 100_000, efforts: ["high"], endpoints: ["/responses"] }))
+  expect(cheapAdvisorModel()).toBeUndefined()
+
+  // Missing high effort -> dropped.
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["medium"], endpoints: ["/responses"] }))
+  expect(cheapAdvisorModel()).toBeUndefined()
+
+  // No tool_calls -> dropped.
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, toolCalls: false, efforts: ["high"], endpoints: ["/responses"] }))
+  expect(cheapAdvisorModel()).toBeUndefined()
+
+  // Wrong endpoint -> dropped.
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["high"], endpoints: ["/v1/messages"] }))
+  expect(cheapAdvisorModel()).toBeUndefined()
 })
 
 test("fast Oracle pins to exact Opus 5 1M high on messages with adaptive thinking", () => {

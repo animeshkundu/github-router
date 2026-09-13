@@ -271,6 +271,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // Cheap-profile resolvers (only exercised under `-m cheap`); stubbed so the
   // static import graph used by mcp/handler.ts resolves for every test here.
   cheapOracleModel: mock(() => "grok-4.6"),
+  cheapAdvisorModel: mock(() => "gpt-5.6-sol"),
   cheapReviewerModel: mock(() => "gpt-5.6-luna"),
   cheapAstraModel: mock(() => "gpt-6-astra"),
   FAST_EXPLORE_EFFORT: "high",

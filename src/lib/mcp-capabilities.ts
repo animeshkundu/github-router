@@ -36,6 +36,8 @@ import {
   FAST_PROFILE_ORACLE_MODEL,
 } from "./fast-profile-contract"
 import {
+  CHEAP_PROFILE_ADVISOR_EFFORT,
+  CHEAP_PROFILE_ADVISOR_MODEL,
   CHEAP_PROFILE_ASTRA_EFFORT,
   CHEAP_PROFILE_ASTRA_MODEL,
   CHEAP_PROFILE_ASTRA_PROMPT_TOKENS,
@@ -516,6 +518,21 @@ export function fastAstraModel(): string | undefined {
   if (!Array.isArray(efforts) || !efforts.includes(FAST_PROFILE_ASTRA_EFFORT)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
   return FAST_PROFILE_ASTRA_MODEL
+}
+
+/** Sol/high Advisor for the cheap family at the 200K default window. Unlike the
+ *  fast Advisor (which budgets a 1M transcript), cheap caps the transcript at
+ *  `CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS`, so the 200K subagent floor — the
+ *  same gate launch validation enforces — is the correct prerequisite here. */
+export function cheapAdvisorModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === CHEAP_PROFILE_ADVISOR_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(CHEAP_PROFILE_ADVISOR_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return CHEAP_PROFILE_ADVISOR_MODEL
 }
 
 /** Exact Grok 4.6 only: the cheap Oracle runs the cheaper avenger at 200K/medium,

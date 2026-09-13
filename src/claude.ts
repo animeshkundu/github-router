@@ -143,6 +143,7 @@ import {
   fastAdvisorModel,
   fastOracleModel,
   fastAstraModel,
+  cheapAdvisorModel,
   cheapOracleModel,
   cheapReviewerModel,
 } from "./lib/mcp-capabilities"
@@ -1010,7 +1011,7 @@ export const claude = defineCommand({
         if (
           isPinnedProfile
           && ((isCheapProfile ? cheapOracleModel() : fastOracleModel()) == null
-            || fastAdvisorModel() == null
+            || (isCheapProfile ? cheapAdvisorModel() : fastAdvisorModel()) == null
             || nativeAgentModels.implementer == null)
         ) {
           if (isCheapProfile) {

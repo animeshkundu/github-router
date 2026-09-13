@@ -328,12 +328,21 @@ function activePersonas(launch?: LaunchRegistryEntry): Array<PersonaSpec> {
   })
 }
 
-function oracleToolEntry(isCheap = false): ToolEntry {
+function oracleToolEntry(isCheap = false, astraAvailable = true): ToolEntry {
+  const descriptor = isCheap
+    ? "Grok 4.6 (200K context, medium effort)"
+    : "exact Opus 5 (1M context, high effort)"
+  // Astra is not wired on every launch that serves Oracle (never on `-m
+  // cheap`; also absent on fast/cheap1m when its catalog gate fails), so the
+  // dead-end clause must not name a tool this session does not expose —
+  // otherwise the model calls `astra` and eats a -32601.
+  const deadEndClause = astraAvailable
+    ? "terminal dead ends (consult Astra), "
+    : "terminal dead ends (no escalation peer on this profile; report the dead end with evidence to the lead), "
   return {
     name: "oracle",
-    description: isCheap
-      ? "Expert consultant backed by Grok 4.6 (200K context, medium effort) for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them. Preferred over advisor for self-contained technical briefs.\n\nWhen NOT to invoke: not for transcript-aware framing (consult Advisor), terminal dead ends (consult Astra), routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question."
-      : "Expert consultant backed by exact Opus 5 (1M context, high effort) for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them. Preferred over advisor for self-contained technical briefs.\n\nWhen NOT to invoke: not for transcript-aware framing (consult Advisor), terminal dead ends (consult Astra), routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.",
+    description:
+      `Expert consultant backed by ${descriptor} for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them. Preferred over advisor for self-contained technical briefs.\n\nWhen NOT to invoke: not for transcript-aware framing (consult Advisor), ${deadEndClause}routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.`,
     inputSchema: {
       type: "object",
       required: ["query", "context"],
@@ -535,6 +544,10 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
     // a hypothetical test/mint granted the persona — this mirrors both the
     // astra `tools/call` gate and `claude.ts`'s `astraAvailable` wiring.
     const astraWired = launch.profileId === "fast" || launch.profileId === "cheap1m"
+    // The Oracle description names Astra only when this session actually
+    // exposes it: never on `-m cheap`, and not on fast/cheap1m when the
+    // Astra catalog gate fails (naming it would route into a -32601).
+    const astraAvailable = astraWired && (isCheap ? cheapAstraModel() : fastAstraModel()) != null
     const entries: Array<ToolEntry> = []
     if (
       (scope === "all" || scope === "peers")
@@ -542,7 +555,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       && launch.allowedPersonas?.has("oracle")
       && (isCheap ? cheapOracleModel() : fastOracleModel())
     ) {
-      entries.push(oracleToolEntry(isCheap))
+      entries.push(oracleToolEntry(isCheap, astraAvailable))
     }
     if (
       (scope === "all" || scope === "peers")

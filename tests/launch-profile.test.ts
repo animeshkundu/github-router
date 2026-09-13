@@ -29,6 +29,8 @@ import {
 } from "../src/lib/messages-identity-preflight"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
+import { CHEAP_PROFILE_DELEGATION_GRAPH } from "../src/lib/cheap-profile-contract"
+import { FAST_PROFILE_DELEGATION_GRAPH } from "../src/lib/fast-profile-contract"
 
 const model = (id: string, opts: {
   context?: number
@@ -326,8 +328,16 @@ describe("cheap-family startup prerequisites", () => {
     expect(cheap1mMessage).toContain("github-router claude -m cheap1m")
   })
 
-  test("rejects the oracle when context metadata is unusable", () => {
-    const noPrompt = cheapCatalog()
+  test("cheap shares fast's exact delegation graph by alias, not by copy", () => {
+    // The PreToolUse ACL enforces FAST_PROFILE_DELEGATION_GRAPH for both
+    // profiles; a restated literal would be dead and drift-prone.
+    expect(CHEAP_PROFILE_DELEGATION_GRAPH).toBe(FAST_PROFILE_DELEGATION_GRAPH)
+    expect(Object.keys(CHEAP_PROFILE_DELEGATION_GRAPH).sort()).toEqual(
+      ["Explore", "Plan", "general-purpose", "implementer", "reviewer"],
+    )
+  })
+
+  test("rejects the oracle when context metadata is unusable", () => {    const noPrompt = cheapCatalog()
     noPrompt.data = noPrompt.data.map((entry) =>
       entry.id === "grok-4.6"
         ? { ...entry, capabilities: { ...entry.capabilities, limits: { max_context_window_tokens: 500_000 } } }
