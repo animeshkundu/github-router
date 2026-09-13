@@ -35,6 +35,14 @@ import {
   FAST_PROFILE_ORACLE_EFFORT,
   FAST_PROFILE_ORACLE_MODEL,
 } from "./fast-profile-contract"
+import {
+  CHEAP_PROFILE_ASTRA_EFFORT,
+  CHEAP_PROFILE_ASTRA_MODEL,
+  CHEAP_PROFILE_ASTRA_PROMPT_TOKENS,
+  CHEAP_PROFILE_ORACLE_EFFORT,
+  CHEAP_PROFILE_ORACLE_MODEL,
+  CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+} from "./cheap-profile-contract"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -506,6 +514,34 @@ export function fastAstraModel(): string | undefined {
   if (!Array.isArray(efforts) || !efforts.includes(FAST_PROFILE_ASTRA_EFFORT)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
   return FAST_PROFILE_ASTRA_MODEL
+}
+
+/** Exact Grok 4.6 only: the cheap Oracle runs the cheaper avenger at 200K/medium,
+ *  mirrored from fast's Opus 5 1M/high. Dispatch goes to the RESPONSES endpoint
+ *  (grok-4.6 serves no messages endpoint). */
+export function cheapOracleModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === CHEAP_PROFILE_ORACLE_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) <= 0) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(CHEAP_PROFILE_ORACLE_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return CHEAP_PROFILE_ORACLE_MODEL
+}
+
+/** Exact GPT-6 Astra only: cheap escalation consultant at 200K/medium. */
+export function cheapAstraModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === CHEAP_PROFILE_ASTRA_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAP_PROFILE_ASTRA_PROMPT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) < CHEAP_PROFILE_ASTRA_PROMPT_TOKENS) return undefined
+  const tokenizer = found.capabilities?.tokenizer
+  if (tokenizer && tokenizer !== "o200k_base") return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(CHEAP_PROFILE_ASTRA_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return CHEAP_PROFILE_ASTRA_MODEL
 }
 
 // Compatibility aliases for tests and callers on the first fast-profile commit.

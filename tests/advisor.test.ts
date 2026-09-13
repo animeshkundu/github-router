@@ -1656,6 +1656,82 @@ describe("renderConversationAsText (Phase L truncation)", () => {
     expect(out).not.toContain("early turn")
   })
 
+  test("pinOriginalAsk leaves an untruncated conversation unaltered", () => {
+    const conversation = [
+      { role: "user", content: "Original question." },
+      { role: "assistant", content: "First answer" },
+      { role: "user", content: "Follow-up" },
+    ]
+    const out = renderConversationAsText(conversation, 1000, undefined, true)
+    // No truncation -> the ask is NOT re-inserted as a pinned block.
+    expect(out).not.toContain("[Original ask (kept for the advisor):]")
+    expect(out).toContain("### Turn 1 — user")
+    expect(out).toContain("Original question.")
+  })
+
+  test("pinOriginalAsk re-inserts the first user ask when it was truncated away", () => {
+    const filler = "x".repeat(1000)
+    const conversation = Array.from({ length: 30 }, (_, i) => ({
+      role: "user",
+      content: i === 0 ? "THE ORIGINAL ASK" : `turn ${i + 1} ${filler}`,
+    }))
+    const out = renderConversationAsText(conversation, 4000, undefined, true)
+    // The pinned ask heads the render even though turn 1 was dropped.
+    expect(out.startsWith("[Original ask (kept for the advisor):]")).toBe(true)
+    expect(out).toContain("THE ORIGINAL ASK")
+    expect(out).toContain("[TRUNCATED:")
+    expect(out).not.toContain("### Turn 1 — user")
+    expect(out).toContain("### Turn 30 — user")
+    // Pinned ask + kept tail still respect the budget (notice is tiny).
+    expect(out.length).toBeLessThanOrEqual(4200)
+  })
+
+  test("pinOriginalAsk without pinning resigns the ask to the normal truncation", () => {
+    const filler = "x".repeat(1000)
+    const conversation = Array.from({ length: 30 }, (_, i) => ({
+      role: "user",
+      content: i === 0 ? "THE ORIGINAL ASK" : `turn ${i + 1} ${filler}`,
+    }))
+    const out = renderConversationAsText(conversation, 4000)
+    // Without the flag the ask is simply dropped with the rest of turn 1.
+    expect(out).not.toContain("[Original ask (kept for the advisor):]")
+    expect(out).not.toContain("THE ORIGINAL ASK")
+    expect(out).toContain("[TRUNCATED:")
+  })
+
+  test("pinOriginalAsk reserves budget so pin + tail fit the same budget", () => {
+    const filler = "a".repeat(2000)
+    const conversation = [
+      { role: "user", content: "SHORT ORIGINAL ASK" },
+      { role: "assistant", content: filler },
+      { role: "user", content: filler },
+      { role: "assistant", content: "latest" },
+    ]
+    // 2500 chars keeps only the last turn plus the pinned ask, not the
+    // middle filler turns.
+    const budget = 2500
+    const out = renderConversationAsText(conversation, budget, undefined, true)
+    expect(out.startsWith("[Original ask (kept for the advisor):]")).toBe(true)
+    expect(out).toContain("SHORT ORIGINAL ASK")
+    expect(out).toContain("latest")
+    expect(out).toContain("[TRUNCATED:")
+    expect(out.length).toBeLessThanOrEqual(budget + 300)
+  })
+
+  test("pinOriginalAsk ignores non-text and later user turns for the pin", () => {
+    const conversation = [
+      { role: "assistant", content: "opener (no user ask yet)" },
+      { role: "tool_use", content: "x".repeat(3000) },
+      { role: "user", content: "REAL FIRST ASK" },
+      { role: "assistant", content: "a".repeat(3000) },
+    ]
+    const out = renderConversationAsText(conversation, 800, undefined, true)
+    // First USER turn is the pin source even if turn 1 was an assistant turn.
+    expect(out.startsWith("[Original ask (kept for the advisor):]")).toBe(true)
+    expect(out).toContain("REAL FIRST ASK")
+    expect(out).toContain("[TRUNCATED:")
+  })
+
   test("truncation notice reports correct counts", () => {
     const filler = "z".repeat(500)
     const conversation = Array.from({ length: 10 }, (_, i) => ({

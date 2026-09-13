@@ -21,10 +21,16 @@ export interface FastRequestPreprocessResult {
   rejectedModel?: string
 }
 
+const cheapFamily = (profileId?: string): boolean =>
+  profileId === "cheap" || profileId === "cheap1m"
+
 /**
- * Apply authenticated fast-profile model and effort policy before ordinary model
- * resolution. Synthetic aliases are refused outside an authenticated fast
- * launch, so raw/BYO traffic cannot opt itself into private profile semantics.
+ * Apply authenticated fast/cheap-profile model and effort policy before
+ * ordinary model resolution. Synthetic aliases are refused outside an
+ * authenticated fast or cheap launch, so raw/BYO traffic cannot opt itself
+ * into private profile semantics. The cheap family shares fast's exact
+ * model set and effort mapping (identical roster identities, just bare
+ * subagent slugs at the wiring layer), so this preprocess is shared.
  */
 export function preprocessFastRequest(
   rawBody: string,
@@ -47,10 +53,10 @@ export function preprocessFastRequest(
     return { body: rawBody, originalModel, modified: false, retiredAlias: originalModel }
   }
   const alias = resolveModelAlias(originalModel)
-  if (alias && (launch?.profileId !== "fast" || isMaxModelAlias(originalModel))) {
+  if (alias && (launch?.profileId !== "fast" && !cheapFamily(launch?.profileId) || isMaxModelAlias(originalModel))) {
     return { body: rawBody, originalModel, modified: false, rejectedAlias: originalModel }
   }
-  if (launch?.profileId !== "fast") {
+  if (launch?.profileId !== "fast" && !cheapFamily(launch?.profileId)) {
     return { body: rawBody, originalModel, modified: false }
   }
 

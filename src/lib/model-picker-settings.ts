@@ -45,6 +45,39 @@ const MAX_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   { id: MAX_PROFILE_MODELS.opus, label: "Claude Opus 5", behavesAs: "claude-opus-5" },
 ])
 
+const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
+  // Cheap reuses Standard's rows but pins every one to the 200K default
+  // window (`neverOneM`), because the profile's whole cost lever is the
+  // reduced context budget on every non-fixed role. `withOneMSuffix` would
+  // otherwise decorate these rows off the live catalog and a `/model` switch
+  // would silently hand the session (and every downstream subagent) a 1M
+  // window again.
+  {
+    id: "gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
+    behavesAs: "claude-opus-5",
+    neverOneM: true,
+  },
+  {
+    id: "gpt-5.6-luna",
+    label: "GPT-5.6 Luna",
+    behavesAs: "claude-opus-5",
+    neverOneM: true,
+  },
+  {
+    id: "gemini-3.8-flash",
+    label: "Gemini 3.8 Flash",
+    behavesAs: "claude-sonnet-5",
+    neverOneM: true,
+  },
+  {
+    id: "grok-4.6",
+    label: "Grok 4.6",
+    behavesAs: "claude-sonnet-5",
+    neverOneM: true,
+  },
+])
+
 /**
  * Return the ordered, profile-specific `/model` rows supported by the live
  * Copilot catalog. Fast intentionally shares Standard's four-row inventory;
@@ -65,7 +98,12 @@ export function selectableModelsInCatalog(
   if (!catalog || catalog.length === 0) return []
 
   const present = new Set(catalog.map((entry) => entry.id))
-  const declared = profile === "max" ? MAX_PICKER_MODELS : STANDARD_PICKER_MODELS
+  const declared =
+    profile === "max"
+      ? MAX_PICKER_MODELS
+      : profile === "cheap" || profile === "cheap1m"
+        ? CHEAP_PICKER_MODELS
+        : STANDARD_PICKER_MODELS
   return declared
     .filter((entry) => present.has(entry.id))
     .map((entry) => ({

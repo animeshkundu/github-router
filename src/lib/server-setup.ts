@@ -841,11 +841,14 @@ export function getClaudeCodeEnvVars(
   // STRIPPED_PARENT_ENV_KEYS comment.
   const isFastProfile = launchProfileId === "fast"
   const isMaxProfile = launchProfileId === "max"
+  const isCheapProfile = launchProfileId === "cheap" || launchProfileId === "cheap1m"
 
   const smallFastModel =
     isMaxProfile
       ? MAX_LUNA_HIGH_ALIAS_ID
       : isFastProfile
+        ? LUNA_HAIKU_ALIAS_ID
+      : isCheapProfile
         ? LUNA_HAIKU_ALIAS_ID
       : isBudgetClaudeLead(model)
         && (state.models?.data?.some((m) => m.id === BUDGET_SMALL_FAST_CATALOG_ID)
@@ -859,9 +862,11 @@ export function getClaudeCodeEnvVars(
     // directly here because they resolve/exact-match the id itself, and
     // the alias id is never a catalog entry. `canonicalizeAliasModel`
     // strips the alias for the outbound Copilot call; this decoration is
-    // purely Claude Code's LOCAL context-accounting signal.
+    // purely Claude Code's LOCAL context-accounting signal. The cheap
+    // profile intentionally keeps the alias BARE so the tier runs at the
+    // 200K default window.
     vars.ANTHROPIC_SMALL_FAST_MODEL =
-      isFastProfile || isMaxProfile
+      (isFastProfile || isMaxProfile) && !isCheapProfile
         ? oneMSuffixForAlias(smallFastModel)
         : smallFastModel
   }
@@ -936,6 +941,21 @@ export function getClaudeCodeEnvVars(
     vars[modelKey] = oneMSuffixForAlias(aliasId)
     if (process.env[nameKey] === undefined) vars[nameKey] = displayName
   }
+  // Cheap profile: identical alias tier rows to fast, but seeded with the BARE
+  // alias id (no `[1m]` bracket) — the cheap profile's whole cost lever is the
+  // 200K default window on every non-lead role, and the picker row inherits the
+  // resolved id verbatim, so a bracketed row would silently hand selected
+  // subagent tiers back their 1M budget.
+  const seedCheapAliasTierRow = (
+    modelKey: string,
+    nameKey: string,
+    aliasId: string,
+    displayName: string,
+  ): void => {
+    if (process.env[modelKey] !== undefined) return
+    vars[modelKey] = aliasId
+    if (process.env[nameKey] === undefined) vars[nameKey] = displayName
+  }
   if (isMaxProfile) {
     const seedMaxRow = (modelKey: string, nameKey: string, id: string): void => {
       if (process.env[modelKey] !== undefined) return
@@ -951,6 +971,36 @@ export function getClaudeCodeEnvVars(
       vars.ANTHROPIC_CUSTOM_MODEL_OPTION = oneMSuffixForMaxModel(MAX_PROFILE_MODELS.sol)
       if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
         vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-5.6 Sol"
+      }
+    }
+  } else if (isCheapProfile) {
+    seedCheapAliasTierRow(
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+      LUNA_SONNET_ALIAS_ID,
+      "GPT-5.6 Luna (xhigh)",
+    )
+    seedCheapAliasTierRow(
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+      LUNA_HAIKU_ALIAS_ID,
+      "GPT-5.6 Luna (high)",
+    )
+    const cheapAliasCapabilities =
+      "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
+    if (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES === undefined) {
+      vars.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = cheapAliasCapabilities
+    }
+    if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES === undefined) {
+      vars.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES = cheapAliasCapabilities
+    }
+    if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION === undefined) {
+      vars.ANTHROPIC_CUSTOM_MODEL_OPTION = LUNA_DRIVER_ALIAS_ID
+      if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
+        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-5.6 Luna (max)"
+      }
+      if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES === undefined) {
+        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES = cheapAliasCapabilities
       }
     }
   } else if (isFastProfile) {

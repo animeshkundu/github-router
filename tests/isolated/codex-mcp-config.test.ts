@@ -928,6 +928,89 @@ describe("buildPeerAgentDefinitions", () => {
       expect(PEER_AGENT_MD_FILENAME.test(`peer-123-${"a".repeat(8)}-critic.md`)).toBe(true)
     })
   })
+
+  describe("cheap launch profile", () => {
+    const CHEAP_ROSTER = ["Explore", "Plan", "general-purpose", "implementer", "reviewer"]
+
+    function buildCheapAgents(extra?: Partial<Parameters<typeof buildPeerAgentDefinitions>[0]>) {
+      return buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        cheapProfile: true,
+        serverUrl: URL,
+        nativeRoster: CHEAP_ROSTER,
+        includeCoordinator: false,
+        cheapExploreModel: "gpt-5.6-luna",
+        cheapPlanModel: "gpt-5.6-sol",
+        cheapGeneralPurposeModel: "gpt-5.6-luna",
+        cheapImplementerModel: "gemini-3.8-flash",
+        cheapReviewerModel: "claude-sonnet-5",
+        ...extra,
+      })
+    }
+
+    test("emits exactly the same five-agent roster as fast", () => {
+      const agents = buildCheapAgents()
+      expect(Object.keys(agents).sort()).toEqual(["Explore", "Plan", "general-purpose", "implementer", "reviewer"])
+      for (const absent of [
+        "peer-review-coordinator", "codex-critic", "gemini-critic", "opus-critic",
+        "implementer-fast", "reviewer-fast", "brainstorm", "scribe", "general-purpose-fast", "critic", "planner",
+      ]) expect(agents[absent]).toBeUndefined()
+    })
+
+    test("pins BARE 200K role models (no [1m]) and the same fixed efforts", () => {
+      const agents = buildCheapAgents()
+      expect(agents.Explore!.model).toBe("gpt-5.6-luna")
+      expect(agents.Plan!.model).toBe("gpt-5.6-sol")
+      expect(agents["general-purpose"]!.model).toBe("gpt-5.6-luna")
+      expect(agents.implementer!.model).toBe("gemini-3.8-flash")
+      expect(agents.reviewer!.model).toBe("claude-sonnet-5")
+      for (const def of Object.values(agents)) expect(def.model).not.toMatch(/\[1m\]/)
+
+      expect(agents.Explore!.effort).toBe("high")
+      expect(agents.Plan!.effort).toBe("high")
+      expect(agents["general-purpose"]!.effort).toBe("max")
+      expect(agents.implementer!.effort).toBe("high")
+      expect(agents.reviewer!.effort).toBe("xhigh")
+
+      expect(agents.Explore!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
+      expect(agents.reviewer!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
+      expect(agents.Plan!.tools).toContain("Agent")
+      expect(agents.Plan!.tools).toContain("mcp__peers__oracle")
+      expect(agents.Plan!.tools).toContain("mcp__search__*")
+      expect(agents.reviewer!.tools).not.toContain("mcp__peers__oracle")
+      expect(agents.reviewer!.mcpServers).not.toHaveProperty("peers")
+      expect(agents.Plan!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything(), search: expect.anything() }))
+      expect(agents.Plan!.prompt).toContain("Oracle")
+      expect(agents.reviewer!.prompt).not.toContain("Oracle")
+      // Explore-first under cheap delegation rules: Plan may only delegate
+      // discovery to Explore, never to any other subagent.
+      expect(agents.Plan!.prompt).toContain("you may invoke Explore for discovery; do not invoke any other subagent")
+    })
+
+    test("browseAvailable with workers group adds an identical bare worker-browse", () => {
+      const agents = buildCheapAgents({ browseAvailable: true })
+      expect(agents["worker-browse"]).toBeDefined()
+      expect(agents["worker-browse"]!.tools).toEqual(["mcp__workers__*"])
+      expect(agents["worker-browse"]!.model).toBe("gpt-5.6-luna")
+      expect(agents["worker-browse"]!.effort).toBe("high")
+    })
+
+    test("nativeRoster remains a hard filter on the cheap definitions", () => {
+      const agents = buildCheapAgents({ nativeRoster: ["Explore"] })
+      expect(Object.keys(agents)).toEqual(["Explore"])
+    })
+
+    test("every cheap agent name matches the permanent sweep allowlist", () => {
+      const agents = buildCheapAgents({ browseAvailable: true })
+      for (const name of Object.keys(agents)) {
+        expect(PEER_AGENT_MD_FILENAME.test(`peer-123-${"a".repeat(8)}-${name}.md`)).toBe(true)
+      }
+    })
+  })
 })
 
 describe("resolveCodexCliBackend", () => {

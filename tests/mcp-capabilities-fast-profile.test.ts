@@ -28,7 +28,17 @@ import {
   fastAdvisorModel,
   fastOracleModel,
   fastAstraModel,
+  cheapOracleModel,
+  cheapAstraModel,
 } from "~/lib/mcp-capabilities"
+import {
+  CHEAP_PROFILE_ASTRA_EFFORT,
+  CHEAP_PROFILE_ASTRA_MODEL,
+  CHEAP_PROFILE_ASTRA_PROMPT_TOKENS,
+  CHEAP_PROFILE_ORACLE_EFFORT,
+  CHEAP_PROFILE_ORACLE_MODEL,
+  CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+} from "~/lib/cheap-profile-contract"
 import { state } from "~/lib/state"
 
 const savedModels = state.models
@@ -188,6 +198,104 @@ test("fast Oracle pins to exact Opus 5 1M high on messages with adaptive thinkin
     }),
   )
   expect(fastOracleModel()).toBe("claude-opus-5")
+})
+
+test("cheap Oracle pins to exact Grok 4.6 200K/medium on responses", () => {
+  expect(CHEAP_PROFILE_ORACLE_MODEL).toBe("grok-4.6")
+  expect(CHEAP_PROFILE_ORACLE_EFFORT).toBe("medium")
+  expect(CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS).toBe(200_000)
+
+  setCatalog(
+    entry("grok-4.6", {
+      ctx: 500_000,
+      maxPrompt: 372_000,
+      efforts: ["low", "medium"],
+      endpoints: ["/responses"],
+    }),
+  )
+  expect(cheapOracleModel()).toBe("grok-4.6")
+
+  // Context below the 200K subagent floor rejects.
+  setCatalog(
+    entry("grok-4.6", {
+      ctx: 100_000,
+      maxPrompt: 372_000,
+      efforts: ["low", "medium"],
+      endpoints: ["/responses"],
+    }),
+  )
+  expect(cheapOracleModel()).toBeUndefined()
+
+  // Missing the fixed medium effort rejects.
+  setCatalog(
+    entry("grok-4.6", {
+      ctx: 500_000,
+      maxPrompt: 372_000,
+      efforts: ["high"],
+      endpoints: ["/responses"],
+    }),
+  )
+  expect(cheapOracleModel()).toBeUndefined()
+
+  // Wrong endpoint rejects (grok serves no messages endpoint anyway).
+  setCatalog(
+    entry("grok-4.6", {
+      ctx: 500_000,
+      maxPrompt: 372_000,
+      efforts: ["low", "medium"],
+      endpoints: ["/v1/chat/completions"],
+    }),
+  )
+  expect(cheapOracleModel()).toBeUndefined()
+})
+
+test("cheap Astra pins to exact gpt-6-astra 200K/medium on responses", () => {
+  expect(CHEAP_PROFILE_ASTRA_MODEL).toBe("gpt-6-astra")
+  expect(CHEAP_PROFILE_ASTRA_EFFORT).toBe("medium")
+  expect(CHEAP_PROFILE_ASTRA_PROMPT_TOKENS).toBe(200_000)
+
+  setCatalog(
+    entry("gpt-6-astra", {
+      ctx: 200_000,
+      maxPrompt: 200_000,
+      efforts: ["medium"],
+      endpoints: ["/responses"],
+    }),
+  )
+  expect(cheapAstraModel()).toBe("gpt-6-astra")
+
+  // Under the 200K prompt-token floor rejects.
+  setCatalog(
+    entry("gpt-6-astra", {
+      ctx: 200_000,
+      maxPrompt: 100_000,
+      efforts: ["medium"],
+      endpoints: ["/responses"],
+    }),
+  )
+  expect(cheapAstraModel()).toBeUndefined()
+
+  // Missing medium effort rejects.
+  setCatalog(
+    entry("gpt-6-astra", {
+      ctx: 200_000,
+      maxPrompt: 200_000,
+      efforts: ["high"],
+      endpoints: ["/responses"],
+    }),
+  )
+  expect(cheapAstraModel()).toBeUndefined()
+
+  // Wrong endpoint rejects.
+  setCatalog(
+    entry("gpt-6-astra", {
+      ctx: 200_000,
+      maxPrompt: 200_000,
+      efforts: ["medium"],
+      endpoints: ["/v1/chat/completions"],
+    }),
+  )
+  expect(cheapAstraModel()).toBeUndefined()
 })
 
 test("fast Astra pins to exact gpt-6-astra 200k high on responses", () => {

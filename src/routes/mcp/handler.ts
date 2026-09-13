@@ -54,12 +54,20 @@ import {
   fleetToolsEnabled,
   fastOracleModel,
   fastAstraModel,
+  cheapOracleModel,
+  cheapAstraModel,
   geminiAvailable,
   resolveGeminiReviewModel,
   standInToolEnabled,
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
 import { maxPersonasFor } from "~/lib/peer-mcp-personas"
+import {
+  CHEAP_PROFILE_ASTRA_EFFORT,
+  CHEAP_PROFILE_ASTRA_MODEL,
+  CHEAP_PROFILE_ORACLE_EFFORT,
+  CHEAP_PROFILE_ORACLE_MODEL,
+} from "~/lib/cheap-profile-contract"
 import {
   MAX_PROFILE_MODELS,
   maxCodexReviewerModel,
@@ -320,11 +328,12 @@ function activePersonas(launch?: LaunchRegistryEntry): Array<PersonaSpec> {
   })
 }
 
-function oracleToolEntry(): ToolEntry {
+function oracleToolEntry(isCheap = false): ToolEntry {
   return {
     name: "oracle",
-    description:
-      "Expert consultant backed by exact Opus 5 (1M context, high effort) for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them. Preferred over advisor for self-contained technical briefs.\n\nWhen NOT to invoke: not for transcript-aware framing (consult Advisor), terminal dead ends (consult Astra), routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.",
+    description: isCheap
+      ? "Expert consultant backed by Grok 4.6 (200K context, medium effort) for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them. Preferred over advisor for self-contained technical briefs.\n\nWhen NOT to invoke: not for transcript-aware framing (consult Advisor), terminal dead ends (consult Astra), routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question."
+      : "Expert consultant backed by exact Opus 5 (1M context, high effort) for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them. Preferred over advisor for self-contained technical briefs.\n\nWhen NOT to invoke: not for transcript-aware framing (consult Advisor), terminal dead ends (consult Astra), routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.",
     inputSchema: {
       type: "object",
       required: ["query", "context"],
@@ -346,7 +355,8 @@ function escapeXml(unsafe: string): string {
     .replace(/'/g, "&apos;")
 }
 
-const ASTRA_INSTRUCTIONS = `You are Astra, a stateless technical decision consultant running on GPT-6 Astra at high reasoning effort.
+function astraInstructions(effortLabel: string): string {
+  return `You are Astra, a stateless technical decision consultant running on GPT-6 Astra at ${effortLabel} reasoning effort.
 
 # Objective
 Resolve one precise technical, algorithmic, protocol, or architectural decision that remains blocked after direct investigation, Advisor, and Oracle. Find a defensible path, identify the minimum evidence needed to find one, or conclude that no defensible path exists under the stated constraints.
@@ -377,12 +387,14 @@ A short ordered list executable by the caller. For NEED_EVIDENCE, list at most t
 
 ## Assumptions and falsifiers
 The assumptions used and the single fact most likely to change the recommendation.`
+}
 
-function astraToolEntry(): ToolEntry {
+function astraToolEntry(isCheap = false): ToolEntry {
+  const effortLabel = isCheap ? "200K policy window, medium effort" : "200K policy window, high effort"
   return {
     name: "astra",
     description:
-      "Terminal decision consultant backed by GPT-6 Astra (200K policy window, high effort). Stateless and cold-start: evaluates a self-contained brief with no repository access, session transcript, tools, execution authority, or approval authority.\n\nWhen to invoke: use strictly as a last resort when direct empirical investigation (code, tests, builds), Advisor (framing/trajectory), and Oracle (spec/architectural trade-offs) have ALL failed to produce a defensible path forward.\n\nWhen NOT to invoke: not for initial trade-offs (consult Oracle), routine framing (consult Advisor), mechanical facts, code generation, approval, or retrying with unchanged evidence.\n\nPass one specific decision in `query` and a concise but complete self-contained evidence packet in `context`. Expected consultation: at most 1-2 calls per decision.\n\nReturns concise, specific structured Markdown with Status (PATH_FOUND | NEED_EVIDENCE | NO_DEFENSIBLE_PATH), Recommendation, Decision basis, Next checks or actions, and Assumptions and falsifiers.",
+      `Terminal decision consultant backed by GPT-6 Astra (${effortLabel}). Stateless and cold-start: evaluates a self-contained brief with no repository access, session transcript, tools, execution authority, or approval authority.\n\nWhen to invoke: use strictly as a last resort when direct empirical investigation (code, tests, builds), Advisor (framing/trajectory), and Oracle (spec/architectural trade-offs) have ALL failed to produce a defensible path forward.\n\nWhen NOT to invoke: not for initial trade-offs (consult Oracle), routine framing (consult Advisor), mechanical facts, code generation, approval, or retrying with unchanged evidence.\n\nPass one specific decision in \`query\` and a concise but complete self-contained evidence packet in \`context\`. Expected consultation: at most 1-2 calls per decision.\n\nReturns concise, specific structured Markdown with Status (PATH_FOUND | NEED_EVIDENCE | NO_DEFENSIBLE_PATH), Recommendation, Decision basis, Next checks or actions, and Assumptions and falsifiers.`,
     inputSchema: {
       type: "object",
       required: ["query", "context"],
@@ -475,7 +487,11 @@ function fastAllowsTool(
   launch: LaunchRegistryEntry,
   item: ProfileProjectionItem,
 ): boolean {
-  if (launch.profileId !== "fast") return true
+  if (
+    launch.profileId !== "fast"
+    && launch.profileId !== "cheap"
+    && launch.profileId !== "cheap1m"
+  ) return true
   if (scope !== "all" && item.group !== scope) return false
   if (!launch.allowedGroups?.has(item.group)) return false
   if (item.persona) return false
@@ -512,24 +528,31 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       }))
     return [...personaEntries, ...nonPersonaEntries]
   }
-  if (launch.profileId === "fast") {
+  if (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m") {
+    const isCheap = launch.profileId === "cheap" || launch.profileId === "cheap1m"
+    // Astra is wired only for `fast` and the `-m cheap1m` successor; the new
+    // `-m cheap` (200K lead, oracle-only allowlist) never exposes it, even if
+    // a hypothetical test/mint granted the persona — this mirrors both the
+    // astra `tools/call` gate and `claude.ts`'s `astraAvailable` wiring.
+    const astraWired = launch.profileId === "fast" || launch.profileId === "cheap1m"
     const entries: Array<ToolEntry> = []
     if (
       (scope === "all" || scope === "peers")
       && launch.allowedGroups?.has("peers")
       && launch.allowedPersonas?.has("oracle")
-      && fastOracleModel()
+      && (isCheap ? cheapOracleModel() : fastOracleModel())
     ) {
-      entries.push(oracleToolEntry())
+      entries.push(oracleToolEntry(isCheap))
     }
     if (
       (scope === "all" || scope === "peers")
       && launch.allowedGroups?.has("peers")
       && launch.allowedPersonas?.has("astra")
       && audience === "lead-peers"
-      && fastAstraModel()
+      && astraWired
+      && (isCheap ? cheapAstraModel() : fastAstraModel())
     ) {
-      entries.push(astraToolEntry())
+      entries.push(astraToolEntry(isCheap))
     }
     for (const tool of NON_PERSONA_MCP_TOOLS) {
       if (!fastAllowsTool(scope, launch, { group: tool.group, name: tool.toolNameHttp, tool })) continue
@@ -1284,7 +1307,7 @@ async function handleToolsCall(
     }
   }
 
-  if (launch.profileId === "fast" && name !== "oracle" && name !== "astra") {
+  if ((launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m") && name !== "oracle" && name !== "astra") {
     const fastPersona = activePersonas(launch).find((persona) => persona.toolNameHttp === name)
     const fastTool = NON_PERSONA_MCP_TOOLS.find((tool) => tool.toolNameHttp === name)
     const fastAllowed = fastPersona
@@ -1297,13 +1320,19 @@ async function handleToolsCall(
     }
   }
 
-  if (launch.profileId === "fast" && name === "astra") {
+  if (
+    (launch.profileId === "fast" || launch.profileId === "cheap1m")
+    && name === "astra"
+  ) {
+    const isCheapAstra = launch.profileId === "cheap1m"
+    const astraModel = isCheapAstra ? CHEAP_PROFILE_ASTRA_MODEL : "gpt-6-astra"
+    const astraEffort = isCheapAstra ? CHEAP_PROFILE_ASTRA_EFFORT : "high"
     if (
       (scope !== "all" && scope !== "peers")
       || !launch.allowedGroups?.has("peers")
       || !launch.allowedPersonas?.has("astra")
       || audience !== "lead-peers"
-      || !fastAstraModel()
+      || !(isCheapAstra ? cheapAstraModel() : fastAstraModel())
     ) {
       return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
     }
@@ -1315,15 +1344,15 @@ async function handleToolsCall(
     const astraPersona: PersonaSpec = {
       agentName: "astra",
       toolNameHttp: "astra",
-      model: "gpt-6-astra",
+      model: astraModel,
       endpoint: "/v1/responses",
-      description: "Fast-profile Astra",
-      baseInstructions: ASTRA_INSTRUCTIONS,
+      description: "Fast/cheap-profile Astra",
+      baseInstructions: astraInstructions(isCheapAstra ? "medium" : "high"),
       agentPrompt: "",
       writeCapable: false,
       requiresHttp: true,
-      allowedEfforts: ["high"],
-      defaultEffort: "high",
+      allowedEfforts: [astraEffort],
+      defaultEffort: astraEffort,
     }
     const astraXmlInput = `<astra_request>\n  <query>${escapeXml(query)}</query>\n  <context>${escapeXml(context)}</context>\n</astra_request>`
     const overflow = await predictedWindowOverflow(astraPersona, astraXmlInput, undefined, {
@@ -1343,18 +1372,18 @@ async function handleToolsCall(
     if (abortKey !== undefined) inflightAborts.set(abortKey, inflightEntry)
     try {
       const text = await dispatchModelCall({
-        model: "gpt-6-astra",
+        model: astraModel,
         endpoint: "/v1/responses",
         instructions: astraPersona.baseInstructions,
         userText: astraXmlInput,
-        effort: "high",
+        effort: astraEffort,
         signal: aborter.signal,
       })
-      logTelemetry({ name: "astra", model: "gpt-6-astra", durationMs: Date.now() - startedAt, result: "ok" })
+      logTelemetry({ name: "astra", model: astraModel, durationMs: Date.now() - startedAt, result: "ok" })
       return rpcResult(body.id, { content: [{ type: "text", text }] })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      logTelemetry({ name: "astra", model: "gpt-6-astra", durationMs: Date.now() - startedAt, result: "exception", errorMessage: message })
+      logTelemetry({ name: "astra", model: astraModel, durationMs: Date.now() - startedAt, result: "exception", errorMessage: message })
       return rpcResult(body.id, toolError(`astra failed: ${message}`))
     } finally {
       if (abortKey !== undefined && inflightAborts.get(abortKey) === inflightEntry) {
@@ -1364,12 +1393,19 @@ async function handleToolsCall(
     }
   }
 
-  if (launch.profileId === "fast" && name === "oracle") {
+  if (
+    (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m")
+    && name === "oracle"
+  ) {
+    const isCheapOracle = launch.profileId === "cheap" || launch.profileId === "cheap1m"
+    const oracleModel = isCheapOracle ? CHEAP_PROFILE_ORACLE_MODEL : "claude-opus-5"
+    const oracleEndpoint = isCheapOracle ? "/v1/responses" : "/v1/messages"
+    const oracleEffort = isCheapOracle ? CHEAP_PROFILE_ORACLE_EFFORT : "high"
     if (
       (scope !== "all" && scope !== "peers")
       || !launch.allowedGroups?.has("peers")
       || !launch.allowedPersonas?.has("oracle")
-      || !fastOracleModel()
+      || !(isCheapOracle ? cheapOracleModel() : fastOracleModel())
     ) {
       return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
     }
@@ -1387,16 +1423,18 @@ async function handleToolsCall(
     const oraclePersona: PersonaSpec = {
       agentName: "oracle",
       toolNameHttp: "oracle",
-      model: "claude-opus-5",
-      endpoint: "/v1/messages",
-      description: "Fast-profile Oracle",
+      model: oracleModel,
+      endpoint: oracleEndpoint,
+      description: "Fast/cheap-profile Oracle",
       baseInstructions:
-        "You are Oracle, an expert architectural and technical consultant running on Opus 5. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.",
+        isCheapOracle
+          ? "You are Oracle, an expert architectural and technical consultant running on Grok 4.6. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action."
+          : "You are Oracle, an expert architectural and technical consultant running on Opus 5. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.",
       agentPrompt: "",
       writeCapable: false,
       requiresHttp: true,
-      allowedEfforts: ["high"],
-      defaultEffort: "high",
+      allowedEfforts: [oracleEffort],
+      defaultEffort: oracleEffort,
     }
     const overflow = await predictedWindowOverflow(oraclePersona, oracleInput, undefined)
     if (overflow) return rpcResult(body.id, toolError(overflow))
@@ -1411,18 +1449,18 @@ async function handleToolsCall(
     if (abortKey !== undefined) inflightAborts.set(abortKey, inflightEntry)
     try {
       const text = await dispatchModelCall({
-        model: "claude-opus-5",
-        endpoint: "/v1/messages",
+        model: oracleModel,
+        endpoint: oracleEndpoint,
         instructions: oraclePersona.baseInstructions,
         userText: oracleInput,
-        effort: "high",
+        effort: oracleEffort,
         signal: aborter.signal,
       })
-      logTelemetry({ name: "oracle", model: "claude-opus-5", durationMs: Date.now() - startedAt, result: "ok" })
+      logTelemetry({ name: "oracle", model: oracleModel, durationMs: Date.now() - startedAt, result: "ok" })
       return rpcResult(body.id, { content: [{ type: "text", text }] })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      logTelemetry({ name: "oracle", model: "claude-opus-5", durationMs: Date.now() - startedAt, result: "exception", errorMessage: message })
+      logTelemetry({ name: "oracle", model: oracleModel, durationMs: Date.now() - startedAt, result: "exception", errorMessage: message })
       return rpcResult(body.id, toolError(`oracle failed: ${message}`))
     } finally {
       if (abortKey !== undefined && inflightAborts.get(abortKey) === inflightEntry) {
@@ -1432,10 +1470,13 @@ async function handleToolsCall(
     }
   }
 
-  // A fast profile exposes only Oracle from peers. Reject every standard
-  // persona before lookup/slot acquisition so a hard-coded tool name cannot
-  // bypass tools/list (including through the unscoped union).
-  if (launch.profileId === "fast" && PERSONAS_READ.some((p) => p.toolNameHttp === name)) {
+  // A fast/cheap-family profile exposes only Oracle and Astra from peers. Reject every
+  // standard persona before lookup/slot acquisition so a hard-coded tool name
+  // cannot bypass tools/list (including through the unscoped union).
+  if (
+    (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m")
+    && PERSONAS_READ.some((p) => p.toolNameHttp === name)
+  ) {
     return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
   }
 

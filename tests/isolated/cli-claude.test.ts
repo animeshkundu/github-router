@@ -158,7 +158,14 @@ mock.module("~/lib/port", () => ({
       pickClaudeDefaultCalls.push(undefined)
       return pickClaudeDefaultImpl(undefined)
     }
+    // Mirrors src/lib/port.ts post-split: `-m fast` and `-m cheap1m` run the
+    // catalog-gated `[1m]` decoration (via `leadOneMDecorateImpl`, the stand-in
+    // for `withOneMSuffixForLead`), while `-m cheap` deliberately returns the
+    // BARE leader with NO decoration — its whole cost lever is the 200K
+    // default lead window.
     if (arg.toLowerCase() === "fast") return leadOneMDecorateImpl("gemini-3.8-flash")
+    if (arg.toLowerCase() === "cheap1m") return leadOneMDecorateImpl("gemini-3.8-flash")
+    if (arg.toLowerCase() === "cheap") return "gemini-3.8-flash"
     const shorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
     if (shorthand) {
       pickClaudeDefaultCalls.push(shorthand)
@@ -261,6 +268,10 @@ mock.module("~/lib/mcp-capabilities", () => ({
   fastAdvisorModel: mock(() => "gemini-3.8-flash"),
   fastOracleModel: mock(() => "claude-opus-5"),
   fastAstraModel: mock(() => undefined),
+  // Cheap-profile resolvers (only exercised under `-m cheap`); stubbed so the
+  // static import graph used by mcp/handler.ts resolves for every test here.
+  cheapOracleModel: mock(() => "grok-4.6"),
+  cheapAstraModel: mock(() => "gpt-6-astra"),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
   FAST_GENERAL_PURPOSE_EFFORT: "max",
@@ -688,7 +699,7 @@ describe("claude command", () => {
         },
         {
           id: "grok-4.6",
-          capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+          capabilities: { limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
           supported_endpoints: ["/responses"],
         },
         {
@@ -719,6 +730,119 @@ describe("claude command", () => {
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_MODEL).toBe("gemini-3.8-flash")
+  })
+
+  test("`-m cheap` selects the BARE Gemini lead (no [1m]) with the bare-subagent surface", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.6-luna",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gpt-5.6-sol",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "claude-opus-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/v1/messages"],
+        },
+        {
+          id: "grok-4.6",
+          capabilities: { limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gemini-3.8-flash",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
+          supported_endpoints: ["/v1/chat/completions"],
+        },
+        {
+          id: "claude-sonnet-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } },
+          supported_endpoints: ["/v1/messages"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    const run = getRunFn()
+
+    await run({ args: { model: "cheap" } })
+
+    expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345",
+      "gemini-3.8-flash",
+      "cheap",
+      [],
+    )
+    expect(injectModelPickerSettingsFileMock).toHaveBeenCalledWith(
+      expect.stringContaining("settings.json"),
+      "cheap",
+    )
+    const [, , options] = spawnMock.mock.calls[0]
+    expect(options.env.ANTHROPIC_MODEL).toBe("gemini-3.8-flash")
+  })
+
+  test("`-m cheap1m` selects the [1m]-decorated Gemini lead (catalog-gated) with the same bare-subagent roster", async () => {
+    // A 1M-capable catalog makes `withOneMSuffixForLead` decorate the cheap1m
+    // leader; the cheap1m lead prereq (1M gate) also requires it.
+    leadOneMDecorateImpl = (slug) =>
+      slug === "gemini-3.8-flash" ? "gemini-3.8-flash[1m]" : slug
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.6-luna",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gpt-5.6-sol",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "claude-opus-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/v1/messages"],
+        },
+        {
+          id: "grok-4.6",
+          capabilities: { limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gemini-3.8-flash",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
+          supported_endpoints: ["/v1/chat/completions"],
+        },
+        {
+          id: "claude-sonnet-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } },
+          supported_endpoints: ["/v1/messages"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    const run = getRunFn()
+
+    await run({ args: { model: "cheap1m" } })
+
+    expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345",
+      "gemini-3.8-flash[1m]",
+      "cheap1m",
+      [],
+    )
+    expect(injectModelPickerSettingsFileMock).toHaveBeenCalledWith(
+      expect.stringContaining("settings.json"),
+      "cheap1m",
+    )
+    const [, , options] = spawnMock.mock.calls[0]
+    expect(options.env.ANTHROPIC_MODEL).toBe("gemini-3.8-flash[1m]")
+    leadOneMDecorateImpl = (slug) => slug
   })
 
   test("`-m fast` overrides mirrored/caller Advisor identity with fixed Gemini", async () => {
@@ -765,6 +889,108 @@ describe("claude command", () => {
     const advisorAt = args.indexOf("--advisor")
     expect(advisorAt).toBeGreaterThanOrEqual(0)
     expect(args[advisorAt + 1]).toBe("gpt-5.6-sol[1m]")
+    expect(args.filter((arg: string) => arg === "--advisor")).toHaveLength(1)
+    expect(args.some((arg: string) => arg.startsWith("--advisor="))).toBe(false)
+    expect(args).not.toContain("opus")
+    expect(args).not.toContain("sonnet")
+    expect(args).not.toContain("haiku")
+  })
+
+  test("`-m cheap` pins the fixed BARE Advisor identity", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.6-luna",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gpt-5.6-sol",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "grok-4.6",
+          capabilities: { limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gemini-3.8-flash",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
+          supported_endpoints: ["/v1/chat/completions"],
+        },
+        {
+          id: "claude-sonnet-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } },
+          supported_endpoints: ["/v1/messages"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    const run = getRunFn()
+    await run({
+      args: { model: "cheap" },
+      rawArgs: [
+        "-m", "cheap", "--advisor", "opus", "--advisor=sonnet",
+        "--", "--advisor", "haiku",
+      ],
+    })
+
+    const [, args] = spawnMock.mock.calls[0]
+    const advisorAt = args.indexOf("--advisor")
+    expect(advisorAt).toBeGreaterThanOrEqual(0)
+    expect(args[advisorAt + 1]).toBe("gpt-5.6-sol")
+    expect(args.filter((arg: string) => arg === "--advisor")).toHaveLength(1)
+    expect(args.some((arg: string) => arg.startsWith("--advisor="))).toBe(false)
+    expect(args).not.toContain("opus")
+    expect(args).not.toContain("sonnet")
+    expect(args).not.toContain("haiku")
+  })
+
+  test("`-m cheap1m` pins the same fixed BARE Advisor identity as cheap", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          id: "gpt-5.6-luna",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gpt-5.6-sol",
+          capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "grok-4.6",
+          capabilities: { limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+          supported_endpoints: ["/responses"],
+        },
+        {
+          id: "gemini-3.8-flash",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
+          supported_endpoints: ["/v1/chat/completions"],
+        },
+        {
+          id: "claude-sonnet-5",
+          capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } },
+          supported_endpoints: ["/v1/messages"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    const run = getRunFn()
+    await run({
+      args: { model: "cheap1m" },
+      rawArgs: [
+        "-m", "cheap1m", "--advisor", "opus", "--advisor=sonnet",
+        "--", "--advisor", "haiku",
+      ],
+    })
+
+    const [, args] = spawnMock.mock.calls[0]
+    const advisorAt = args.indexOf("--advisor")
+    expect(advisorAt).toBeGreaterThanOrEqual(0)
+    expect(args[advisorAt + 1]).toBe("gpt-5.6-sol")
     expect(args.filter((arg: string) => arg === "--advisor")).toHaveLength(1)
     expect(args.some((arg: string) => arg.startsWith("--advisor="))).toBe(false)
     expect(args).not.toContain("opus")
@@ -1530,8 +1756,13 @@ describe("claude command", () => {
             supported_endpoints: ["/v1/messages"],
           },
           {
+            id: "claude-sonnet-5",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["xhigh"] } },
+            supported_endpoints: ["/v1/messages"],
+          },
+          {
             id: "grok-4.6",
-            capabilities: { limits: { max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+            capabilities: { limits: { max_context_window_tokens: 400_000, max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
             supported_endpoints: ["/responses"],
           },
           {
@@ -1548,11 +1779,66 @@ describe("claude command", () => {
       expect(fakeServer.close).toHaveBeenCalled()
     })
 
+    test("cheap1m runtime failure is fatal with the Cheap1m label and does not spawn", async () => {
+      state.models = {
+        object: "list",
+        data: [
+          {
+            id: "gpt-5.6-luna",
+            capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "gpt-5.6-sol",
+            capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "claude-opus-5",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high"] } },
+            supported_endpoints: ["/v1/messages"],
+          },
+          {
+            id: "claude-sonnet-5",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["xhigh"] } },
+            supported_endpoints: ["/v1/messages"],
+          },
+          {
+            id: "grok-4.6",
+            capabilities: { limits: { max_context_window_tokens: 400_000, max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+            supported_endpoints: ["/responses"],
+          },
+          {
+            id: "gemini-3.8-flash",
+            capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
+            supported_endpoints: ["/chat/completions"],
+          },
+        ] as unknown as NonNullable<typeof state.models>["data"],
+      }
+      writePeerMcpRuntimeFilesMock.mockRejectedValue(new Error("disk full"))
+      const run = getRunFn()
+      await expect(run({ args: { model: "cheap1m" } })).rejects.toThrow(ExitError)
+      expect(spawnMock).not.toHaveBeenCalled()
+      expect(fakeServer.close).toHaveBeenCalled()
+      expect(stderrWriteMock).toHaveBeenCalledTimes(2)
+      expect(String(stderrWriteMock.mock.calls[1][0])).toContain("Cheap1m profile wiring failed")
+    })
+
     test("fast plus --no-codex-mcp is rejected before spawning", async () => {
       const run = getRunFn()
       await expect(run({ args: { model: "fast", "codex-mcp": false } })).rejects.toThrow(ExitError)
       expect(spawnMock).not.toHaveBeenCalled()
       expect(writePeerMcpRuntimeFilesMock).not.toHaveBeenCalled()
+    })
+
+    test("cheap1m plus --no-codex-mcp is rejected with the cheap1m-specific message", async () => {
+      const run = getRunFn()
+      await expect(run({ args: { model: "cheap1m", "codex-mcp": false } })).rejects.toThrow(ExitError)
+      expect(spawnMock).not.toHaveBeenCalled()
+      expect(writePeerMcpRuntimeFilesMock).not.toHaveBeenCalled()
+      expect(stderrWriteMock).toHaveBeenCalledTimes(1)
+      expect(String(stderrWriteMock.mock.calls[0][0]))
+        .toContain("github-router claude -m cheap1m requires codex MCP wiring")
     })
 
     test("injectPeerMcpIntoMirror failure does not block claude launch", async () => {

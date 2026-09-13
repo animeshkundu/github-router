@@ -2,6 +2,11 @@ import type { Effort } from "./reasoning-effort"
 import { normalizeTrailingOneMSuffix, stripTrailingOneMSuffix } from "./model-suffix"
 import { fastEndpointForModel } from "./fast-endpoint"
 import {
+  CHEAP_PROFILE_MODELS,
+  CHEAP_PROFILE_NATIVE_AGENT_NAMES,
+  CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+} from "./cheap-profile-contract"
+import {
   FAST_PROFILE_MODELS,
   FAST_PROFILE_NATIVE_AGENT_NAMES,
 } from "./fast-profile-contract"
@@ -16,18 +21,27 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *
  * `"standard"` is every launch today: the ordinary Opus/Sonnet/Haiku lead,
  * the full native-agent roster, every peer persona, and every scoped MCP
- * group (`peers`/`search`/`workers`/`orchestrate`, plus the independently
- * opted-in `browser`/`fleet`/`first-mate`/`decide` groups under their own
- * predicates). `"fast"` is the deliberately lean `-m fast` profile: a
- * `gpt-5.6-luna` lead, exactly five native agents, the fast-only Oracle,
- * Artifact/search tools, and optional direct-browser plus browse-worker groups.
+*  group (`peers`/`search`/`workers`/`orchestrate`, plus the independently
+ *  opted-in `browser`/`fleet`/`first-mate`/`decide` groups under their own
+ *  predicates). `"fast"` is the deliberately lean `-m fast` profile: a
+ *  `gpt-5.6-luna` lead, exactly five native agents, the fast-only Oracle,
+ *  Artifact/search tools, and optional direct-browser plus browse-worker groups.
+ *  `"cheap"` is the cost-lean `-m cheap` variant of `fast`: the same exact
+ *  five-agent surface, but the Gemini leader also runs at the 200K default
+ *  window (bare slug), every subagent runs at 200K, and the only peer is the
+ *  `grok-4.6`/medium Oracle. `"cheap1m"` is the named successor of the
+ *  original cheap launch: identical to `cheap` except the Gemini leader keeps
+ *  its full 1M window (`[1m]` decoration) and the `astra` peer remains
+ *  available next to Oracle. Both cheap variants share the same `CHEAP_*`
+ *  contract values; the three gates that differ are the lead slug, the lead
+ *  prereq window, and the cheap1m-only `astra` peer.
  *
- * Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
- * from the resolved lead model id — so `-m gpt-5.6-luna` (a direct pin of
- * the same model the fast profile drives) stays a standard-surface launch,
- * and only the literal `fast` alias narrows the surface.
+ *  Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
+ *  from the resolved lead model id — so `-m gpt-5.6-luna` (a direct pin of
+ *  the same model the fast profile drives) stays a standard-surface launch,
+ *  and only the literal `fast`/`cheap`/`cheap1m` aliases narrow the surface.
  */
-export type LaunchProfileId = "standard" | "fast" | "max"
+export type LaunchProfileId = "standard" | "fast" | "max" | "cheap" | "cheap1m"
 
 /**
  * Everything a launch profile needs to declare about its own surface.
@@ -76,6 +90,38 @@ export const FAST_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
+ * The `-m cheap1m` roster: the named successor of the original cheap launch.
+ * Identical to `cheap` except the Gemini leader keeps its full 1M window
+ * (the `-m cheap1m` lead slug is `[1m]`-decorated) and the `astra` peer
+ * remains in the persona allowlist next to Oracle. Oracle and Astra run at
+ * the 200K default window like every cheap-family role. Hard-denies match
+ * fast's: core workers, `orchestrate`, `decide`, `fleet`, and `first-mate`.
+ */
+export const CHEAP1M_PROFILE: LaunchProfileDescriptor = Object.freeze({
+  id: "cheap1m",
+  nativeRoster: new Set(CHEAP_PROFILE_NATIVE_AGENT_NAMES),
+  personaAllowlist: new Set(["oracle", "astra"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser"]),
+  hasCoordinator: false,
+})
+
+/**
+ * The `-m cheap` roster: the exact `fast` surface and groups, minus the 1M
+ * accounting decoration on the LEAD as well (`-m cheap` selects the BARE
+ * `gemini-3.8-flash` slug, so the leader runs at the 200K default window
+ * too), plus a cheaper `grok-4.6`/medium Oracle and NO `astra` peer.
+ * Hard-denies match fast's: core workers, `orchestrate`, `decide`, `fleet`,
+ * and `first-mate`.
+ */
+export const CHEAP_PROFILE: LaunchProfileDescriptor = Object.freeze({
+  id: "cheap",
+  nativeRoster: new Set(CHEAP_PROFILE_NATIVE_AGENT_NAMES),
+  personaAllowlist: new Set(["oracle"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser"]),
+  hasCoordinator: false,
+})
+
+/**
  * The `-m max` profile: Sol/Luna-led, browse-only workers, and explicit
  * cross-lab peer names. The descriptor is a hard projection for bound launch
  * requests; unbound/BYO traffic remains standard because it has no registry
@@ -101,6 +147,8 @@ export const MAX_PROFILE: LaunchProfileDescriptor = Object.freeze({
 export function profileDescriptor(id: LaunchProfileId): LaunchProfileDescriptor {
   if (id === "fast") return FAST_PROFILE
   if (id === "max") return MAX_PROFILE
+  if (id === "cheap1m") return CHEAP1M_PROFILE
+  if (id === "cheap") return CHEAP_PROFILE
   return STANDARD_PROFILE
 }
 
@@ -119,6 +167,8 @@ export function resolveLaunchProfile(modelArg: string | undefined): LaunchProfil
   const arg = modelArg?.trim().toLowerCase()
   if (arg === "fast") return "fast"
   if (arg === "max") return "max"
+  if (arg === "cheap1m") return "cheap1m"
+  if (arg === "cheap") return "cheap"
   return "standard"
 }
 
@@ -487,6 +537,211 @@ export function formatFastPrerequisiteFailure(missing: ReadonlyArray<string>): s
     + `which this account's catalog does not fully provide:\n`
     + missing.map((m) => `  - ${m}`).join("\n")
     + `\n\nFalling back or silently dropping an agent is not supported for the fast `
+    + `profile's exact roster. Run plain \`github-router claude\` instead.`
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Cheap-family startup prerequisites
+// ---------------------------------------------------------------------------
+
+export interface CheapPrerequisiteCheck {
+  ok: boolean
+  /** Human-readable description of each missing/invalid requirement, empty
+   *  when `ok`. Every entry names the model and the specific capability
+   *  that was absent so a launch failure is immediately actionable. */
+  missing: ReadonlyArray<string>
+}
+
+/** The subagent window floor: every cheap subagent must at least EXCEED the
+ *  Claude Code default budget it runs at. Unlike fast, the catalog's real
+ *  window is irrelevant to what the client sends (bare slug = 200K either
+ *  way); this floor only guarantees the billed model isn't tiny. */
+const CHEAP_SUBAGENT_MIN_CONTEXT_TOKENS = CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS
+
+/**
+ * Shared cheap-family roster prerequisite check, parameterized only by the
+ * LEAD's context gate. Both `-m cheap` (200K lead floor) and `-m cheap1m`
+ * (1M lead window) validate the EXACT same five-agent roster: the lead gate
+ * is the only requirement that differs between the two cheap siblings, and
+ * every subagent runs at the 200K default window either way. A non-1M
+ * luna/sol/sonnet/grok is acceptable as long as the roster models advertise
+ * tool calls, the fixed effort, and a supported endpoint.
+ */
+function collectCheapPrerequisiteMissing(
+  catalog: ModelsResponse | undefined,
+  leadGateTokens: number,
+  leadGateMessage: (modelId: string) => string,
+): Array<string> {
+  const missing: Array<string> = []
+
+  const gemini = findModel(catalog, CHEAP_PROFILE_MODELS.lead)
+  if (!gemini) {
+    missing.push(`${CHEAP_PROFILE_MODELS.lead}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(gemini)) {
+      missing.push(`${CHEAP_PROFILE_MODELS.lead}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(gemini, leadGateTokens)) {
+      missing.push(leadGateMessage(CHEAP_PROFILE_MODELS.lead))
+    }
+    if (!supportsEffort(gemini, "high")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.lead}: does not advertise a "high" reasoning effort`)
+    }
+    if (!supportsEndpoint(gemini, "chat")) {
+      missing.push(
+        `${CHEAP_PROFILE_MODELS.lead}: does not advertise a supported chat-completions endpoint`,
+      )
+    }
+  }
+
+  const luna = findModel(catalog, CHEAP_PROFILE_MODELS.explore)
+  if (!luna) {
+    missing.push(`${CHEAP_PROFILE_MODELS.explore}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(luna)) {
+      missing.push(`${CHEAP_PROFILE_MODELS.explore}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(luna, CHEAP_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${CHEAP_PROFILE_MODELS.explore}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(luna, "high") || !supportsEffort(luna, "max")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.explore}: does not advertise both "high" and "max" reasoning effort`)
+    }
+    if (!supportsEndpoint(luna, "responses")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.explore}: does not advertise a supported Responses endpoint`)
+    }
+  }
+
+  const sol = findModel(catalog, CHEAP_PROFILE_MODELS.plan)
+  if (!sol) {
+    missing.push(`${CHEAP_PROFILE_MODELS.plan}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(sol)) {
+      missing.push(`${CHEAP_PROFILE_MODELS.plan}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(sol, CHEAP_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${CHEAP_PROFILE_MODELS.plan}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(sol, "high")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.plan}: does not advertise a "high" reasoning effort`)
+    }
+    if (!supportsEndpoint(sol, "responses")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.plan}: does not advertise a supported Responses endpoint`)
+    }
+  }
+
+  const sonnet = findModel(catalog, CHEAP_PROFILE_MODELS.reviewer)
+  if (!sonnet) {
+    missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(sonnet)) {
+      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(sonnet, CHEAP_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${CHEAP_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(sonnet, "xhigh")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: does not advertise an "xhigh" reasoning effort`)
+    }
+    if (sonnet.capabilities?.supports?.adaptive_thinking !== true) {
+      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: does not advertise adaptive_thinking`)
+    }
+    if (!hasUsablePromptMetadata(sonnet)) {
+      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: no usable max_prompt_tokens metadata`)
+    }
+    if (!supportsEndpoint(sonnet, "messages")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: does not advertise a supported Messages endpoint`)
+    }
+  }
+
+  const grok = findModel(catalog, CHEAP_PROFILE_MODELS.oracle)
+  if (!grok) {
+    missing.push(`${CHEAP_PROFILE_MODELS.oracle}: absent from the live catalog`)
+  } else {
+    if (!hasContextAtLeast(grok, CHEAP_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${CHEAP_PROFILE_MODELS.oracle}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(grok, "medium")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.oracle}: does not advertise a "medium" reasoning effort`)
+    }
+    if (!hasUsablePromptMetadata(grok)) {
+      missing.push(`${CHEAP_PROFILE_MODELS.oracle}: no usable max_prompt_tokens metadata`)
+    }
+    if (!supportsEndpoint(grok, "responses")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.oracle}: does not advertise a supported Responses endpoint`)
+    }
+  }
+
+  return missing
+}
+
+/**
+ * Validate the live Copilot catalog for `-m cheap1m` (the named successor of
+ * the original cheap launch): the Gemini leader must still advertise 1M, so
+ * the lead keeps its full window while every subagent runs at the 200K
+ * default. Roster and capability checks are otherwise identical to `cheap`.
+ */
+export function validateCheap1mProfilePrerequisites(
+  catalog: ModelsResponse | undefined,
+): CheapPrerequisiteCheck {
+  const missing = collectCheapPrerequisiteMissing(
+    catalog,
+    FAST_REQUIRED_CONTEXT_TOKENS,
+    (id) => `${id}: advertised context window is below 1M (leader window)`,
+  )
+  return { ok: missing.length === 0, missing }
+}
+
+/**
+ * Validate the live Copilot catalog for `-m cheap`: the Gemini leader runs
+ * at the 200K DEFAULT window (bare slug), so the lead only needs to clear
+ * the same 200K floor as every subagent — unlike `cheap1m`, which keeps the
+ * 1M leader window. Roster and capability checks are otherwise identical.
+ */
+export function validateCheapProfilePrerequisites(
+  catalog: ModelsResponse | undefined,
+): CheapPrerequisiteCheck {
+  const missing = collectCheapPrerequisiteMissing(
+    catalog,
+    CHEAP_SUBAGENT_MIN_CONTEXT_TOKENS,
+    (id) => `${id}: advertised context window is below the 200K lead floor`,
+  )
+  return { ok: missing.length === 0, missing }
+}
+
+/**
+ * Format `validateCheap1mProfilePrerequisites`'s failure list into the launch
+ * error message: every missing/invalid model, plus the rollback command.
+ */
+export function formatCheap1mPrerequisiteFailure(missing: ReadonlyArray<string>): string {
+  return (
+    `github-router claude -m cheap1m requires the following live-catalog capabilities, `
+    + `which this account's catalog does not fully provide:\n`
+    + missing.map((m) => `  - ${m}`).join("\n")
+    + `\n\nFalling back or silently dropping an agent is not supported for the cheap1m `
+    + `profile's exact roster. Run plain \`github-router claude\` instead.`
+  )
+}
+
+/**
+ * Format `validateCheapProfilePrerequisites`'s failure list into the launch
+ * error message: every missing/invalid model, plus the rollback command.
+ */
+export function formatCheapPrerequisiteFailure(missing: ReadonlyArray<string>): string {
+  return (
+    `github-router claude -m cheap requires the following live-catalog capabilities, `
+    + `which this account's catalog does not fully provide:\n`
+    + missing.map((m) => `  - ${m}`).join("\n")
+    + `\n\nFalling back or silently dropping an agent is not supported for the cheap `
     + `profile's exact roster. Run plain \`github-router claude\` instead.`
   )
 }

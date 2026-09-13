@@ -103,3 +103,18 @@ Luna aliases where the same catalog model needs different fixed efforts
 (lead/general-purpose max versus Explore high); those aliases are accepted only
 on an authenticated Fast request and never reach Copilot. Retired role aliases
 are rejected. See [`default-models.md`](default-models.md).
+
+**Cheap family.** The literal raw `-m cheap` and `-m cheap1m` aliases are the
+fast surface classified by cost class instead of speed. Both run every subagent
+and peer (including grok-4.6 and, under cheap1m, gpt-6-astra) at the bare 200K
+default with no `[1m]` decoration, and both pin the Advisor to the bare GPT-5.6
+Sol slug. They differ only on the leader: `-m cheap` runs Gemini 3.8 Flash
+**bare** at 200K too and exposes no `astra` peer (Oracle-only), while
+`-m cheap1m` (the named successor of the original cheap launch) keeps the
+`[1m]` leader window and gains the gpt-6-astra peer, still at bare 200K/medium.
+The family accepts the same model set, efforts, and privately allocated Luna
+aliases as Fast (identical roster identities). `-m cheap` never emits the
+`[1m]`-decorated forms anywhere in its wiring; `-m cheap1m` decorates only its
+leader slug. The curated picker marks every cheap/cheap1m row `neverOneM` and
+the agent/mcp wiring produces bare slugs for every non-lead role, so the 200K
+roles get no local 1M accounting at all.

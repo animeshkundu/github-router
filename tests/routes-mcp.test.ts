@@ -3650,4 +3650,233 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       unregisterLaunch(dualLaunch.launchId)
     }
   })
+
+  test("cheap1m Oracle/Astra: grok-4.6 medium oracle under shared audience; astra medium under lead only", async () => {
+    const CHEAP_LEAD_NONCE = "c".repeat(64)
+    const CHEAP_SHARED_NONCE = "d".repeat(64)
+    const cheapLaunch = registerLaunch({
+      profileId: "cheap1m",
+      nonce: CHEAP_SHARED_NONCE,
+      leadPeersNonce: CHEAP_LEAD_NONCE,
+      secret: "cheap-dual-secret",
+      allowedGroups: new Set(["peers", "search"]),
+      allowedPersonas: new Set(["oracle", "astra"]),
+    })
+    const saved = state.models
+    try {
+      state.models = {
+        object: "list",
+        data: [
+          {
+            id: "grok-4.6",
+            name: "grok-4.6",
+            object: "model",
+            vendor: "xai",
+            version: "1",
+            preview: false,
+            model_picker_enabled: true,
+            supported_endpoints: ["/responses"],
+            capabilities: {
+              family: "grok-4.6",
+              object: "model_capabilities",
+              tokenizer: "o200k_base",
+              type: "chat",
+              limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 },
+              supports: { reasoning_effort: ["medium"] },
+            },
+          },
+          {
+            id: "gpt-6-astra",
+            name: "gpt-6-astra",
+            object: "model",
+            vendor: "openai",
+            version: "1",
+            preview: false,
+            model_picker_enabled: true,
+            supported_endpoints: ["/responses"],
+            capabilities: {
+              family: "gpt-6-astra",
+              object: "model_capabilities",
+              tokenizer: "o200k_base",
+              type: "chat",
+              limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 1_000_000 },
+              supports: { reasoning_effort: ["medium", "high", "max"] },
+            },
+          },
+        ],
+      } as never
+
+      // 1. tools/list under shared nonce lists the cheap Oracle (shared with
+      // Plan per cheap delegation), but NOT astra.
+      const sharedList = await rpc(
+        { jsonrpc: "2.0", id: 20, method: "tools/list" },
+        { auth: `Bearer ${CHEAP_SHARED_NONCE}` },
+      )
+      const sharedNames = (sharedList.json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+      expect(sharedNames).toContain("oracle")
+      expect(sharedNames).not.toContain("astra")
+
+      // 2. tools/list under lead-peers nonce DOES list astra
+      const leadList = await rpc(
+        { jsonrpc: "2.0", id: 21, method: "tools/list" },
+        { auth: `Bearer ${CHEAP_LEAD_NONCE}` },
+      )
+      const leadNames = (leadList.json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+      expect(leadNames).toContain("astra")
+
+      // 3. tools/call oracle under shared nonce dispatches grok-4.6 via
+      // /responses at MEDIUM effort, with the Grok-4.6 persona instructions.
+      let oracleUrl = ""
+      const oracleCapture: { body?: { model?: string; reasoning?: { effort?: string }; instructions?: string } } = {}
+      globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+        oracleUrl = input.toString()
+        if (init?.body) {
+          oracleCapture.body = JSON.parse(init.body.toString()) as { model?: string; reasoning?: { effort?: string }; instructions?: string }
+        }
+        return Response.json({
+          id: "resp-oracle",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "## Answer\nUse approach B." }],
+            },
+          ],
+        })
+      }) as unknown as typeof fetch
+
+      const oracleCall = await rpc(
+        {
+          jsonrpc: "2.0",
+          id: 22,
+          method: "tools/call",
+          params: { name: "oracle", arguments: { query: "A or B?", context: "Evidence E." } },
+        },
+        { auth: `Bearer ${CHEAP_SHARED_NONCE}` },
+      )
+      expect(oracleCall.status).toBe(200)
+      expect(oracleUrl).toContain("/responses")
+      expect(oracleCapture.body?.model).toBe("grok-4.6")
+      expect(oracleCapture.body?.reasoning).toEqual({ effort: "medium" })
+      expect(oracleCapture.body?.instructions).toContain("running on Grok 4.6")
+
+      // 4. tools/call astra under lead-peers nonce dispatches gpt-6-astra at
+      // MEDIUM effort.
+      let astraUrl = ""
+      const astraCapture: { body?: { model?: string; reasoning?: { effort?: string }; instructions?: string } } = {}
+      globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+        astraUrl = input.toString()
+        if (init?.body) {
+          astraCapture.body = JSON.parse(init.body.toString()) as { model?: string; reasoning?: { effort?: string }; instructions?: string }
+        }
+        return Response.json({
+          id: "resp-astra",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "## Status\nPATH_FOUND\n\n## Recommendation\nApproach B." }],
+            },
+          ],
+        })
+      }) as unknown as typeof fetch
+
+      const astraCall = await rpc(
+        {
+          jsonrpc: "2.0",
+          id: 23,
+          method: "tools/call",
+          params: { name: "astra", arguments: { query: "Which?", context: "Ctx" } },
+        },
+        { auth: `Bearer ${CHEAP_LEAD_NONCE}` },
+      )
+      expect(astraCall.status).toBe(200)
+      expect(astraUrl).toContain("/responses")
+      expect(astraCapture.body?.model).toBe("gpt-6-astra")
+      expect(astraCapture.body?.reasoning).toEqual({ effort: "medium" })
+      expect(astraCapture.body?.instructions).toContain("at medium reasoning effort")
+    } finally {
+      state.models = saved
+      unregisterLaunch(cheapLaunch.launchId)
+    }
+  })
+
+  test("cheap Oracle-only: grok-4.6 medium oracle under shared audience; astra never exposed or callable", async () => {
+    const CHEAP_NONCE = "d".repeat(64)
+    const cheapLaunch = registerLaunch({
+      profileId: "cheap",
+      nonce: CHEAP_NONCE,
+      secret: "cheap-oracle-only-secret",
+      allowedGroups: new Set(["peers", "search"]),
+      allowedPersonas: new Set(["oracle"]),
+    })
+    const saved = state.models
+    try {
+      state.models = {
+        object: "list",
+        data: [
+          {
+            id: "grok-4.6",
+            name: "grok-4.6",
+            object: "model",
+            vendor: "xai",
+            version: "1",
+            preview: false,
+            model_picker_enabled: true,
+            supported_endpoints: ["/responses"],
+            capabilities: {
+              family: "grok-4.6",
+              object: "model_capabilities",
+              tokenizer: "o200k_base",
+              type: "chat",
+              limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 },
+              supports: { reasoning_effort: ["medium"] },
+            },
+          },
+        ],
+      } as never
+
+      // tools/list under the nonce lists Oracle but NOT astra — the
+      // cheap profile descriptor never grants astra, and the MCP gate
+      // requires `fast` or `cheap1m` to emit the tool.
+      const { json: listJson } = await rpc(
+        { jsonrpc: "2.0", id: 30, method: "tools/list" },
+        { auth: `Bearer ${CHEAP_NONCE}` },
+      )
+      const names = (listJson.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+      expect(names).toContain("oracle")
+      expect(names).not.toContain("astra")
+
+      // tools/call oracle dispatches grok-4.6 via /responses at MEDIUM effort.
+      let oracleUrl = ""
+      const oracleCapture: { body?: { model?: string; reasoning?: { effort?: string } } } = {}
+      globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+        oracleUrl = input.toString()
+        if (init?.body) {
+          oracleCapture.body = JSON.parse(init.body.toString()) as typeof oracleCapture.body
+        }
+        return Response.json({
+          id: "resp-oracle",
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Approach B." }] }],
+        })
+      }) as unknown as typeof fetch
+
+      const oracleCall = await rpc(
+        {
+          jsonrpc: "2.0",
+          id: 31,
+          method: "tools/call",
+          params: { name: "oracle", arguments: { query: "A or B?", context: "Evidence E." } },
+        },
+        { auth: `Bearer ${CHEAP_NONCE}` },
+      )
+      expect(oracleCall.status).toBe(200)
+      expect(oracleUrl).toContain("/responses")
+      expect(oracleCapture.body?.model).toBe("grok-4.6")
+      expect(oracleCapture.body?.reasoning).toEqual({ effort: "medium" })
+    } finally {
+      state.models = saved
+      unregisterLaunch(cheapLaunch.launchId)
+    }
+  })
 })

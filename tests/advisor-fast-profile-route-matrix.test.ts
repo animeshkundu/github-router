@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
 import { clearLaunchRegistry, registerLaunch } from "~/lib/launch-registry"
 import { LAUNCH_SECRET_HEADER } from "~/lib/messages-identity-preflight"
+import { CHEAP_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheap-profile-contract"
+import { loadEncoder } from "~/lib/tokenizer"
 import { state } from "~/lib/state"
 import { server } from "~/server"
 import {
@@ -16,6 +18,7 @@ const savedCopilotToken = state.copilotToken
 const savedVsCodeVersion = state.vsCodeVersion
 const savedAdvisorModel = process.env.GH_ROUTER_ADVISOR_MODEL
 const FAST_SECRET = "f".repeat(64)
+const CHEAP_SECRET = "c".repeat(64)
 
 const LEADS = [
   { id: "gpt-5.6-luna", transport: "responses" as const },
@@ -405,3 +408,113 @@ describe("authenticated fast Advisor route matrix", () => {
     )
   })
 })
+
+describe("cheap Advisor route matrix", () => {
+  test("cheap lead pins the original ask and caps the transcript at 200K tokens", async () => {
+    clearLaunchRegistry()
+    registerLaunch({ profileId: "cheap", nonce: "z".repeat(64), secret: CHEAP_SECRET })
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = []
+    let leadCalls = 0
+
+    globalThis.fetch = mock((url: string | URL | Request, init?: RequestInit) => {
+      const requestUrl = String(url)
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>
+      calls.push({ url: requestUrl, body })
+      if (requestUrl.includes("/responses")) {
+        if (body.stream === false) return Promise.resolve(advisorResponsesResponse())
+        return Promise.resolve(new Response("unexpected streaming responses call", { status: 500 }))
+      }
+      if (requestUrl.includes("/chat/completions")) {
+        if (body.stream === false) {
+          return Promise.resolve(new Response("unexpected non-streaming chat call", { status: 500 }))
+        }
+        leadCalls++
+        return Promise.resolve(leadCalls === 1 ? leadChatSse() : continuationChatSse())
+      }
+      return Promise.resolve(new Response("unexpected endpoint", { status: 500 }))
+    }) as unknown as typeof fetch
+
+    // The cheap lead is the fixed gemini; the cheap client pins the advisor
+    // model BARE (no `[1m]`). The conversation exceeds the 200K subagent
+    // window by a comfortable margin, and would comfortably fit the ~892K
+    // UNCAPPED Sol budget — so the cheap cap is observable in the transcript
+    // that actually leaves the router.
+    const filler = "wobble wobble ".repeat(11_000) // ~140K chars ≈ 30-35K tokens
+    const conversation = [
+      { role: "user", content: "Inspect the repository for the cheap advisor cap." },
+      { role: "assistant", content: filler },
+      { role: "user", content: filler },
+      { role: "assistant", content: filler },
+      { role: "user", content: filler },
+      { role: "assistant", content: filler },
+      { role: "user", content: "wrapped up." },
+    ]
+    const body = JSON.stringify({
+      model: "gemini-3.8-flash",
+      max_tokens: 100,
+      stream: true,
+      messages: conversation,
+      tools: [
+        {
+          type: "advisor_20260301",
+          name: "advisor",
+          model: CHEAP_PROFILE_ADVISOR_CLIENT_MODEL,
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+    })
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+        [LAUNCH_SECRET_HEADER]: CHEAP_SECRET,
+      },
+      body,
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain("advisor_tool_result")
+
+    const advisorCall = calls.find(
+      (call) => call.body.model === ADVISOR_FAST_PROFILE_MODEL && call.body.stream === false,
+    )
+    expect(advisorCall).toBeDefined()
+    expect(advisorCall!.url).toContain("/responses")
+    // Same fixed Sol advisor as fast, at the same fixed effort.
+    expect((advisorCall!.body as { reasoning?: { effort?: string } }).reasoning?.effort).toBe("high")
+    expect(JSON.stringify(advisorCall!.body)).toContain("non-binding consultant")
+
+    // The cap must have engaged: the >200K-token stream is front-truncated,
+    // the original ask is pinned verbatim, and the poverty of the kept tail
+    // stays inside the cheap 200K ceiling (not the uncapped ~892K Sol window).
+    const transcript = extractTranscriptText(advisorCall!.body)
+    expect(transcript.startsWith("[Original ask (kept for the advisor):]")).toBe(true)
+    expect(transcript).toContain("Inspect the repository for the cheap advisor cap.")
+    expect(transcript).toContain("[TRUNCATED:")
+    expect(transcript).not.toContain("### Turn 1 — user")
+    expect(transcript).toContain("### Turn 7 — user")
+    const tokenizedLength = (await loadEncoder("o200k_base")).encode(transcript).length
+    expect(tokenizedLength).toBeLessThanOrEqual(200_000)
+  })
+})
+
+function extractTranscriptText(body: Record<string, unknown>): string {
+  const input = body.input
+  if (!Array.isArray(input)) return ""
+  const parts: Array<string> = []
+  for (const item of input) {
+    if (typeof item !== "object" || item === null) continue
+    const record = item as Record<string, unknown>
+    const content = record.content
+    if (!Array.isArray(content)) continue
+    if (record.role === "system") continue
+    for (const part of content) {
+      if (typeof part !== "object" || part === null) continue
+      const p = part as Record<string, unknown>
+      if (p.type === "input_text" && typeof p.text === "string") parts.push(p.text)
+    }
+  }
+  return parts.join("\n")
+}
