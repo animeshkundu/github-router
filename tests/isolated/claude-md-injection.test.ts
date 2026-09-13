@@ -1219,6 +1219,24 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(fastDigestWithAstra).toContain("`astra`")
   expect(fastDigestWithAstra).toContain("GPT-6 Astra 200K/high")
 
+  const cheapDigestWithoutAstra = buildOperatingDefaultsDigest({ profile: "cheap" })
+  expect(cheapDigestWithoutAstra).toContain("Cheap launch profile")
+  expect(cheapDigestWithoutAstra).toContain("`oracle`")
+  expect(cheapDigestWithoutAstra).toContain("Grok 4.6 200K/medium")
+  expect(cheapDigestWithoutAstra).not.toContain("`astra`")
+
+  // `-m cheap` deliberately runs without astra even if the caller hints the
+  // peer is "available" — the profile never wires it; only cheap1m does.
+  const cheapDigestHintedAstra = buildOperatingDefaultsDigest({ profile: "cheap", astraAvailable: true })
+  expect(cheapDigestHintedAstra).not.toContain("`astra`")
+
+  const cheap1mDigestWithAstra = buildOperatingDefaultsDigest({ profile: "cheap1m", astraAvailable: true })
+  expect(cheap1mDigestWithAstra).toContain("Cheap launch profile")
+  expect(cheap1mDigestWithAstra).toContain("`oracle`")
+  expect(cheap1mDigestWithAstra).toContain("`astra`")
+  expect(cheap1mDigestWithAstra).toContain("GPT-6 Astra 200K/medium")
+  expect(cheap1mDigestWithAstra).not.toContain("200K/high")
+
   const maxDigest = buildOperatingDefaultsDigest({ profile: "max" })
   expect(maxDigest).toContain("Max launch profile")
   expect(maxDigest).toContain("The lead owns the outcome")

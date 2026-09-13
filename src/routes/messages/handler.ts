@@ -37,6 +37,7 @@ import { filterBetaHeader, resolveModel } from "~/lib/utils"
 import { preprocessFastRequest } from "~/lib/fast-request-preprocess"
 import { maxRequestError } from "~/lib/max-request-preprocess"
 import { FAST_PROFILE_ADVISOR_MODEL } from "~/lib/fast-profile-contract"
+import { CHEAP_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheap-profile-contract"
 import {
   MAX_PROFILE_ADVISOR_INSTRUCTIONS,
   maxAdvisorEffortForModel,
@@ -415,15 +416,26 @@ export async function handleCompletion(c: Context) {
   const advisorRequested = isAdvisorRequested(incomingBeta)
   const fastProfileRequest = identity.launch?.profileId === "fast"
   const maxProfileRequest = identity.launch?.profileId === "max"
+  const cheapProfileRequest =
+    identity.launch?.profileId === "cheap" || identity.launch?.profileId === "cheap1m"
   const subagentRequest = Boolean(c.req.header("x-claude-code-agent-id"))
   const fastSubagentRequest = fastProfileRequest && subagentRequest
   const maxSubagentRequest = maxProfileRequest && subagentRequest
+  const cheapSubagentRequest = cheapProfileRequest && subagentRequest
   const fastLeadAdvisor = fastProfileRequest && !fastSubagentRequest
   const maxLeadAdvisor = maxProfileRequest && !maxSubagentRequest
-  const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest
+  const cheapLeadAdvisor = cheapProfileRequest && !cheapSubagentRequest
+  const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest && !cheapSubagentRequest
   const fastAdvisorEnabled = fastLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const maxAdvisorEnabled = maxLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
-  const advisorBehaviorEnabled = fastLeadAdvisor ? fastAdvisorEnabled : maxLeadAdvisor ? maxAdvisorEnabled : advisorEnabled
+  const cheapAdvisorEnabled = cheapLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
+  const advisorBehaviorEnabled = fastLeadAdvisor
+    ? fastAdvisorEnabled
+    : cheapLeadAdvisor
+      ? cheapAdvisorEnabled
+      : maxLeadAdvisor
+        ? maxAdvisorEnabled
+        : advisorEnabled
   let fastAdvisorChoice: ReturnType<typeof resolveAdvisorModel> | undefined
   let maxAdvisorChoice: { model: string; effort: string } | undefined
   if (maxAdvisorEnabled) {
@@ -477,6 +489,43 @@ export async function handleCompletion(c: Context) {
       )
     }
   }
+  if (cheapAdvisorEnabled) {
+    // Same fixed Sol advisor model as fast; the cheap family differs only in
+    // the client-side BARE pin (no `[1m]`) and the 200K transcript cap applied
+    // at dispatch. fastAdvisorMetadataMismatch accepts either bracket spelling.
+    const mismatch = fastAdvisorMetadataMismatch(rawBody)
+    const relaunchProfile = identity.launch?.profileId === "cheap1m" ? "cheap1m" : "cheap"
+
+    if (mismatch) {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message:
+              `Cheap Advisor model mismatch: ${mismatch}. `
+              + `Run \`/advisor ${CHEAP_PROFILE_ADVISOR_CLIENT_MODEL}\` to restore the fixed cheap profile, or relaunch with \`github-router claude -m ${relaunchProfile}\`.`,
+          },
+        },
+        400,
+        { "x-should-retry": "false" },
+      )
+    }
+    try {
+      fastAdvisorChoice = resolveAdvisorModel(undefined, true)
+    } catch (error) {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "api_error",
+            message: error instanceof Error ? error.message : String(error),
+          },
+        },
+        503,
+      )
+    }
+  }
 
   const fastPreprocess = preprocessFastRequest(
     rawBody,
@@ -484,13 +533,16 @@ export async function handleCompletion(c: Context) {
     subagentRequest,
   )
   if (fastPreprocess.retiredAlias || fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
+    const profileId = identity.launch?.profileId
+    const profileLabel =
+      profileId === "cheap" || profileId === "cheap1m" ? "cheap" : "fast"
     const message = fastPreprocess.retiredAlias
       ? `Router-owned model alias ${JSON.stringify(fastPreprocess.retiredAlias)} belongs to a retired Fast role and is no longer valid. Relaunch or select a current Fast role.`
-      : identity.launch?.profileId === "max"
+      : profileId === "max"
         ? (maxRequestError(fastPreprocess) ?? "Invalid max request")
         : fastPreprocess.rejectedAlias
-          ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m fast launch.`
-          : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m fast model set.`
+          ? `Router-owned model alias ${JSON.stringify(fastPreprocess.rejectedAlias)} is valid only for an authenticated -m ${profileLabel} launch.`
+          : `Model ${JSON.stringify(fastPreprocess.rejectedModel)} is outside the fixed -m ${profileLabel} model set.`
     return c.json(
       { type: "error", error: { type: "invalid_request_error", message } },
       400,
@@ -642,7 +694,7 @@ export async function handleCompletion(c: Context) {
     const wantsStream = parsedBase?.stream === true
 
     if (
-      (fastAdvisorEnabled || maxAdvisorEnabled)
+      (fastAdvisorEnabled || cheapAdvisorEnabled || maxAdvisorEnabled)
       && wantsStream
     ) {
       const initialConversation = Array.isArray(parsedBase!.messages)
@@ -682,12 +734,22 @@ export async function handleCompletion(c: Context) {
             escalated: false,
             fastProfile: false,
           }
-        : {
-            model: fastAdvisorChoice!.model,
-            effort: resolveAdvisorEffort(rawBody, fastAdvisorChoice!.model, true),
-            escalated: fastAdvisorChoice!.escalated,
-            fastProfile: true,
-          }
+        : cheapAdvisorEnabled
+          ? {
+              // Cheap shares fast's fixed Sol identity/effort; the distinctions
+              // (bare client pin, 200K transcript cap) are carried by
+              // `advisorCheapProfile` below and the client's own pinned tool.
+              model: fastAdvisorChoice!.model,
+              effort: resolveAdvisorEffort(rawBody, fastAdvisorChoice!.model, true),
+              escalated: fastAdvisorChoice!.escalated,
+              fastProfile: true,
+            }
+          : {
+              model: fastAdvisorChoice!.model,
+              effort: resolveAdvisorEffort(rawBody, fastAdvisorChoice!.model, true),
+              escalated: fastAdvisorChoice!.escalated,
+              fastProfile: true,
+            }
       return new Response(
         buildAdvisorStream({
           firstResponse,
@@ -703,6 +765,7 @@ export async function handleCompletion(c: Context) {
           // retaining their independent model, effort, and transport policies.
           advisorFastProfile: advisorChoice.fastProfile,
           advisorMaxProfile: maxAdvisorEnabled,
+          advisorCheapProfile: cheapAdvisorEnabled,
           advisorEffort: advisorChoice.effort,
           externalAborter: translatedAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {
@@ -972,14 +1035,15 @@ export async function handleCompletion(c: Context) {
           requestHeaders,
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          advisorFastProfile: fastLeadAdvisor,
+          advisorFastProfile: fastLeadAdvisor || cheapLeadAdvisor,
           advisorMaxProfile: maxAdvisorEnabled,
+          advisorCheapProfile: cheapLeadAdvisor,
           advisorEffort: maxAdvisorChoice
             ? maxAdvisorChoice.effort
             : resolveAdvisorEffort(
                 rawBody,
                 advisorChoice.model,
-                fastLeadAdvisor,
+                fastLeadAdvisor || cheapLeadAdvisor,
               ),
           externalAborter: advisorAborter,
         }),

@@ -143,6 +143,9 @@ import {
   fastAdvisorModel,
   fastOracleModel,
   fastAstraModel,
+  cheapAdvisorModel,
+  cheapOracleModel,
+  cheapReviewerModel,
 } from "./lib/mcp-capabilities"
 import {
   getClaudeCodeEnvVars,
@@ -153,10 +156,14 @@ import {
 import {
   formatFastPrerequisiteFailure,
   formatMaxPrerequisiteFailure,
+  formatCheap1mPrerequisiteFailure,
+  formatCheapPrerequisiteFailure,
   profileDescriptor,
   resolveLaunchProfile,
   validateFastProfilePrerequisites,
   validateMaxProfileLaunch,
+  validateCheap1mProfilePrerequisites,
+  validateCheapProfilePrerequisites,
 } from "./lib/launch-profile"
 import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
 import { LAUNCH_SECRET_HEADER } from "./lib/messages-identity-preflight"
@@ -167,6 +174,11 @@ import {
   fastAdvisorClientEnabled,
   withFixedFastAdvisorArg,
 } from "./lib/fast-advisor-client"
+import {
+  cheapAdvisorClientEnabled,
+  withFixedCheapAdvisorArg,
+} from "./lib/cheap-advisor-client"
+import { CHEAP_PROFILE_NATIVE_MODELS } from "./lib/cheap-profile-contract"
 
 export const claudeArgs = {
   ...sharedServerArgs,
@@ -174,7 +186,7 @@ export const claudeArgs = {
     alias: "m",
     type: "string",
     description:
-      "Override the default model for Claude Code. Accepts a full slug (e.g. claude-opus-4-7) or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
+      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, max), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
   },
   "codex-mcp": {
     type: "boolean" as const,
@@ -353,10 +365,20 @@ export const claude = defineCommand({
       process.exit(1)
     }
     if (
-      (requestedLaunchProfileId === "fast" || requestedLaunchProfileId === "max")
+      (requestedLaunchProfileId === "fast"
+        || requestedLaunchProfileId === "max"
+        || requestedLaunchProfileId === "cheap"
+        || requestedLaunchProfileId === "cheap1m")
       && !codexMcpEnabled
     ) {
-      const profileName = requestedLaunchProfileId === "fast" ? "fast" : "max"
+      const profileName =
+        requestedLaunchProfileId === "fast"
+          ? "fast"
+          : requestedLaunchProfileId === "cheap"
+            ? "cheap"
+            : requestedLaunchProfileId === "cheap1m"
+              ? "cheap1m"
+              : "max"
       const message =
         `github-router claude -m ${profileName} requires codex MCP wiring for its native roster and dispatch ACL; remove --no-codex-mcp or choose a standard model.`
       process.stderr.write(`${message}\n`)
@@ -584,6 +606,24 @@ export const claude = defineCommand({
         const message = formatMaxPrerequisiteFailure(prereqCheck.missing)
         await fastFatal(message)
       }
+    } else if (launchProfileId === "cheap" || launchProfileId === "cheap1m") {
+      // The cheap family shares fast's exact-roster discipline, but its
+      // context gate is LEAD-ONLY and profile-specific: cheap1m requires the
+      // Gemini leader to advertise 1M, while cheap only needs it to clear
+      // the 200K default floor it actually runs at. Every subagent runs at
+      // the 200K default window and only needs tool calls, its fixed effort,
+      // and a supported endpoint (see `validateCheap*ProfilePrerequisites`).
+      const prereqCheck =
+        launchProfileId === "cheap1m"
+          ? validateCheap1mProfilePrerequisites(state.models)
+          : validateCheapProfilePrerequisites(state.models)
+      if (!prereqCheck.ok) {
+        const message =
+          launchProfileId === "cheap1m"
+            ? formatCheap1mPrerequisiteFailure(prereqCheck.missing)
+            : formatCheapPrerequisiteFailure(prereqCheck.missing)
+        await fastFatal(message)
+      }
     } else {
       // Standard profile behavior is unchanged. This branch intentionally keeps
       // all ordinary launches on the existing catalog/model flow.
@@ -686,6 +726,13 @@ export const claude = defineCommand({
         extraArgs,
         fastAdvisorClientEnabled(process.env),
       )
+    } else if (launchProfileId === "cheap" || launchProfileId === "cheap1m") {
+      // Same pinning discipline as fast, but to the BARE 200K Advisor slug
+      // (see `CHEAP_PROFILE_ADVISOR_CLIENT_MODEL`).
+      extraArgs = withFixedCheapAdvisorArg(
+        extraArgs,
+        cheapAdvisorClientEnabled(process.env),
+      )
     }
 
     // LLM toolbelt: materialize curated CLI tools (rg/fd/jq/sd/sg/yq)
@@ -786,8 +833,10 @@ export const claude = defineCommand({
     let peerAwarenessSnippet: string | undefined
     let peerAwarenessSummary: string | undefined
     let operatingGroupKeys: Partial<Record<McpGroup, string>> = {}
-    let fastWiringComplete = launchProfileId !== "fast"
-    const astraAvailable = launchProfileId === "fast" && Boolean(fastAstraModel())
+    const isCheapLaunch = launchProfileId === "cheap" || launchProfileId === "cheap1m"
+    let fastWiringComplete = launchProfileId !== "fast" && !isCheapLaunch
+    const astraAvailable = (launchProfileId === "fast" || launchProfileId === "cheap1m")
+      && Boolean(fastAstraModel())
     const browseAgentAvailable = browseAgentEnabled()
     const directBrowserAvailable = browserToolsEnabled()
     const artifactAvailable = artifactToolsEnabled()
@@ -812,6 +861,14 @@ export const claude = defineCommand({
             implementer: fastImplementerModel(),
             reviewer: fastReviewerModel(),
           }
+        : launchProfileId === "cheap" || launchProfileId === "cheap1m"
+          ? {
+              Explore: CHEAP_PROFILE_NATIVE_MODELS.Explore,
+              Plan: CHEAP_PROFILE_NATIVE_MODELS.Plan,
+              "general-purpose": CHEAP_PROFILE_NATIVE_MODELS["general-purpose"],
+              implementer: CHEAP_PROFILE_NATIVE_MODELS.implementer,
+              reviewer: cheapReviewerModel(),
+            }
         : launchProfileId === "max"
           ? {
               Explore: MAX_PROFILE_MODELS.luna,
@@ -833,7 +890,11 @@ export const claude = defineCommand({
           }
     const nativeAvailability: NativeAgentAvailability = {
       scoutAvailable:
-        (launchProfileId === "fast" ? nativeAgentModels.Explore : nativeAgentModels.scout)
+        (launchProfileId === "fast"
+          || launchProfileId === "cheap"
+          || launchProfileId === "cheap1m"
+          ? nativeAgentModels.Explore
+          : nativeAgentModels.scout)
         != null,
       implementerFastAvailable: nativeAgentModels["implementer-fast"] != null,
       reviewerFastAvailable: nativeAgentModels["reviewer-fast"] != null,
@@ -865,12 +926,15 @@ export const claude = defineCommand({
           ((args as Record<string, unknown>)["codex-cli"] as boolean | undefined) ?? false
         const isFastProfile = launchProfileId === "fast"
         const isMaxProfile = launchProfileId === "max"
-        if (isFastProfile && requestedCli) {
+        const isCheapProfile = launchProfileId === "cheap" || launchProfileId === "cheap1m"
+        // Fast and the cheap family share the exact fixed HTTP surface; max has its own.
+        const isPinnedProfile = isFastProfile || isMaxProfile || isCheapProfile
+        if ((isFastProfile || isCheapProfile) && requestedCli) {
           process.stderr.write(
-            "Fast profile uses its fixed HTTP MCP surface; ignoring --codex-cli.\n",
+            "Fast/cheap profile uses its fixed HTTP MCP surface; ignoring --codex-cli.\n",
           )
         }
-        const backend = isFastProfile || isMaxProfile
+        const backend = isPinnedProfile
           ? "http"
           : resolveCodexCliBackend({
               requested: requestedCli,
@@ -906,15 +970,15 @@ export const claude = defineCommand({
         // `fleet`/`first-mate`) are appended AFTER the filter and stay under
         // their own predicates regardless of profile, per plan section 6.
         const fastDescriptor = profileDescriptor(launchProfileId)
-        const baseGroups: Array<McpGroup> = isFastProfile || isMaxProfile
+        const baseGroups: Array<McpGroup> = isPinnedProfile
           ? ["peers", "search"]
           : ["peers", "search", "orchestrate"]
-        if (workerToolsEnabled() && !isFastProfile && !isMaxProfile) baseGroups.push("workers")
-        if ((isFastProfile || isMaxProfile) && browseAgentAvailable) baseGroups.push("workers")
+        if (workerToolsEnabled() && !isPinnedProfile) baseGroups.push("workers")
+        if (isPinnedProfile && browseAgentAvailable) baseGroups.push("workers")
         const enabledGroups: Array<McpGroup> = fastDescriptor.allowedGroups
           ? baseGroups.filter((g) => fastDescriptor.allowedGroups!.has(g))
           : baseGroups
-        if (!isFastProfile && !isMaxProfile && standInToolEnabled()) enabledGroups.push("decide")
+        if (!isPinnedProfile && standInToolEnabled()) enabledGroups.push("decide")
         if (
           isMaxProfile
           && maxOpusModel() !== undefined
@@ -925,8 +989,8 @@ export const claude = defineCommand({
         if (directBrowserAvailable && (!fastDescriptor.allowedGroups || fastDescriptor.allowedGroups.has("browser"))) {
           enabledGroups.push("browser")
         }
-        if (!isFastProfile && !isMaxProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
-        if (!isFastProfile && !isMaxProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
+        if (!isPinnedProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
+        if (!isPinnedProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
         if (isMaxProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
         if (isMaxProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
         const { keys: groupKeys, skipped: skippedGroups } =
@@ -945,12 +1009,21 @@ export const claude = defineCommand({
         // guard, both gated on this same flag below) survives the profile
         // restriction even if the catalog gate would otherwise pass.
         if (
-          isFastProfile
-          && (fastOracleModel() == null || fastAdvisorModel() == null || nativeAgentModels.implementer == null)
+          isPinnedProfile
+          && ((isCheapProfile ? cheapOracleModel() : fastOracleModel()) == null
+            || (isCheapProfile ? cheapAdvisorModel() : fastAdvisorModel()) == null
+            || nativeAgentModels.implementer == null)
         ) {
+          if (isCheapProfile) {
+            // Cheap oracle (grok-4.6) and advisor (gpt-5.6-sol) are fixed
+            // constants; the cheap drift surface is implementer + oracle.
+            throw new Error(
+              "cheap profile prerequisite drift: exact implementer or oracle (grok-4.6) model no longer resolves",
+            )
+          }
           throw new Error("fast profile prerequisite drift: exact Oracle, Advisor, or implementer model no longer resolves")
         }
-        const leadPeersNonce = isFastProfile && astraAvailable
+        const leadPeersNonce = (isFastProfile || launchProfileId === "cheap1m") && astraAvailable
           ? randomBytes(32).toString("hex")
           : undefined
         const runtime = await writePeerMcpRuntimeFiles(serverUrl, {
@@ -962,19 +1035,19 @@ export const claude = defineCommand({
             : resolveGeminiReviewModel(),
           groupKeys,
           parentGroupNonceOverrides: leadPeersNonce ? { peers: leadPeersNonce } : undefined,
-          workerToolsAvailable: !isFastProfile && !isMaxProfile && workerToolsEnabled(),
+          workerToolsAvailable: !isPinnedProfile && workerToolsEnabled(),
           browseAvailable: browseAgentAvailable,
           nativeSubagentModel: nativeAgentModels.implementer,
           reviewerModel: nativeAgentModels.reviewer,
           reviewerFastModel: nativeAgentModels["reviewer-fast"],
           brainstormModel: nativeAgentModels.brainstorm,
           scoutModel:
-            isFastProfile ? nativeAgentModels.Explore : nativeAgentModels.scout,
+            (isFastProfile || isCheapProfile) ? nativeAgentModels.Explore : nativeAgentModels.scout,
           scribeModel: nativeAgentModels.scribe,
           implementerFastModel: nativeAgentModels["implementer-fast"],
           generalPurposeFastModel: nativeAgentModels["general-purpose-fast"],
           nativeRoster: fastDescriptor.nativeRoster,
-          personaAllowlist: isFastProfile
+          personaAllowlist: isFastProfile || isCheapProfile
             ? undefined
             : fastDescriptor.personaAllowlist
               ? agentNamesForToolAllowlist(fastDescriptor.personaAllowlist)
@@ -989,6 +1062,15 @@ export const claude = defineCommand({
                 fastImplementerModel: nativeAgentModels.implementer,
                 fastReviewerModel: nativeAgentModels.reviewer,
               }
+            : isCheapProfile
+              ? {
+                  cheapProfile: true,
+                  cheapExploreModel: nativeAgentModels.Explore,
+                  cheapPlanModel: nativeAgentModels.Plan,
+                  cheapGeneralPurposeModel: nativeAgentModels["general-purpose"],
+                  cheapImplementerModel: nativeAgentModels.implementer,
+                  cheapReviewerModel: nativeAgentModels.reviewer,
+                }
             : isMaxProfile
               ? {
                   maxProfile: true,
@@ -1013,7 +1095,7 @@ export const claude = defineCommand({
                 }
               : {}),
         })
-        if (isFastProfile || isMaxProfile) fastRuntimeCleanup = runtime.cleanup
+        if (isPinnedProfile) fastRuntimeCleanup = runtime.cleanup
         const maxPersonaNames = isMaxProfile
           ? runtime.personas.map((persona) => persona.toolNameHttp)
           : undefined
@@ -1034,7 +1116,7 @@ export const claude = defineCommand({
           allowedGroups: fastDescriptor.allowedGroups,
           allowedPersonas: fastDescriptor.personaAllowlist,
         })
-        if (isFastProfile || isMaxProfile) fastLaunchId = launchEntry.launchId
+        if (isPinnedProfile) fastLaunchId = launchEntry.launchId
 
         // Delivered via `ANTHROPIC_CUSTOM_HEADERS` (an Anthropic SDK env var
         // Claude Code already forwards on every `/v1/messages` request) so
@@ -1054,7 +1136,7 @@ export const claude = defineCommand({
         // the detached reviewer they spawn — inherit it.
         envVars.GH_ROUTER_HOOK_MCP_URL = serverUrl
         envVars.GH_ROUTER_HOOK_NONCE = runtime.nonce
-        onShutdown = (isFastProfile || isMaxProfile)
+        onShutdown = isPinnedProfile
           ? async (): Promise<void> => {
               try {
                 unregisterLaunch(launchEntry.launchId)
@@ -1095,7 +1177,7 @@ export const claude = defineCommand({
         // with inherited tools would otherwise receive Oracle or Artifact tools.
         let subagentVisibility: string
         let injected: Awaited<ReturnType<typeof injectPeerMcpIntoMirror>> | undefined
-        if (isFastProfile) {
+        if (isFastProfile || isCheapProfile) {
           extraArgs.push("--mcp-config", runtime.mcpConfigPath)
           if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
             extraArgs.push("--strict-mcp-config")
@@ -1138,7 +1220,7 @@ export const claude = defineCommand({
             : `subagent-INVISIBLE (collision on user-side mcpServers: [${injected.conflictingServers.join(", ")}]; parent-only via --mcp-config)`
         }
 
-        if (isFastProfile) {
+        if (isFastProfile || isCheapProfile) {
           let fastGuardInstalled = false
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
@@ -1158,7 +1240,7 @@ export const claude = defineCommand({
             )
             fastGuardInstalled = true
           } catch (err) {
-            consola.error(`Could not register the fast native dispatch ACL hook: ${String(err)}`)
+            consola.error(`Could not register the fast/cheap native dispatch ACL hook: ${String(err)}`)
           }
           assertFastDispatchGuardInstalled(true, fastGuardInstalled)
           fastWiringComplete = true
@@ -1279,7 +1361,7 @@ export const claude = defineCommand({
         } catch (err) {
           consola.warn(`Could not auto-approve injected tools: ${String(err)}`)
         }
-        const workerGuardActive = workerSkillsActive || ((isFastProfile || isMaxProfile) && browseAgentAvailable)
+        const workerGuardActive = workerSkillsActive || (isPinnedProfile && browseAgentAvailable)
         if (workerGuardActive) {
           // Workers non-blocking guard: a PreToolUse hook scoped (matcher) to the
           // active worker tools that DENIES a raw `mcp__<workersKey>__<mode>` call
@@ -1302,7 +1384,7 @@ export const claude = defineCommand({
           // raw `mcp__workers__*` escape hatch on demand (e.g. for guaranteed
           // structured-arg fidelity, or when a blocking call is acceptable) — so
           // the worker-* agents COMPLEMENT rather than hard-replace the raw tools.
-          const dispatcherCanReachWorkers = isFastProfile || injected?.ok === true
+          const dispatcherCanReachWorkers = isFastProfile || isCheapProfile || injected?.ok === true
           if (!dispatcherCanReachWorkers) {
             consola.warn(
               "Workers non-blocking guard NOT registered: subagent MCP injection "
@@ -1320,7 +1402,7 @@ export const claude = defineCommand({
             try {
               const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
               const workersKey = workersKeyOf(groupKeys)
-              const modes = isFastProfile || isMaxProfile
+              const modes = isPinnedProfile
                 ? (["browse"] as const)
                 : activeDispatchModes({ browse: browseAgentAvailable })
               const cmd = buildWorkerGuardHookCommand(
@@ -1441,7 +1523,7 @@ export const claude = defineCommand({
         // from artifact auto-open. It is default-on when the hook MCP runtime is
         // wired, top-level-only at runtime, and never blocks ExitPlanMode; material
         // findings are written to the shared findings store for the next prompt.
-        if (!isFastProfile && hookMcpRuntimeFromEnv(envVars) && planReviewEnabled()) {
+        if (!isFastProfile && !isCheapProfile && hookMcpRuntimeFromEnv(envVars) && planReviewEnabled()) {
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const command = buildPlanReviewHookCommand(selfInvocation)
@@ -1455,7 +1537,7 @@ export const claude = defineCommand({
         // never runs an UNTRUSTED repo's scripts). `--trust-gate` records consent
         // for this repo; GH_ROUTER_ENABLE_STOP_GATE force-enables. The hook also
         // re-checks trust at runtime and scopes to the top-level session.
-        if (!isFastProfile && !isMaxProfile && (args as Record<string, unknown>)["trust-gate"] === true) {
+        if (!isFastProfile && !isCheapProfile && !isMaxProfile && (args as Record<string, unknown>)["trust-gate"] === true) {
           try {
             const root = await trustRepo(sessionCwd)
             process.stderr.write(
@@ -1465,7 +1547,7 @@ export const claude = defineCommand({
             consola.warn(`Could not record gate trust: ${String(err)}`)
           }
         }
-        const gateDisabled = isFastProfile || isMaxProfile || stopGateDisabled(args as Record<string, unknown>)
+        const gateDisabled = isPinnedProfile || stopGateDisabled(args as Record<string, unknown>)
         const forceEnabled = parseBoolEnv(process.env.GH_ROUTER_ENABLE_STOP_GATE) === true
         const includeTests = parseBoolEnv(process.env.GH_ROUTER_STOP_GATE_RUN_TESTS) === true
         const gateRoot = await repoRoot(sessionCwd).catch(() => sessionCwd)
@@ -1710,13 +1792,17 @@ export const claude = defineCommand({
           )
         }
       } catch (err) {
-        if (launchProfileId === "fast" || launchProfileId === "max") {
+        if (launchProfileId === "fast" || launchProfileId === "max" || launchProfileId === "cheap" || launchProfileId === "cheap1m") {
           if (fastLaunchId) unregisterLaunch(fastLaunchId)
           await disposeFastRuntime().catch(() => {})
           await server.close(true).catch(() => {})
           await baseShutdown().catch(() => {})
           resetFastRuntimeOwnership()
-          const profileLabel = launchProfileId === "fast" ? "Fast" : "Max"
+          const profileLabel =
+            launchProfileId === "fast" ? "Fast"
+            : launchProfileId === "cheap" ? "Cheap"
+            : launchProfileId === "cheap1m" ? "Cheap1m"
+            : "Max"
           const message = `${profileLabel} profile wiring failed; refusing to launch an unguarded session: ${err instanceof Error ? err.message : String(err)}`
           consola.error(message)
           process.stderr.write(`${message}\n`)

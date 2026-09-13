@@ -54,6 +54,7 @@ import {
   FAST_PROFILE_ADVISOR_MODEL,
 } from "~/lib/fast-profile-contract"
 import { HTTPError } from "~/lib/error"
+import { CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS } from "~/lib/cheap-profile-contract"
 import { MAX_ADVISOR_SYSTEM_PROMPT } from "~/lib/max-profile-prompts"
 import {
   fastEndpointForCatalogId,
@@ -696,6 +697,12 @@ export function resolveAdvisorMaxTokens(advisorModel: string): number {
  * omitted ...]` notice so the advisor knows the transcript is
  * partial and can flag if it needs the missing context.
  *
+ * When `pinOriginalAsk` is enabled (fast and cheap profile leaders),
+ * the FIRST user turn's text is reserved out of the budget and kept
+ * verbatim, so the advisor always sees the original ask even after
+ * aggressive seat-backward truncation — the "keep the ask + seat the
+ * most-recent turns backward, no plan-detection" pruning rule.
+ *
  * Unit-agnostic via the injected `measure` function: production passes
  * an EXACT o200k token counter and a token budget (so truncation tracks
  * the model's real `max_prompt_tokens`); the default `measure` is char
@@ -706,6 +713,7 @@ export function renderConversationAsText(
   conversation: Array<AnyRecord>,
   maxUnits: number = ADVISOR_MAX_CONVERSATION_CHARS,
   measure: (s: string) => number = (s) => s.length,
+  pinOriginalAsk = false,
 ): string {
   const turnBlocks: Array<string> = []
   for (let i = 0; i < conversation.length; i++) {
@@ -738,6 +746,42 @@ export function renderConversationAsText(
     turnBlocks.push(block.join("\n"))
   }
 
+  // Reserve budget for the pinned original ask BEFORE the seat-backward walk,
+  // so the two together still fit `maxUnits` (the pin re-adds the dropped
+  // first turn's ask rather than duplicating it: the ask is only re-inserted
+  // when truncation actually ejected turn 1).
+  const PINNED_ASK_HEADER = "[Original ask (kept for the advisor):]\n\n"
+  let pinnedAsk: string | undefined
+  if (pinOriginalAsk) {
+    for (const msg of conversation) {
+      if ((msg.role as string) !== "user") continue
+      const content = msg.content as AnyRecord["content"] | undefined
+      if (typeof content === "string") {
+        pinnedAsk = content
+        break
+      }
+      if (Array.isArray(content)) {
+        for (const part of content) {
+          if (
+            typeof part === "object"
+            && part !== null
+            && (part as AnyRecord).type === "text"
+            && typeof (part as AnyRecord).text === "string"
+          ) {
+            pinnedAsk = (part as AnyRecord).text as string
+            break
+          }
+        }
+        if (pinnedAsk) break
+      }
+    }
+  }
+  let pinnedAskBlock: string | undefined
+  if (pinnedAsk) {
+    pinnedAskBlock = `${PINNED_ASK_HEADER}${pinnedAsk}\n\n`
+    maxUnits = Math.max(0, maxUnits - measure(pinnedAskBlock))
+  }
+
   // Walk from the latest turn backward, accumulating until the next
   // turn would push us over budget. Measured in whatever unit `measure`
   // reports (tokens in prod, chars by default).
@@ -752,14 +796,15 @@ export function renderConversationAsText(
 
   // Edge case: even the latest turn alone exceeds the budget. Hard-
   // truncate its tail to fit (advisor still gets the most-recent
-  // context, just not all of it).
+  // context, just not all of it). The pinned original ask survives here
+  // too — the ask is the one thing an over-budget tail must not bury.
   if (firstKeptIdx === turnBlocks.length && turnBlocks.length > 0) {
     const last = turnBlocks[turnBlocks.length - 1]
     const notice =
       `[TRUNCATED: conversation too long for advisor model context; `
       + `only the tail of the latest (turn ${turnBlocks.length}) is shown]\n\n`
     const budgetForTail = Math.max(0, maxUnits - measure(notice))
-    return notice + truncateTailToUnits(last, budgetForTail, measure)
+    return (pinnedAskBlock ?? "") + notice + truncateTailToUnits(last, budgetForTail, measure)
   }
 
   const kept = turnBlocks.slice(firstKeptIdx)
@@ -769,6 +814,9 @@ export function renderConversationAsText(
         + `model context budget; ${turnBlocks.length - firstKeptIdx} most-recent `
         + `turn(s) shown below]\n`,
     )
+    if (pinnedAskBlock) {
+      kept.unshift(pinnedAskBlock)
+    }
   }
   return kept.join("\n")
 }
@@ -863,6 +911,7 @@ async function runAdvisor(
   advisorEscalated = false,
   fastProfile = false,
   maxProfile = false,
+  cheapProfile = false,
 ): Promise<string> {
   if (signal?.aborted) {
     throw new Error("advisor call aborted before dispatch")
@@ -892,7 +941,15 @@ async function runAdvisor(
       modelEntry ? getTokenizerFromModel(modelEntry) : "o200k_base",
     )
     measure = (s) => encoder.encode(s).length
-    maxUnits = resolveAdvisorMaxTokens(advisorModel)
+    // Cheap profile runs the same fixed Sol advisor but on a bounded 200K
+    // transcript: the cost lever is realized as a cap on what the advisor
+    // may READ, not on what model it runs as (the model identity is shared
+    // with fast). `Math.min` keeps the reserve/shaping behavior intact while
+    // asserting the cheap ceiling even if the catalog advertises Sol's full
+    // ~1M window.
+    maxUnits = cheapProfile
+      ? Math.min(resolveAdvisorMaxTokens(advisorModel), CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS)
+      : resolveAdvisorMaxTokens(advisorModel)
   } catch (err) {
     consola.debug(
       "advisor: tokenizer load failed; using char-length budget:",
@@ -905,6 +962,9 @@ async function runAdvisor(
     conversation,
     maxUnits,
     measure,
+    // Fast and cheap profile leaders keep the original user ask pinned even
+    // when seat-backward truncation drops everything before the stable window.
+    fastProfile,
   )
 
   // Route by model family/catalog endpoint — see `advisorTransport` for the
@@ -914,6 +974,11 @@ async function runAdvisor(
   if (fastProfile) {
     consola.warn(
       `fast Advisor dispatch: model=${resolvedAdvisorModel} transport=${transport} effort=${advisorEffort}`,
+    )
+  }
+  if (cheapProfile) {
+    consola.warn(
+      `cheap Advisor dispatch: model=${resolvedAdvisorModel} transport=${transport} effort=${advisorEffort} transcriptCap=200K`,
     )
   }
 
@@ -1282,6 +1347,11 @@ export function buildAdvisorStream(opts: {
   /** True only for the authenticated max lead. Uses the same non-binding
    * consultant posture while retaining max's model and effort policy. */
   advisorMaxProfile?: boolean
+  /** True only for the authenticated cheap lead. Same fixed Sol advisor as
+   * fast (its consultant prompt `advisorFastProfile`), but the rendered
+   * transcript is capped at `CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS` (200K)
+   * — the cheap cost lever for advisor reads. */
+  advisorCheapProfile?: boolean
   externalAborter?: AbortController
   /**
    * Injectable continuation dispatcher for every turn AFTER the first.
@@ -1308,6 +1378,7 @@ export function buildAdvisorStream(opts: {
   const advisorEscalated = opts.advisorEscalated ?? false
   const advisorFastProfile = opts.advisorFastProfile ?? false
   const advisorMaxProfile = opts.advisorMaxProfile ?? false
+  const advisorCheapProfile = opts.advisorCheapProfile ?? false
   const continueTurn =
     opts.continueTurn
     ?? ((body: AnyRecord, signal: AbortSignal) =>
@@ -1755,6 +1826,7 @@ export function buildAdvisorStream(opts: {
                   advisorEscalated,
                   advisorFastProfile,
                   advisorMaxProfile,
+                  advisorCheapProfile,
                 )
               } catch (err) {
                 // If the failure was the consumer-cancel abort, let the

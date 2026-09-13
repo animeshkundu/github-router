@@ -189,7 +189,7 @@ launch window = min(window(model) for every reachable [1m] model)
 
 The current fast/standard catalog derives `816700` because Luna/Sol bind at a 783.7K trigger. Opus/Sonnet individually derive `828600`; Gemini 3.8 derives `868584` from its 983,040-token prompt ceiling. The calculation minimizes the **complete expression**, not the prompt field alone, because output reserve participates. Missing/unusable limits omit that candidate; if no usable `[1m]` candidate remains, the variable is omitted rather than guessed.
 
-`/model` does **not** change the environment; the value is fixed at process launch. This is safe and conservative because the client resolves an effective window as `Math.min(locallyRecognizedModelWindow, launchWindow)`. Switching from Luna to a 936K-prompt Opus/Sonnet model keeps `816700`, 11.9K (about 1.4%) below that model's individual optimum; switching to Gemini 3.8 keeps the same launch value, 51,884 (about 6.0%) below its `868584` individual optimum. Native subagents inherit the same env; their frontmatter model controls the locally recognized window. A true 200K model therefore stays about 200K. Grok advertises 500K but carries no `[1m]` marker because the client has no 500K declaration, so Claude Code conservatively treats it as about 200K and compacts early. The fixed fast roster has no true 200K role.
+`/model` does **not** change the environment; the value is fixed at process launch. This is safe and conservative because the client resolves an effective window as `Math.min(locallyRecognizedModelWindow, launchWindow)`. Switching from Luna to a 936K-prompt Opus/Sonnet model keeps `816700`, 11.9K (about 1.4%) below that model's individual optimum; switching to Gemini 3.8 keeps the same launch value, 51,884 (about 6.0%) below its `868584` individual optimum. Native subagents inherit the same env; their frontmatter model controls the locally recognized window. A true 200K model therefore stays about 200K. Grok advertises 500K but carries no `[1m]` marker because the client has no 500K declaration, so Claude Code conservatively treats it as about 200K and compacts early. The fixed fast roster has no true 200K role — every fast role except Grok is `[1m]`-decorated. The cheap family is the opposite: the entire roster (including the `-m cheap` leader) is genuinely 200K, so it never needs the launch-window derivation at all and compacts naturally at 200K.
 
 The value **must be a plain decimal integer**: that env path uses `parseInt`, not the suffix-aware `/config` parser, so `"1m"` parses to `1`, is floored to the client's 100,000 minimum, and would compact a 1M session roughly every 52K tokens. Regression tests pin both the integer shape and the settings-injected `/model` switch case.
 
@@ -199,11 +199,56 @@ As the recovery half of the fix, the proxy maps an upstream overflow onto Claude
 
 ### Advisor
 
-The user-facing role is Advisor. In an authenticated fast launch it remains available only to the primary lead across every fixed `/model` selection (Luna, Sol, Grok 4.6, Gemini 3.8 Flash, or Opus 5), uses GPT-5.6 Sol via Responses at fixed high effort, and sees the lead's bounded recent transcript. The launcher passes `--advisor gpt-5.6-sol[1m]`, overriding a mirrored standard Advisor preference only for this session, so Claude Code's native tool schema, UI label, and JSONL identify the same model the proxy actually dispatches. Fast selection is fixed: `GH_ROUTER_ADVISOR_MODEL` and forwarded `--advisor` values cannot change it, and a missing/wrong-endpoint Sol runtime invariant fails visibly rather than silently falling back. An in-session `/advisor` mismatch is rejected with a restoration command. Standard launches retain operator pins and fallback behavior unchanged. Fast Task subagents have all Advisor tool forms stripped; their narrower transcripts are not the session context Advisor exists to assess. Advisor is optional, non-binding consultation for consequential unresolved uncertainty, conflicting evidence, a genuinely non-converging approach, materially changed assumptions, or an explicit request for a fresh perspective. It is not used for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. The lead retains decision ownership and may consult again when materially new evidence creates a different question. Non-Claude continuations reuse the selected lead's translation shim/endpoint and existing SSE lifecycle.
+The user-facing role is Advisor. In an authenticated fast launch it remains available only to the primary lead across every fixed `/model` selection (Luna, Sol, Grok 4.6, Gemini 3.8 Flash, or Opus 5), uses GPT-5.6 Sol via Responses at fixed high effort, and sees the lead's bounded recent transcript. The launcher passes `--advisor gpt-5.6-sol[1m]`, overriding a mirrored standard Advisor preference only for this session, so Claude Code's native tool schema, UI label, and JSONL identify the same model the proxy actually dispatches. Fast selection is fixed: `GH_ROUTER_ADVISOR_MODEL` and forwarded `--advisor` values cannot change it, and a missing/wrong-endpoint Sol runtime invariant fails visibly rather than silently falling back. An in-session `/advisor` mismatch is rejected with a restoration command. In a cheap or cheap1m launch the same fixed Sol Advisory runs at the 200K cost class: the launcher pins the **bare** `gpt-5.6-sol` slug (no `[1m]`), and the proxy caps the transcript at 200K tokens while keeping the original user ask pinned through seat-backward truncation. Standard launches retain operator pins and fallback behavior unchanged. Fast and cheap Task subagents have all Advisor tool forms stripped; their narrower transcripts are not the session context Advisor exists to assess. Advisor is optional, non-binding consultation for consequential unresolved uncertainty, conflicting evidence, a genuinely non-converging approach, materially changed assumptions, or an explicit request for a fresh perspective. It is not used for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. The lead retains decision ownership and may consult again when materially new evidence creates a different question. Non-Claude continuations reuse the selected lead's translation shim/endpoint and existing SSE lifecycle.
 
 Oracle remains separate and stateless. It is available to the lead and `Plan` as a last resort for one focused unresolved question, and remains unavailable to `reviewer`, `implementer`, `Explore`, and `general-purpose`. Fast launches keep the proxy MCP servers out of the shared mirrored config: the lead receives them through its launch-only MCP config, while `Plan` receives its role-scoped inline servers. This prevents other natives from inheriting Oracle.
 
 Standard Advisor behavior is unchanged: Sol/xhigh (high floor) on the normal Opus path and Opus escalation for lighter Claude leads.
+
+## Cheap launch profiles (`-m cheap`, `-m cheap1m`)
+
+The literal raw aliases `cheap` and `cheap1m` select the **cost-classed sibling of fast**: identical roster shape, delegation graph, MCP surface, and fixed per-role efforts, but every subagent and peer runs at the bare 200K default window (no `[1m]` decoration). The one identity swap is `reviewer`: Luna at max effort instead of fast's Sonnet 5 at xhigh. The two aliases differ only on the **leader**:
+
+- **`-m cheap`** — the whole profile runs at the 200K cost class: the Gemini 3.8 Flash **leader is bare too**, and the only peer is a Grok 4.6 Oracle. There is no `astra` peer (`personaAllowlist` is Oracle-only; the MCP peers surface exposes Oracle exclusively).
+- **`-m cheap1m`** — the named successor of the original cheap launch: the leader keeps its full 1M window (`[1m]`), and the `astra` peer (`gpt-6-astra`) remains available next to Oracle. Subagents and both peers still run at bare 200K.
+
+### `-m cheap` (200K leader)
+
+The lead is `gemini-3.8-flash` bare.
+
+| Surface | Model | Effort | Window |
+|---|---|---|---|
+| Lead | `gemini-3.8-flash` | high | 200K |
+| `Explore` | `gpt-5.6-luna` | high | 200K |
+| `Plan` | `gpt-5.6-sol` | high | 200K |
+| `general-purpose` | `gpt-5.6-luna` | max | 200K |
+| `implementer` | `gemini-3.8-flash` | high | 200K |
+| `reviewer` | `gpt-5.6-luna` | max | 200K |
+| Advisor | `gpt-5.6-sol` | high | 200K |
+| `oracle` | `grok-4.6` | medium | 200K |
+
+### `-m cheap1m` (1M leader)
+
+The lead is `gemini-3.8-flash[1m]`, decorated only when the live catalog serves 1M.
+
+| Surface | Model | Effort | Window |
+|---|---|---|---|
+| Lead | `gemini-3.8-flash[1m]` | high | 1M |
+| `Explore` | `gpt-5.6-luna` | high | 200K |
+| `Plan` | `gpt-5.6-sol` | high | 200K |
+| `general-purpose` | `gpt-5.6-luna` | max | 200K |
+| `implementer` | `gemini-3.8-flash` | high | 200K |
+| `reviewer` | `gpt-5.6-luna` | max | 200K |
+| Advisor | `gpt-5.6-sol` | high | 200K |
+| `oracle` | `grok-4.6` | medium | 200K |
+| `astra` | `gpt-6-astra` | medium | 200K |
+
+### Cost levers and validation (shared family)
+
+- **Cost lever**: the curated picker flags every cheap row `neverOneM`, the agent/MCP wiring emits bare slugs, and the launcher pins Claude Code's Advisor to the bare `gpt-5.6-sol`, so nothing in the cheap surface acquires `[1m]` accounting. Even in `-m cheap1m`, a `/model` switch drops to a 200K-budget row — the 1M window lives only on the fixed lead. The proxy caps the Advisor transcript at 200K tokens (`CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS`) while keeping the original user ask pinned.
+- **Oracle**: swaps Fast's exact Opus 5 for Grok 4.6 (`/responses`, medium) — the cheaper cross-lab second set of eyes, scoped to the lead and `Plan` like Fast. **Astra** (cheap1m only) is GPT-6 Astra at medium effort, lead-only, 200K policy window.
+- **Prerequisites**: `validateCheapProfilePrerequisites` gates the leader at the 200K floor; `validateCheap1mProfilePrerequisites` gates the same leader at 1M. Every other role needs just its fixed effort, tool-calling (where relevant), and a supported endpoint. `astra` is optional (exposed only when the catalog serves it); every other role in the roster is mandatory, and startup fails with an actionable list rather than substituting a model.
+- Delegation edges, Oracle scoping, MCP surface and hard-denies, and picker rows are otherwise identical to Fast.
 
 ## 1M context accounting
 
@@ -211,6 +256,6 @@ Claude Code locally recognizes the literal `[1m]` suffix. The proxy adds it only
 
 ## Curated model picker
 
-The per-launch mirror's supported `modelPicker` setting advertises only live-catalog-present rows. Standard and Fast expose Sol, Luna, Gemini 3.8 Flash, and Grok 4.6; Max exposes Sol, Luna, Gemini 3.8 Flash, and Opus 5 so every row is an allowed Max lead. Missing rows are omitted, not substituted. Selecting a row changes the active lead model but does not change the launch profile's roster or MCP scope. Existing user `modelPicker` configuration wins wholesale, and its valid `[1m]` rows still participate in the compaction bound. Claude Code 2.1.260 requires `behavesAs` to offer otherwise-unknown ids, so Sol/Luna use the Opus 5 client profile and Gemini/Grok use Sonnet 5 while labels and wire ids remain unchanged. Gateway discovery stays disabled because the same client filters its refresh to Claude/Anthropic ids and replaces its cache.
+The per-launch mirror's supported `modelPicker` setting advertises only live-catalog-present rows. Standard and Fast expose Sol, Luna, Gemini 3.8 Flash, and Grok 4.6; Max exposes Sol, Luna, Gemini 3.8 Flash, and Opus 5 so every row is an allowed Max lead; Cheap and Cheap1m expose the same four as Standard/Fast but flag every row `neverOneM` so the picker never decorates a cheap selection with `[1m]`. Missing rows are omitted, not substituted. Selecting a row changes the active lead model but does not change the launch profile's roster or MCP scope. Existing user `modelPicker` configuration wins wholesale, and its valid `[1m]` rows still participate in the compaction bound. Claude Code 2.1.260 requires `behavesAs` to offer otherwise-unknown ids, so Sol/Luna use the Opus 5 client profile and Gemini/Grok use Sonnet 5 while labels and wire ids remain unchanged. Gateway discovery stays disabled because the same client filters its refresh to Claude/Anthropic ids and replaces its cache.
 
-`github-router serve` intentionally uses the Standard roster, ACL, and picker. The `fast` and `max` aliases are rejected there with an actionable message; use `github-router claude -m fast|max` for those profiles, or pass an explicit model id to `serve` while retaining its Standard enhancement surface.
+`github-router serve` intentionally uses the Standard roster, ACL, and picker. The `fast`, `cheap`, `cheap1m`, and `max` aliases are rejected there with an actionable message; use `github-router claude -m fast|cheap|cheap1m|max` for those profiles, or pass an explicit model id to `serve` while retaining its Standard enhancement surface.

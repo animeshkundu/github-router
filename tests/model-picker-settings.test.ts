@@ -131,6 +131,51 @@ describe("selectableModelsInCatalog", () => {
     ])
   })
 
+  test("cheap rows stay BARE even when their catalog entries serve 1M", () => {
+    // WINDOWS advertises every cheap row as 1M-capable (sol/luna 1.05M,
+    // gemini 1M) — Standard decorates them with `[1m]`, but cheap's whole
+    // cost lever is pinning every non-lead role to the 200K default window,
+    // so a `/model` switch must never hand the session a 1M budget again.
+    setCatalog(WINDOWS)
+    expect(ids("standard")).toEqual([
+      "gpt-5.6-sol[1m]",
+      "gpt-5.6-luna[1m]",
+      "gemini-3.8-flash[1m]",
+      "grok-4.6",
+    ])
+    expect(ids("cheap")).toEqual([...STANDARD_IDS])
+    expect(ids("cheap").some((id) => /\[1m\]/i.test(id))).toBe(false)
+    // `cheap1m` shares cheap's picker surface exactly: same bare rows with
+    // the 1M decoration opted out. Its 1M difference lives in the LAUNCH
+    // lead slug (`-m cheap1m` → gemini [1m]), not in `/model` switches.
+    expect(ids("cheap1m")).toEqual([...STANDARD_IDS])
+    expect(ids("cheap1m").some((id) => /\[1m\]/i.test(id))).toBe(false)
+    expect(selectableModelsInCatalog("cheap").map((row) => row.label)).toEqual([
+      "GPT-5.6 Sol",
+      "GPT-5.6 Luna",
+      "Gemini 3.8 Flash",
+      "Grok 4.6",
+    ])
+    expect(selectableModelsInCatalog("cheap1m").map((row) => row.label)).toEqual([
+      "GPT-5.6 Sol",
+      "GPT-5.6 Luna",
+      "Gemini 3.8 Flash",
+      "Grok 4.6",
+    ])
+  })
+
+  test("cheap rows follow the live catalog gate like every profile", () => {
+    setCatalog({ "gemini-3.8-flash": 1_000_000, "grok-4.6": 500_000 })
+    expect(ids("cheap")).toEqual(["gemini-3.8-flash", "grok-4.6"])
+    expect(ids("cheap1m")).toEqual(["gemini-3.8-flash", "grok-4.6"])
+    state.models = { object: "list", data: [] as never }
+    expect(ids("cheap")).toEqual([])
+    expect(ids("cheap1m")).toEqual([])
+    state.models = undefined
+    expect(ids("cheap")).toEqual([])
+    expect(ids("cheap1m")).toEqual([])
+  })
+
   test("matches the presence-based 1M opt-out and never decorates Grok", () => {
     setCatalog({ ...WINDOWS, "grok-4.6": 1_000_000 })
     expect(ids("standard")).toContain("grok-4.6")
@@ -168,6 +213,34 @@ describe("injectModelPickerSettingsFile", () => {
     for (const option of options) {
       expect(option).not.toHaveProperty("description")
     }
+  })
+
+  test("writes a cheap picker whose rows carry no [1m] decoration", async () => {
+    setCatalog(WINDOWS)
+    const result = await injectModelPickerSettingsFile(settingsPath, "cheap")
+    expect(result.written).toBe(true)
+    expect(result.models).toEqual([...STANDARD_IDS])
+    expect(result.models.some((id) => /\[1m\]/i.test(id))).toBe(false)
+    const settings = await read()
+    const options = (settings.modelPicker as { options: Array<Record<string, unknown>> }).options
+    expect(options.map((option) => option.model)).toEqual([...STANDARD_IDS])
+    expect(options.map((option) => option.behavesAs)).toEqual([
+      "claude-opus-5",
+      "claude-opus-5",
+      "claude-sonnet-5",
+      "claude-sonnet-5",
+    ])
+  })
+
+  test("writes an identical bare picker for the cheap1m successor", async () => {
+    setCatalog(WINDOWS)
+    const result = await injectModelPickerSettingsFile(settingsPath, "cheap1m")
+    expect(result.written).toBe(true)
+    expect(result.models).toEqual([...STANDARD_IDS])
+    expect(result.models.some((id) => /\[1m\]/i.test(id))).toBe(false)
+    const settings = await read()
+    const options = (settings.modelPicker as { options: Array<Record<string, unknown>> }).options
+    expect(options.map((option) => option.model)).toEqual([...STANDARD_IDS])
   })
 
   test("preserves unrelated settings and an existing user modelPicker wholesale", async () => {

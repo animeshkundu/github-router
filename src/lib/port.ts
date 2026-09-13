@@ -1,6 +1,7 @@
 import consola from "consola"
 
 import { ONE_M_TOKENS, withOneMSuffixForLead } from "./one-m-context"
+import { CHEAP_PROFILE_MODELS } from "./cheap-profile-contract"
 import { FAST_PROFILE_MODELS } from "./fast-profile-contract"
 import { MAX_PROFILE_LEAD_MODEL } from "./max-profile-contract"
 import { state } from "./state"
@@ -100,6 +101,14 @@ const DEFAULT_OPUS_FAMILY = "5"
  */
 export const FAST_LEAD_MODEL = FAST_PROFILE_MODELS.lead
 
+/**
+ * The lead `-m cheap` selects. Same Gemini leader as `fast`, but run at the
+ * 200K DEFAULT window (BARE slug, no `[1m]`) — see the cheap-family split in
+ * `./launch-profile` and `.resolveLeadSlugArg` below. `-m cheap1m` is the
+ * successor that keeps the leader at its full 1M window.
+ */
+export const CHEAP_LEAD_MODEL = CHEAP_PROFILE_MODELS.lead
+
 /** Small/fast tier for a budget lead, in the two forms this codebase needs.
  *
  *  `SLUG` is the Anthropic-published DASHED form and is what goes into
@@ -115,18 +124,22 @@ export const BUDGET_SMALL_FAST_CATALOG_ID = "claude-haiku-4.5"
 /**
  * Resolve the `-m` argument to the lead slug to launch with.
  *
- *   - `fast`      → `FAST_LEAD_MODEL` (the fast Luna profile — see
+ *   - `fast`      → `FAST_LEAD_MODEL` (the fast Gemini profile — see
  *                   `./launch-profile`, NOT the retired Sonnet budget lead)
+ *   - `cheap1m`   → `CHEAP_LEAD_MODEL` decorated `[1m]` (the named successor
+ *                   of the original cheap launch: Gemini leader at 1M)
+ *   - `cheap`     → `CHEAP_LEAD_MODEL` BARE (the cost-lean launch: Gemini
+ *                   leader at the 200K DEFAULT window, no astra peer)
  *   - `N.M`       → the best variant of that Opus family, via `pickClaudeDefault`
  *   - a full slug → unchanged, including Copilot slugs a power user pins
  *   - absent      → the ordinary default
  *
- * Every branch is `[1m]`-decorated against the live catalog, by
- * `pickClaudeDefault` on the two Opus-family branches and by
- * `withOneMSuffixForLead` on the other two. `gpt-5.6-luna` advertises a 1M
- * window, so `-m fast` gets local 1M accounting exactly like every other
- * branch here; the decoration is catalog-gated per model, so a genuinely
- * 200K model (`claude-haiku-4.5`) still comes back bare.
+ * Every branch except `cheap` is `[1m]`-decorated against the live catalog,
+ * by `pickClaudeDefault` on the two Opus-family branches and by
+ * `withOneMSuffixForLead` on the rest — the decoration is catalog-gated per
+ * model, so a genuinely 200K model (`claude-haiku-4.5`) still comes back
+ * bare. `cheap` deliberately skips the decoration entirely because its whole
+ * cost lever is the 200K default lead window.
  *
  * `fast` resolves to an ordinary slug rather than setting a mode flag —
  * `resolveLaunchProfile` (`./launch-profile`) is keyed off the SAME raw
@@ -154,6 +167,12 @@ export function resolveLeadSlugArg(modelArg: string | undefined): string {
   }
   if (arg.toLowerCase() === "max") {
     return withOneMSuffixForLead(MAX_PROFILE_LEAD_MODEL)
+  }
+  if (arg.toLowerCase() === "cheap1m") {
+    return withOneMSuffixForLead(CHEAP_LEAD_MODEL)
+  }
+  if (arg.toLowerCase() === "cheap") {
+    return CHEAP_LEAD_MODEL
   }
   const opusFamilyShorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
   if (opusFamilyShorthand) return pickClaudeDefault(opusFamilyShorthand)
