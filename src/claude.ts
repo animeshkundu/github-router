@@ -144,6 +144,7 @@ import {
   fastOracleModel,
   fastAstraModel,
   cheapOracleModel,
+  cheapReviewerModel,
 } from "./lib/mcp-capabilities"
 import {
   getClaudeCodeEnvVars,
@@ -865,7 +866,7 @@ export const claude = defineCommand({
               Plan: CHEAP_PROFILE_NATIVE_MODELS.Plan,
               "general-purpose": CHEAP_PROFILE_NATIVE_MODELS["general-purpose"],
               implementer: CHEAP_PROFILE_NATIVE_MODELS.implementer,
-              reviewer: CHEAP_PROFILE_NATIVE_MODELS.reviewer,
+              reviewer: cheapReviewerModel(),
             }
         : launchProfileId === "max"
           ? {

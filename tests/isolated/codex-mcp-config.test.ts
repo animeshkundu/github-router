@@ -947,7 +947,7 @@ describe("buildPeerAgentDefinitions", () => {
         cheapPlanModel: "gpt-5.6-sol",
         cheapGeneralPurposeModel: "gpt-5.6-luna",
         cheapImplementerModel: "gemini-3.8-flash",
-        cheapReviewerModel: "claude-sonnet-5",
+        cheapReviewerModel: "gpt-5.6-luna",
         ...extra,
       })
     }
@@ -967,14 +967,14 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents.Plan!.model).toBe("gpt-5.6-sol")
       expect(agents["general-purpose"]!.model).toBe("gpt-5.6-luna")
       expect(agents.implementer!.model).toBe("gemini-3.8-flash")
-      expect(agents.reviewer!.model).toBe("claude-sonnet-5")
+      expect(agents.reviewer!.model).toBe("gpt-5.6-luna")
       for (const def of Object.values(agents)) expect(def.model).not.toMatch(/\[1m\]/)
 
       expect(agents.Explore!.effort).toBe("high")
       expect(agents.Plan!.effort).toBe("high")
       expect(agents["general-purpose"]!.effort).toBe("max")
       expect(agents.implementer!.effort).toBe("high")
-      expect(agents.reviewer!.effort).toBe("xhigh")
+      expect(agents.reviewer!.effort).toBe("max")
 
       expect(agents.Explore!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
       expect(agents.reviewer!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
@@ -986,9 +986,11 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents.Plan!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything(), search: expect.anything() }))
       expect(agents.Plan!.prompt).toContain("Oracle")
       expect(agents.reviewer!.prompt).not.toContain("Oracle")
-      // Explore-first under cheap delegation rules: Plan may only delegate
-      // discovery to Explore, never to any other subagent.
-      expect(agents.Plan!.prompt).toContain("you may invoke Explore for discovery; do not invoke any other subagent")
+      // Explore-first under cheap delegation rules: Plan delegates discovery
+      // to Explore in parallel and reads directly only what it must act on;
+      // it may also invoke reviewer, never any other subagent.
+      expect(agents.Plan!.prompt).toContain("Do not sweep the repository yourself: delegate discovery to `Explore`")
+      expect(agents.Plan!.prompt).toContain("you may invoke Explore and `reviewer` for discovery and verification; do not invoke any other subagent")
     })
 
     test("browseAvailable with workers group adds an identical bare worker-browse", () => {

@@ -207,7 +207,7 @@ Standard Advisor behavior is unchanged: Sol/xhigh (high floor) on the normal Opu
 
 ## Cheap launch profiles (`-m cheap`, `-m cheap1m`)
 
-The literal raw aliases `cheap` and `cheap1m` select the **cost-classed sibling of fast**: identical roster identities, delegation graph, MCP surface, and fixed per-role efforts, but every subagent and peer runs at the bare 200K default window (no `[1m]` decoration). The two aliases differ only on the **leader**:
+The literal raw aliases `cheap` and `cheap1m` select the **cost-classed sibling of fast**: identical roster shape, delegation graph, MCP surface, and fixed per-role efforts, but every subagent and peer runs at the bare 200K default window (no `[1m]` decoration). The one identity swap is `reviewer`: Luna at max effort instead of fast's Sonnet 5 at xhigh. The two aliases differ only on the **leader**:
 
 - **`-m cheap`** — the whole profile runs at the 200K cost class: the Gemini 3.8 Flash **leader is bare too**, and the only peer is a Grok 4.6 Oracle. There is no `astra` peer (`personaAllowlist` is Oracle-only; the MCP peers surface exposes Oracle exclusively).
 - **`-m cheap1m`** — the named successor of the original cheap launch: the leader keeps its full 1M window (`[1m]`), and the `astra` peer (`gpt-6-astra`) remains available next to Oracle. Subagents and both peers still run at bare 200K.
@@ -223,7 +223,7 @@ The lead is `gemini-3.8-flash` bare.
 | `Plan` | `gpt-5.6-sol` | high | 200K |
 | `general-purpose` | `gpt-5.6-luna` | max | 200K |
 | `implementer` | `gemini-3.8-flash` | high | 200K |
-| `reviewer` | `claude-sonnet-5` | xhigh | 200K |
+| `reviewer` | `gpt-5.6-luna` | max | 200K |
 | Advisor | `gpt-5.6-sol` | high | 200K |
 | `oracle` | `grok-4.6` | medium | 200K |
 
@@ -238,7 +238,7 @@ The lead is `gemini-3.8-flash[1m]`, decorated only when the live catalog serves 
 | `Plan` | `gpt-5.6-sol` | high | 200K |
 | `general-purpose` | `gpt-5.6-luna` | max | 200K |
 | `implementer` | `gemini-3.8-flash` | high | 200K |
-| `reviewer` | `claude-sonnet-5` | xhigh | 200K |
+| `reviewer` | `gpt-5.6-luna` | max | 200K |
 | Advisor | `gpt-5.6-sol` | high | 200K |
 | `oracle` | `grok-4.6` | medium | 200K |
 | `astra` | `gpt-6-astra` | medium | 200K |

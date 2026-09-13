@@ -22,7 +22,7 @@ export const CHEAP_PROFILE_MODELS = Object.freeze({
   plan: "gpt-5.6-sol",
   "general-purpose": "gpt-5.6-luna",
   implementer: "gemini-3.8-flash",
-  reviewer: "claude-sonnet-5",
+  reviewer: "gpt-5.6-luna",
   advisor: "gpt-5.6-sol",
   oracle: "grok-4.6",
   astra: "gpt-6-astra",
@@ -54,7 +54,7 @@ export const CHEAP_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Plan: "high",
   "general-purpose": "max",
   implementer: "high",
-  reviewer: "xhigh",
+  reviewer: "max",
 } as const)
 
 /**

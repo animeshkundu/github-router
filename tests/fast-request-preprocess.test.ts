@@ -100,7 +100,7 @@ describe("fast request preprocessing", () => {
     })
   })
 
-  describe("cheap profile (shared fast model set at 200K)", () => {
+  describe("cheap profile (shared fast effort mapping at 200K; reviewer is Luna/max, not Sonnet/xhigh)", () => {
     test("forces the same role efforts as fast", () => {
       for (const [model, effort] of [
         ["gpt-5.6-luna", "max"],

@@ -154,7 +154,7 @@ The proxy filters via `filterBetaHeader` in `src/lib/utils.ts`. Two lists:
 
 ### Cheap and Cheap1m profile rows
 
-The `-m cheap` and `-m cheap1m` aliases reuse the Fast roster identities (see [`default-models.md`](default-models.md) "Cheap launch profiles"), so they add no new request shapes for the shared roles — the model/endpoint/effort rows above already cover them (Grok 4.6 medium Oracle, Gemini 3.8 Flash leader via Chat, GPT-5.6 Sol Advisor via Responses, claude-sonnet-5 reviewer via Messages). These rows pin the profile-specific policy that is NOT derivable from the shared model rows: the lead-window split and the astra peer gate.
+The `-m cheap` and `-m cheap1m` aliases reuse the Fast roster identities except `reviewer` (Luna/max on Responses instead of Sonnet 5/xhigh on Messages; see [`default-models.md`](default-models.md) "Cheap launch profiles"), so they add no new request shapes for the shared roles — the model/endpoint/effort rows above already cover them (Grok 4.6 medium Oracle, Gemini 3.8 Flash leader via Chat, GPT-5.6 Sol Advisor via Responses, Luna reviewer via Responses). These rows pin the profile-specific policy that is NOT derivable from the shared model rows: the lead-window split and the astra peer gate.
 
 | Model / policy | End-to-end status | Source | Probe id | Notes |
 |---|---|---|---|---|

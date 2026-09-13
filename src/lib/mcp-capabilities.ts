@@ -39,6 +39,8 @@ import {
   CHEAP_PROFILE_ASTRA_EFFORT,
   CHEAP_PROFILE_ASTRA_MODEL,
   CHEAP_PROFILE_ASTRA_PROMPT_TOKENS,
+  CHEAP_PROFILE_MODELS,
+  CHEAP_PROFILE_NATIVE_EFFORTS,
   CHEAP_PROFILE_ORACLE_EFFORT,
   CHEAP_PROFILE_ORACLE_MODEL,
   CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS,
@@ -528,6 +530,18 @@ export function cheapOracleModel(): string | undefined {
   if (!Array.isArray(efforts) || !efforts.includes(CHEAP_PROFILE_ORACLE_EFFORT)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
   return CHEAP_PROFILE_ORACLE_MODEL
+}
+
+/** Luna/max reviewer for the cheap family at the 200K default window. */
+export function cheapReviewerModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === CHEAP_PROFILE_MODELS.reviewer)
+  if (!found) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(CHEAP_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return CHEAP_PROFILE_MODELS.reviewer
 }
 
 /** Exact GPT-6 Astra only: cheap escalation consultant at 200K/medium. */

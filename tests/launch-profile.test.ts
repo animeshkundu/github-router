@@ -170,14 +170,8 @@ function cheapCatalog(): typeof fullCatalog {
       // windows — the whole cheap cost lever.
       model("gpt-5.6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
       model("gpt-5.6-sol", { context: 500_000, efforts: ["high"], endpoints: ["/responses"] }),
-      {
-        ...model("claude-sonnet-5", { context: 500_000, prompt: 372_000, efforts: ["high", "xhigh", "max"], endpoints: ["/v1/messages"] }),
-        capabilities: {
-          ...model("claude-sonnet-5").capabilities,
-          limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 },
-          supports: { tool_calls: true, reasoning_effort: ["high", "xhigh", "max"], adaptive_thinking: true },
-        },
-      },
+      // Reviewer shares the Luna entry above (Luna/max at the 200K default
+      // window), so no separate reviewer row is needed here.
       model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["low", "medium"], endpoints: ["/responses"] }),
     ],
   }
@@ -255,7 +249,7 @@ describe("cheap-family startup prerequisites", () => {
     const cases: ReadonlyArray<{
       id: string
       mutate: (entry: CheapEntry) => CheapEntry
-      expected: string
+      expected: string | ReadonlyArray<string>
     }> = [
       {
         id: "gemini-3.8-flash",
@@ -282,20 +276,23 @@ describe("cheap-family startup prerequisites", () => {
         mutate: (entry) => ({ ...entry, supported_endpoints: ["/v1/messages"] }),
         expected: `gpt-5.6-sol: does not advertise a supported Responses endpoint`,
       },
+      // Reviewer shares Luna's catalog entry with Explore, so a Luna
+      // regression double-reports: once for Explore, once for the reviewer.
       {
-        id: "claude-sonnet-5",
-        mutate: (entry) => ({ ...entry, capabilities: { ...entry.capabilities, supports: { ...entry.capabilities.supports, adaptive_thinking: false } } }),
-        expected: "claude-sonnet-5: does not advertise adaptive_thinking",
+        id: "gpt-5.6-luna",
+        mutate: (entry) => ({ ...entry, capabilities: { ...entry.capabilities, supports: { ...entry.capabilities.supports, reasoning_effort: ["high"] } } }),
+        expected: [
+          `gpt-5.6-luna: does not advertise both "high" and "max" reasoning effort`,
+          `gpt-5.6-luna: does not advertise a "max" reasoning effort`,
+        ],
       },
       {
-        id: "claude-sonnet-5",
-        mutate: (entry) => ({ ...entry, capabilities: { ...entry.capabilities, supports: { ...entry.capabilities.supports, reasoning_effort: ["high", "max"] } } }),
-        expected: `claude-sonnet-5: does not advertise an "xhigh" reasoning effort`,
-      },
-      {
-        id: "claude-sonnet-5",
-        mutate: (entry) => ({ ...entry, supported_endpoints: ["/responses"] }),
-        expected: "claude-sonnet-5: does not advertise a supported Messages endpoint",
+        id: "gpt-5.6-luna",
+        mutate: (entry) => ({ ...entry, supported_endpoints: ["/v1/messages"] }),
+        expected: [
+          "gpt-5.6-luna: does not advertise a supported Responses endpoint",
+          "gpt-5.6-luna: does not advertise a supported Responses endpoint",
+        ],
       },
     ]
     for (const { id, mutate, expected } of cases) {
@@ -303,8 +300,9 @@ describe("cheap-family startup prerequisites", () => {
       catalog.data = catalog.data.map((entry) =>
         entry.id === id ? mutate(structuredClone(entry)) : entry,
       ) as typeof fullCatalog["data"]
-      expect(validateCheapProfilePrerequisites(catalog as never).missing).toEqual([expected])
-      expect(validateCheap1mProfilePrerequisites(catalog as never).missing).toEqual([expected])
+      const want = typeof expected === "string" ? [expected] : [...expected]
+      expect(validateCheapProfilePrerequisites(catalog as never).missing).toEqual(want)
+      expect(validateCheap1mProfilePrerequisites(catalog as never).missing).toEqual(want)
     }
   })
 
@@ -316,7 +314,8 @@ describe("cheap-family startup prerequisites", () => {
     expect(cheapMessage).toContain("gemini-3.8-flash")
     expect(cheapMessage).toContain("gpt-5.6-luna")
     expect(cheapMessage).toContain("gpt-5.6-sol")
-    expect(cheapMessage).toContain("claude-sonnet-5")
+    // Reviewer shares Luna's entry, so Luna is reported twice on an empty catalog.
+    expect(result.missing.filter((m) => m.startsWith("gpt-5.6-luna:"))).toHaveLength(2)
     expect(cheapMessage).toContain("grok-4.6")
     expect(cheapMessage).toContain("github-router claude -m cheap")
 

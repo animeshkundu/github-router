@@ -635,29 +635,23 @@ function collectCheapPrerequisiteMissing(
     }
   }
 
-  const sonnet = findModel(catalog, CHEAP_PROFILE_MODELS.reviewer)
-  if (!sonnet) {
+  const reviewer = findModel(catalog, CHEAP_PROFILE_MODELS.reviewer)
+  if (!reviewer) {
     missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: absent from the live catalog`)
   } else {
-    if (!hasToolCalls(sonnet)) {
+    if (!hasToolCalls(reviewer)) {
       missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
     }
-    if (!hasContextAtLeast(sonnet, CHEAP_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+    if (!hasContextAtLeast(reviewer, CHEAP_SUBAGENT_MIN_CONTEXT_TOKENS)) {
       missing.push(
         `${CHEAP_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
       )
     }
-    if (!supportsEffort(sonnet, "xhigh")) {
-      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: does not advertise an "xhigh" reasoning effort`)
+    if (!supportsEffort(reviewer, "max")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: does not advertise a "max" reasoning effort`)
     }
-    if (sonnet.capabilities?.supports?.adaptive_thinking !== true) {
-      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: does not advertise adaptive_thinking`)
-    }
-    if (!hasUsablePromptMetadata(sonnet)) {
-      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: no usable max_prompt_tokens metadata`)
-    }
-    if (!supportsEndpoint(sonnet, "messages")) {
-      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: does not advertise a supported Messages endpoint`)
+    if (!supportsEndpoint(reviewer, "responses")) {
+      missing.push(`${CHEAP_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`)
     }
   }
 

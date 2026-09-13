@@ -29,12 +29,15 @@ import {
   fastOracleModel,
   fastAstraModel,
   cheapOracleModel,
+  cheapReviewerModel,
   cheapAstraModel,
 } from "~/lib/mcp-capabilities"
 import {
   CHEAP_PROFILE_ASTRA_EFFORT,
   CHEAP_PROFILE_ASTRA_MODEL,
   CHEAP_PROFILE_ASTRA_PROMPT_TOKENS,
+  CHEAP_PROFILE_MODELS,
+  CHEAP_PROFILE_NATIVE_EFFORTS,
   CHEAP_PROFILE_ORACLE_EFFORT,
   CHEAP_PROFILE_ORACLE_MODEL,
   CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS,
@@ -247,6 +250,30 @@ test("cheap Oracle pins to exact Grok 4.6 200K/medium on responses", () => {
     }),
   )
   expect(cheapOracleModel()).toBeUndefined()
+})
+
+test("cheap reviewer pins to Luna/max at the 200K default window on responses", () => {
+  expect(CHEAP_PROFILE_MODELS.reviewer).toBe("gpt-5.6-luna")
+  expect(CHEAP_PROFILE_NATIVE_EFFORTS.reviewer).toBe("max")
+
+  setCatalog(entry("gpt-5.6-luna", { ctx: 500_000, efforts: ["high", "max"], endpoints: ["/responses"] }))
+  expect(cheapReviewerModel()).toBe("gpt-5.6-luna")
+
+  // Below the 200K subagent floor -> dropped.
+  setCatalog(entry("gpt-5.6-luna", { ctx: 100_000, efforts: ["high", "max"], endpoints: ["/responses"] }))
+  expect(cheapReviewerModel()).toBeUndefined()
+
+  // Missing max effort -> dropped.
+  setCatalog(entry("gpt-5.6-luna", { ctx: 500_000, efforts: ["high"], endpoints: ["/responses"] }))
+  expect(cheapReviewerModel()).toBeUndefined()
+
+  // No tool_calls -> dropped.
+  setCatalog(entry("gpt-5.6-luna", { ctx: 500_000, toolCalls: false, efforts: ["high", "max"], endpoints: ["/responses"] }))
+  expect(cheapReviewerModel()).toBeUndefined()
+
+  // Wrong endpoint -> dropped.
+  setCatalog(entry("gpt-5.6-luna", { ctx: 500_000, efforts: ["high", "max"], endpoints: ["/v1/messages"] }))
+  expect(cheapReviewerModel()).toBeUndefined()
 })
 
 test("cheap Astra pins to exact gpt-6-astra 200K/medium on responses", () => {
