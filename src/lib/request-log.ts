@@ -1,5 +1,6 @@
 import consola from "consola"
 
+import { formatAic, nanoAiuToCredits } from "~/lib/aic-usage"
 import { isFileLoggingEnabled } from "~/lib/file-log-reporter"
 import type { Model } from "~/services/copilot/get-models"
 
@@ -12,6 +13,8 @@ export interface RequestLogInfo {
   outputTokens?: number
   cacheReadTokens?: number
   cacheWriteTokens?: number
+  /** Upstream-measured AIC in nano-AIU (`copilot_usage.total_nano_aiu`). */
+  aicNano?: number
   status?: number
   streaming?: boolean
   errorBody?: string
@@ -188,6 +191,7 @@ function formatTokenInfo(
   cacheReadTokens: number | undefined,
   cacheWriteTokens: number | undefined,
   model: Model | undefined,
+  aicNano?: number | undefined,
 ): string | undefined {
   if (inputTokens === undefined) return undefined
 
@@ -208,6 +212,9 @@ function formatTokenInfo(
     parts.push(
       `cache:r${formatTokens(cacheReadTokens ?? 0)}/w${formatTokens(cacheWriteTokens ?? 0)}`,
     )
+  }
+  if ((aicNano ?? 0) > 0) {
+    parts.push(`aic:${formatAic(nanoAiuToCredits(aicNano!))}`)
   }
 
   return parts.join(" ")
@@ -265,6 +272,7 @@ export function logRequest(
     info.cacheReadTokens,
     info.cacheWriteTokens,
     model,
+    info.aicNano,
   )
   if (tokenInfo) {
     parts.push(tokenInfo)

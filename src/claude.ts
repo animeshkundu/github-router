@@ -103,6 +103,19 @@ import {
   type NativeAgentName,
 } from "./lib/peer-mcp-personas"
 import { injectAttributionSuppressionIntoSettingsFile } from "./lib/attribution-settings"
+import {
+  AIC_LEDGER_ENV,
+  AIC_USER_STATUSLINE_ENV,
+  buildAicStatusHookCommand,
+  injectAicStatusLineIntoSettingsFile,
+} from "./lib/aic-statusline-settings"
+import {
+  aicLedgerPath,
+  aicSnapshot,
+  formatAicExitSummary,
+  removeAicLedgerFile,
+  sweepStaleAicLedgerFiles,
+} from "./lib/aic-ledger"
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, buildOperatingDefaultsDigest, buildOperatingDefaultsDirective, type NativeAgentAvailability, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
@@ -824,6 +837,7 @@ export const claude = defineCommand({
     const baseShutdown = async (): Promise<void> => {
       await stopKeepAwake()
       await removeOwnClaudeConfigMirror()
+      await removeAicLedgerFile()
     }
     let onShutdown: () => Promise<void> = baseShutdown
     // Captured inside the codex-mcp block (when built) so the always-on
@@ -1885,10 +1899,55 @@ export const claude = defineCommand({
       }
     }
 
+    // AIC status line: this session's AI-credit total (`[AIC 12.42]`) in
+    // Claude Code's status bar, prepended to the user's own statusLine when
+    // they have one (wrap-don't-clobber). Best-effort; opt out with
+    // GH_ROUTER_DISABLE_AIC_STATUSLINE=1.
+    if (process.env.GH_ROUTER_DISABLE_AIC_STATUSLINE !== "1") {
+      try {
+        // Reap orphaned ledger files from dead launches (best-effort,
+        // fire-and-forget — never blocks spawn).
+        void sweepStaleAicLedgerFiles()
+        const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+        const statusCommand = buildAicStatusHookCommand(selfInvocation)
+        const injected = await injectAicStatusLineIntoSettingsFile(
+          settingsPath,
+          statusCommand,
+        )
+        if (injected.written) {
+          envVars[AIC_LEDGER_ENV] = aicLedgerPath()
+          if (injected.mode === "wrapped" && injected.userCommand) {
+            envVars[AIC_USER_STATUSLINE_ENV] = injected.userCommand
+          }
+        }
+      } catch (err) {
+        consola.warn(
+          `AIC status line skipped: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        )
+      }
+    }
+
     launchChild(
       { kind: "claude-code", envVars, extraArgs, model: chosenSlug },
       server,
-      { onShutdown },
+      {
+        onShutdown,
+        // Session AIC total, printed after cleanup on every exit path.
+        // Breakdown only at debug verbosity (it implies billing-grade
+        // attribution the estimates can't support — all values here are
+        // upstream-measured, but per-model splits still aren't invoices).
+        onExitSummary: () => {
+          const snapshot = aicSnapshot()
+          if (snapshot.requests === 0 || snapshot.totalNanoAiu <= 0) {
+            return undefined
+          }
+          return formatAicExitSummary(snapshot, {
+            verbose: consola.level >= 4,
+          })
+        },
+      },
     )
   },
 })

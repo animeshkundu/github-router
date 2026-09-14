@@ -44,9 +44,12 @@
  * mcp_servers translate which had unfix-able continuation-after-TTL
  * holes). Each request evaluates ADVISOR fresh from the body.
  */
-
 import consola from "consola"
+
 import { events } from "fetch-event-stream"
+
+import { extractCopilotUsage } from "~/lib/aic-usage"
+import { extractAndRecordAic, recordAic } from "~/lib/aic-ledger"
 
 import { isClaudeModel } from "~/lib/anthropic-translate/classifier"
 import {
@@ -1027,6 +1030,8 @@ async function runAdvisor(
         `Advisor model ${resolvedAdvisorModel} returned empty assistant output`,
       )
     }
+    // Advisor turns cost AIC too — record under the advisor model.
+    extractAndRecordAic(resolvedAdvisorModel, response)
     return text
   }
 
@@ -1064,6 +1069,7 @@ async function runAdvisor(
         `Advisor model ${resolvedAdvisorModel} returned empty response`,
       )
     }
+    extractAndRecordAic(resolvedAdvisorModel, response)
     return text
   }
 
@@ -1129,6 +1135,7 @@ async function runAdvisor(
   if (!text) {
     throw new Error(`Advisor model ${resolvedAdvisorModel} returned empty response`)
   }
+  extractAndRecordAic(resolvedAdvisorModel, json)
   return text
 }
 
@@ -1406,6 +1413,23 @@ export function buildAdvisorStream(opts: {
         stopSequence: unknown
         usage: Record<string, number>
       } | null = null
+      // Upstream AIC (`copilot_usage`, verified live as a sibling of `usage`
+      // on terminal `message_delta` events) accumulated across this stream's
+      // lead-model turns. Recorded per turn under the lead model (intermediate
+      // deltas are suppressed, so waiting for the terminal re-emit would lose
+      // all but the last turn's reading).
+      let pendingCopilotNano = 0
+      const pendingCopilotDetails: Array<{
+        tokenCount: number
+        batchSize: number
+        costPerBatch: number
+        tokenType?: string
+        model?: string
+      }> = []
+      const leadModelForAic =
+        typeof opts.baseBody.model === "string" && opts.baseBody.model.length > 0
+          ? (opts.baseBody.model as string)
+          : undefined
 
       const safeEnqueue = (bytes: Uint8Array): boolean => {
         try {
@@ -1459,6 +1483,12 @@ export function buildAdvisorStream(opts: {
               (pendingMessageDelta.usage[key] ?? 0) + value
           }
         }
+        const turnAic = extractCopilotUsage(payload.copilot_usage)
+        if (turnAic) {
+          pendingCopilotNano += turnAic.totalNanoAiu
+          pendingCopilotDetails.push(...turnAic.tokenDetails)
+          recordAic(leadModelForAic, turnAic)
+        }
       }
 
       const emitTerminal = (forcedStopReason?: string): boolean => {
@@ -1476,6 +1506,23 @@ export function buildAdvisorStream(opts: {
                 stop_sequence: terminal.stopSequence,
               },
               usage: terminal.usage,
+              // Re-emit the accumulated AIC so the client-visible terminal
+              // delta carries the same report the suppressed per-turn deltas
+              // did (already recorded to the ledger above — not re-recorded).
+              ...(pendingCopilotNano > 0
+                ? {
+                    copilot_usage: {
+                      total_nano_aiu: pendingCopilotNano,
+                      token_details: pendingCopilotDetails.map((d) => ({
+                        batch_size: d.batchSize,
+                        cost_per_batch: d.costPerBatch,
+                        ...(d.model ? { model: d.model } : {}),
+                        token_count: d.tokenCount,
+                        ...(d.tokenType ? { token_type: d.tokenType } : {}),
+                      })),
+                    },
+                  }
+                : {}),
             })
           ) {
             return false

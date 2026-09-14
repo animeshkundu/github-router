@@ -27,6 +27,13 @@ interface RelayOptions {
    * without wall-clock waits.
    */
   inactivityTimeoutMs?: number
+  /**
+   * Optional byte tap (e.g. the AIC SSE tap): invoked with each upstream
+   * chunk BEFORE it is enqueued downstream. Must be total and non-blocking —
+   * invoked inside try/catch so a tap failure can never break delivery or
+   * alter bytes. Not invoked for synthesized error events.
+   */
+  onBytes?: (bytes: Uint8Array) => void
 }
 
 /**
@@ -124,6 +131,13 @@ export function relayAnthropicStream(
         }
         if (result.value) {
           bytesRelayed += result.value.byteLength
+          if (opts.onBytes) {
+            try {
+              opts.onBytes(result.value)
+            } catch {
+              // Tap failures must never break delivery.
+            }
+          }
           try {
             controller.enqueue(result.value)
           } catch (enqueueError) {

@@ -106,6 +106,9 @@ const CASES: ReadonlyArray<{
   // so the custom role's frontmatter model can take effect.
   { cmd: "internal-max-dispatch-guard", label: "schema-model-placeholder", stdin: JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "implementer", prompt: "smoke", model: "fable" } }), expectedUpdatedInput: { subagent_type: "implementer", prompt: "smoke" } },
   { cmd: "internal-max-dispatch-guard", label: "sonnet-reviewer-xhigh", args: ["--reviewerModel", "claude-sonnet-5", "--reviewerEffort", "xhigh"], stdin: JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", prompt: "smoke", model: "sonnet" } }), expectedUpdatedInput: { subagent_type: "reviewer", prompt: "smoke", effort: "xhigh" } },
+  // internal-aic-status: no ledger env -> prints nothing, still exits 0.
+  { cmd: "internal-aic-status", label: "no-ledger-env", stdin: JSON.stringify({ session_id: "s" }) },
+  { cmd: "internal-aic-status", label: "empty-stdin", stdin: "" },
 ]
 
 describe("internal hook subcommands: Windows libuv teardown regression", () => {

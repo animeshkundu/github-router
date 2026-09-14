@@ -31,6 +31,7 @@
 import { randomUUID } from "node:crypto"
 
 import type { ResponsesApiResponse } from "~/services/copilot/create-responses"
+import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 
 import {
@@ -175,6 +176,10 @@ export function responsesResponseToAnthropicMessage(
   resp: ResponsesApiResponse,
   modelId: string,
 ): AnthropicMessageResult {
+  // Upstream AIC report rides top-level beside `usage` — record under the
+  // shim's resolved model id. The native `/responses` route never sees this
+  // object (it forwards upstream bytes directly), so no double-count.
+  extractAndRecordAic(modelId, resp)
   const output = Array.isArray(resp.output) ? resp.output : []
   const content: Array<AnyRecord> = []
   let sawToolUse = false
@@ -308,6 +313,8 @@ export async function* synthAnthropicFromResponses(
   // upstream iterable ends without one, the stream was truncated mid-flight and
   // must NOT be synthesized as a clean, successful message.
   let sawTerminal = false
+  // Upstream AIC recorded at most once per stream (see terminal case below).
+  let aicRecorded = false
 
   const closeCurrent = (): void => {
     if (!current) return
@@ -527,6 +534,13 @@ export async function* synthAnthropicFromResponses(
       case "response.completed":
       case "response.incomplete": {
         sawTerminal = true
+        // Upstream AIC rides top-level on the terminal event (verified live).
+        // Record once — a repeated terminal frame must not double-count.
+        if (!aicRecorded) {
+          if (extractAndRecordAic(opts.modelId, ev) !== undefined) {
+            aicRecorded = true
+          }
+        }
         const u = ev.response?.usage
         if (u) {
           usageIn = Math.max(usageIn, u.input_tokens ?? 0)

@@ -223,7 +223,7 @@ declare -a PROBE_REGISTRY=(
   "shim_image_gpt55|exploratory|base64 RGB PNG image block on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message"
   "shim_image_gemini35flash|exploratory|base64 RGB PNG image block on /v1/messages → gemini-3.5-flash /chat shim: 200 + well-formed Anthropic message"
   "passthrough_image_claude|exploratory|base64 RGB PNG image block on /v1/messages → claude-opus-5 NATIVE passthrough (no copilot-vision-request header): 200 + well-formed Anthropic message"
-  "shim_image_tool_result_gpt55|exploratory|image inside a tool_result on /v1/messages → gpt-5.5 /responses shim: 200 (the shape a subagent reading a screenshot actually produces)"
+  "copilot_usage_reported|exploratory|/v1/messages non-stream (claude-haiku-4-5) returns top-level copilot_usage with total_nano_aiu beside usage (verified live 2026-09-14; feeds the AIC ledger/status line/exit summary)"  "shim_image_tool_result_gpt55|exploratory|image inside a tool_result on /v1/messages → gpt-5.5 /responses shim: 200 (the shape a subagent reading a screenshot actually produces)"
   "shim_image_tool_result_gemini35flash|exploratory|image inside a tool_result on /v1/messages → gemini-3.5-flash /chat shim: 200 (same shape, chat egress)"
   "vision_multi_image_gpt|exploratory|2 images to a max_prompt_images:1 gpt model → 200; the catalog field understates the real ceiling (gpt-5.5 accepted 120) and must not gate locally"
   "vision_ceiling_recovery_gemini|exploratory|12 images to gemini-3.8-flash (real upstream ceiling 10) → 200; the proxy prunes to the number upstream names and retries once"
@@ -1307,6 +1307,24 @@ probe_passthrough_image_claude() {
     ]}]
   }'
   assert_status 200     && assert_anthropic_message
+}
+
+probe_copilot_usage_reported() {
+  # Upstream AIC report: Copilot returns top-level `copilot_usage`
+  # ({token_details:[{batch_size,cost_per_batch,model,token_count,token_type}],
+  # total_nano_aiu}) beside `usage` on /v1/messages (verified live 2026-09-14
+  # on haiku non-streaming, haiku streaming message_delta, luna /responses
+  # non-stream + terminal response.completed, and gemini chat non-stream).
+  # The proxy must forward it untouched — the AIC ledger, status line, and
+  # exit summary all read it downstream.
+  do_request POST /v1/messages '{
+    "model": "claude-haiku-4-5",
+    "max_tokens": 5,
+    "messages": [{"role":"user","content":"Reply with exactly: ok"}]
+  }'
+  assert_status 200 \
+    && assert_body_contains "copilot_usage" \
+    && assert_body_contains "total_nano_aiu"
 }
 
 probe_shim_image_tool_result_gpt55() {

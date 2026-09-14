@@ -210,7 +210,16 @@ export function windowsLaunchNeedsShell(executable: string): boolean {
 export function launchChild(
   target: LaunchTarget,
   server: Server,
-  options: { onShutdown?: () => Promise<void> | void } = {},
+  options: {
+    onShutdown?: () => Promise<void> | void
+    /**
+     * Optional exit summary (e.g. the AIC session total). Called once from
+     * `exit()`, after cleanup, on every shutdown path (natural child exit,
+     * signal escalation, spawn error). Return undefined for no output.
+     * Best-effort: throwing content is swallowed so shutdown never blocks.
+     */
+    onExitSummary?: () => string | undefined
+  } = {},
 ): void {
   const { cmd, env } = buildLaunchCommand(target)
 
@@ -322,6 +331,12 @@ export function launchChild(
   function exit(code: number): void {
     if (exiting) return
     exiting = true
+    try {
+      const summary = options.onExitSummary?.()
+      if (summary) process.stderr.write(`\n${summary}\n`)
+    } catch {
+      // Best-effort summary; never block shutdown.
+    }
     process.exit(code)
   }
 

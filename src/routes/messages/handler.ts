@@ -3,6 +3,8 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { awaitApproval } from "~/lib/approval"
+import { createAnthropicAicTap } from "~/lib/aic-sse-tap"
+import { extractAndRecordAic, recordAic } from "~/lib/aic-ledger"
 import {
   classifyMessagesRoute,
   handleNonClaudeChat,
@@ -1056,7 +1058,12 @@ export async function handleCompletion(c: Context) {
 
     return new Response(
       response.body
-        ? relayAnthropicStream(response.body, { routePath: c.req.path })
+        ? relayAnthropicStream(response.body, {
+            routePath: c.req.path,
+            onBytes: createAnthropicAicTap((usage) =>
+              recordAic(resolvedModel, usage),
+            ).onBytes,
+          })
         : null,
       {
         status: response.status,
@@ -1089,6 +1096,9 @@ export async function handleCompletion(c: Context) {
       }
     | undefined
 
+  // Upstream AIC report (verified live as top-level `copilot_usage`).
+  const aicNano = extractAndRecordAic(resolvedModel, responseBody)
+
   logRequest(
     {
       method: "POST",
@@ -1103,6 +1113,7 @@ export async function handleCompletion(c: Context) {
       // OpenAI-shaped routes need one and this one doesn't.
       cacheReadTokens: usage?.cache_read_input_tokens,
       cacheWriteTokens: usage?.cache_creation_input_tokens,
+      aicNano,
       status: response.status,
     },
     selectedModel,

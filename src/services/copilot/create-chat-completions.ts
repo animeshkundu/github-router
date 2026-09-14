@@ -250,6 +250,11 @@ export interface ChatCompletionResponse {
       cache_ttl_seconds?: number
     }
   }
+  /**
+   * Upstream AIC report (verified live): `{token_details: [...],
+   * total_nano_aiu}`. Parsed via `extractCopilotUsage`, never trusted blindly.
+   */
+  copilot_usage?: unknown
 }
 
 interface ResponseMessage {
