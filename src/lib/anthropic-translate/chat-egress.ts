@@ -41,6 +41,7 @@ import {
   makeMessageStop,
   makeTextDelta,
 } from "./anthropic-sse"
+import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 
 type AnyRecord = Record<string, unknown>
@@ -150,6 +151,9 @@ export function chatResponseToAnthropicMessage(
   resp: ChatCompletionResponse,
   modelId: string,
 ): AnthropicMessageResult {
+  // Upstream AIC report rides top-level beside `usage` — record under the
+  // shim's resolved model id (no double-count: native routes never call this).
+  extractAndRecordAic(modelId, resp)
   const choice = resp.choices?.[0]
   const content: Array<AnyRecord> = []
   let sawTool = false
@@ -239,6 +243,8 @@ export async function* synthAnthropicFromChat(
   let usageOut = 0
   let usageCacheRead = 0
   let usageCacheWrite = 0
+  // Upstream AIC recorded at most once per stream (see usage-accumulation below).
+  let aicRecorded = false
   // The last finish_reason seen — informs stop_reason ONLY (null → end_turn).
   let finishReason: string | null = null
   // The `[DONE]` sentinel is the authoritative clean-end marker. A stream that
@@ -267,6 +273,14 @@ export async function* synthAnthropicFromChat(
 
     // Usage may ride on any chunk (typically a trailing choices-empty chunk).
     // Max-accumulate so a later zeroed frame can't clobber a real count.
+    // Upstream AIC (`copilot_usage`) rides the same trailing chunk — record it
+    // once per stream (the trailing chunk appears once; the flag guards
+    // against a repeated frame double-counting).
+    if (!aicRecorded) {
+      if (extractAndRecordAic(opts.modelId, chunk) !== undefined) {
+        aicRecorded = true
+      }
+    }
     if (chunk.usage) {
       usageIn = Math.max(usageIn, chunk.usage.prompt_tokens ?? 0)
       usageOut = Math.max(usageOut, chunk.usage.completion_tokens ?? 0)

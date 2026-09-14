@@ -40,6 +40,7 @@ const isInternalHook =
   || argv[0] === "internal-first-mate-guard"
   || argv[0] === "internal-worker-guard"
   || argv[0] === "internal-fast-dispatch-guard"
+  || argv[0] === "internal-aic-status"
 if (!isVersionFlag && !isInternalHook) {
   consola.info(`github-router v${version}`)
 }
@@ -110,6 +111,8 @@ const main = defineCommand({
       import("./internal-fast-dispatch-guard").then((m) => m.internalFastDispatchGuard),
     "internal-max-dispatch-guard": () =>
       import("./internal-max-dispatch-guard").then((m) => m.internalMaxDispatchGuard),
+    "internal-aic-status": () =>
+      import("./internal-aic-status").then((m) => m.internalAicStatus),
   },
 })
 

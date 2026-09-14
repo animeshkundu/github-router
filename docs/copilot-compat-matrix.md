@@ -214,6 +214,12 @@ All four models are **live-verified end-to-end** against real Copilot (HTTP 200 
 
 **Streaming usage**: Copilot emits usage on the stream unprompted (no `stream_options` needed); the shim maps it into the terminal `message_delta`.
 
+**AIC (`copilot_usage`)**: Copilot returns a top-level `copilot_usage` object beside `usage` — `{token_details: [{batch_size, cost_per_batch, model, token_count, token_type}], total_nano_aiu}` — with the proxy's stock request headers (no opt-in header needed). Credits = `total_nano_aiu / 1e9`. Verified live 2026-09-14 on: `/v1/messages` non-stream (`claude-haiku-4.5`) + streaming terminal `message_delta`, `/responses` non-stream + terminal `response.completed` (`gpt-5.6-luna`), `/chat/completions` non-stream (`gemini-3.5-flash`). The proxy forwards it untouched on all paths and records it into the per-launch AIC ledger (status line + exit summary); per-type cost reconstructs as `token_count × cost_per_batch / batch_size / 1e9` (verified arithmetically against `total_nano_aiu`).
+
+| Shape | Model / endpoint | Expected end-to-end status | Source | Probe id | Notes |
+|---|---|---|---|---|---|
+| Minimal `/v1/messages` request (no special headers) | `claude-haiku-4.5` → `/v1/messages` | ✅ 200 + top-level `copilot_usage` with `total_nano_aiu` | exploratory | `copilot_usage_reported` | Pins the upstream AIC report the ledger reads. If Copilot ever stops sending it, the ledger falls back to nothing (no estimate is fabricated) and this probe is what notices. |
+
 ## Web search — cross-endpoint native exposure (Task #2 empirical map)
 
 Resolution of the long-standing `tooltype_web_search_20250305` "inconclusive" row, plus full coverage of how Copilot exposes web_search natively across all three Anthropic-shape entry points and what the proxy does on top.

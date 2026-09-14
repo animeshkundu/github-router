@@ -92,6 +92,8 @@ const main = defineCommand({
       import("./internal-fast-dispatch-guard").then((m) => m.internalFastDispatchGuard),
     "internal-max-dispatch-guard": () =>
       import("./internal-max-dispatch-guard").then((m) => m.internalMaxDispatchGuard),
+    "internal-aic-status": () =>
+      import("./internal-aic-status").then((m) => m.internalAicStatus),
   },
 })
 

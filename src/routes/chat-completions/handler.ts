@@ -2,6 +2,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
@@ -170,6 +171,12 @@ export async function handleCompletion(c: Context) {
     : undefined
   const responseUsage = rawUsage ? normalizeOpenAIUsage(rawUsage) : undefined
 
+  // Upstream AIC report (verified live as top-level `copilot_usage`).
+  // Non-streaming only here — the streaming path taps each chunk below.
+  const aicNano = !isStreaming
+    ? extractAndRecordAic(resolvedModel, response)
+    : undefined
+
   logRequest(
     {
       method: "POST",
@@ -180,6 +187,7 @@ export async function handleCompletion(c: Context) {
       outputTokens,
       cacheReadTokens: responseUsage?.cacheRead,
       cacheWriteTokens: responseUsage?.cacheWrite,
+      aicNano,
       status: 200,
       streaming: isStreaming,
     },
@@ -212,6 +220,20 @@ export async function handleCompletion(c: Context) {
     : firstResult.value
   let upstreamFinished = firstResult.done
   let consumerCancelled = false
+  // Upstream AIC arrives once per stream (terminal chunk's `copilot_usage`).
+  // Parsed but never modified — bytes still relay verbatim.
+  let aicRecorded = false
+  const tapAic = (chunk: UpstreamSSEEvent): void => {
+    if (aicRecorded || !chunk.data || chunk.data === "[DONE]") return
+    try {
+      const parsed: unknown = JSON.parse(chunk.data)
+      if (extractAndRecordAic(resolvedModel, parsed) !== undefined) {
+        aicRecorded = true
+      }
+    } catch {
+      // Non-JSON frame — nothing to extract.
+    }
+  }
 
   const safeClose = (controller: ReadableStreamDefaultController<Uint8Array>) => {
     try {
@@ -261,6 +283,7 @@ export async function handleCompletion(c: Context) {
           if (debugEnabled) {
             consola.debug("Streaming chunk:", JSON.stringify(chunk))
           }
+          tapAic(chunk)
           safeEnqueue(controller, ENCODER.encode(formatSSE(chunk)))
           return
         }
@@ -283,6 +306,7 @@ export async function handleCompletion(c: Context) {
           if (debugEnabled) {
             consola.debug("Streaming chunk:", JSON.stringify(result.value))
           }
+          tapAic(result.value)
           safeEnqueue(controller, ENCODER.encode(formatSSE(result.value)))
         } catch (error) {
           upstreamFinished = true
