@@ -23,7 +23,7 @@ import {
 import { getCodexVersion, launchChild } from "./lib/launch"
 import { injectAllowRules, planModeAllowRules } from "./lib/mcp-permissions-settings"
 import { listModelsForEndpoint } from "./lib/model-validation"
-import { ensureClaudeConfigMirror, PATHS, removeOwnClaudeConfigMirror, writeArtifactCredsToMirror } from "./lib/paths"
+import { ensureClaudeConfigMirror, PATHS, purgeNonRouterAgentsFromMirror, removeOwnClaudeConfigMirror, writeArtifactCredsToMirror } from "./lib/paths"
 import { injectModelPickerSettingsFile } from "./lib/model-picker-settings"
 import {
   buildArtifactOpenHookCommand,
@@ -31,6 +31,7 @@ import {
   buildStopHookCommand,
   captureLaunchBaseline,
   injectStopHookIntoSettingsFile,
+  purgeNonRouterHooksForPinnedProfile,
   stopGateId,
   stopGateDisabled,
 } from "./lib/orchestration/stop-gate-hook"
@@ -724,6 +725,44 @@ export const claude = defineCommand({
     // row ids still feed the launch-global compaction minimum. Failures are
     // visible but non-fatal: explicit `-m` remains available and env setup
     // falls back to the router-declared profile rows.
+    // Pinned profiles (fast/cheap/cheap1m/cheapest) run router-provided
+    // surfaces only. The mirror is a disposable per-launch snapshot, so
+    // purging user-supplied agents and guarded hooks here never touches
+    // the operator's real `~/.claude/` — it just keeps a stale custom
+    // picker/guard/subagent from surviving into the pinned session.
+    // Router hook/agent injection below re-adds the profile's own rows.
+    if (
+      launchProfileId === "fast"
+      || launchProfileId === "cheap"
+      || launchProfileId === "cheap1m"
+      || launchProfileId === "cheapest"
+    ) {
+      try {
+        const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
+        const purgedHooks = await purgeNonRouterHooksForPinnedProfile(settingsPath)
+        if (purgedHooks.removed > 0) {
+          consola.info(
+            `Removed ${purgedHooks.removed} non-router hook entries from this launch's isolated settings (${launchProfileId} provides its own hooks).`,
+          )
+        }
+      } catch (err) {
+        consola.warn(
+          `Non-router hook purge skipped: ${err instanceof Error ? err.message : String(err)}.`,
+        )
+      }
+      try {
+        const purgedAgents = await purgeNonRouterAgentsFromMirror()
+        if (purgedAgents > 0) {
+          consola.info(
+            `Removed ${purgedAgents} non-router subagent files from this launch's isolated agents dir (${launchProfileId} provides its own roster).`,
+          )
+        }
+      } catch (err) {
+        consola.warn(
+          `Non-router subagent purge skipped: ${err instanceof Error ? err.message : String(err)}.`,
+        )
+      }
+    }
     let pickerModels: string[] | undefined
     try {
       const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
@@ -732,6 +771,10 @@ export const claude = defineCommand({
       if (picker.reason === "user-set") {
         consola.info(
           "Preserving the user-configured modelPicker for this launch; router-curated rows were not merged.",
+        )
+      } else if (picker.reason === "router-overwrite") {
+        consola.info(
+          "Replaced a stale modelPicker in this launch's isolated settings with the router-curated rows for this profile.",
         )
       }
     } catch (err) {
@@ -747,6 +790,38 @@ export const claude = defineCommand({
       launchProfileId,
       pickerModels,
     )
+
+    // Pinned-profile guarantee check: cheap/cheapest must never carry a
+    // `[1m]` accounting bracket on any selectable id (lead, tier rows, or
+    // picker rows) — warn loud if one slipped through so it gets fixed at
+    // the seeding layer rather than silently relying on the request-time
+    // backstop. `fast`/`cheap1m` leads intentionally keep 1M.
+    if (launchProfileId === "cheap" || launchProfileId === "cheapest") {
+      const suspectKeys = [
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION",
+      ].filter((key) => typeof envVars[key] === "string" && /\[1m\]/i.test(envVars[key] as string))
+      const suspectPicker = (pickerModels ?? []).filter((id) => /\[1m\]/i.test(id))
+      if (suspectKeys.length > 0 || suspectPicker.length > 0) {
+        consola.warn(
+          `Pinned-profile context leak (${launchProfileId} must be bare 200K): `
+          + [...suspectKeys.map((key) => `env:${key}`), ...suspectPicker.map((id) => `picker:${id}`)].join(", "),
+        )
+      }
+    }
+    if (
+      launchProfileId === "fast"
+      || launchProfileId === "cheap"
+      || launchProfileId === "cheap1m"
+      || launchProfileId === "cheapest"
+    ) {
+      consola.info(
+        `Pinned launch: profile=${launchProfileId} lead=${chosenSlug} pickerRows=${pickerModels?.length ?? 0}.`,
+      )
+    }
 
     // Forward unrecognized flags (e.g. --print / --output-format / --resume)
     // to the spawned Claude Code child. citty is non-strict, so those land in
@@ -1970,8 +2045,10 @@ export const claude = defineCommand({
     }
 
     // AIC status line: this session's AI-credit total (`[AIC 12.42]`) in
-    // Claude Code's status bar, prepended to the user's own statusLine when
-    // they have one (wrap-don't-clobber). Best-effort; opt out with
+    // Claude Code's status bar. Pinned profiles (fast/cheap/cheap1m/
+    // cheapest) always render the router's native rich line; standard
+    // wraps a pre-existing user command when one is present
+    // (wrap-don't-clobber). Best-effort; opt out with
     // GH_ROUTER_DISABLE_AIC_STATUSLINE=1.
     if (process.env.GH_ROUTER_DISABLE_AIC_STATUSLINE !== "1") {
       try {
@@ -1980,14 +2057,24 @@ export const claude = defineCommand({
         void sweepStaleAicLedgerFiles()
         const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
         const statusCommand = buildAicStatusHookCommand(selfInvocation)
+        const routerWinsStatusLine = launchProfileId === "fast"
+          || launchProfileId === "cheap"
+          || launchProfileId === "cheap1m"
+          || launchProfileId === "cheapest"
         const injected = await injectAicStatusLineIntoSettingsFile(
           settingsPath,
           statusCommand,
+          routerWinsStatusLine ? { routerWins: true } : {},
         )
         if (injected.written) {
           envVars[AIC_LEDGER_ENV] = aicLedgerPath()
           if (injected.mode === "wrapped" && injected.userCommand) {
             envVars[AIC_USER_STATUSLINE_ENV] = injected.userCommand
+          }
+          if (injected.mode === "forced") {
+            consola.info(
+              `Pinned status line installed natively for ${launchProfileId}; a pre-existing statusLine was backed up in this launch's isolated settings and will not run.`,
+            )
           }
         }
       } catch (err) {

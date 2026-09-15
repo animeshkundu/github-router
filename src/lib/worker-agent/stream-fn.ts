@@ -42,6 +42,7 @@ import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-s
 import type { StreamFn } from "@earendil-works/pi-agent-core"
 
 import { HTTPError } from "~/lib/error"
+import { extractAndRecordAic } from "~/lib/aic-ledger"
 import type {
   ChatCompletionChunk,
   ChatCompletionsPayload,
@@ -351,6 +352,10 @@ async function runChatAttempt(
   // output as a successful completion. The Anthropic egress has guarded this
   // since it shipped (`chat-egress.ts`); the worker path never did.
   let sawDone = false
+  // Upstream AIC (`copilot_usage`) rides the trailing chunk — record it
+  // once so worker turns count toward the session total. A repeated
+  // terminal frame must not double-count.
+  let aicRecorded = false
 
   for await (const evt of sseStream) {
       const data = evt?.data
@@ -366,6 +371,12 @@ async function runChatAttempt(
       } catch {
         // Skip unparseable SSE lines — proxy is forgiving here.
         continue
+      }
+
+      if (!aicRecorded) {
+        if (extractAndRecordAic(resolved.modelId, chunk) !== undefined) {
+          aicRecorded = true
+        }
       }
 
       try {
@@ -930,6 +941,9 @@ async function runResponsesAttempt(
   // Absent one, the stream was cut and the result must not be reported as a
   // clean completion.
   let sawTerminal = false
+  // Upstream AIC rides top-level on the terminal event (verified live).
+  // Record once — a repeated terminal frame must not double-count.
+  let aicRecorded = false
 
   for await (const evt of sseStream) {
       const data = evt?.data
@@ -1111,6 +1125,11 @@ async function runResponsesAttempt(
         case "response.completed":
         case "response.incomplete": {
           sawTerminal = true
+          if (!aicRecorded) {
+            if (extractAndRecordAic(resolved.modelId, ev) !== undefined) {
+              aicRecorded = true
+            }
+          }
           accum.usage = mapResponsesUsage(ev.response?.usage)
           if (
             ev.type === "response.incomplete"

@@ -300,13 +300,42 @@ describe("injectModelPickerSettingsFile", () => {
     expect(first.hooks).toEqual({ Stop: [] })
     expect((await fs.readdir(dir)).sort()).toEqual(["settings.json"])
 
+    // Pinned profiles run router-provided rows only: re-injecting
+    // overwrites the mirrored picker (same content, so bytes are stable).
     const bytes = await fs.readFile(settingsPath, "utf8")
     expect(await injectModelPickerSettingsFile(settingsPath, "fast")).toEqual({
-      written: false,
-      reason: "user-set",
+      written: true,
+      reason: "router-overwrite",
       models: selectableModelsInCatalog("fast").map((option) => option.model),
     })
     expect(await fs.readFile(settingsPath, "utf8")).toBe(bytes)
+  })
+
+  test("pinned profiles overwrite a stale user modelPicker; standard preserves it", async () => {
+    const userPicker = {
+      options: [{ model: "my-gateway-model", label: "Mine", behavesAs: "sonnet" }],
+      replaceBuiltInOptions: true,
+    }
+    setCatalog(WINDOWS)
+    for (const profile of ["fast", "cheap", "cheap1m", "cheapest"] as const) {
+      await fs.writeFile(settingsPath, JSON.stringify({ modelPicker: userPicker }))
+      const result = await injectModelPickerSettingsFile(settingsPath, profile)
+      expect(result.written).toBe(true)
+      expect(result.reason).toBe("router-overwrite")
+      expect(result.models).toEqual(
+        selectableModelsInCatalog(profile).map((option) => option.model),
+      )
+      expect((await read()).modelPicker).toEqual({
+        options: selectableModelsInCatalog(profile),
+        replaceBuiltInOptions: false,
+      })
+    }
+    await fs.writeFile(settingsPath, JSON.stringify({ modelPicker: userPicker }))
+    expect(await injectModelPickerSettingsFile(settingsPath, "standard")).toEqual({
+      written: false,
+      reason: "user-set",
+      models: ["my-gateway-model"],
+    })
   })
 
   test("refuses invalid or non-object settings instead of clobbering them", async () => {

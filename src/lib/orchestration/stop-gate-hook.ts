@@ -633,6 +633,87 @@ export function buildArtifactOpenHookCommand(invocation: SelfInvocation): string
 }
 
 /**
+ * Strip user-supplied hook entries for router-guarded events from a mirrored
+ * `settings.json` on pinned-profile launches (fast/cheap/cheap1m/cheapest),
+ * which run router-provided surfaces only. Removed:
+ * - every `Stop` entry (the structural gate is off on pinned; a user Stop
+ *   hook could block or reshape turn-end),
+ * - every `PreToolUse` entry whose matcher targets `Task`/`Agent` (the
+ *   router re-adds its own dispatch ACL guard afterwards),
+ * - every `UserPromptSubmit` entry (unused on pinned),
+ * - every `PostToolUse` entry with an `ExitPlanMode` matcher (unused on pinned).
+ * All other hooks/events are preserved byte-for-byte. Mirror-only; the
+ * operator's real settings are never touched (this runs against the
+ * per-launch mirror). Missing file → `{ removed: 0 }`. Parse/other read
+ * errors throw (caller warns), matching `injectStopHookIntoSettingsFile`.
+ */
+export async function purgeNonRouterHooksForPinnedProfile(
+  settingsPath: string,
+): Promise<{ removed: number }> {
+  let raw: string
+  try {
+    raw = await fs.readFile(settingsPath, "utf8")
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { removed: 0 }
+    throw err
+  }
+  const parsed: unknown = JSON.parse(raw)
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`settings.json at ${settingsPath} is not a JSON object; refusing to overwrite`)
+  }
+  const existing = parsed as Record<string, unknown>
+  if (!existing.hooks || typeof existing.hooks !== "object" || Array.isArray(existing.hooks)) {
+    return { removed: 0 }
+  }
+  const hooks = { ...(existing.hooks as Record<string, unknown>) }
+  let removed = 0
+
+  const dropEvent = (event: string): void => {
+    if (Array.isArray(hooks[event])) {
+      removed += (hooks[event] as unknown[]).length
+      delete hooks[event]
+    }
+  }
+  const entryMatcherTargetsTaskAgent = (entry: unknown): boolean => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false
+    const matcher = (entry as { matcher?: unknown }).matcher
+    return typeof matcher === "string" && /Task|Agent/.test(matcher)
+  }
+  const entryMatcherIs = (entry: unknown, value: string): boolean => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false
+    return (entry as { matcher?: unknown }).matcher === value
+  }
+
+  // Stop: router never sets it on pinned launches.
+  dropEvent("Stop")
+  // UserPromptSubmit: router sets it on standard launches only.
+  dropEvent("UserPromptSubmit")
+  if (Array.isArray(hooks.PreToolUse)) {
+    const before = (hooks.PreToolUse as unknown[]).length
+    hooks.PreToolUse = (hooks.PreToolUse as unknown[]).filter(
+      (entry) => !entryMatcherTargetsTaskAgent(entry),
+    )
+    removed += before - (hooks.PreToolUse as unknown[]).length
+    if ((hooks.PreToolUse as unknown[]).length === 0) delete hooks.PreToolUse
+  }
+  if (Array.isArray(hooks.PostToolUse)) {
+    const before = (hooks.PostToolUse as unknown[]).length
+    hooks.PostToolUse = (hooks.PostToolUse as unknown[]).filter(
+      (entry) => !entryMatcherIs(entry, "ExitPlanMode"),
+    )
+    removed += before - (hooks.PostToolUse as unknown[]).length
+    if ((hooks.PostToolUse as unknown[]).length === 0) delete hooks.PostToolUse
+  }
+
+  if (removed === 0) return { removed: 0 }
+  const merged = { ...existing, hooks }
+  const tmp = `${settingsPath}.${process.pid}.tmp`
+  await fs.writeFile(tmp, `${JSON.stringify(merged, null, 2)}\n`, { mode: 0o600 })
+  await fs.rename(tmp, settingsPath)
+  return { removed }
+}
+
+/**
  * Read-merge-atomic-write the Stop hook into a Claude Code `settings.json` file
  * (the mirrored one). A MISSING file (ENOENT) starts from `{}`; any OTHER read or
  * parse error THROWS (the caller's try/catch warns and continues) rather than

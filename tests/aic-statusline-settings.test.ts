@@ -75,6 +75,47 @@ describe("injectAicStatusLineIntoSettingsFile", () => {
     expect(await read()).toEqual({ statusLine: { type: "fancy", widget: true } })
   })
 
+  test("routerWins forces a command-shaped user statusLine to native (backup, never runs it)", async () => {
+    const userCommand = "/home/u/.claude/statusline.sh"
+    await fs.writeFile(
+      settingsPath,
+      JSON.stringify({ statusLine: { type: "command", command: userCommand } }, null, 2),
+    )
+    const r = await injectAicStatusLineIntoSettingsFile(settingsPath, STATUS_COMMAND, { routerWins: true })
+    expect(r).toEqual({ written: true, mode: "forced", hadPrevious: true })
+    // Ours installed; the user command survives only in the backup sidecar.
+    expect(await read()).toEqual({
+      statusLine: { type: "command", command: STATUS_COMMAND },
+    })
+    const backup = JSON.parse(
+      await fs.readFile(`${settingsPath}.aic-statusline-backup.json`, "utf8"),
+    ) as Record<string, unknown>
+    expect(backup).toEqual({
+      replacedStatusLine: { type: "command", command: userCommand },
+    })
+  })
+
+  test("routerWins forces an exotic statusLine shape to native", async () => {
+    await fs.writeFile(
+      settingsPath,
+      JSON.stringify({ statusLine: { type: "fancy", widget: true } }),
+    )
+    const r = await injectAicStatusLineIntoSettingsFile(settingsPath, STATUS_COMMAND, { routerWins: true })
+    expect(r).toEqual({ written: true, mode: "forced", hadPrevious: true })
+    expect(await read()).toEqual({
+      statusLine: { type: "command", command: STATUS_COMMAND },
+    })
+  })
+
+  test("routerWins still reports already-set for our own hook", async () => {
+    await fs.writeFile(
+      settingsPath,
+      JSON.stringify({ statusLine: { type: "command", command: STATUS_COMMAND } }),
+    )
+    const r = await injectAicStatusLineIntoSettingsFile(settingsPath, STATUS_COMMAND, { routerWins: true })
+    expect(r).toEqual({ written: false, reason: "already-set" })
+  })
+
   test("refuses a non-object settings.json rather than clobbering it", async () => {
     await fs.writeFile(settingsPath, JSON.stringify(["nope"]))
     await expect(

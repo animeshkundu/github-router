@@ -1332,6 +1332,59 @@ describe("budget-mode lead and small/fast tier", () => {
     })
   })
 
+  test("cheap/cheapest tier rows stay bare (200K default) even when Luna serves 1M", () => {
+    withoutOneMOptOut(() => {
+      withCatalog([["gpt-5.6-luna", 1_050_000]], () => {
+        withoutUserOverrides(() => {
+          for (const profile of ["cheap", "cheapest"] as const) {
+            const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787", undefined, profile)
+            for (const key of [
+              "ANTHROPIC_SMALL_FAST_MODEL",
+              "ANTHROPIC_DEFAULT_SONNET_MODEL",
+              "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+              "ANTHROPIC_CUSTOM_MODEL_OPTION",
+            ] as const) {
+              expect(vars[key]).toBeDefined()
+              expect(vars[key]).not.toContain("[1m]")
+            }
+          }
+        })
+      })
+    })
+  })
+
+  test("pinned tier rows override a parent-shell override; standard preserves it", () => {
+    withoutOneMOptOut(() => {
+      withCatalog([["gpt-5.6-luna", 1_050_000]], () => {
+        const priorModel = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+        const priorCustom = process.env.ANTHROPIC_CUSTOM_MODEL_OPTION
+        const priorSmall = process.env.ANTHROPIC_SMALL_FAST_MODEL
+        try {
+          process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = "my-foreign-sonnet"
+          process.env.ANTHROPIC_CUSTOM_MODEL_OPTION = "my-foreign-custom"
+          process.env.ANTHROPIC_SMALL_FAST_MODEL = "my-foreign-small"
+          for (const profile of ["fast", "cheap", "cheap1m", "cheapest"] as const) {
+            const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787", undefined, profile)
+            expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).not.toBe("my-foreign-sonnet")
+            expect(vars.ANTHROPIC_CUSTOM_MODEL_OPTION).not.toBe("my-foreign-custom")
+            expect(vars.ANTHROPIC_SMALL_FAST_MODEL).not.toBe("my-foreign-small")
+          }
+          const standard = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+          expect(standard).not.toHaveProperty("ANTHROPIC_DEFAULT_SONNET_MODEL")
+          expect(standard).not.toHaveProperty("ANTHROPIC_CUSTOM_MODEL_OPTION")
+          expect(standard).not.toHaveProperty("ANTHROPIC_SMALL_FAST_MODEL")
+        } finally {
+          if (priorModel === undefined) delete process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
+          else process.env.ANTHROPIC_DEFAULT_SONNET_MODEL = priorModel
+          if (priorCustom === undefined) delete process.env.ANTHROPIC_CUSTOM_MODEL_OPTION
+          else process.env.ANTHROPIC_CUSTOM_MODEL_OPTION = priorCustom
+          if (priorSmall === undefined) delete process.env.ANTHROPIC_SMALL_FAST_MODEL
+          else process.env.ANTHROPIC_SMALL_FAST_MODEL = priorSmall
+        }
+      })
+    })
+  })
+
   test("a user-set small/fast model survives budget mode", () => {
     withCatalog(["claude-sonnet-5", "claude-haiku-4.5"], () => {
       const prior = process.env.ANTHROPIC_SMALL_FAST_MODEL

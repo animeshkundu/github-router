@@ -80,6 +80,7 @@ import type {
 import { type TSchema, Type } from "@earendil-works/pi-ai"
 
 import { detectImageMimeType } from "~/lib/attachments"
+import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { resolveRipgrep } from "~/lib/code-search"
 import { resolveExecutable, runManagedExeCapture } from "~/lib/exec"
 import { applyResponsesCachePolicy } from "~/lib/prompt-cache"
@@ -1863,6 +1864,8 @@ function advisorTool(
           // so a transient network/5xx retry is safe.
           true,
         )) as ResponsesApiResponse
+        // Worker advisor calls are billed Copilot usage on this instance.
+        extractAndRecordAic(resolvedModel, response)
         const text = extractResponsesText(response)
         if (!text) {
           throw new Error("advisor returned empty output")

@@ -860,6 +860,11 @@ export function getClaudeCodeEnvVars(
     launchProfileId === "cheap"
     || launchProfileId === "cheap1m"
     || launchProfileId === "cheapest"
+  // Pinned sessions run router-provided surfaces only: tier rows are
+  // force-seeded even when the parent env sets them, so a shell export
+  // cannot smuggle a foreign model into the pinned `/model` UI. Standard
+  // and max launches keep the presence guard (user value wins).
+  const routerWinsTiers = isFastProfile || isCheapProfile
 
   const smallFastModel =
     isMaxProfile
@@ -873,7 +878,7 @@ export function getClaudeCodeEnvVars(
           ?? false)
         ? BUDGET_SMALL_FAST_SLUG
         : "claude-sonnet-5"
-  if (process.env.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
+  if (process.env.ANTHROPIC_SMALL_FAST_MODEL === undefined || routerWinsTiers) {
     // The fast profile's small/fast tier is the Haiku Luna alias, decorated
     // with `[1m]` off the REAL `gpt-5.6-luna` catalog entry's advertised
     // window — `withOneMSuffixForLead`/`withOneMSuffix` can't be used
@@ -954,10 +959,11 @@ export function getClaudeCodeEnvVars(
     nameKey: string,
     aliasId: string,
     displayName: string,
+    force = false,
   ): void => {
-    if (process.env[modelKey] !== undefined) return
+    if (!force && process.env[modelKey] !== undefined) return
     vars[modelKey] = oneMSuffixForAlias(aliasId)
-    if (process.env[nameKey] === undefined) vars[nameKey] = displayName
+    if (force || process.env[nameKey] === undefined) vars[nameKey] = displayName
   }
   // Cheap profile: identical alias tier rows to fast, but seeded with the BARE
   // alias id (no `[1m]` bracket) — the cheap profile's whole cost lever is the
@@ -969,10 +975,11 @@ export function getClaudeCodeEnvVars(
     nameKey: string,
     aliasId: string,
     displayName: string,
+    force = false,
   ): void => {
-    if (process.env[modelKey] !== undefined) return
+    if (!force && process.env[modelKey] !== undefined) return
     vars[modelKey] = aliasId
-    if (process.env[nameKey] === undefined) vars[nameKey] = displayName
+    if (force || process.env[nameKey] === undefined) vars[nameKey] = displayName
   }
   if (isMaxProfile) {
     const seedMaxRow = (modelKey: string, nameKey: string, id: string): void => {
@@ -997,27 +1004,29 @@ export function getClaudeCodeEnvVars(
       "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
       LUNA_SONNET_ALIAS_ID,
       "GPT-5.6 Luna (xhigh)",
+      routerWinsTiers,
     )
     seedCheapAliasTierRow(
       "ANTHROPIC_DEFAULT_HAIKU_MODEL",
       "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
       LUNA_HAIKU_ALIAS_ID,
       "GPT-5.6 Luna (high)",
+      routerWinsTiers,
     )
     const cheapAliasCapabilities =
       "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
-    if (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES === undefined) {
+    if (routerWinsTiers || process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES === undefined) {
       vars.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = cheapAliasCapabilities
     }
-    if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES === undefined) {
+    if (routerWinsTiers || process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES === undefined) {
       vars.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES = cheapAliasCapabilities
     }
-    if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION === undefined) {
+    if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION === undefined) {
       vars.ANTHROPIC_CUSTOM_MODEL_OPTION = LUNA_DRIVER_ALIAS_ID
-      if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
+      if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
         vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-5.6 Luna (max)"
       }
-      if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES === undefined) {
+      if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES === undefined) {
         vars.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES = cheapAliasCapabilities
       }
     }
@@ -1027,12 +1036,14 @@ export function getClaudeCodeEnvVars(
       "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
       LUNA_SONNET_ALIAS_ID,
       "GPT-5.6 Luna (xhigh)",
+      routerWinsTiers,
     )
     seedFastAliasTierRow(
       "ANTHROPIC_DEFAULT_HAIKU_MODEL",
       "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
       LUNA_HAIKU_ALIAS_ID,
       "GPT-5.6 Luna (high)",
+      routerWinsTiers,
     )
     // Claude Code cannot infer capabilities from the router-owned alias ids.
     // Declare only what the live Luna catalog entry actually advertises; the
@@ -1040,18 +1051,18 @@ export function getClaudeCodeEnvVars(
     // tool use are available on the real model.
     const fastAliasCapabilities =
       "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
-    if (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES === undefined) {
+    if (routerWinsTiers || process.env.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES === undefined) {
       vars.ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES = fastAliasCapabilities
     }
-    if (process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES === undefined) {
+    if (routerWinsTiers || process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES === undefined) {
       vars.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES = fastAliasCapabilities
     }
-    if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION === undefined) {
+    if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION === undefined) {
       vars.ANTHROPIC_CUSTOM_MODEL_OPTION = oneMSuffixForAlias(LUNA_DRIVER_ALIAS_ID)
-      if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
+      if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
         vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-5.6 Luna (max)"
       }
-      if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES === undefined) {
+      if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES === undefined) {
         vars.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES = fastAliasCapabilities
       }
     }

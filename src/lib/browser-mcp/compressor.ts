@@ -31,6 +31,7 @@ import consola from "consola"
 import { deterministicResolve } from "./matcher"
 import { parseIntent } from "./parse-intent"
 import { acquireInFlightSlot } from "~/lib/mcp-inflight"
+import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { applyResponsesCachePolicy } from "~/lib/prompt-cache"
 import { state } from "~/lib/state"
 import {
@@ -190,6 +191,8 @@ async function callViaChat(
   // retryTransient: true: non-streaming (stream:false), so the whole call is
   // pre-first-byte and a transient network/5xx retry is safe.
   const resp = (await createChatCompletions(payload, undefined, signal, true)) as ChatCompletionResponse
+  // Browser compression calls are billed Copilot usage on this instance.
+  extractAndRecordAic(model, resp)
   const msg = resp.choices?.[0]?.message as
     | { content?: string | null; tool_calls?: Array<{ function?: { arguments?: string } }> }
     | undefined
@@ -234,6 +237,7 @@ async function callViaResponses(
   })
   // retryTransient: true: non-streaming (stream:false), pre-first-byte, safe.
   const resp = (await createResponses(payload, undefined, signal, true)) as ResponsesApiResponse
+  extractAndRecordAic(model, resp)
   const output = Array.isArray(resp.output) ? resp.output : []
   for (const item of output) {
     if (!item || typeof item !== "object") continue

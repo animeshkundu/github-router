@@ -178,10 +178,25 @@ async function renameSettingsWithRetry(temp: string, target: string): Promise<vo
  */
 export interface ModelPickerInjectionResult {
   written: boolean
-  reason?: "user-set" | "no-models"
+  reason?: "user-set" | "no-models" | "router-overwrite"
   /** Every model reachable through the effective mirror-level picker. The
    * launcher feeds these into its one launch-global compaction bound. */
   models: string[]
+}
+
+/**
+ * Profiles whose sessions run router-provided surfaces only. On these
+ * launches a user-curated `modelPicker` in the (per-launch, disposable)
+ * mirror is overwritten with the router rows rather than preserved: the
+ * mirror is a snapshot copy, so the operator's real settings are never
+ * touched, but a stale standard `[1m]` picker must not survive into a
+ * 200K session's `/model` UI.
+ */
+function routerWinsPicker(profile: LaunchProfileId): boolean {
+  return profile === "fast"
+    || profile === "cheap"
+    || profile === "cheap1m"
+    || profile === "cheapest"
 }
 
 function modelIdsFromExistingPicker(value: unknown): string[] {
@@ -219,12 +234,20 @@ export async function injectModelPickerSettingsFile(
     existing = parsed as Record<string, unknown>
   }
 
+  let overwroteUserPicker = false
   if ("modelPicker" in existing) {
-    return {
-      written: false,
-      reason: "user-set",
-      models: modelIdsFromExistingPicker(existing.modelPicker),
+    if (!routerWinsPicker(profile)) {
+      return {
+        written: false,
+        reason: "user-set",
+        models: modelIdsFromExistingPicker(existing.modelPicker),
+      }
     }
+    // Pinned profile: fall through and overwrite the mirrored picker with
+    // the router rows. `existing` keeps every unrelated key; only the
+    // `modelPicker` value is replaced.
+    overwroteUserPicker = true
+    delete existing.modelPicker
   }
   if (options.length === 0) {
     return { written: false, reason: "no-models", models: [] }
@@ -247,5 +270,9 @@ export async function injectModelPickerSettingsFile(
     await fs.rm(temp, { force: true }).catch(() => {})
     throw error
   }
-  return { written: true, models: options.map((option) => option.model) }
+  return {
+    written: true,
+    ...(overwroteUserPicker ? { reason: "router-overwrite" as const } : {}),
+    models: options.map((option) => option.model),
+  }
 }

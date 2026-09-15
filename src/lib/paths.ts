@@ -1699,6 +1699,42 @@ export async function sweepStalePeerAgentMdFiles(): Promise<void> {
 }
 
 /**
+ * Remove user-supplied subagent definitions from the router-owned mirror's
+ * `agents/` dir on pinned-profile launches (fast/cheap/cheap1m/cheapest),
+ * which run router-provided surfaces only. Deletes every `*.md` file that
+ * does NOT match `PEER_AGENT_MD_FILENAME` — i.e. files the proxy could
+ * never have written, which can only have arrived via the `~/.claude/`
+ * snapshot copy. Router-shaped files are left alone (the PID-liveness
+ * sweep above owns them, and this launch's own peer files are written
+ * after this purge runs).
+ *
+ * SCOPE IS THE MIRROR ONLY: the operator's real `~/.claude/agents/`
+ * is never touched. Returns the number of files removed (for launch
+ * logging). Missing dir → 0.
+ */
+export async function purgeNonRouterAgentsFromMirror(): Promise<number> {
+  const dir = path.join(PATHS.CLAUDE_CONFIG_DIR, "agents")
+  let entries: Array<string>
+  try {
+    entries = await fs.readdir(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0
+    throw err
+  }
+  let removed = 0
+  for (const name of entries) {
+    if (!name.endsWith(".md")) continue
+    if (PEER_AGENT_MD_FILENAME.exec(name)) continue
+    await fs.unlink(path.join(dir, name)).catch(() => {
+      // already gone or unreadable — treat as removed anyway so the
+      // launch log reflects the attempt, not the race
+    })
+    removed += 1
+  }
+  return removed
+}
+
+/**
  * Strict regex matching only files this proxy writes:
  *   peer-<pid>-<8 hex>-<exact persona/coordinator/native/dispatcher name>.md
  * The name allowlist is the load-bearing protection against deleting user
