@@ -116,6 +116,10 @@ import {
   removeAicLedgerFile,
   sweepStaleAicLedgerFiles,
 } from "./lib/aic-ledger"
+import {
+  discountedUsdForSnapshot,
+  formatDiscountedCostTable,
+} from "./lib/copilot-discount"
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, buildOperatingDefaultsDigest, buildOperatingDefaultsDirective, type NativeAgentAvailability, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
@@ -1934,18 +1938,25 @@ export const claude = defineCommand({
       server,
       {
         onShutdown,
-        // Session AIC total, printed after cleanup on every exit path.
-        // Breakdown only at debug verbosity (it implies billing-grade
-        // attribution the estimates can't support — all values here are
-        // upstream-measured, but per-model splits still aren't invoices).
+        // Session AIC total + discounted per-model cost table, printed
+        // after cleanup on every exit path. The table is default-on (not
+        // debug-gated): every value in it is upstream-measured, and the
+        // ~$ column carries the same static-discount approximation as the
+        // status line. Per-model credit splits stay verbose-only — they
+        // imply billing-grade attribution the estimates can't support.
         onExitSummary: () => {
           const snapshot = aicSnapshot()
           if (snapshot.requests === 0 || snapshot.totalNanoAiu <= 0) {
             return undefined
           }
-          return formatAicExitSummary(snapshot, {
+          const summary = formatAicExitSummary(snapshot, {
             verbose: consola.level >= 4,
           })
+          const table = formatDiscountedCostTable(
+            snapshot,
+            discountedUsdForSnapshot(snapshot),
+          )
+          return table ? `${summary}\n${table}` : summary
         },
       },
     )

@@ -7,9 +7,10 @@
  * (see `src/lib/default-statusline.ts`) as
  * `[ctx bar] % | model | dir (branch) | ~$actual | in/out | dur | +a -r`,
  * with this launch's AIC ledger total PINNED ahead of it: `[AIC 12.42] ...`.
- * The `~$` segment is the discounted actual (session AIC × $0.01), not
- * Claude's list-price `total_cost_usd`. Narrow terminals drop segments
- * right-to-left; AIC is never dropped.
+ * The `~$` segment is the factor-discounted actual (per-model static
+ * factors over ledger nano, capped at AIC × $0.01 — see
+ * `src/lib/copilot-discount.ts`), not Claude's list-price `total_cost_usd`.
+ * Narrow terminals drop segments right-to-left; AIC is never dropped.
  *
  * When the user already had a `statusLine` command, its text arrives via
  * `GH_ROUTER_AIC_USER_STATUSLINE` and is run instead of the rich default
@@ -29,10 +30,10 @@ import { spawnSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 
 import {
-  aicTotalCredits,
   formatAicStatus,
   readAicSnapshotFile,
 } from "./lib/aic-ledger"
+import { discountedUsdForSnapshot } from "./lib/copilot-discount"
 import { buildRichStatusLine } from "./lib/default-statusline"
 
 /**
@@ -93,20 +94,20 @@ export function runUserStatusLine(
   }
 }
 
-function readAicSnapshot(): { fragment: string; credits?: number } {
+function readAicSnapshot(): { fragment: string; actualUsd?: number } {
   try {
     const ledgerPath = process.env.GH_ROUTER_AIC_LEDGER
     if (!ledgerPath) return { fragment: "" }
     const snapshot = readAicSnapshotFile(ledgerPath)
     if (!snapshot) return { fragment: "" }
-    // No priced responses yet → no fragment AND no credits: the `~$`
+    // No priced responses yet → no fragment AND no USD: the `~$`
     // segment renders its `~$--` placeholder instead of `~$0.00`.
     if (snapshot.requests === 0 || snapshot.totalNanoAiu <= 0) {
       return { fragment: "" }
     }
     return {
       fragment: formatAicStatus(snapshot),
-      credits: aicTotalCredits(snapshot),
+      actualUsd: discountedUsdForSnapshot(snapshot).total,
     }
   } catch {
     return { fragment: "" }
@@ -121,7 +122,7 @@ export const internalAicStatus = defineCommand({
   },
   async run() {
     const stdinRaw = readStdin()
-    const { fragment: aic, credits: aicCredits } = readAicSnapshot()
+    const { fragment: aic, actualUsd } = readAicSnapshot()
     const userCommand = process.env.GH_ROUTER_AIC_USER_STATUSLINE ?? ""
     // Wrap mode: the user's own script already renders ctx/cost/model from
     // the same stdin JSON — run it and prepend AIC only.
@@ -138,7 +139,7 @@ export const internalAicStatus = defineCommand({
     let line: string
     try {
       line = buildRichStatusLine(stdinRaw, aic, {
-        ...(aicCredits !== undefined ? { aicCredits } : {}),
+        ...(actualUsd !== undefined ? { actualUsd } : {}),
       })
     } catch {
       line = aic.trim()

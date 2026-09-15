@@ -120,18 +120,18 @@ describe("segment builders", () => {
     expect(buildCtxSegment(1000).plain).toBe("[##########] 100%")
   })
 
-  test("~$ actuals: 1 credit ≈ $0.01, placeholder until first priced response", () => {
+  test("~$ actuals: discounted total in, placeholder until first priced response", () => {
     expect(usdFromAicCredits(12.42)).toBeCloseTo(0.1242)
     expect(buildUsdSegment(undefined).plain).toBe("~$--")
-    // 12.42 credits → ~$0.12, green tier.
-    expect(buildUsdSegment(12.42).plain).toBe("~$0.12")
-    expect(buildUsdSegment(12.42).text).toContain("\x1b[32m")
-    expect(buildUsdSegment(300).plain).toBe("~$3.00")
-    expect(buildUsdSegment(300).text).toContain("\x1b[33m")
-    expect(buildUsdSegment(1000).plain).toBe("~$10.0")
-    expect(buildUsdSegment(1000).text).toContain("\x1b[38;5;208m")
-    expect(buildUsdSegment(5000).plain).toBe("~$50.0")
-    expect(buildUsdSegment(5000).text).toContain("\x1b[31m")
+    // 12.42 credits × 0.01 (pre-factor test value) → ~$0.12, green tier.
+    expect(buildUsdSegment(0.1242).plain).toBe("~$0.12")
+    expect(buildUsdSegment(0.1242).text).toContain("\x1b[32m")
+    expect(buildUsdSegment(3).plain).toBe("~$3.00")
+    expect(buildUsdSegment(3).text).toContain("\x1b[33m")
+    expect(buildUsdSegment(10).plain).toBe("~$10.0")
+    expect(buildUsdSegment(10).text).toContain("\x1b[38;5;208m")
+    expect(buildUsdSegment(50).plain).toBe("~$50.0")
+    expect(buildUsdSegment(50).text).toContain("\x1b[31m")
   })
 
   test("dir+git combos", () => {
@@ -177,7 +177,7 @@ describe("assembleStatusLine", () => {
     const line = assembleStatusLine("[AIC 12.42]", input, {
       width: 500,
       branch: "main",
-      aicCredits: 12.42,
+      actualUsd: 0.1242,
     })
     const plain = stripAnsi(line)
     for (const token of [
@@ -240,7 +240,7 @@ describe("buildRichStatusLine", () => {
     const line = buildRichStatusLine(FULL_JSON, "[AIC 12.42]", {
       width: 500,
       branchOverride: "main",
-      aicCredits: 12.42,
+      actualUsd: 0.1242,
     })
     const plain = stripAnsi(line)
     expect(plain).toContain("[AIC 12.42]")
