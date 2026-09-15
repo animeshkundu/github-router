@@ -2045,8 +2045,10 @@ export const claude = defineCommand({
     }
 
     // AIC status line: this session's AI-credit total (`[AIC 12.42]`) in
-    // Claude Code's status bar, prepended to the user's own statusLine when
-    // they have one (wrap-don't-clobber). Best-effort; opt out with
+    // Claude Code's status bar. Pinned profiles (fast/cheap/cheap1m/
+    // cheapest) always render the router's native rich line; standard
+    // wraps a pre-existing user command when one is present
+    // (wrap-don't-clobber). Best-effort; opt out with
     // GH_ROUTER_DISABLE_AIC_STATUSLINE=1.
     if (process.env.GH_ROUTER_DISABLE_AIC_STATUSLINE !== "1") {
       try {
@@ -2055,14 +2057,24 @@ export const claude = defineCommand({
         void sweepStaleAicLedgerFiles()
         const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
         const statusCommand = buildAicStatusHookCommand(selfInvocation)
+        const routerWinsStatusLine = launchProfileId === "fast"
+          || launchProfileId === "cheap"
+          || launchProfileId === "cheap1m"
+          || launchProfileId === "cheapest"
         const injected = await injectAicStatusLineIntoSettingsFile(
           settingsPath,
           statusCommand,
+          routerWinsStatusLine ? { routerWins: true } : {},
         )
         if (injected.written) {
           envVars[AIC_LEDGER_ENV] = aicLedgerPath()
           if (injected.mode === "wrapped" && injected.userCommand) {
             envVars[AIC_USER_STATUSLINE_ENV] = injected.userCommand
+          }
+          if (injected.mode === "forced") {
+            consola.info(
+              `Pinned status line installed natively for ${launchProfileId}; a pre-existing statusLine was backed up in this launch's isolated settings and will not run.`,
+            )
           }
         }
       } catch (err) {

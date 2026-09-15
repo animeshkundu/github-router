@@ -70,9 +70,16 @@ export function composeAicStatusLine(
  * Run the user's own statusLine command (from `GH_ROUTER_AIC_USER_STATUSLINE`),
  * returning its first stdout line or "" on any failure/timeout. Exported for
  * unit tests (command + timeout injectable).
+ *
+ * Claude Code pipes session JSON to the statusLine command's stdin, and
+ * user scripts commonly block reading it to EOF — so the received
+ * `stdinRaw` is forwarded via `input` (written then closed) rather than
+ * leaving stdin disconnected, which would hang such scripts until the
+ * timeout and silently drop their segment.
  */
 export function runUserStatusLine(
   command: string,
+  stdinRaw: string,
   timeoutMs = 5000,
 ): string {
   if (!command.trim()) return ""
@@ -81,7 +88,8 @@ export function runUserStatusLine(
       shell: true,
       timeout: timeoutMs,
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
+      input: stdinRaw,
+      stdio: ["pipe", "pipe", "ignore"],
       // Inherit env so user scripts see the same session context they would
       // under their own statusLine (cwd included — spawnSync inherits it).
       env: process.env,
@@ -127,7 +135,7 @@ export const internalAicStatus = defineCommand({
     // Wrap mode: the user's own script already renders ctx/cost/model from
     // the same stdin JSON — run it and prepend AIC only.
     if (userCommand.trim()) {
-      const userLine = runUserStatusLine(userCommand)
+      const userLine = runUserStatusLine(userCommand, stdinRaw)
       const line = composeAicStatusLine(aic, userLine)
       if (line) process.stdout.write(`${line}\n`)
       process.exitCode = 0

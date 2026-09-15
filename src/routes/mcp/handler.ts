@@ -13,6 +13,7 @@ import {
   type McpAudience,
 } from "~/lib/launch-registry"
 import { MCP_WORKSPACE_HEADER } from "~/lib/mcp-workspace-header"
+import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { loadPeerImages } from "~/lib/peer-attachments"
 import { state } from "~/lib/state"
 import { getTextTokenCount, getTokenizerFromModel } from "~/lib/tokenizer"
@@ -1117,6 +1118,10 @@ export async function dispatchModelCall(args: {
       () => createResponses(payload, undefined, args.signal),
       { signal: args.signal, label: resolvedModel },
     )) as ResponsesApiResponse
+    // Peer/oracle/stand-in calls are billed Copilot usage on this
+    // instance — record it so the session AIC total accounts for every
+    // call, not just lead/subagent turns.
+    extractAndRecordAic(resolvedModel, response)
     return extractResponsesText(response)
   }
 
@@ -1169,6 +1174,7 @@ export async function dispatchModelCall(args: {
       { signal: args.signal, label: resolvedModel },
     )
     const json = (await response.json()) as MessagesApiResponse
+    extractAndRecordAic(resolvedModel, json)
     return extractMessagesText(json)
   }
 
@@ -1201,6 +1207,7 @@ export async function dispatchModelCall(args: {
     () => createChatCompletions(payload, undefined, args.signal),
     { signal: args.signal, label: resolvedModel },
   )) as ChatCompletionResponse
+  extractAndRecordAic(resolvedModel, response)
   return extractChatCompletionText(response)
 }
 

@@ -514,3 +514,47 @@ test("/responses partial tool args then timeout does not retry", async () => {
   expect(final.stopReason).toBe("error")
   expect(events.at(-1)?.type).toBe("error")
 })
+
+// ---------------------------------------------------------------------------
+// AIC ledger coverage: worker turns are billed Copilot usage on this instance
+// ---------------------------------------------------------------------------
+
+test("worker responses terminal copilot_usage records once under the worker model", async () => {
+  const { __resetAicLedgerForTests, aicSnapshot } = await import("~/lib/aic-ledger")
+  const fsp = (await import("node:fs/promises")).default
+  const nodeOs = (await import("node:os")).default
+  const nodePath = (await import("node:path")).default
+  const dir = await fsp.mkdtemp(nodePath.join(nodeOs.tmpdir(), "gh-router-worker-aic-"))
+  const savedEnv = process.env.GH_ROUTER_AIC_LEDGER
+  process.env.GH_ROUTER_AIC_LEDGER = nodePath.join(dir, "ledger.json")
+  __resetAicLedgerForTests()
+  try {
+    const usage = {
+      token_details: [
+        { batch_size: 1000000, cost_per_batch: 20000000000, model: RESPONSES_MODEL_ID, token_count: 11, token_type: "input" },
+      ],
+      total_nano_aiu: 220000,
+    }
+    globalThis.fetch = mock(() =>
+      sseResponse([
+        ...REASONING_PROLOGUE,
+        { type: "response.output_text.delta", delta: "hi" },
+        { type: "response.output_text.done", text: "hi" },
+        // Repeated terminal frame must not double-count.
+        { type: "response.completed", response: { status: "completed" }, copilot_usage: usage },
+        { type: "response.completed", response: { status: "completed" }, copilot_usage: usage },
+      ])
+    ) as unknown as typeof fetch
+    await drain(USER_CTX)
+    const snap = aicSnapshot()
+    expect(snap.requests).toBe(1)
+    expect(snap.totalNanoAiu).toBe(220000)
+    expect(snap.perModel[RESPONSES_MODEL_ID]?.requests).toBe(1)
+  } finally {
+    if (savedEnv === undefined) delete process.env.GH_ROUTER_AIC_LEDGER
+    else process.env.GH_ROUTER_AIC_LEDGER = savedEnv
+    const { __resetAicLedgerForTests: reset } = await import("~/lib/aic-ledger")
+    reset()
+    await fsp.rm(dir, { recursive: true, force: true })
+  }
+})
