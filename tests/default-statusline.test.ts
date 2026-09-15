@@ -2,16 +2,17 @@ import { describe, expect, test } from "bun:test"
 
 import {
   assembleStatusLine,
-  buildCostSegment,
   buildCtxSegment,
   buildDirGitSegment,
   buildRichStatusLine,
+  buildUsdSegment,
   compactTokens,
   dirLeaf,
   formatDurationMs,
   parseStatusInput,
   resolveGitBranch,
   terminalWidth,
+  usdFromAicCredits,
 } from "~/lib/default-statusline"
 
 const ANSI = "\x1b\\[[0-9;]*m"
@@ -27,7 +28,6 @@ const FULL_JSON = JSON.stringify({
     total_output_tokens: 4521,
   },
   cost: {
-    total_cost_usd: 1.93,
     total_duration_ms: 213_000,
     total_lines_added: 156,
     total_lines_removed: 23,
@@ -41,7 +41,6 @@ describe("parseStatusInput", () => {
     expect(in_.usedPct).toBe(42)
     expect(in_.totalInputTokens).toBe(15234)
     expect(in_.totalOutputTokens).toBe(4521)
-    expect(in_.totalCostUsd).toBeCloseTo(1.93)
     expect(in_.totalDurationMs).toBe(213_000)
     expect(in_.linesAdded).toBe(156)
     expect(in_.linesRemoved).toBe(23)
@@ -67,15 +66,20 @@ describe("parseStatusInput", () => {
     expect(parseStatusInput("[1,2]")).toEqual({})
   })
 
+  test("list-price total_cost_usd is ignored (actuals come from AIC)", () => {
+    const in_ = parseStatusInput(
+      JSON.stringify({ cost: { total_cost_usd: 99.99 } }),
+    )
+    expect(in_).toEqual({})
+  })
+
   test("nulls before first API call are tolerated", () => {
     const in_ = parseStatusInput(
       JSON.stringify({
         context_window: { used_percentage: null, current_usage: null },
-        cost: { total_cost_usd: null },
       }),
     )
     expect(in_.usedPct).toBeUndefined()
-    expect(in_.totalCostUsd).toBeUndefined()
   })
 })
 
@@ -116,14 +120,18 @@ describe("segment builders", () => {
     expect(buildCtxSegment(1000).plain).toBe("[##########] 100%")
   })
 
-  test("cost thresholds + placeholder", () => {
-    expect(buildCostSegment(undefined).plain).toBe("$--")
-    expect(buildCostSegment(1.93).plain).toBe("$1.93")
-    expect(buildCostSegment(12.34).plain).toBe("$12.3")
-    expect(buildCostSegment(10).text).toContain("\x1b[32m")
-    expect(buildCostSegment(50).text).toContain("\x1b[33m")
-    expect(buildCostSegment(100).text).toContain("\x1b[38;5;208m")
-    expect(buildCostSegment(200).text).toContain("\x1b[31m")
+  test("~$ actuals: 1 credit ≈ $0.01, placeholder until first priced response", () => {
+    expect(usdFromAicCredits(12.42)).toBeCloseTo(0.1242)
+    expect(buildUsdSegment(undefined).plain).toBe("~$--")
+    // 12.42 credits → ~$0.12, green tier.
+    expect(buildUsdSegment(12.42).plain).toBe("~$0.12")
+    expect(buildUsdSegment(12.42).text).toContain("\x1b[32m")
+    expect(buildUsdSegment(300).plain).toBe("~$3.00")
+    expect(buildUsdSegment(300).text).toContain("\x1b[33m")
+    expect(buildUsdSegment(1000).plain).toBe("~$10.0")
+    expect(buildUsdSegment(1000).text).toContain("\x1b[38;5;208m")
+    expect(buildUsdSegment(5000).plain).toBe("~$50.0")
+    expect(buildUsdSegment(5000).text).toContain("\x1b[31m")
   })
 
   test("dir+git combos", () => {
@@ -158,7 +166,6 @@ describe("assembleStatusLine", () => {
     usedPct: 42,
     totalInputTokens: 15234,
     totalOutputTokens: 4521,
-    totalCostUsd: 1.93,
     totalDurationMs: 213_000,
     linesAdded: 156,
     linesRemoved: 23,
@@ -170,6 +177,7 @@ describe("assembleStatusLine", () => {
     const line = assembleStatusLine("[AIC 12.42]", input, {
       width: 500,
       branch: "main",
+      aicCredits: 12.42,
     })
     const plain = stripAnsi(line)
     for (const token of [
@@ -178,7 +186,7 @@ describe("assembleStatusLine", () => {
       "Opus",
       "my-proj",
       "main",
-      "$1.93",
+      "~$0.12",
       "15.2k/4.5k",
       "3m33s",
       "+156 -23",
@@ -190,7 +198,7 @@ describe("assembleStatusLine", () => {
       "42%",
       "Opus",
       "my-proj",
-      "$1.93",
+      "~$0.12",
       "15.2k/4.5k",
       "3m33s",
       "+156 -23",
@@ -232,11 +240,13 @@ describe("buildRichStatusLine", () => {
     const line = buildRichStatusLine(FULL_JSON, "[AIC 12.42]", {
       width: 500,
       branchOverride: "main",
+      aicCredits: 12.42,
     })
     const plain = stripAnsi(line)
     expect(plain).toContain("[AIC 12.42]")
     expect(plain).toContain("Opus")
     expect(plain).toContain("my-proj (main)")
+    expect(plain).toContain("~$0.12")
   })
 
   test("never throws on garbage", () => {

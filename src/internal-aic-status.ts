@@ -5,9 +5,11 @@
  *
  * Default-on rich status line: Claude Code's stdin JSON is rendered natively
  * (see `src/lib/default-statusline.ts`) as
- * `[ctx bar] % | model | dir (branch) | $cost | in/out | dur | +a -r`,
+ * `[ctx bar] % | model | dir (branch) | ~$actual | in/out | dur | +a -r`,
  * with this launch's AIC ledger total PINNED ahead of it: `[AIC 12.42] ...`.
- * Narrow terminals drop segments right-to-left; AIC is never dropped.
+ * The `~$` segment is the discounted actual (session AIC × $0.01), not
+ * Claude's list-price `total_cost_usd`. Narrow terminals drop segments
+ * right-to-left; AIC is never dropped.
  *
  * When the user already had a `statusLine` command, its text arrives via
  * `GH_ROUTER_AIC_USER_STATUSLINE` and is run instead of the rich default
@@ -27,6 +29,7 @@ import { spawnSync } from "node:child_process"
 import { readFileSync } from "node:fs"
 
 import {
+  aicTotalCredits,
   formatAicStatus,
   readAicSnapshotFile,
 } from "./lib/aic-ledger"
@@ -90,15 +93,23 @@ export function runUserStatusLine(
   }
 }
 
-function readAicFragment(): string {
+function readAicSnapshot(): { fragment: string; credits?: number } {
   try {
     const ledgerPath = process.env.GH_ROUTER_AIC_LEDGER
-    if (!ledgerPath) return ""
+    if (!ledgerPath) return { fragment: "" }
     const snapshot = readAicSnapshotFile(ledgerPath)
-    if (!snapshot) return ""
-    return formatAicStatus(snapshot)
+    if (!snapshot) return { fragment: "" }
+    // No priced responses yet → no fragment AND no credits: the `~$`
+    // segment renders its `~$--` placeholder instead of `~$0.00`.
+    if (snapshot.requests === 0 || snapshot.totalNanoAiu <= 0) {
+      return { fragment: "" }
+    }
+    return {
+      fragment: formatAicStatus(snapshot),
+      credits: aicTotalCredits(snapshot),
+    }
   } catch {
-    return ""
+    return { fragment: "" }
   }
 }
 
@@ -110,7 +121,7 @@ export const internalAicStatus = defineCommand({
   },
   async run() {
     const stdinRaw = readStdin()
-    const aic = readAicFragment()
+    const { fragment: aic, credits: aicCredits } = readAicSnapshot()
     const userCommand = process.env.GH_ROUTER_AIC_USER_STATUSLINE ?? ""
     // Wrap mode: the user's own script already renders ctx/cost/model from
     // the same stdin JSON — run it and prepend AIC only.
@@ -126,7 +137,9 @@ export const internalAicStatus = defineCommand({
     // prints nothing rather than a placeholder line.
     let line: string
     try {
-      line = buildRichStatusLine(stdinRaw, aic)
+      line = buildRichStatusLine(stdinRaw, aic, {
+        ...(aicCredits !== undefined ? { aicCredits } : {}),
+      })
     } catch {
       line = aic.trim()
     }

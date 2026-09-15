@@ -11,7 +11,15 @@
  * Segment order (left = highest priority; narrow terminals drop from the
  * right, `AIC` is never dropped):
  *
- *   `[AIC] | [ctx bar] % | model | dir (branch) | $cost | in/out | dur | +a -r`
+ *   `[AIC] | [ctx bar] % | model | dir (branch) | ~$actual | in/out | dur | +a -r`
+ *
+ * The `$` segment is the DISCOUNTED actual (`~$` = session AIC × $0.01,
+ * the same 1-credit-≈-1¢ convention as the exit summary) — NOT Claude's
+ * `cost.total_cost_usd`, which prices at Anthropic list rates and reads
+ * ~10-100x high against Copilot billing (a 28-day sample: 41.1B tokens
+ * for $5,142 ≈ $0.13/1M blended vs $15-75/1M list). Rendering list price
+ * next to the real `[AIC]` billing unit would show two contradictory
+ * numbers, so list price is deliberately not rendered at all.
  *
  * Width comes from `COLUMNS` (set by Claude Code for status scripts since
  * v2.1.153); fallback is 120 when unset/unparseable so a missing `COLUMNS`
@@ -47,7 +55,6 @@ export interface StatusInput {
   usedPct?: number
   totalInputTokens?: number
   totalOutputTokens?: number
-  totalCostUsd?: number
   totalDurationMs?: number
   linesAdded?: number
   linesRemoved?: number
@@ -104,8 +111,6 @@ export function parseStatusInput(raw: string): StatusInput {
 
   const cost = asRecord(root.cost)
   if (cost) {
-    const usd = finiteNumber(cost.total_cost_usd)
-    if (usd !== undefined && usd >= 0) out.totalCostUsd = usd
     const dur = finiteNumber(cost.total_duration_ms)
     if (dur !== undefined && dur >= 0) out.totalDurationMs = dur
     const la = finiteNumber(cost.total_lines_added)
@@ -174,16 +179,35 @@ export function buildCtxSegment(usedPct: number | undefined): StatusSegment {
   }
 }
 
-export function buildCostSegment(costUsd: number | undefined): StatusSegment {
-  if (costUsd === undefined || !Number.isFinite(costUsd) || costUsd < 0) {
-    return { text: `${DIM}$--${RESET}`, plain: "$--" }
+/**
+ * AIC credits → discounted USD. 1 credit ≈ $0.01 — the same convention as
+ * the session exit summary (`aic-ledger.ts`). The `~` prefix marks the
+ * 1¢/credit approximation (GitHub bills in credits, not dollars).
+ */
+export const USD_PER_AIC_CREDIT = 0.01
+
+export function usdFromAicCredits(credits: number): number {
+  return credits * USD_PER_AIC_CREDIT
+}
+
+/**
+ * Discounted-actual `$` segment from session AIC credits. Placeholder
+ * `~$--` until the first priced upstream response lands in the ledger.
+ * Thresholds are tuned for ACTUALS scale (a session runs ~$0.10-2.00) —
+ * not the old list-price scale.
+ */
+export function buildUsdSegment(
+  aicCredits: number | undefined,
+): StatusSegment {
+  if (aicCredits === undefined || !Number.isFinite(aicCredits) || aicCredits < 0) {
+    return { text: `${DIM}~$--${RESET}`, plain: "~$--" }
   }
-  const c = costUsd
-  const color = c < 25 ? GREEN : c < 70 ? YELLOW : c < 140 ? ORANGE : RED
+  const c = usdFromAicCredits(aicCredits)
+  const color = c < 1 ? GREEN : c < 5 ? YELLOW : c < 20 ? ORANGE : RED
   const formatted = c < 10 ? c.toFixed(2) : c.toFixed(1)
   return {
-    text: `${color}$${formatted}${RESET}`,
-    plain: `$${formatted}`,
+    text: `${color}~$${formatted}${RESET}`,
+    plain: `~$${formatted}`,
   }
 }
 
@@ -298,13 +322,15 @@ export function terminalWidth(env: NodeJS.ProcessEnv = process.env): number {
 
 /**
  * Assemble the full status line. `aicFragment` (e.g. `[AIC 12.42]`) is
- * PINNED — it renders even when nothing else fits. Droppable segments in
- * priority order: ctx, model, dir/git, cost, toks, dur, lines.
+ * PINNED — it renders even when nothing else fits. `aicCredits` feeds the
+ * `~$` actuals segment (same ledger snapshot the fragment came from).
+ * Droppable segments in priority order: ctx, model, dir/git, ~$, toks,
+ * dur, lines.
  */
 export function assembleStatusLine(
   aicFragment: string,
   input: StatusInput,
-  opts: { width?: number; branch?: string } = {},
+  opts: { width?: number; branch?: string; aicCredits?: number } = {},
 ): string {
   const aic = aicFragment.trim()
   const aicText = aic ? `${AIC_COLOR}${aic}${RESET}` : ""
@@ -317,7 +343,7 @@ export function assembleStatusLine(
   const dirGit = buildDirGitSegment(input.cwd, opts.branch)
   if (dirGit) droppable.push(dirGit)
   droppable.push(
-    buildCostSegment(input.totalCostUsd),
+    buildUsdSegment(opts.aicCredits),
     buildToksSegment(input.totalInputTokens, input.totalOutputTokens),
     buildDurSegment(input.totalDurationMs),
     buildLinesSegment(input.linesAdded, input.linesRemoved),
@@ -351,12 +377,14 @@ export function assembleStatusLine(
 
 /**
  * Convenience: parse stdin JSON + assemble with branch resolution.
- * `branchOverride` skips the `git` spawn (used by tests).
+ * `branchOverride` skips the `git` spawn (used by tests). `aicCredits`
+ * comes from the same ledger snapshot as `aicFragment` (read by the
+ * caller — this module never touches the ledger file).
  */
 export function buildRichStatusLine(
   stdinRaw: string,
   aicFragment: string,
-  opts: { width?: number; branchOverride?: string } = {},
+  opts: { width?: number; branchOverride?: string; aicCredits?: number } = {},
 ): string {
   const input = parseStatusInput(stdinRaw)
   const branch =
@@ -366,5 +394,6 @@ export function buildRichStatusLine(
   return assembleStatusLine(aicFragment, input, {
     ...(opts.width !== undefined ? { width: opts.width } : {}),
     ...(branch ? { branch } : {}),
+    ...(opts.aicCredits !== undefined ? { aicCredits: opts.aicCredits } : {}),
   })
 }
