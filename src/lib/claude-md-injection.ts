@@ -161,7 +161,9 @@ export interface NativeAgentAvailability {
    *  hard restriction (not a catalog-availability signal, unlike every
    *  `*Available` flag above). `"cheap"`/`"cheap1m"` select the same
    *  restricted roster prose with the cheap family's oracle identities
-   *  (`"cheap1m"` additionally wires the astra peer). When set,
+   *  (`"cheap1m"` additionally wires the astra peer). `"cheapest"` selects
+   *  the same restricted roster prose with the cheapest identities
+   *  (Luna lead, Gemini reviewer/Advisor, Sol Oracle; never astra). When set,
    *  `buildNativeReachClauses` and
    *  `buildOperatingDefaultsDirective` return a short, self-contained
    *  rendering naming only `Explore`/`Plan`/`general-purpose`/`implementer`/`reviewer`,
@@ -170,7 +172,7 @@ export interface NativeAgentAvailability {
    *  `worker-*`/`orchestrate` tools or skills, or `stand_in`, since none of
    *  those are registered in this profile regardless of catalog state.
    *  Absent/`"standard"` is today's catalog-driven full roster. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"
   /** False when a fast launch disabled or failed its MCP/native runtime wiring.
    *  The fallback directive must not advertise agents/tools that do not exist. */
   fastRuntimeAvailable?: boolean
@@ -211,7 +213,7 @@ function joinClauses(parts: ReadonlyArray<string>): string {
  *  there is no quality-for-cost trade being hidden by leading with the cheap
  *  tier; reserve `reviewer` for the higher-stakes assessment it is there for. */
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest") {
     return joinClauses([
       "`Explore` for broad repository discovery, dependency mapping, and convention tracking",
       "`Plan` for architectural sequencing, interface contracts, migration risk, and runnable acceptance criteria",
@@ -358,13 +360,16 @@ export function buildOperatingDefaultsDirective(
       + artifactClause
     )
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
-    const profileLabel = isCheap ? "Cheap" : "Fast"
-    const oracleDescriptor = isCheap
-      ? "Grok 4.6 (200K/medium)"
-      : "exact Opus 5 (1M/high)"
-    const astraDescriptor = isCheap ? "200K/medium" : "200K/high"
+    const isCheapest = opts.profile === "cheapest"
+    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : "Fast"
+    const oracleDescriptor = isCheapest
+      ? "GPT-5.6 Sol (200K/high)"
+      : isCheap
+        ? "Grok 4.6 (200K/medium)"
+        : "exact Opus 5 (1M/high)"
+    const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
     if (opts.fastRuntimeAvailable === false) {
       return (
         "## Operating defaults (apply when the user has not specified otherwise; the "
@@ -385,7 +390,7 @@ export function buildOperatingDefaultsDirective(
       ? ` \`mcp__${peersKey}__artifact_*\` provides human review in the artifact panel with auto-open on plan completion.`
       : ""
 
-    const astraClause = opts.astraAvailable && opts.profile !== "cheap"
+    const astraClause = opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? ` \`mcp__${peersKey}__astra\` (GPT-6 Astra ${astraDescriptor}) is the terminal escalation consultant for the lead only, reserved strictly for the hardest dead ends when direct evidence, Advisor, and Oracle have all failed to produce a defensible path (consulted at most 1-2 times per decision with concise context and specific questions).`
       : ""
 
@@ -452,7 +457,7 @@ const STANDARD_OPERATING_DEFAULTS_DIGEST =
   + "without a lookup."
 
 export function buildOperatingDefaultsDigest(
-  opts: { profile?: "standard" | "fast" | "cheap" | "cheap1m" | "max"; astraAvailable?: boolean } = {},
+  opts: { profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"; astraAvailable?: boolean } = {},
 ): string {
   if (opts.profile === "max") {
     return (
@@ -463,20 +468,26 @@ export function buildOperatingDefaultsDigest(
       + "Synthesize and verify: run the code, inspect outputs, and check tests. Agent count and agreement are not evidence. Use a fresh-context peer only for consequential judgment that remains after direct checks, and use the coordinator only when several distinct lenses could change the decision. Advisor is optional, non-binding, primary-lead-only counsel for one focused consequential uncertainty; it is not an approval or completion gate."
     )
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
-    const profileLabel = isCheap ? "Cheap" : "Fast"
-    const oracleDescriptor = isCheap
-      ? "(Grok 4.6 200K/medium, lead and Plan)"
-      : "(Opus 5 1M/high, lead and Plan)"
+    const isCheapest = opts.profile === "cheapest"
+    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : "Fast"
+    const oracleDescriptor = isCheapest
+      ? "(GPT-5.6 Sol 200K/high, lead and Plan)"
+      : isCheap
+        ? "(Grok 4.6 200K/medium, lead and Plan)"
+        : "(Opus 5 1M/high, lead and Plan)"
+    const advisorDescriptor = isCheapest ? "(Gemini/high, lead-only)" : "(Sol/high, lead-only)"
     const astraStep =
-    opts.astraAvailable && opts.profile !== "cheap"
+    opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? `; (4) \`astra\` (GPT-6 Astra 200K/${isCheap ? "medium" : "high"}, lead-only) only as a last resort when direct evidence, Advisor, and Oracle cannot produce a defensible path (at most 1-2 calls per decision).`
       : "."
     return (
       "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
       + `${profileLabel} launch profile. The lead coordinates execution across specialized roles: delegate broad discovery to \`Explore\` in parallel and do not sweep the repo yourself (read directly only files you will act on); delegate to \`Plan\` in plan mode or when structuring complex multi-step sequencing (\`Plan\` is an advisory planning capability, not an approval gate); delegate bounded implementation to \`implementer\` in a fresh context to preserve lead context (\`general-purpose\` for mixed multi-step execution); delegate to \`reviewer\` after behavior-changing or risk-sensitive implementation, and always after \`implementer\` completes, to verify correctness before declaring done; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
-      + "Verify claims against real evidence: run relevant commands and tests. Follow a disciplined consultation ladder for unresolved decisions: (1) direct code inspection, search, builds, and tests settle factual questions; (2) `advisor` (Sol/high, lead-only) for transcript-aware framing checks or trajectory guidance; (3) `oracle` "
+      + "Verify claims against real evidence: run relevant commands and tests. Follow a disciplined consultation ladder for unresolved decisions: (1) direct code inspection, search, builds, and tests settle factual questions; (2) `advisor` "
+      + advisorDescriptor
+      + " for transcript-aware framing checks or trajectory guidance; (3) `oracle` "
       + oracleDescriptor
       + " for self-contained technical/architectural trade-offs"
       + astraStep

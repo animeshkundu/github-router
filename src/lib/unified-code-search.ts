@@ -317,7 +317,7 @@ export async function runUnifiedCodeSearch(
       ...r,
       notice: joinNotice(
         r.notice,
-        "semantic search unavailable on this host; returned lexical results",
+        "semantic search is off (launch with --search to enable); returned lexical results",
       ),
     }
   }

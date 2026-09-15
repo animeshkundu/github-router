@@ -286,8 +286,8 @@ export const serve = defineCommand({
     // server is listening so the bounded probe can't delay it.
     void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
 
-    // Best-effort ColBERT semantic-search provision. ON by default; never blocks
-    // launch. `skipCwdIndex`: serve is machine-wide, so the launch cwd is usually
+    // Best-effort ColBERT semantic-search provision. Opt-IN via --search
+    // (no-op otherwise); never blocks launch. `skipCwdIndex`: serve is machine-wide, so the launch cwd is usually
     // NOT a repo the user works on — per-workspace on-demand indexing (kicked by
     // the first search for a given repo) covers real queries instead.
     void provisionAndIndexColbert({ skipCwdIndex: true })

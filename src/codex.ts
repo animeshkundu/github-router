@@ -73,7 +73,8 @@ export const codex = defineCommand({
     }
 
     // Best-effort ColBERT semantic-search provision + background index of
-    // the launch cwd. ON by default; never blocks launch, never throws.
+    // the launch cwd. Opt-IN via --search (no-op otherwise); never blocks
+    // launch, never throws.
     void provisionAndIndexColbert()
 
     // Surface a terminally-failed semantic index to the HUMAN (see the note

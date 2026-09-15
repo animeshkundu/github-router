@@ -639,11 +639,13 @@ export function buildPeerAwarenessSnippet(opts: {
   groupKeys?: Partial<Record<McpGroup, string>>
   /** Launch-profile surface selector. Fast is a hard roster restriction that
    *  renders only its fixed native roles, Oracle, and search. Cheap renders the
-   *  same restricted surface with its own oracle/astra identities. Max renders
-   *  its own native/peer roster and gated retained groups. Absent/`"standard"`
+   *  same restricted surface with its own oracle/astra identities. Cheapest
+   *  renders the same restricted surface with the Sol Oracle and Gemini
+   *  reviewer/Advisor identities (never astra). Max renders its own
+   *  native/peer roster and gated retained groups. Absent/`"standard"`
    *  preserves the full standard surface. Same field as
    *  `NativeAgentAvailability.profile` in claude-md-injection.ts. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
@@ -672,11 +674,16 @@ export function buildPeerAwarenessSnippet(opts: {
       `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is transcript-aware, primary-lead-only, and unavailable to native subagents and browse workers; it can detect framing drift but is not independent verification.${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
     ].join("\n")
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
-    const profileLabel = isCheap ? "cheap" : "fast"
-    const oracleDescriptor = isCheap ? "Grok 4.6 (200K/medium)" : "exact Opus 5 (1M/high)"
-    const astraDescriptor = isCheap ? "200K/medium" : "200K/high"
+    const isCheapest = opts.profile === "cheapest"
+    const profileLabel = isCheapest ? "cheapest" : isCheap ? "cheap" : "fast"
+    const oracleDescriptor = isCheapest
+      ? "GPT-5.6 Sol (200K/high)"
+      : isCheap
+        ? "Grok 4.6 (200K/medium)"
+        : "exact Opus 5 (1M/high)"
+    const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
     const fastPeersKey = key("peers")
     const fastSearchKey = key("search")
     const fastBrowserKey = key("browser")
@@ -689,7 +696,7 @@ export function buildPeerAwarenessSnippet(opts: {
     const artifactClause = opts.artifactToolsAvailable
       ? ` \`mcp__${fastPeersKey}__artifact_*\` provides artifact review with auto-open on plan completion.`
       : ""
-    const astraClause = opts.astraAvailable && opts.profile !== "cheap"
+    const astraClause = opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? ` \`mcp__${fastPeersKey}__astra\` is GPT-6 Astra (${astraDescriptor}), an expensive terminal escalation consultant available to the lead only for hardest dead ends.`
       : ""
     return [
@@ -871,7 +878,7 @@ export function buildPeerAwarenessSummary(opts: {
    *  matching option on `buildPeerAwarenessSnippet`). Every other flag on
    *  this call is ignored in favor of a short fast-profile rendering. Same
    *  field name/values as `NativeAgentAvailability.profile`. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
@@ -882,15 +889,20 @@ export function buildPeerAwarenessSummary(opts: {
       "Native roles can inspect the repository within their listed tools. Fresh-context peers see only the artifact and constraints supplied to them. Advisor is transcript-aware, optional, non-binding, and primary-lead-only; it can identify framing drift but is not independent verification or an approval gate. Detailed routing lives in each role or tool description, and the full gated capability inventory lives in CLAUDE.md.",
     ].join("\n")
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
-    const profileLabel = isCheap ? "Cheap" : "Fast"
-    const oracleDescriptor = isCheap ? "Grok 4.6 (200K/medium)" : "exact Opus 5 (1M/high)"
-    const astraDescriptor = isCheap ? "200K/medium" : "200K/high"
+    const isCheapest = opts.profile === "cheapest"
+    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : "Fast"
+    const oracleDescriptor = isCheapest
+      ? "GPT-5.6 Sol (200K/high)"
+      : isCheap
+        ? "Grok 4.6 (200K/medium)"
+        : "exact Opus 5 (1M/high)"
+    const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
     const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
     const browserClause = directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""
     const workerBrowseClause = opts.browseAvailable ? ` \`worker-browse\` runs delegated browsing tasks through \`mcp__${key("workers")}__browse\`.` : ""
-    const astraClause = opts.astraAvailable && opts.profile !== "cheap"
+    const astraClause = opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? ` \`mcp__${key("peers")}__astra\` is GPT-6 Astra (${astraDescriptor}), lead-only escalation for hardest dead ends.`
       : ""
     return [
@@ -1357,7 +1369,7 @@ export type WorkspaceSource = "argument" | "session" | "absent"
  *  changing standard/BYO behavior. */
 export interface McpToolCallContext {
   workspaceSource: WorkspaceSource
-  profileId?: "standard" | "fast" | "cheap" | "cheap1m" | "max"
+  profileId?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"
 }
 
 const WEB_SEARCH_DESCRIPTION =

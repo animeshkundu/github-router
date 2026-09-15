@@ -78,6 +78,30 @@ const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   },
 ])
 
+const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
+  // Cheapest reuses cheap's 200K pinning (`neverOneM`) but drops Grok (not in
+  // the cheapest roster) — rows are Luna (lead/GP/implementer), Sol (Plan +
+  // Oracle), and Gemini Flash (reviewer + Advisor).
+  {
+    id: "gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
+    behavesAs: "claude-opus-5",
+    neverOneM: true,
+  },
+  {
+    id: "gpt-5.6-luna",
+    label: "GPT-5.6 Luna",
+    behavesAs: "claude-opus-5",
+    neverOneM: true,
+  },
+  {
+    id: "gemini-3.8-flash",
+    label: "Gemini 3.8 Flash",
+    behavesAs: "claude-sonnet-5",
+    neverOneM: true,
+  },
+])
+
 /**
  * Return the ordered, profile-specific `/model` rows supported by the live
  * Copilot catalog. Fast intentionally shares Standard's four-row inventory;
@@ -103,7 +127,9 @@ export function selectableModelsInCatalog(
       ? MAX_PICKER_MODELS
       : profile === "cheap" || profile === "cheap1m"
         ? CHEAP_PICKER_MODELS
-        : STANDARD_PICKER_MODELS
+        : profile === "cheapest"
+          ? CHEAPEST_PICKER_MODELS
+          : STANDARD_PICKER_MODELS
   return declared
     .filter((entry) => present.has(entry.id))
     .map((entry) => ({

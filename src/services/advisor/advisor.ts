@@ -58,6 +58,10 @@ import {
 } from "~/lib/fast-profile-contract"
 import { HTTPError } from "~/lib/error"
 import { CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS } from "~/lib/cheap-profile-contract"
+import {
+  CHEAPEST_PROFILE_ADVISOR_EFFORT,
+  CHEAPEST_PROFILE_ADVISOR_MODEL,
+} from "~/lib/cheapest-profile-contract"
 import { MAX_ADVISOR_SYSTEM_PROMPT } from "~/lib/max-profile-prompts"
 import {
   fastEndpointForCatalogId,
@@ -162,6 +166,36 @@ function fastProfileAdvisorAvailable(): boolean {
     ADVISOR_FAST_PROFILE_MODEL,
     state.models?.data,
   ) === "responses"
+}
+
+/** The Advisor model for an authenticated cheapest primary lead:
+ * `gemini-3.8-flash` at high effort over its Chat endpoint, transcript
+ * capped at `CHEAPEST_PROFILE_ADVISOR_CONTEXT_TOKENS` (200K). */
+export const ADVISOR_CHEAPEST_PROFILE_MODEL = CHEAPEST_PROFILE_ADVISOR_MODEL
+export const ADVISOR_CHEAPEST_PROFILE_EFFORT = CHEAPEST_PROFILE_ADVISOR_EFFORT
+
+/** True only when the live Gemini entry satisfies the fixed cheapest
+ * transport (Chat Completions). */
+function cheapestProfileAdvisorAvailable(): boolean {
+  return fastEndpointForCatalogId(
+    ADVISOR_CHEAPEST_PROFILE_MODEL,
+    state.models?.data,
+  ) === "chat"
+}
+
+/** Pick the cheapest Advisor model. Throws when the catalog gate fails so
+ * the launch prerequisite surface (not a silent downgrade) owns the error. */
+export function resolveCheapestAdvisorModel(): AdvisorModelChoice {
+  if (!cheapestProfileAdvisorAvailable()) {
+    throw new Error(
+      `cheapest Advisor invariant failed: ${ADVISOR_CHEAPEST_PROFILE_MODEL} must advertise the Chat Completions endpoint`,
+    )
+  }
+  return {
+    model: ADVISOR_CHEAPEST_PROFILE_MODEL,
+    escalated: false,
+    fastProfile: true,
+  }
 }
 
 /** Output cap for the Anthropic-branch advisor call when the catalog carries no
@@ -1354,10 +1388,10 @@ export function buildAdvisorStream(opts: {
   /** True only for the authenticated max lead. Uses the same non-binding
    * consultant posture while retaining max's model and effort policy. */
   advisorMaxProfile?: boolean
-  /** True only for the authenticated cheap lead. Same fixed Sol advisor as
-   * fast (its consultant prompt `advisorFastProfile`), but the rendered
-   * transcript is capped at `CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS` (200K)
-   * — the cheap cost lever for advisor reads. */
+  /** True only for the authenticated cheap/cheapest lead. Same consultant
+   * prompt `advisorFastProfile`, but the rendered transcript is capped at
+   * the 200K `CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS` (identical value for
+   * cheapest) — the cost lever for advisor reads. */
   advisorCheapProfile?: boolean
   externalAborter?: AbortController
   /**

@@ -163,6 +163,9 @@ import {
   cheapAdvisorModel,
   cheapOracleModel,
   cheapReviewerModel,
+  cheapestAdvisorModel,
+  cheapestOracleModel,
+  cheapestReviewerModel,
 } from "./lib/mcp-capabilities"
 import {
   getClaudeCodeEnvVars,
@@ -175,12 +178,14 @@ import {
   formatMaxPrerequisiteFailure,
   formatCheap1mPrerequisiteFailure,
   formatCheapPrerequisiteFailure,
+  formatCheapestPrerequisiteFailure,
   profileDescriptor,
   resolveLaunchProfile,
   validateFastProfilePrerequisites,
   validateMaxProfileLaunch,
   validateCheap1mProfilePrerequisites,
   validateCheapProfilePrerequisites,
+  validateCheapestProfilePrerequisites,
 } from "./lib/launch-profile"
 import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
 import { LAUNCH_SECRET_HEADER } from "./lib/messages-identity-preflight"
@@ -195,7 +200,12 @@ import {
   cheapAdvisorClientEnabled,
   withFixedCheapAdvisorArg,
 } from "./lib/cheap-advisor-client"
+import {
+  cheapestAdvisorClientEnabled,
+  withFixedCheapestAdvisorArg,
+} from "./lib/cheapest-advisor-client"
 import { CHEAP_PROFILE_NATIVE_MODELS } from "./lib/cheap-profile-contract"
+import { CHEAPEST_PROFILE_NATIVE_MODELS } from "./lib/cheapest-profile-contract"
 
 export const claudeArgs = {
   ...sharedServerArgs,
@@ -203,7 +213,7 @@ export const claudeArgs = {
     alias: "m",
     type: "string",
     description:
-      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, max), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
+      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, cheapest, max), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
   },
   "codex-mcp": {
     type: "boolean" as const,
@@ -385,7 +395,8 @@ export const claude = defineCommand({
       (requestedLaunchProfileId === "fast"
         || requestedLaunchProfileId === "max"
         || requestedLaunchProfileId === "cheap"
-        || requestedLaunchProfileId === "cheap1m")
+        || requestedLaunchProfileId === "cheap1m"
+        || requestedLaunchProfileId === "cheapest")
       && !codexMcpEnabled
     ) {
       const profileName =
@@ -395,7 +406,9 @@ export const claude = defineCommand({
             ? "cheap"
             : requestedLaunchProfileId === "cheap1m"
               ? "cheap1m"
-              : "max"
+              : requestedLaunchProfileId === "cheapest"
+                ? "cheapest"
+                : "max"
       const message =
         `github-router claude -m ${profileName} requires codex MCP wiring for its native roster and dispatch ACL; remove --no-codex-mcp or choose a standard model.`
       process.stderr.write(`${message}\n`)
@@ -641,6 +654,14 @@ export const claude = defineCommand({
             : formatCheapPrerequisiteFailure(prereqCheck.missing)
         await fastFatal(message)
       }
+    } else if (launchProfileId === "cheapest") {
+      // The cheapest tier runs the Luna lead and every subagent at the 200K
+      // default window with fixed efforts/endpoints (see
+      // `validateCheapestProfilePrerequisites`).
+      const prereqCheck = validateCheapestProfilePrerequisites(state.models)
+      if (!prereqCheck.ok) {
+        await fastFatal(formatCheapestPrerequisiteFailure(prereqCheck.missing))
+      }
     } else {
       // Standard profile behavior is unchanged. This branch intentionally keeps
       // all ordinary launches on the existing catalog/model flow.
@@ -750,6 +771,13 @@ export const claude = defineCommand({
         extraArgs,
         cheapAdvisorClientEnabled(process.env),
       )
+    } else if (launchProfileId === "cheapest") {
+      // Same pinning discipline as cheap, but to the BARE Gemini Advisor slug
+      // (see `CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL`).
+      extraArgs = withFixedCheapestAdvisorArg(
+        extraArgs,
+        cheapestAdvisorClientEnabled(process.env),
+      )
     }
 
     // LLM toolbelt: materialize curated CLI tools (rg/fd/jq/sd/sg/yq)
@@ -778,8 +806,8 @@ export const claude = defineCommand({
     }
 
     // Best-effort ColBERT semantic-search provision + background index of
-    // the launch cwd (if a git repo). ON by default; never blocks launch,
-    // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
+    // the launch cwd (if a git repo). Opt-IN via --search (no-op otherwise);
+    // never blocks launch, never throws.
     void provisionAndIndexColbert()
 
     // Surface a terminally-failed semantic index to the HUMAN. Without this
@@ -851,7 +879,10 @@ export const claude = defineCommand({
     let peerAwarenessSnippet: string | undefined
     let peerAwarenessSummary: string | undefined
     let operatingGroupKeys: Partial<Record<McpGroup, string>> = {}
-    const isCheapLaunch = launchProfileId === "cheap" || launchProfileId === "cheap1m"
+    const isCheapLaunch =
+      launchProfileId === "cheap"
+      || launchProfileId === "cheap1m"
+      || launchProfileId === "cheapest"
     let fastWiringComplete = launchProfileId !== "fast" && !isCheapLaunch
     const astraAvailable = (launchProfileId === "fast" || launchProfileId === "cheap1m")
       && Boolean(fastAstraModel())
@@ -887,6 +918,14 @@ export const claude = defineCommand({
               implementer: CHEAP_PROFILE_NATIVE_MODELS.implementer,
               reviewer: cheapReviewerModel(),
             }
+        : launchProfileId === "cheapest"
+          ? {
+              Explore: CHEAPEST_PROFILE_NATIVE_MODELS.Explore,
+              Plan: CHEAPEST_PROFILE_NATIVE_MODELS.Plan,
+              "general-purpose": CHEAPEST_PROFILE_NATIVE_MODELS["general-purpose"],
+              implementer: CHEAPEST_PROFILE_NATIVE_MODELS.implementer,
+              reviewer: cheapestReviewerModel(),
+            }
         : launchProfileId === "max"
           ? {
               Explore: MAX_PROFILE_MODELS.luna,
@@ -911,6 +950,7 @@ export const claude = defineCommand({
         (launchProfileId === "fast"
           || launchProfileId === "cheap"
           || launchProfileId === "cheap1m"
+          || launchProfileId === "cheapest"
           ? nativeAgentModels.Explore
           : nativeAgentModels.scout)
         != null,
@@ -944,7 +984,10 @@ export const claude = defineCommand({
           ((args as Record<string, unknown>)["codex-cli"] as boolean | undefined) ?? false
         const isFastProfile = launchProfileId === "fast"
         const isMaxProfile = launchProfileId === "max"
-        const isCheapProfile = launchProfileId === "cheap" || launchProfileId === "cheap1m"
+        const isCheapProfile =
+          launchProfileId === "cheap"
+          || launchProfileId === "cheap1m"
+          || launchProfileId === "cheapest"
         // Fast and the cheap family share the exact fixed HTTP surface; max has its own.
         const isPinnedProfile = isFastProfile || isMaxProfile || isCheapProfile
         if ((isFastProfile || isCheapProfile) && requestedCli) {
@@ -1028,10 +1071,23 @@ export const claude = defineCommand({
         // restriction even if the catalog gate would otherwise pass.
         if (
           isPinnedProfile
-          && ((isCheapProfile ? cheapOracleModel() : fastOracleModel()) == null
-            || (isCheapProfile ? cheapAdvisorModel() : fastAdvisorModel()) == null
+          && ((launchProfileId === "cheapest"
+            ? cheapestOracleModel()
+            : isCheapProfile
+              ? cheapOracleModel()
+              : fastOracleModel()) == null
+            || (launchProfileId === "cheapest"
+              ? cheapestAdvisorModel()
+              : isCheapProfile
+                ? cheapAdvisorModel()
+                : fastAdvisorModel()) == null
             || nativeAgentModels.implementer == null)
         ) {
+          if (launchProfileId === "cheapest") {
+            throw new Error(
+              "cheapest profile prerequisite drift: exact implementer, oracle (gpt-5.6-sol), or advisor (gemini-3.8-flash) model no longer resolves",
+            )
+          }
           if (isCheapProfile) {
             // Cheap oracle (grok-4.6) and advisor (gpt-5.6-sol) are fixed
             // constants; the cheap drift surface is implementer + oracle.
@@ -1080,6 +1136,15 @@ export const claude = defineCommand({
                 fastImplementerModel: nativeAgentModels.implementer,
                 fastReviewerModel: nativeAgentModels.reviewer,
               }
+            : launchProfileId === "cheapest"
+              ? {
+                  cheapestProfile: true,
+                  cheapestExploreModel: nativeAgentModels.Explore,
+                  cheapestPlanModel: nativeAgentModels.Plan,
+                  cheapestGeneralPurposeModel: nativeAgentModels["general-purpose"],
+                  cheapestImplementerModel: nativeAgentModels.implementer,
+                  cheapestReviewerModel: nativeAgentModels.reviewer,
+                }
             : isCheapProfile
               ? {
                   cheapProfile: true,
@@ -1810,7 +1875,7 @@ export const claude = defineCommand({
           )
         }
       } catch (err) {
-        if (launchProfileId === "fast" || launchProfileId === "max" || launchProfileId === "cheap" || launchProfileId === "cheap1m") {
+        if (launchProfileId === "fast" || launchProfileId === "max" || launchProfileId === "cheap" || launchProfileId === "cheap1m" || launchProfileId === "cheapest") {
           if (fastLaunchId) unregisterLaunch(fastLaunchId)
           await disposeFastRuntime().catch(() => {})
           await server.close(true).catch(() => {})
@@ -1820,6 +1885,7 @@ export const claude = defineCommand({
             launchProfileId === "fast" ? "Fast"
             : launchProfileId === "cheap" ? "Cheap"
             : launchProfileId === "cheap1m" ? "Cheap1m"
+            : launchProfileId === "cheapest" ? "Cheapest"
             : "Max"
           const message = `${profileLabel} profile wiring failed; refusing to launch an unguarded session: ${err instanceof Error ? err.message : String(err)}`
           consola.error(message)

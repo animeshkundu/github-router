@@ -171,6 +171,18 @@ export interface State {
   powerBrowseEnabled: boolean
 
   /**
+   * Opt-in flag for ColBERT/colgrep semantic code search. Set by
+   * `setupAndServe` from the `--search` CLI flag or
+   * `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1` env var. When false, no colgrep
+   * binary/model is provisioned, no workspace is indexed, and the `code`
+   * MCP tool serves lexical results (with `lexical-fallback` source when
+   * semantic mode was requested). See `semanticSearchOptedIn()` in
+   * `src/lib/colbert/index.ts`; `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1`
+   * hard-disables regardless of this flag.
+   */
+  searchEnabled: boolean
+
+  /**
    * Humanlike pacing override:
    *   "on"   - --humanlike CLI flag or GH_ROUTER_HUMANLIKE=1 env;
    *            inject Beta-distributed inter-action delays, Bezier
@@ -242,6 +254,7 @@ export const state: State = {
   fleetEnabled: false,
   agentsEnabled: false,
   powerBrowseEnabled: false,
+  searchEnabled: false,
   humanlikeForce: "auto",
   sessionId: randomUUID(),
   machineId: randomBytes(32).toString("hex"),

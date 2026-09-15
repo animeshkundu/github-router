@@ -75,6 +75,9 @@ afterEach(async () => {
   await (await import("../../src/lib/colbert/runner")).__waitForAllInitsForTests()
   await fs.rm(colbertDir, { recursive: true, force: true }).catch(() => {})
   delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
+  delete process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH
+  const { state } = await import("../../src/lib/state")
+  state.searchEnabled = false
 })
 
 // ---------------------------------------------------------------------
@@ -191,7 +194,57 @@ describe("semanticSearchEnabled (internal colgrep-availability predicate)", () =
     expect(cap.semanticSearchEnabled()).toBe(false)
   })
 
-  test("true only when artifacts present AND smoke ok AND not opted out", async () => {
+  test("false by default even when artifacts present AND smoke ok (opt-in required)", async () => {
+    // Synthesize the on-disk presence the gate checks — without any opt-in
+    // signal the gate must still be false (semantic search is off by default).
+    const prov = await import("../../src/lib/colbert/provision")
+    const binDir = path.dirname(prov.colgrepBinaryPath())
+    const modelDir = prov.colbertModelDir()
+    const ortPath = prov.colbertOrtDylibPath()
+    await fs.mkdir(binDir, { recursive: true })
+    await fs.mkdir(modelDir, { recursive: true })
+    await fs.mkdir(path.dirname(ortPath), { recursive: true })
+    await writeInsideTestHome(prov.colgrepBinaryPath(), "binary")
+    await fs.writeFile(path.join(modelDir, "model_int8.onnx"), "model")
+    await fs.writeFile(ortPath, "dylib")
+    await fs.mkdir(colbertDir, { recursive: true })
+    const man = await import("../../src/lib/colbert/manifest")
+    const validMarker =
+      `colbert-smoke-ok\n` +
+      `binary=${man.colgrepBinAsset()!.sha256}\n` +
+      `ort=${man.ortLibAsset()!.sha256}\n` +
+      `model=${man.MODEL_REVISION}\n`
+    await fs.writeFile(path.join(colbertDir, ".smoke-ok"), validMarker)
+
+    expect(prov.colbertArtifactsPresent()).toBe(true)
+    expect(prov.colbertSmokeOk()).toBe(true)
+    const cap = await import("../../src/lib/mcp-capabilities")
+    expect(cap.semanticSearchEnabled()).toBe(false)
+  })
+
+  test("opt-in matrix: --search state / enable env on; disable env wins over both", async () => {
+    const { semanticSearchOptedIn } = await import("../../src/lib/colbert/index")
+    const { state } = await import("../../src/lib/state")
+    // Default: off.
+    expect(semanticSearchOptedIn()).toBe(false)
+    // --search launch flag opts in.
+    state.searchEnabled = true
+    expect(semanticSearchOptedIn()).toBe(true)
+    state.searchEnabled = false
+    // Env opt-in works without the flag.
+    process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH = "1"
+    expect(semanticSearchOptedIn()).toBe(true)
+    // Explicit disable wins over the enable env …
+    process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = "1"
+    expect(semanticSearchOptedIn()).toBe(false)
+    // … and over the launch flag too.
+    state.searchEnabled = true
+    expect(semanticSearchOptedIn()).toBe(false)
+  })
+
+  test("true only when opted in AND artifacts present AND smoke ok", async () => {
+    // Opt in for this gate test (afterEach resets it).
+    process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH = "1"
     // Synthesize the on-disk presence the gate checks.
     const prov = await import("../../src/lib/colbert/provision")
     const binDir = path.dirname(prov.colgrepBinaryPath())
@@ -1432,6 +1485,8 @@ describe("provisioning self-repair (corrupt install, valid sidecar)", () => {
 
 describe("colbertDegradedWarning (launch banner)", () => {
   test("warns for a terminally-failed index, silent otherwise", async () => {
+    // The warning is gated on the semantic-search opt-in (afterEach resets it).
+    process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH = "1"
     const store = await import("../../src/lib/colbert/index-store")
     const { colbertDegradedWarning } = await import("../../src/lib/colbert")
 
@@ -1489,6 +1544,20 @@ describe("colbertDegradedWarning (launch banner)", () => {
     expect(await colbertDegradedWarning(wsStuck)).toMatch(
       /GH_ROUTER_COLBERT_INIT_STALL_MS/,
     )
+  })
+
+  test("silent when not opted in, even for a terminally-failed index", async () => {
+    const store = await import("../../src/lib/colbert/index-store")
+    const { colbertDegradedWarning } = await import("../../src/lib/colbert")
+    const wsFailed = path.join(TEST_HOME, "warn-failed-not-opted-in")
+    await store.writeColbertMeta({
+      workspace: wsFailed,
+      model: "LateOn-Code-edge",
+      modelRev: "rev",
+      status: "failed",
+      failureClass: "error",
+    })
+    expect(await colbertDegradedWarning(wsFailed)).toBeNull()
   })
 })
 

@@ -19,6 +19,7 @@ const baseState: State = {
   fleetEnabled: false,
   agentsEnabled: false,
   powerBrowseEnabled: false,
+  searchEnabled: false,
   humanlikeForce: "auto",
   sessionId: "test-session-id",
   machineId: "test-machine-id",

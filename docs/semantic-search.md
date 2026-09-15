@@ -1,14 +1,16 @@
 # Semantic code search (ColBERT sidecar)
 
-`github-router` ships an opt-OUT semantic code search capability, backed by a router-managed [`colgrep`](https://github.com/lightonai/next-plaid) sidecar (ColBERT / PLAID late-interaction). It is folded into the unified `mcp__search__code` tool as the default `mode: "semantic"`.
+`github-router` ships an opt-IN semantic code search capability, backed by a router-managed [`colgrep`](https://github.com/lightonai/next-plaid) sidecar (ColBERT / PLAID late-interaction). It is folded into the unified `mcp__search__code` tool as the default `mode: "semantic"`.
 
 Design + adversarial-review record:
 [`research/colbert-sidecar-design.md`](research/colbert-sidecar-design.md).
 
-## On by default, availability-gated
+## Off by default, opt-in + availability-gated
 
-Semantic search is **on by default**. At `start` / `claude` / `codex`
-launch the proxy, fire-and-forget and non-blocking:
+Semantic search is **off by default**. Opt in with `--search` on
+`start` / `claude` / `codex` / `serve`, or with
+`GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`. When opted in, at launch the
+proxy, fire-and-forget and non-blocking:
 
 1. **Provisions** three SHA256-pinned artifacts into the router data dir
    (`~/.local/share/github-router/colbert/`): the `colgrep` binary, the
@@ -23,14 +25,18 @@ launch the proxy, fire-and-forget and non-blocking:
    is the guard against that.
 3. **Background-indexes** the launch cwd if it is a git repo.
 
-The capability gate `semanticSearchEnabled()` is **availability-based**
-(exactly like `browserToolsEnabled()`): the tool is listed/callable only
-when the artifacts are present on disk **and** the smoke test passed
-**and** the operator has not opted out. On CI, sandboxes, or any host
-where provisioning hasn't completed, the tool is simply absent - the
+The capability gate `semanticSearchEnabled()` is **opt-in AND
+availability-based** (exactly like `browserToolsEnabled()`): semantic
+results are served only when the operator opted in (`--search` /
+`GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`) **and** the artifacts are present
+on disk **and** the smoke test passed. Without the opt-in, no colgrep
+binary/model is provisioned, no workspace is indexed, and the `code`
+tool serves lexical results. On CI, sandboxes, or any host where
+provisioning hasn't completed, the tool falls back to lexical - the
 `tools/list` surface stays `{code, web}`.
 
-**Opt out:** `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1`.
+**Opt in:** `--search` or `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`.
+**Hard off:** `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1` (wins over both).
 
 ## Contract split: Strict runner, fallback tool
 
@@ -210,8 +216,8 @@ because the only signals were an MCP `notice` string the model reads and a
   source.
 - `colbertDegradedWarning()` writes one line to stderr at `claude` / `codex` /
   `start` launch when the current workspace's index is in a terminal `failed`
-  state, naming the class. It is gated only on the
-  `GH_ROUTER_DISABLE_SEMANTIC_SEARCH` opt-out — deliberately NOT on
+  state, naming the class. It is gated only on the semantic-search opt-in
+  (`--search` / `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`) — deliberately NOT on
   `colbertSearchEnabled()`, since missing artifacts or a failed smoke test are
   themselves degraded states worth reporting. The log pointer tracks where the
   detail actually went: `claude`/`codex` call `enableFileLogging()` so it names
