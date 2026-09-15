@@ -60,8 +60,40 @@ describe("aic ledger", () => {
     // Reconstructed per-type nano: 11×20e9/1e6=220000 input, 5×120e9/1e6=600000 output, ×2.
     expect(snap.perTokenType.input).toBe(440000)
     expect(snap.perTokenType.output).toBe(1200000)
+    // Raw token counts retained per model per type (11 in + 5 out, ×2).
+    expect(snap.tokensByModel["gpt-5.6-luna"]).toEqual({
+      input: 22,
+      cache_read: 0,
+      cache_write: 0,
+      output: 10,
+      other: 0,
+    })
+    // Models recorded without details still get a zeroed entry.
+    expect(snap.tokensByModel["claude-haiku-4.5"]).toEqual({
+      input: 0,
+      cache_read: 0,
+      cache_write: 0,
+      output: 0,
+      other: 0,
+    })
     // Persisted file round-trips through the hook reader.
     expect(readAicSnapshotFile(ledgerFile)).toEqual(snap)
+  })
+
+  test("unknown token types land in the other bucket, never dropped", () => {
+    recordAic(
+      "m",
+      extractCopilotUsage({
+        total_nano_aiu: 100000,
+        token_details: [
+          { batch_size: 1000000, cost_per_batch: 1000000, token_count: 7, token_type: "weird_future_type" },
+          { batch_size: 1000000, cost_per_batch: 1000000, token_count: 3 },
+        ],
+      }),
+    )
+    const snap = aicSnapshot()
+    expect(snap.tokensByModel["m"]?.other).toBe(10)
+    expect(snap.tokensByModel["m"]?.input).toBe(0)
   })
 
   test("record is a no-op on undefined usage", () => {
@@ -106,5 +138,34 @@ describe("aic ledger", () => {
     await fs.writeFile(ledgerFile, JSON.stringify([1, 2]))
     expect(readAicSnapshotFile(ledgerFile)).toBeUndefined()
     expect(readAicSnapshotFile(path.join(dir, "missing.json"))).toBeUndefined()
+  })
+
+  test("pre-tokens snapshot files read with empty tokensByModel", async () => {
+    await fs.writeFile(
+      ledgerFile,
+      JSON.stringify({
+        totalNanoAiu: 820000,
+        requests: 1,
+        perModel: { "gpt-5.6-luna": { nanoAiu: 820000, requests: 1 } },
+        perTokenType: { input: 220000 },
+      }),
+    )
+    const snap = readAicSnapshotFile(ledgerFile)
+    expect(snap?.tokensByModel).toEqual({})
+    expect(snap?.totalNanoAiu).toBe(820000)
+  })
+
+  test("malformed tokensByModel degrades to empty rather than failing", async () => {
+    await fs.writeFile(
+      ledgerFile,
+      JSON.stringify({
+        totalNanoAiu: 1,
+        requests: 1,
+        perModel: {},
+        perTokenType: {},
+        tokensByModel: { m: { input: -5 }, n: "nope" },
+      }),
+    )
+    expect(readAicSnapshotFile(ledgerFile)?.tokensByModel).toEqual({})
   })
 })

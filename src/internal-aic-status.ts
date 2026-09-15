@@ -3,16 +3,25 @@
  * Claude Code session's `statusLine` invokes (registered into the mirrored
  * settings.json by the launcher — see `src/lib/aic-statusline-settings.ts`).
  *
- * It reads this launch's AIC ledger snapshot (path via `GH_ROUTER_AIC_LEDGER`,
- * set in the spawned child's env) and prints a single-line status fragment:
- * `[AIC 12.42]`. When the user already had a `statusLine` command, its text
- * arrives via `GH_ROUTER_AIC_USER_STATUSLINE` and is run here so the output is
- * one composed line: `[AIC 12.42] <user line>`.
+ * Default-on rich status line: Claude Code's stdin JSON is rendered natively
+ * (see `src/lib/default-statusline.ts`) as
+ * `[ctx bar] % | model | dir (branch) | ~$actual | in/out | dur | +a -r`,
+ * with this launch's AIC ledger total PINNED ahead of it: `[AIC 12.42] ...`.
+ * The `~$` segment is the factor-discounted actual (per-model static
+ * factors over ledger nano, capped at AIC × $0.01 — see
+ * `src/lib/copilot-discount.ts`), not Claude's list-price `total_cost_usd`.
+ * Narrow terminals drop segments right-to-left; AIC is never dropped.
+ *
+ * When the user already had a `statusLine` command, its text arrives via
+ * `GH_ROUTER_AIC_USER_STATUSLINE` and is run instead of the rich default
+ * (their script already renders ctx/cost/model itself — rendering both
+ * would duplicate every segment), so the output stays one composed line:
+ * `[AIC 12.42] <user line>`.
  *
  * Status-line contract: stdout is the rendered line (first line wins), fast
- * (<1s budget — the ledger file read is local; the user command gets a 5s
- * cap), and NEVER failing (any error → print whatever is available → exit 0).
- * Stdin (Claude Code's session JSON) is drained and ignored.
+ * (<1s budget — ledger read is local, git branch has a 300ms cap, the user
+ * command gets a 5s cap), and NEVER failing (any error → print whatever is
+ * available → exit 0).
  */
 
 import { defineCommand } from "citty"
@@ -24,17 +33,22 @@ import {
   formatAicStatus,
   readAicSnapshotFile,
 } from "./lib/aic-ledger"
+import { discountedUsdForSnapshot } from "./lib/copilot-discount"
+import { buildRichStatusLine } from "./lib/default-statusline"
 
 /**
- * Read stdin synchronously and discard. Claude Code pipes session JSON to the
- * statusLine command; an unread pipe can SIGPIPE the writer on some platforms.
+ * Read stdin synchronously. Claude Code pipes session JSON to the
+ * statusLine command; an unread pipe can SIGPIPE the writer on some
+ * platforms. Returns "" when stdin is a TTY or unreadable — callers render
+ * placeholders/omit segments rather than failing.
  */
-function drainStdin(): void {
+function readStdin(): string {
   try {
-    if (process.stdin.isTTY) return
-    readFileSync(0, "utf8")
+    if (process.stdin.isTTY) return ""
+    return readFileSync(0, "utf8")
   } catch {
     // Best-effort; the ledger read below does not depend on stdin.
+    return ""
   }
 }
 
@@ -80,15 +94,23 @@ export function runUserStatusLine(
   }
 }
 
-function readAicFragment(): string {
+function readAicSnapshot(): { fragment: string; actualUsd?: number } {
   try {
     const ledgerPath = process.env.GH_ROUTER_AIC_LEDGER
-    if (!ledgerPath) return ""
+    if (!ledgerPath) return { fragment: "" }
     const snapshot = readAicSnapshotFile(ledgerPath)
-    if (!snapshot) return ""
-    return formatAicStatus(snapshot)
+    if (!snapshot) return { fragment: "" }
+    // No priced responses yet → no fragment AND no USD: the `~$`
+    // segment renders its `~$--` placeholder instead of `~$0.00`.
+    if (snapshot.requests === 0 || snapshot.totalNanoAiu <= 0) {
+      return { fragment: "" }
+    }
+    return {
+      fragment: formatAicStatus(snapshot),
+      actualUsd: discountedUsdForSnapshot(snapshot).total,
+    }
   } catch {
-    return ""
+    return { fragment: "" }
   }
 }
 
@@ -96,14 +118,32 @@ export const internalAicStatus = defineCommand({
   meta: {
     name: "internal-aic-status",
     description:
-      "Internal: Claude Code statusLine handler printing this session's AIC total.",
+      "Internal: Claude Code statusLine handler printing AIC total + rich session line.",
   },
   async run() {
-    drainStdin()
-    const aic = readAicFragment()
+    const stdinRaw = readStdin()
+    const { fragment: aic, actualUsd } = readAicSnapshot()
     const userCommand = process.env.GH_ROUTER_AIC_USER_STATUSLINE ?? ""
-    const userLine = userCommand ? runUserStatusLine(userCommand) : ""
-    const line = composeAicStatusLine(aic, userLine)
+    // Wrap mode: the user's own script already renders ctx/cost/model from
+    // the same stdin JSON — run it and prepend AIC only.
+    if (userCommand.trim()) {
+      const userLine = runUserStatusLine(userCommand)
+      const line = composeAicStatusLine(aic, userLine)
+      if (line) process.stdout.write(`${line}\n`)
+      process.exitCode = 0
+      return
+    }
+    // Default mode: native rich line with AIC pinned ahead of it. The
+    // builder never throws; an empty result (no ledger yet AND no stdin)
+    // prints nothing rather than a placeholder line.
+    let line: string
+    try {
+      line = buildRichStatusLine(stdinRaw, aic, {
+        ...(actualUsd !== undefined ? { actualUsd } : {}),
+      })
+    } catch {
+      line = aic.trim()
+    }
     if (line) process.stdout.write(`${line}\n`)
     // Signal success WITHOUT tearing the loop down — same resolution as the
     // other internal hooks (see main.ts help-path comment): a hard

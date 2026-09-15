@@ -1,12 +1,15 @@
 /**
- * Claude Code `statusLine` injection for the per-session AIC total.
+ * Claude Code `statusLine` injection for the per-session AIC total + rich
+ * default session line.
  *
  * `github-router claude` writes `{ statusLine: { type: "command", command } }`
- * into the mirrored settings.json so the status bar shows `[AIC 12.42]`,
+ * into the mirrored settings.json so the status bar shows
+ * `[AIC 12.42] [####------] 42% | model | dir (branch) | ...`,
  * updating as the ledger file grows. The command itself
  * (`internal-aic-status`) reads the ledger path from `GH_ROUTER_AIC_LEDGER`
  * in the spawned child's env — never a path baked into settings — so the
- * same mirror mechanics work for concurrent launches.
+ * same mirror mechanics work for concurrent launches. AIC is pinned: it
+ * renders even when the terminal is too narrow for any other segment.
  *
  * Wrap-don't-clobber: when the user's own config already defines `statusLine`
  * as a `{type:"command", command:string}` shape, that command is preserved via

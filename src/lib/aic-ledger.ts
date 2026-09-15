@@ -35,12 +35,32 @@ export interface AicModelEntry {
   requests: number
 }
 
+/** Token counts per model per upstream `token_type`, for the cost table. */
+export interface AicModelTokens {
+  /** Upstream `input` type: fresh (uncached) input tokens. */
+  input: number
+  /** Upstream `cache_read` type. */
+  cache_read: number
+  /** Upstream `cache_write` type. */
+  cache_write: number
+  /** Upstream `output` type. */
+  output: number
+  /** Any other/missing `token_type`: never dropped silently, priced at input. */
+  other: number
+}
+
 export interface AicSnapshot {
   totalNanoAiu: number
   requests: number
   perModel: Record<string, AicModelEntry>
   /** Reconstructed nano-AIU per token_type (input/cache_read/cache_write/output). */
   perTokenType: Record<string, number>
+  /** Raw token counts per model per type (exit cost table + rate math). */
+  tokensByModel: Record<string, AicModelTokens>
+}
+
+function emptyModelTokens(): AicModelTokens {
+  return { input: 0, cache_read: 0, cache_write: 0, output: 0, other: 0 }
 }
 
 function emptySnapshot(): AicSnapshot {
@@ -49,6 +69,7 @@ function emptySnapshot(): AicSnapshot {
     requests: 0,
     perModel: {},
     perTokenType: {},
+    tokensByModel: {},
   }
 }
 
@@ -104,6 +125,7 @@ export function recordAic(
   entry.nanoAiu += usage.totalNanoAiu
   entry.requests += 1
   ledger.perModel[key] = entry
+  ledger.tokensByModel[key] ??= emptyModelTokens()
   for (const detail of usage.tokenDetails) {
     const type = detail.tokenType ?? "unknown"
     // Reconstruct nano-AIU per token type from the priced detail.
@@ -111,8 +133,35 @@ export function recordAic(
       (detail.tokenCount * detail.costPerBatch) / detail.batchSize,
     )
     ledger.perTokenType[type] = (ledger.perTokenType[type] ?? 0) + nano
+    // Retain raw counts per model per type for the exit cost table. The
+    // hook only reads them; pricing still flows exclusively through nano.
+    const counts = ledger.tokensByModel[key] ?? emptyModelTokens()
+    const bucket = tokenBucket(type)
+    counts[bucket] += detail.tokenCount
+    ledger.tokensByModel[key] = counts
   }
   persistBestEffort()
+}
+
+/**
+ * Map an upstream `token_type` to its count bucket. Unknown/missing types
+ * land in `other` (priced at the model's input factor downstream) rather
+ * than being dropped — the observed universe is the four known types, this
+ * is the just-in-case bucket.
+ */
+function tokenBucket(type: string): keyof AicModelTokens {
+  switch (type) {
+    case "input":
+      return "input"
+    case "cache_read":
+      return "cache_read"
+    case "cache_write":
+      return "cache_write"
+    case "output":
+      return "output"
+    default:
+      return "other"
+  }
 }
 
 /**
@@ -144,6 +193,9 @@ export function aicSnapshot(): AicSnapshot {
       Object.entries(ledger.perModel).map(([k, v]) => [k, { ...v }]),
     ),
     perTokenType: { ...ledger.perTokenType },
+    tokensByModel: Object.fromEntries(
+      Object.entries(ledger.tokensByModel).map(([k, v]) => [k, { ...v }]),
+    ),
   }
 }
 
@@ -176,10 +228,36 @@ export function readAicSnapshotFile(file: string): AicSnapshot | undefined {
         record.perTokenType && typeof record.perTokenType === "object"
           ? (record.perTokenType as AicSnapshot["perTokenType"])
           : {},
+      // Pre-tokens files (written before this field existed) read as empty
+      // rather than failing the hook.
+      tokensByModel: sanitizeModelTokens(record.tokensByModel),
     }
   } catch {
     return undefined
   }
+}
+
+/** Best-effort sanitize of persisted per-model token counts; `{}` when absent. */
+function sanitizeModelTokens(value: unknown): Record<string, AicModelTokens> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {}
+  const out: Record<string, AicModelTokens> = {}
+  for (const [model, counts] of Object.entries(value as Record<string, unknown>)) {
+    if (!counts || typeof counts !== "object" || Array.isArray(counts)) continue
+    const entry = counts as Record<string, unknown>
+    const clean = emptyModelTokens()
+    let ok = true
+    for (const field of ["input", "cache_read", "cache_write", "output", "other"] as const) {
+      const n = entry[field]
+      if (n === undefined) continue
+      if (typeof n !== "number" || !Number.isFinite(n) || n < 0) {
+        ok = false
+        break
+      }
+      clean[field] = Math.floor(n)
+    }
+    if (ok) out[model] = clean
+  }
+  return out
 }
 
 /** Total credits for a snapshot. */
