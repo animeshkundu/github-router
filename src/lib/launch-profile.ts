@@ -7,6 +7,11 @@ import {
   CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS,
 } from "./cheap-profile-contract"
 import {
+  CHEAPEST_PROFILE_MODELS,
+  CHEAPEST_PROFILE_NATIVE_AGENT_NAMES,
+  CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+} from "./cheapest-profile-contract"
+import {
   FAST_PROFILE_MODELS,
   FAST_PROFILE_NATIVE_AGENT_NAMES,
 } from "./fast-profile-contract"
@@ -34,14 +39,24 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  its full 1M window (`[1m]` decoration) and the `astra` peer remains
  *  available next to Oracle. Both cheap variants share the same `CHEAP_*`
  *  contract values; the three gates that differ are the lead slug, the lead
- *  prereq window, and the cheap1m-only `astra` peer.
+ *  prereq window, and the cheap1m-only `astra` peer. `"cheapest"` is the
+ *  all-200K cheapest tier: a Luna/max lead, Luna Explore/GP/implementer
+ *  roles, a Sol/high Plan and Oracle, and Gemini/high reviewer and Advisor —
+ *  Oracle-only peer set, no `astra` (see `./cheapest-profile-contract`).
  *
  *  Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
  *  from the resolved lead model id — so `-m gpt-5.6-luna` (a direct pin of
  *  the same model the fast profile drives) stays a standard-surface launch,
- *  and only the literal `fast`/`cheap`/`cheap1m` aliases narrow the surface.
+ *  and only the literal `fast`/`cheap`/`cheap1m`/`cheapest` aliases narrow
+ *  the surface.
  */
-export type LaunchProfileId = "standard" | "fast" | "max" | "cheap" | "cheap1m"
+export type LaunchProfileId =
+  | "standard"
+  | "fast"
+  | "max"
+  | "cheap"
+  | "cheap1m"
+  | "cheapest"
 
 /**
  * Everything a launch profile needs to declare about its own surface.
@@ -122,6 +137,21 @@ export const CHEAP_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
+ * The `-m cheapest` roster: the exact cheap surface and groups, but Luna-led
+ * (`gpt-5.6-luna`/max at the 200K default window), a Gemini/high Advisor, a
+ * Sol/high Oracle, and a Gemini/high reviewer. Oracle-only peer set, no
+ * `astra`. Hard-denies match fast's: core workers, `orchestrate`, `decide`,
+ * `fleet`, and `first-mate`.
+ */
+export const CHEAPEST_PROFILE: LaunchProfileDescriptor = Object.freeze({
+  id: "cheapest",
+  nativeRoster: new Set(CHEAPEST_PROFILE_NATIVE_AGENT_NAMES),
+  personaAllowlist: new Set(["oracle"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser"]),
+  hasCoordinator: false,
+})
+
+/**
  * The `-m max` profile: Sol/Luna-led, browse-only workers, and explicit
  * cross-lab peer names. The descriptor is a hard projection for bound launch
  * requests; unbound/BYO traffic remains standard because it has no registry
@@ -149,6 +179,7 @@ export function profileDescriptor(id: LaunchProfileId): LaunchProfileDescriptor 
   if (id === "max") return MAX_PROFILE
   if (id === "cheap1m") return CHEAP1M_PROFILE
   if (id === "cheap") return CHEAP_PROFILE
+  if (id === "cheapest") return CHEAPEST_PROFILE
   return STANDARD_PROFILE
 }
 
@@ -169,6 +200,7 @@ export function resolveLaunchProfile(modelArg: string | undefined): LaunchProfil
   if (arg === "max") return "max"
   if (arg === "cheap1m") return "cheap1m"
   if (arg === "cheap") return "cheap"
+  if (arg === "cheapest") return "cheapest"
   return "standard"
 }
 
@@ -736,6 +768,122 @@ export function formatCheapPrerequisiteFailure(missing: ReadonlyArray<string>): 
     + `which this account's catalog does not fully provide:\n`
     + missing.map((m) => `  - ${m}`).join("\n")
     + `\n\nFalling back or silently dropping an agent is not supported for the cheap `
+    + `profile's exact roster. Run plain \`github-router claude\` instead.`
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Cheapest-profile startup prerequisites (`-m cheapest`, all-200K tier)
+// ---------------------------------------------------------------------------
+
+export interface CheapestPrerequisiteCheck {
+  ok: boolean
+  /** Human-readable description of each missing/invalid requirement, empty
+   *  when `ok`. */
+  missing: ReadonlyArray<string>
+}
+
+/** The subagent window floor: every cheapest role runs at the 200K default. */
+const CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS =
+  CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS
+
+/**
+ * Validate the live Copilot catalog for `-m cheapest`: Luna lead at the 200K
+ * default window, Luna Explore/Plan/GP/implementer roles, Gemini reviewer and
+ * Advisor, and a Sol Oracle — all at the 200K default with their fixed
+ * efforts and supported endpoints.
+ */
+export function validateCheapestProfilePrerequisites(
+  catalog: ModelsResponse | undefined,
+): CheapestPrerequisiteCheck {
+  const missing: Array<string> = []
+
+  const luna = findModel(catalog, CHEAPEST_PROFILE_MODELS.lead)
+  if (!luna) {
+    missing.push(`${CHEAPEST_PROFILE_MODELS.lead}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(luna)) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.lead}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(luna, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${CHEAPEST_PROFILE_MODELS.lead}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (
+      !supportsEffort(luna, "high")
+      || !supportsEffort(luna, "max")
+      || !supportsEffort(luna, "xhigh")
+    ) {
+      missing.push(
+        `${CHEAPEST_PROFILE_MODELS.lead}: does not advertise "high", "max", and "xhigh" reasoning effort`,
+      )
+    }
+    if (!supportsEndpoint(luna, "responses")) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.lead}: does not advertise a supported Responses endpoint`)
+    }
+  }
+
+  const sol = findModel(catalog, CHEAPEST_PROFILE_MODELS.plan)
+  if (!sol) {
+    missing.push(`${CHEAPEST_PROFILE_MODELS.plan}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(sol)) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.plan}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(sol, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${CHEAPEST_PROFILE_MODELS.plan}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(sol, "high")) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.plan}: does not advertise a "high" reasoning effort`)
+    }
+    if (!supportsEndpoint(sol, "responses")) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.plan}: does not advertise a supported Responses endpoint`)
+    }
+    if (!hasUsablePromptMetadata(sol)) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.plan}: no usable max_prompt_tokens metadata (Oracle brief)`)
+    }
+  }
+
+  const gemini = findModel(catalog, CHEAPEST_PROFILE_MODELS.reviewer)
+  if (!gemini) {
+    missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(gemini)) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(gemini, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${CHEAPEST_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(gemini, "high")) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise a "high" reasoning effort`)
+    }
+    if (!supportsEndpoint(gemini, "chat")) {
+      missing.push(
+        `${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise a supported chat-completions endpoint`,
+      )
+    }
+  }
+
+  return { ok: missing.length === 0, missing }
+}
+
+/**
+ * Format `validateCheapestProfilePrerequisites`'s failure list into the
+ * launch error message.
+ */
+export function formatCheapestPrerequisiteFailure(
+  missing: ReadonlyArray<string>,
+): string {
+  return (
+    `github-router claude -m cheapest requires the following live-catalog capabilities, `
+    + `which this account's catalog does not fully provide:\n`
+    + missing.map((m) => `  - ${m}`).join("\n")
+    + `\n\nFalling back or silently dropping an agent is not supported for the cheapest `
     + `profile's exact roster. Run plain \`github-router claude\` instead.`
   )
 }

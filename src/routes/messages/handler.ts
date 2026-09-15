@@ -40,6 +40,7 @@ import { preprocessFastRequest } from "~/lib/fast-request-preprocess"
 import { maxRequestError } from "~/lib/max-request-preprocess"
 import { FAST_PROFILE_ADVISOR_MODEL } from "~/lib/fast-profile-contract"
 import { CHEAP_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheap-profile-contract"
+import { CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheapest-profile-contract"
 import {
   MAX_PROFILE_ADVISOR_INSTRUCTIONS,
   maxAdvisorEffortForModel,
@@ -61,6 +62,7 @@ import {
   isAdvisorRequested,
   resolveAdvisorEffort,
   resolveAdvisorModel,
+  resolveCheapestAdvisorModel,
 } from "~/services/advisor/advisor"
 import { createMessages } from "~/services/copilot/create-messages"
 import type { Model } from "~/services/copilot/get-models"
@@ -207,6 +209,29 @@ function fastAdvisorMetadataMismatch(rawBody: string): string | undefined {
     }
     if (stripTrailingOneMSuffix(model).base !== FAST_PROFILE_ADVISOR_MODEL) {
       return `the native Advisor tool requested ${JSON.stringify(model)} instead of ${JSON.stringify(FAST_PROFILE_ADVISOR_MODEL)}`
+    }
+  }
+  return undefined
+}
+
+function cheapestAdvisorMetadataMismatch(rawBody: string): string | undefined {
+  let body: AnyRecord
+  try {
+    body = JSON.parse(rawBody) as AnyRecord
+  } catch {
+    return undefined
+  }
+  if (!Array.isArray(body.tools) || body.tools.length === 0) return undefined
+  for (const tool of body.tools as Array<AnyRecord>) {
+    if (!tool || typeof tool !== "object") continue
+    const type = tool.type
+    if (typeof type !== "string" || !type.startsWith("advisor_")) continue
+    const model = tool.model
+    if (typeof model !== "string") {
+      return "the native Advisor tool omitted its fixed model"
+    }
+    if (stripTrailingOneMSuffix(model).base !== CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL) {
+      return `the native Advisor tool requested ${JSON.stringify(model)} instead of ${JSON.stringify(CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL)}`
     }
   }
   return undefined
@@ -420,24 +445,30 @@ export async function handleCompletion(c: Context) {
   const maxProfileRequest = identity.launch?.profileId === "max"
   const cheapProfileRequest =
     identity.launch?.profileId === "cheap" || identity.launch?.profileId === "cheap1m"
+  const cheapestProfileRequest = identity.launch?.profileId === "cheapest"
   const subagentRequest = Boolean(c.req.header("x-claude-code-agent-id"))
   const fastSubagentRequest = fastProfileRequest && subagentRequest
   const maxSubagentRequest = maxProfileRequest && subagentRequest
   const cheapSubagentRequest = cheapProfileRequest && subagentRequest
+  const cheapestSubagentRequest = cheapestProfileRequest && subagentRequest
   const fastLeadAdvisor = fastProfileRequest && !fastSubagentRequest
   const maxLeadAdvisor = maxProfileRequest && !maxSubagentRequest
   const cheapLeadAdvisor = cheapProfileRequest && !cheapSubagentRequest
-  const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest && !cheapSubagentRequest
+  const cheapestLeadAdvisor = cheapestProfileRequest && !cheapestSubagentRequest
+  const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest && !cheapSubagentRequest && !cheapestSubagentRequest
   const fastAdvisorEnabled = fastLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const maxAdvisorEnabled = maxLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const cheapAdvisorEnabled = cheapLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
+  const cheapestAdvisorEnabled = cheapestLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const advisorBehaviorEnabled = fastLeadAdvisor
     ? fastAdvisorEnabled
     : cheapLeadAdvisor
       ? cheapAdvisorEnabled
-      : maxLeadAdvisor
-        ? maxAdvisorEnabled
-        : advisorEnabled
+      : cheapestLeadAdvisor
+        ? cheapestAdvisorEnabled
+        : maxLeadAdvisor
+          ? maxAdvisorEnabled
+          : advisorEnabled
   let fastAdvisorChoice: ReturnType<typeof resolveAdvisorModel> | undefined
   let maxAdvisorChoice: { model: string; effort: string } | undefined
   if (maxAdvisorEnabled) {
@@ -528,6 +559,40 @@ export async function handleCompletion(c: Context) {
       )
     }
   }
+  if (cheapestAdvisorEnabled) {
+    // Fixed Gemini advisor at the 200K default window (bare client pin) with
+    // the 200K transcript cap applied at dispatch, mirroring cheap's shape.
+    const mismatch = cheapestAdvisorMetadataMismatch(rawBody)
+
+    if (mismatch) {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "invalid_request_error",
+            message:
+              `Cheapest Advisor model mismatch: ${mismatch}. `
+              + `Run \`/advisor ${CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL}\` to restore the fixed cheapest profile, or relaunch with \`github-router claude -m cheapest\`.`,
+          },
+        },
+        400,
+      )
+    }
+    try {
+      fastAdvisorChoice = resolveCheapestAdvisorModel()
+    } catch (error) {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "api_error",
+            message: error instanceof Error ? error.message : String(error),
+          },
+        },
+        503,
+      )
+    }
+  }
 
   const fastPreprocess = preprocessFastRequest(
     rawBody,
@@ -537,7 +602,11 @@ export async function handleCompletion(c: Context) {
   if (fastPreprocess.retiredAlias || fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
     const profileId = identity.launch?.profileId
     const profileLabel =
-      profileId === "cheap" || profileId === "cheap1m" ? "cheap" : "fast"
+      profileId === "cheap" || profileId === "cheap1m"
+        ? "cheap"
+        : profileId === "cheapest"
+          ? "cheapest"
+          : "fast"
     const message = fastPreprocess.retiredAlias
       ? `Router-owned model alias ${JSON.stringify(fastPreprocess.retiredAlias)} belongs to a retired Fast role and is no longer valid. Relaunch or select a current Fast role.`
       : profileId === "max"
@@ -696,7 +765,7 @@ export async function handleCompletion(c: Context) {
     const wantsStream = parsedBase?.stream === true
 
     if (
-      (fastAdvisorEnabled || cheapAdvisorEnabled || maxAdvisorEnabled)
+      (fastAdvisorEnabled || cheapAdvisorEnabled || cheapestAdvisorEnabled || maxAdvisorEnabled)
       && wantsStream
     ) {
       const initialConversation = Array.isArray(parsedBase!.messages)
@@ -736,11 +805,12 @@ export async function handleCompletion(c: Context) {
             escalated: false,
             fastProfile: false,
           }
-        : cheapAdvisorEnabled
+        : cheapAdvisorEnabled || cheapestAdvisorEnabled
           ? {
-              // Cheap shares fast's fixed Sol identity/effort; the distinctions
-              // (bare client pin, 200K transcript cap) are carried by
-              // `advisorCheapProfile` below and the client's own pinned tool.
+              // Cheap shares fast's fixed Sol identity/effort and cheapest its
+              // fixed Gemini identity/effort; the distinctions (bare client
+              // pin, 200K transcript cap) are carried by `advisorCheapProfile`
+              // below and the client's own pinned tool.
               model: fastAdvisorChoice!.model,
               effort: resolveAdvisorEffort(rawBody, fastAdvisorChoice!.model, true),
               escalated: fastAdvisorChoice!.escalated,
@@ -767,7 +837,7 @@ export async function handleCompletion(c: Context) {
           // retaining their independent model, effort, and transport policies.
           advisorFastProfile: advisorChoice.fastProfile,
           advisorMaxProfile: maxAdvisorEnabled,
-          advisorCheapProfile: cheapAdvisorEnabled,
+          advisorCheapProfile: cheapAdvisorEnabled || cheapestAdvisorEnabled,
           advisorEffort: advisorChoice.effort,
           externalAborter: translatedAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {
@@ -1037,15 +1107,15 @@ export async function handleCompletion(c: Context) {
           requestHeaders,
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          advisorFastProfile: fastLeadAdvisor || cheapLeadAdvisor,
+          advisorFastProfile: fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor,
           advisorMaxProfile: maxAdvisorEnabled,
-          advisorCheapProfile: cheapLeadAdvisor,
+          advisorCheapProfile: cheapLeadAdvisor || cheapestLeadAdvisor,
           advisorEffort: maxAdvisorChoice
             ? maxAdvisorChoice.effort
             : resolveAdvisorEffort(
                 rawBody,
                 advisorChoice.model,
-                fastLeadAdvisor || cheapLeadAdvisor,
+                fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor,
               ),
           externalAborter: advisorAborter,
         }),

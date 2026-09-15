@@ -82,8 +82,8 @@ export const start = defineCommand({
     void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
 
     // Best-effort ColBERT semantic-search provision + background index of
-    // the launch cwd (if a git repo). ON by default; never blocks launch,
-    // never throws. Opt out with GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1.
+    // the launch cwd (if a git repo). Opt-IN via --search (no-op otherwise);
+    // never blocks launch, never throws.
     void provisionAndIndexColbert()
 
     // Surface a terminally-failed semantic index to the HUMAN (see the note

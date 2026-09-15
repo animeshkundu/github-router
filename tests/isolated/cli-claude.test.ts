@@ -274,6 +274,11 @@ mock.module("~/lib/mcp-capabilities", () => ({
   cheapAdvisorModel: mock(() => "gpt-5.6-sol"),
   cheapReviewerModel: mock(() => "gpt-5.6-luna"),
   cheapAstraModel: mock(() => "gpt-6-astra"),
+  // Cheapest-profile resolvers (only exercised under `-m cheapest`); stubbed
+  // for the same static-import-graph reason as the cheap entries above.
+  cheapestOracleModel: mock(() => "gpt-5.6-sol"),
+  cheapestAdvisorModel: mock(() => "gemini-3.8-flash"),
+  cheapestReviewerModel: mock(() => "gemini-3.8-flash"),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
   FAST_GENERAL_PURPOSE_EFFORT: "max",

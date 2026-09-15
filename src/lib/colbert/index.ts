@@ -4,7 +4,8 @@
  * `provisionAndIndexColbert()` is the fire-and-forget call site the
  * `start` / `claude` / `codex` launchers invoke after `setupAndServe`
  * (mirroring `provisionToolbelt()` / `runSelfUpdate()`):
- *   1. Bail if opted out (`GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1`).
+ *   1. Bail unless opted in (`--search` / `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`);
+ *      `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1` hard-disables.
  *   2. Register the exit handlers (tree-kill tracked colgrep children).
  *   3. Provision the binary/model/ORT under a lock + smoke test
  *      (best-effort, never throws to the launcher).
@@ -22,6 +23,7 @@ import consola from "consola"
 
 import { parseBoolEnv } from "../exec"
 import { PATHS } from "../paths"
+import { state } from "../state"
 
 import { gitState, readColbertMeta } from "./index-store"
 import { registerColbertExitHandlers } from "./lifecycle"
@@ -33,15 +35,25 @@ import {
 import { kickBackgroundInit, startupKickAllowed } from "./runner"
 
 /**
- * True unless the operator opted out via
- * `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1`. Semantic search is ON BY
- * DEFAULT (the proxy auto-provisions + background-indexes); the
- * capability gate additionally requires the artifacts to be present on
- * disk + smoke-passed, so in any environment where provisioning hasn't
- * completed the tool simply doesn't appear (no regression).
+ * True only when the operator opted in via `--search`
+ * (`state.searchEnabled`, set by `setupAndServe`) or
+ * `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`. Semantic search is OFF BY
+ * DEFAULT (no auto-provision, no background-index); the capability gate
+ * additionally requires the artifacts to be present on disk +
+ * smoke-passed, so the `code` tool stays lexical until both the opt-in
+ * and provisioning have completed.
+ *
+ * `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1` hard-disables and wins over every
+ * opt-in signal (escape hatch for tests and managed environments).
  */
 export function semanticSearchOptedIn(): boolean {
-  return parseBoolEnv(process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH) !== true
+  if (parseBoolEnv(process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH) === true) {
+    return false
+  }
+  return (
+    state.searchEnabled === true
+    || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
+  )
 }
 
 /**

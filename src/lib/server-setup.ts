@@ -245,6 +245,7 @@ export interface ServerSetupOptions {
   agentsEnabled: boolean
   powerBrowseEnabled: boolean
   humanlikeEnabled: boolean
+  searchEnabled: boolean
   silent: boolean
 }
 
@@ -357,6 +358,12 @@ export async function setupAndServe(
   // the GH_ROUTER_DISABLE_WORKER_TOOLS / GH_ROUTER_LOG_PEER_MCP convention.
   state.browseEnabled =
     options.browseEnabled || process.env.GH_ROUTER_ENABLE_BROWSE === "1"
+  // --search + GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1 are equivalent; either opts
+  // into ColBERT/colgrep semantic search (provision + background-index). Off
+  // by default; GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1 hard-disables and wins
+  // over both (see `semanticSearchOptedIn` in `./colbert`).
+  state.searchEnabled =
+    options.searchEnabled || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
   state.fleetEnabled =
     options.fleetEnabled || process.env.GH_ROUTER_ENABLE_FLEET === "1"
   // --agents + GH_ROUTER_ENABLE_AGENTS=1 enable the first-mate
@@ -604,6 +611,12 @@ export const sharedServerArgs = {
     description:
       "Update github-router itself to the latest npm version on launch (throttled once/hour). Best-effort and non-blocking: the proxy serves immediately and a detached updater applies the new version after this process exits (it takes effect on the NEXT launch; the running process keeps its current build). Disable with --no-self-update or GH_ROUTER_NO_SELF_UPDATE=1. Skipped silently if npm/network unavailable.",
   },
+  search: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Enable ColBERT/colgrep semantic code search (meaning-ranked `code` tool results over a per-workspace index, with transparent lexical fallback). Off by default; the `code` tool is lexical-only unless this is set. Can also be enabled with GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1. GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1 hard-disables (wins over --search, for tests).",
+  },
 } as const
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
@@ -625,6 +638,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   agentsEnabled: boolean
   powerBrowseEnabled: boolean
   humanlikeEnabled: boolean
+  searchEnabled: boolean
 } {
   const portRaw = args.port as string | undefined
   let port: number | undefined
@@ -675,6 +689,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     agentsEnabled: args.agents as boolean,
     powerBrowseEnabled: args["power-browse"] as boolean,
     humanlikeEnabled: args.humanlike as boolean,
+    searchEnabled: args.search as boolean,
   }
 }
 
@@ -841,7 +856,10 @@ export function getClaudeCodeEnvVars(
   // STRIPPED_PARENT_ENV_KEYS comment.
   const isFastProfile = launchProfileId === "fast"
   const isMaxProfile = launchProfileId === "max"
-  const isCheapProfile = launchProfileId === "cheap" || launchProfileId === "cheap1m"
+  const isCheapProfile =
+    launchProfileId === "cheap"
+    || launchProfileId === "cheap1m"
+    || launchProfileId === "cheapest"
 
   const smallFastModel =
     isMaxProfile

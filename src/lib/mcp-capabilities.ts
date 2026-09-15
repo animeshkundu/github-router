@@ -47,6 +47,14 @@ import {
   CHEAP_PROFILE_ORACLE_MODEL,
   CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS,
 } from "./cheap-profile-contract"
+import {
+  CHEAPEST_PROFILE_ADVISOR_EFFORT,
+  CHEAPEST_PROFILE_ADVISOR_MODEL,
+  CHEAPEST_PROFILE_NATIVE_EFFORTS,
+  CHEAPEST_PROFILE_ORACLE_EFFORT,
+  CHEAPEST_PROFILE_ORACLE_MODEL,
+  CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+} from "./cheapest-profile-contract"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -561,6 +569,42 @@ export function cheapReviewerModel(): string | undefined {
   return CHEAP_PROFILE_MODELS.reviewer
 }
 
+/** Gemini/high Advisor for the cheapest profile at the 200K default window. */
+export function cheapestAdvisorModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === CHEAPEST_PROFILE_ADVISOR_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST_PROFILE_ADVISOR_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "chat") return undefined
+  return CHEAPEST_PROFILE_ADVISOR_MODEL
+}
+
+/** Sol/high Oracle for the cheapest profile at the 200K default window. */
+export function cheapestOracleModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === CHEAPEST_PROFILE_ORACLE_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) <= 0) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST_PROFILE_ORACLE_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return CHEAPEST_PROFILE_ORACLE_MODEL
+}
+
+/** Gemini/high reviewer for the cheapest profile at the 200K default window. */
+export function cheapestReviewerModel(): string | undefined {
+  const reviewer = state.models?.data.find((m) => m.id === "gemini-3.8-flash")
+  if (!reviewer) return undefined
+  if (reviewer.capabilities?.supports?.tool_calls !== true) return undefined
+  if ((reviewer.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  const efforts = reviewer.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
+  if (fastEndpointForModel(reviewer) !== "chat") return undefined
+  return "gemini-3.8-flash"
+}
+
 /** Exact GPT-6 Astra only: cheap escalation consultant at 200K/medium. */
 export function cheapAstraModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === CHEAP_PROFILE_ASTRA_MODEL)
@@ -775,13 +819,14 @@ export function browseAgentEnabled(): boolean {
  * single question "should the `code` tool attempt ColBERT before
  * falling back to lexical?"
  *
- * Delegates to the leaf `colbertSearchEnabled()` (the single source of
- * truth, in `src/lib/colbert/`) so the unified helper can read the same
- * decision without importing this module (cycle avoidance). True iff the
- * operator hasn't opted out (`GH_ROUTER_DISABLE_SEMANTIC_SEARCH`) AND the
- * colgrep binary + model + ORT are provisioned on disk AND the
- * post-provision smoke test passed.
- */
+  * Delegates to the leaf `colbertSearchEnabled()` (the single source of
+  * truth, in `src/lib/colbert/`) so the unified helper can read the same
+  * decision without importing this module (cycle avoidance). True iff the
+  * operator opted in (`--search` / `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`,
+  * unless `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1` hard-disables) AND the
+  * colgrep binary + model + ORT are provisioned on disk AND the
+  * post-provision smoke test passed.
+  */
 export function semanticSearchEnabled(): boolean {
   return colbertSearchEnabled()
 }
