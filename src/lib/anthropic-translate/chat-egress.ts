@@ -41,7 +41,7 @@ import {
   makeMessageStop,
   makeTextDelta,
 } from "./anthropic-sse"
-import { extractAndRecordAic } from "~/lib/aic-ledger"
+import { extractAndRecordAic, extractAndRecordPricedAic } from "~/lib/aic-ledger"
 import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 
 type AnyRecord = Record<string, unknown>
@@ -273,11 +273,12 @@ export async function* synthAnthropicFromChat(
 
     // Usage may ride on any chunk (typically a trailing choices-empty chunk).
     // Max-accumulate so a later zeroed frame can't clobber a real count.
-    // Upstream AIC (`copilot_usage`) rides the same trailing chunk — record it
-    // once per stream (the trailing chunk appears once; the flag guards
-    // against a repeated frame double-counting).
+    // Upstream AIC (`copilot_usage`) rides the same trailing chunk — record
+    // the first priced reading per stream (the priced variant skips interim
+    // zero-nano frames; the flag guards against a repeated terminal frame
+    // double-counting).
     if (!aicRecorded) {
-      if (extractAndRecordAic(opts.modelId, chunk) !== undefined) {
+      if (extractAndRecordPricedAic(opts.modelId, chunk) !== undefined) {
         aicRecorded = true
       }
     }

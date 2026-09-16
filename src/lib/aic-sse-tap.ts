@@ -5,7 +5,10 @@
  * Verified live: `copilot_usage` rides inside the terminal `message_delta`
  * event beside `usage`. Chunks are arbitrary byte splits, so the tap buffers
  * text, splits on blank-line event boundaries, and keeps the tail. Recording
- * fires at most once per tap instance (one terminal event per stream).
+ * fires at most once per tap instance (one terminal event per stream), and
+ * only for a priced reading: a zero-nano frame is skipped so an interim
+ * free frame can never latch ahead of the real terminal value (same
+ * contract as `extractAndRecordPricedAic`).
  *
  * Total and never throws — a malformed frame is skipped silently. The relay
  * path additionally wraps the call in try/catch, so a tap bug can never break
@@ -44,7 +47,9 @@ export function createAnthropicAicTap(
       const usage = extractCopilotUsage(
         (parsed as Record<string, unknown>).copilot_usage,
       )
-      if (usage) {
+      // Priced-only latch (same contract as `extractAndRecordPricedAic`):
+      // an interim zero-nano frame is "no reading yet", not a free request.
+      if (usage && usage.totalNanoAiu > 0) {
         recorded = true
         try {
           record(usage)

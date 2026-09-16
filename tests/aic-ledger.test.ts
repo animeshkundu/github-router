@@ -9,6 +9,7 @@ import {
   aicSnapshot,
   aicTotalCredits,
   extractAndRecordAic,
+  extractAndRecordPricedAic,
   formatAicExitSummary,
   formatAicStatus,
   readAicSnapshotFile,
@@ -108,6 +109,27 @@ describe("aic ledger", () => {
     expect(extractAndRecordAic("m", { usage: {} })).toBeUndefined()
     expect(extractAndRecordAic("m", null)).toBeUndefined()
     expect(aicSnapshot().requests).toBe(1)
+  })
+
+  test("extractAndRecordPricedAic skips zero-nano frames without recording", () => {
+    // Interim streaming frames carry total_nano_aiu: 0 — a streaming tap
+    // must treat that as "no reading yet", not as a free request.
+    expect(
+      extractAndRecordPricedAic("m", { copilot_usage: { total_nano_aiu: 0, token_details: [] } }),
+    ).toBeUndefined()
+    expect(aicSnapshot().requests).toBe(0)
+    expect(aicSnapshot().totalNanoAiu).toBe(0)
+    // Missing/invalid containers behave exactly like the unpriced variant.
+    expect(extractAndRecordPricedAic("m", { usage: {} })).toBeUndefined()
+    expect(extractAndRecordPricedAic("m", null)).toBeUndefined()
+    expect(aicSnapshot().requests).toBe(0)
+  })
+
+  test("extractAndRecordPricedAic records the first priced reading", () => {
+    const nano = extractAndRecordPricedAic("gpt-5.6-luna", { copilot_usage: USAGE_A })
+    expect(nano).toBe(820000)
+    expect(aicSnapshot().requests).toBe(1)
+    expect(aicSnapshot().totalNanoAiu).toBe(820000)
   })
 
   test("formatAicStatus is empty pre-first-record, [AIC x] after", () => {
