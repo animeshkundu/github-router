@@ -4,7 +4,7 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
-import { extractAndRecordAic } from "~/lib/aic-ledger"
+import { extractAndRecordAic, extractAndRecordPricedAic } from "~/lib/aic-ledger"
 import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
@@ -240,17 +240,45 @@ export async function handleResponses(c: Context) {
   let consumerCancelled = false
   // Upstream AIC arrives once per stream (terminal `response.completed`
   // event's `copilot_usage`). Parsed but never modified — bytes relay verbatim.
+  // The priced variant skips zero-nano frames so the tap latches on the real
+  // terminal reading even if upstream ever emits interim usage frames.
   let aicRecorded = false
+  let streamAicNano: number | undefined
+  let completionLogged = false
   const tapAic = (chunk: UpstreamSSEEvent): void => {
     if (aicRecorded || !chunk.data || chunk.data === "[DONE]") return
     try {
       const parsed: unknown = JSON.parse(chunk.data)
-      if (extractAndRecordAic(resolvedModel, parsed) !== undefined) {
+      const nano = extractAndRecordPricedAic(resolvedModel, parsed)
+      if (nano !== undefined) {
         aicRecorded = true
+        streamAicNano = nano
       }
     } catch {
       // Non-JSON frame — nothing to extract.
     }
+  }
+  // End-of-stream AIC line — see the twin in chat-completions/handler.ts.
+  // Emitted once, on clean completion, only when the tap captured a reading.
+  const logStreamCompletion = (): void => {
+    if (completionLogged || consumerCancelled || streamAicNano === undefined) {
+      return
+    }
+    completionLogged = true
+    logRequest(
+      {
+        method: "POST",
+        path: c.req.path,
+        model: originalModel,
+        resolvedModel,
+        aicNano: streamAicNano,
+        status: 200,
+        streaming: true,
+        streamMs: Date.now() - startTime,
+      },
+      selectedModel,
+      startTime,
+    )
   }
   // The discovery frame can itself be terminal on a single-event stream.
   if (pendingFirstChunk !== undefined) tapAic(pendingFirstChunk)
@@ -315,6 +343,7 @@ export async function handleResponses(c: Context) {
           }
           if (result.done) {
             upstreamFinished = true
+            logStreamCompletion()
             safeClose(controller)
             return
           }
@@ -325,6 +354,7 @@ export async function handleResponses(c: Context) {
           if (result.value === undefined || result.value === null) return
           if (result.value.data === "[DONE]") {
             upstreamFinished = true
+            logStreamCompletion()
             safeClose(controller)
             return
           }
@@ -520,12 +550,16 @@ export async function handleResponsesCompact(c: Context) {
   )
 
   if (response.ok) {
+    const json = (await response.json()) as Record<string, unknown>
+    // Native compaction is billed Copilot usage on this instance — record it
+    // under the resolved model like every other non-streaming turn.
+    extractAndRecordAic(resolveModel(body.model), json)
     logRequest(
       { method: "POST", path: c.req.path, status: 200 },
       undefined,
       startTime,
     )
-    return c.json(await response.json())
+    return c.json(json)
   }
 
   // Copilot doesn't support /responses/compact — perform synthetic compaction
@@ -593,6 +627,11 @@ async function syntheticCompact(
     }
     throw error
   }
+
+  // Synthetic compaction burns a full-history turn plus a summary turn
+  // upstream — record its billed usage under the resolved model so the
+  // session AIC total accounts for it like any other non-streaming turn.
+  extractAndRecordAic(resolveModel(body.model), result)
 
   logRequest(
     { method: "POST", path: c.req.path, status: 200 },

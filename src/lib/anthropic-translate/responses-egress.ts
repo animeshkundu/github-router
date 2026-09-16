@@ -31,7 +31,7 @@
 import { randomUUID } from "node:crypto"
 
 import type { ResponsesApiResponse } from "~/services/copilot/create-responses"
-import { extractAndRecordAic } from "~/lib/aic-ledger"
+import { extractAndRecordAic, extractAndRecordPricedAic } from "~/lib/aic-ledger"
 import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 
 import {
@@ -536,8 +536,9 @@ export async function* synthAnthropicFromResponses(
         sawTerminal = true
         // Upstream AIC rides top-level on the terminal event (verified live).
         // Record once — a repeated terminal frame must not double-count.
+        // Priced variant: skips a zero-nano terminal should one ever appear.
         if (!aicRecorded) {
-          if (extractAndRecordAic(opts.modelId, ev) !== undefined) {
+          if (extractAndRecordPricedAic(opts.modelId, ev) !== undefined) {
             aicRecorded = true
           }
         }

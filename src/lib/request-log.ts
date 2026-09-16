@@ -193,16 +193,21 @@ function formatTokenInfo(
   model: Model | undefined,
   aicNano?: number | undefined,
 ): string | undefined {
-  if (inputTokens === undefined) return undefined
+  // inputTokens was historically required, but end-of-stream completion
+  // lines carry a tap-measured aicNano with no token estimate — an AIC
+  // reading must still surface there, so gate on "nothing to show".
+  if (inputTokens === undefined && (aicNano ?? 0) <= 0) return undefined
 
   const parts: Array<string> = []
   const maxPrompt = model?.capabilities?.limits?.max_prompt_tokens
 
-  if (maxPrompt) {
-    const pct = ((inputTokens / maxPrompt) * 100).toFixed(1)
-    parts.push(`in:${formatTokens(inputTokens)}/${formatTokens(maxPrompt)} (${pct}%)`)
-  } else {
-    parts.push(`in:${formatTokens(inputTokens)}`)
+  if (inputTokens !== undefined) {
+    if (maxPrompt) {
+      const pct = ((inputTokens / maxPrompt) * 100).toFixed(1)
+      parts.push(`in:${formatTokens(inputTokens)}/${formatTokens(maxPrompt)} (${pct}%)`)
+    } else {
+      parts.push(`in:${formatTokens(inputTokens)}`)
+    }
   }
 
   if (outputTokens !== undefined) {

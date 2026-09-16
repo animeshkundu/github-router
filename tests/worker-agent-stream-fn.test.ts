@@ -9,6 +9,7 @@ import type {
 } from "@earendil-works/pi-ai"
 
 import { state } from "~/lib/state"
+import { __resetAicLedgerForTests, aicSnapshot } from "~/lib/aic-ledger"
 import {
   createCopilotStreamFn,
   type ResolvedModel,
@@ -100,8 +101,7 @@ function lastFetchBody(): {
 // text-delta accumulation
 // ---------------------------------------------------------------------------
 
-test("text deltas accumulate into a single TextContent on the final message", async () => {
-  globalThis.fetch = mock(() =>
+test("text deltas accumulate into a single TextContent on the final message", async () => {  globalThis.fetch = mock(() =>
     sseResponse([
       { choices: [{ index: 0, delta: { content: "Hello" }, finish_reason: null }] },
       { choices: [{ index: 0, delta: { content: " " }, finish_reason: null }] },
@@ -823,4 +823,38 @@ test("outer abort returns promptly as aborted without retry", async () => {
   expect((globalThis.fetch as unknown as { mock: { calls: unknown[] } }).mock.calls).toHaveLength(1)
   expect(final.stopReason).toBe("aborted")
   expect(events.at(-1)?.type).toBe("error")
+})
+
+// ---------------------------------------------------------------------------
+// AIC ledger: interim zero-nano frames must not latch (B1)
+// ---------------------------------------------------------------------------
+
+test("interim zero-nano copilot_usage does not latch; terminal records once", async () => {
+  __resetAicLedgerForTests()
+  const priced = {
+    total_nano_aiu: 820000,
+    token_details: [
+      { batch_size: 1000000, cost_per_batch: 20000000000, model: "gemini-3.1-pro-preview", token_count: 11, token_type: "input" },
+      { batch_size: 1000000, cost_per_batch: 120000000000, model: "gemini-3.1-pro-preview", token_count: 5, token_type: "output" },
+    ],
+  }
+  globalThis.fetch = mock(() =>
+    sseResponse([
+      { choices: [{ index: 0, delta: { content: "ok" }, finish_reason: "stop" }] },
+      { choices: [], copilot_usage: { total_nano_aiu: 0, token_details: [] } },
+      { choices: [], copilot_usage: priced },
+    ]),
+  ) as unknown as typeof fetch
+
+  const { final } = await drain(
+    createCopilotStreamFn({ resolved: RESOLVED }),
+    USER_CTX,
+  )
+
+  expect(final.stopReason).toBe("stop")
+  const snap = aicSnapshot()
+  expect(snap.requests).toBe(1)
+  expect(snap.totalNanoAiu).toBe(820000)
+  expect(snap.perModel["gemini-3.1-pro-preview"]?.nanoAiu).toBe(820000)
+  __resetAicLedgerForTests()
 })

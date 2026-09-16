@@ -255,6 +255,49 @@ describe("/v1/chat/completions", () => {
     expect(aicSnapshot().requests).toBe(1)
     expect(aicSnapshot().totalNanoAiu).toBe(820000)
   })
+
+  test("stream: interim zero-nano frame does not latch ahead of the terminal reading", async () => {
+    // Live shape on gemini chat streams: an interim chunk with
+    // total_nano_aiu: 0 precedes the terminal priced chunk. The tap must
+    // skip the zero frame and record the terminal value exactly once.
+    const interimZero = JSON.stringify({
+      id: "chatcmpl-1",
+      choices: [],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      copilot_usage: { total_nano_aiu: 0, token_details: [] },
+    })
+    const terminalChunk = JSON.stringify({
+      id: "chatcmpl-1",
+      choices: [],
+      usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+      copilot_usage: COPILOT_USAGE,
+    })
+    installFetchMock(() =>
+      sseResponse([
+        'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\n',
+        `data: ${interimZero}\n\n`,
+        `data: ${terminalChunk}\n\n`,
+      ]),
+    )
+    const res = await server.request("/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-3.5-flash",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      }),
+    })
+    expect(res.status).toBe(200)
+    const text = await readAllText(res)
+    // Bytes relay verbatim — both frames reach the client.
+    expect(text).toContain('"total_nano_aiu":0')
+    expect(text).toContain(JSON.stringify(COPILOT_USAGE))
+    // But the ledger holds exactly the terminal reading, once.
+    expect(aicSnapshot().requests).toBe(1)
+    expect(aicSnapshot().totalNanoAiu).toBe(820000)
+    expect(aicSnapshot().perModel["gemini-3.5-flash"]?.nanoAiu).toBe(820000)
+  })
 })
 
 describe("/v1/responses", () => {
@@ -390,6 +433,32 @@ describe("translation shim egress", () => {
     expect(events.some((e) => e.type === "message_stop")).toBe(true)
     expect(aicSnapshot().requests).toBe(1)
   })
+
+  test("chat stream synth skips interim zero-nano chunk, records terminal once", async () => {
+    const zeroTrailing = JSON.stringify({
+      choices: [],
+      usage: { prompt_tokens: 0, completion_tokens: 0 },
+      copilot_usage: { total_nano_aiu: 0, token_details: [] },
+    })
+    const pricedTrailing = JSON.stringify({
+      choices: [],
+      usage: { prompt_tokens: 5, completion_tokens: 2 },
+      copilot_usage: COPILOT_USAGE,
+    })
+    async function* upstream(): AsyncIterable<{ data?: string }> {
+      yield { data: JSON.stringify({ choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] }) }
+      yield { data: zeroTrailing }
+      yield { data: pricedTrailing }
+      yield { data: "[DONE]" }
+    }
+    const events = []
+    for await (const e of synthAnthropicFromChat(upstream(), { modelId: "gemini-3.5-flash" })) {
+      events.push(e)
+    }
+    expect(events.some((e) => e.type === "message_stop")).toBe(true)
+    expect(aicSnapshot().requests).toBe(1)
+    expect(aicSnapshot().totalNanoAiu).toBe(820000)
+  })
 })
 
 describe("advisor stream", () => {
@@ -501,6 +570,92 @@ describe("/v1/messages shim non-streaming exactly-once", () => {
         model: "gpt-5.6-luna",
         max_tokens: 64,
         messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(res.status).toBe(200)
+    const snap = aicSnapshot()
+    expect(snap.requests).toBe(1)
+    expect(snap.totalNanoAiu).toBe(820000)
+    expect(snap.perModel["gpt-5.6-luna"]?.nanoAiu).toBe(820000)
+  })
+
+  test("chat-shim streaming (cheap-profile lead path) skips interim zero, records terminal", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          ...catalogEntry("gemini-3.5-flash", "gemini"),
+          supported_endpoints: ["/chat/completions"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    const interimZero = JSON.stringify({
+      id: "chatcmpl-1",
+      choices: [],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      copilot_usage: { total_nano_aiu: 0, token_details: [] },
+    })
+    const terminalChunk = JSON.stringify({
+      id: "chatcmpl-1",
+      choices: [],
+      usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+      copilot_usage: COPILOT_USAGE,
+    })
+    installFetchMock(() =>
+      sseResponse([
+        'data: {"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\n',
+        `data: ${interimZero}\n\n`,
+        `data: ${terminalChunk}\n\n`,
+        "data: [DONE]\n\n",
+      ]),
+    )
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-3.5-flash",
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(res.status).toBe(200)
+    const text = await readAllText(res)
+    expect(text).toContain("message_stop")
+    const snap = aicSnapshot()
+    expect(snap.requests).toBe(1)
+    expect(snap.totalNanoAiu).toBe(820000)
+    expect(snap.perModel["gemini-3.5-flash"]?.nanoAiu).toBe(820000)
+  })
+})
+
+describe("/v1/responses/compact", () => {
+  test("synthetic-compaction fallback records AIC under the compact model", async () => {
+    globalThis.fetch = Object.assign(
+      mock(async (url: unknown): Promise<Response> => {
+        if (String(url).endsWith("/responses/compact")) {
+          return new Response("not found", { status: 404 })
+        }
+        return new Response(
+          JSON.stringify({
+            id: "resp_1",
+            object: "response",
+            status: "completed",
+            output: [],
+            usage: { input_tokens: 11, output_tokens: 5, total_tokens: 16 },
+            copilot_usage: COPILOT_USAGE,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }),
+      { preconnect: () => {} },
+    )
+    const res = await server.request("/v1/responses/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.6-luna",
+        input: [{ role: "user", content: "hi" }],
       }),
     })
     expect(res.status).toBe(200)

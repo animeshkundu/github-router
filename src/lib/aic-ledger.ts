@@ -184,6 +184,34 @@ export function extractAndRecordAic(
   return usage.totalNanoAiu
 }
 
+/**
+ * Streaming-tap variant of `extractAndRecordAic`: identical, except a
+ * zero-nano reading is treated as "no reading yet" — it is NOT recorded
+ * and `undefined` is returned so the tap keeps scanning.
+ *
+ * Why: Copilot's `/chat/completions` streams emit interim chunks carrying
+ * `copilot_usage` with `total_nano_aiu: 0` before the terminal chunk with
+ * the real value (verified live on gemini-3.8-flash). A first-wins tap
+ * built on `extractAndRecordAic` latches on the zero frame and drops the
+ * terminal value, under-recording the whole stream as free. Every
+ * streaming tap must use this variant; non-streaming callers keep
+ * `extractAndRecordAic` so a genuinely free call still counts its request.
+ */
+export function extractAndRecordPricedAic(
+  model: string | undefined,
+  container: unknown,
+): number | undefined {
+  if (!container || typeof container !== "object" || Array.isArray(container)) {
+    return undefined
+  }
+  const usage = extractCopilotUsage(
+    (container as Record<string, unknown>).copilot_usage,
+  )
+  if (!usage || usage.totalNanoAiu <= 0) return undefined
+  recordAic(model, usage)
+  return usage.totalNanoAiu
+}
+
 /** In-process snapshot (defensive copy). */
 export function aicSnapshot(): AicSnapshot {
   return {

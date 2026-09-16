@@ -42,7 +42,7 @@ import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-s
 import type { StreamFn } from "@earendil-works/pi-agent-core"
 
 import { HTTPError } from "~/lib/error"
-import { extractAndRecordAic } from "~/lib/aic-ledger"
+import { extractAndRecordPricedAic } from "~/lib/aic-ledger"
 import type {
   ChatCompletionChunk,
   ChatCompletionsPayload,
@@ -374,7 +374,7 @@ async function runChatAttempt(
       }
 
       if (!aicRecorded) {
-        if (extractAndRecordAic(resolved.modelId, chunk) !== undefined) {
+        if (extractAndRecordPricedAic(resolved.modelId, chunk) !== undefined) {
           aicRecorded = true
         }
       }
@@ -1126,7 +1126,7 @@ async function runResponsesAttempt(
         case "response.incomplete": {
           sawTerminal = true
           if (!aicRecorded) {
-            if (extractAndRecordAic(resolved.modelId, ev) !== undefined) {
+            if (extractAndRecordPricedAic(resolved.modelId, ev) !== undefined) {
               aicRecorded = true
             }
           }

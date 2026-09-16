@@ -2,7 +2,7 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
-import { extractAndRecordAic } from "~/lib/aic-ledger"
+import { extractAndRecordAic, extractAndRecordPricedAic } from "~/lib/aic-ledger"
 import { awaitApproval } from "~/lib/approval"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
@@ -221,18 +221,49 @@ export async function handleCompletion(c: Context) {
   let upstreamFinished = firstResult.done
   let consumerCancelled = false
   // Upstream AIC arrives once per stream (terminal chunk's `copilot_usage`).
-  // Parsed but never modified — bytes still relay verbatim.
+  // Parsed but never modified — bytes still relay verbatim. The priced
+  // variant skips interim zero-nano frames so the tap latches on the real
+  // terminal reading instead of an interim free one.
   let aicRecorded = false
+  let streamAicNano: number | undefined
+  let completionLogged = false
   const tapAic = (chunk: UpstreamSSEEvent): void => {
     if (aicRecorded || !chunk.data || chunk.data === "[DONE]") return
     try {
       const parsed: unknown = JSON.parse(chunk.data)
-      if (extractAndRecordAic(resolvedModel, parsed) !== undefined) {
+      const nano = extractAndRecordPricedAic(resolvedModel, parsed)
+      if (nano !== undefined) {
         aicRecorded = true
+        streamAicNano = nano
       }
     } catch {
       // Non-JSON frame — nothing to extract.
     }
+  }
+  // End-of-stream AIC line: the header-time logRequest above fires before
+  // any upstream byte exists, so a streaming request could never show its
+  // cost. Emit one additive line on clean completion, but only when the tap
+  // actually captured a reading — otherwise this would double every stream's
+  // log volume for no new information.
+  const logStreamCompletion = (): void => {
+    if (completionLogged || consumerCancelled || streamAicNano === undefined) {
+      return
+    }
+    completionLogged = true
+    logRequest(
+      {
+        method: "POST",
+        path: c.req.path,
+        model: originalModel,
+        resolvedModel,
+        aicNano: streamAicNano,
+        status: 200,
+        streaming: true,
+        streamMs: Date.now() - startTime,
+      },
+      selectedModel,
+      startTime,
+    )
   }
 
   const safeClose = (controller: ReadableStreamDefaultController<Uint8Array>) => {
@@ -295,6 +326,7 @@ export async function handleCompletion(c: Context) {
           }
           if (result.done) {
             upstreamFinished = true
+            logStreamCompletion()
             safeClose(controller)
             return
           }
