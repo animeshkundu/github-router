@@ -20,7 +20,6 @@ import type { Context } from "hono"
 import consola from "consola"
 
 import { UPSTREAM_INACTIVITY_TIMEOUT_MS } from "~/lib/port"
-import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { logRequest } from "~/lib/request-log"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
 import type { ChatCompletionResponse } from "~/services/copilot/create-chat-completions"
@@ -272,7 +271,9 @@ export async function handleNonClaudeResponses(
     true,
   )
   // Non-streaming shim turns are billed Copilot usage on this instance.
-  extractAndRecordAic(opts.modelId, result)
+  // Recording lives inside `responsesResponseToAnthropicMessage` (single
+  // site — a second `extractAndRecordAic` here would double-count every
+  // non-streaming shim turn, e.g. cheap-profile non-streaming calls).
   const anthropic = responsesResponseToAnthropicMessage(
     result as ResponsesApiResponse,
     opts.modelId,
@@ -380,7 +381,9 @@ export async function handleNonClaudeChat(
     true,
   )
   // Non-streaming shim turns are billed Copilot usage on this instance.
-  extractAndRecordAic(opts.modelId, result)
+  // Recording lives inside `chatResponseToAnthropicMessage` (single site —
+  // a second `extractAndRecordAic` here would double-count every
+  // non-streaming Gemini turn, e.g. the cheap-profile lead).
   const anthropic = chatResponseToAnthropicMessage(
     result as ChatCompletionResponse,
     opts.modelId,

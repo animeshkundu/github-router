@@ -427,3 +427,86 @@ describe("advisor stream", () => {
     expect(snap.perModel["claude-haiku-4.5"]?.nanoAiu).toBe(820000)
   })
 })
+
+describe("/v1/messages shim non-streaming exactly-once", () => {
+  test("chat-shim (gemini lead, e.g. cheap profile) records once", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          ...catalogEntry("gemini-3.5-flash", "gemini"),
+          supported_endpoints: ["/chat/completions"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    installFetchMock(
+      () =>
+        new Response(
+          JSON.stringify({
+            id: "chatcmpl-1",
+            object: "chat.completion",
+            created: 1,
+            model: "gemini-3.5-flash",
+            choices: [{ index: 0, message: { role: "assistant", content: "ok" }, logprobs: null, finish_reason: "stop" }],
+            usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 },
+            copilot_usage: COPILOT_USAGE,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    )
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gemini-3.5-flash",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(res.status).toBe(200)
+    const snap = aicSnapshot()
+    expect(snap.requests).toBe(1)
+    expect(snap.totalNanoAiu).toBe(820000)
+    expect(snap.perModel["gemini-3.5-flash"]?.nanoAiu).toBe(820000)
+  })
+
+  test("responses-shim (gpt lead) records once", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          ...catalogEntry("gpt-5.6-luna", "gpt-5"),
+          supported_endpoints: ["/responses"],
+        },
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    installFetchMock(
+      () =>
+        new Response(
+          JSON.stringify({
+            id: "resp_1",
+            object: "response",
+            status: "completed",
+            output: [],
+            usage: { input_tokens: 11, output_tokens: 5, total_tokens: 16 },
+            copilot_usage: COPILOT_USAGE,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    )
+    const res = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-5.6-luna",
+        max_tokens: 64,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(res.status).toBe(200)
+    const snap = aicSnapshot()
+    expect(snap.requests).toBe(1)
+    expect(snap.totalNanoAiu).toBe(820000)
+    expect(snap.perModel["gpt-5.6-luna"]?.nanoAiu).toBe(820000)
+  })
+})
