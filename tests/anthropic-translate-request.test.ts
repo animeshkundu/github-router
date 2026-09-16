@@ -583,6 +583,61 @@ describe("anthropic-translate request mapping", () => {
     ])
   })
 
+  test("I7: parallel image tool_results → outputs stay contiguous, images flush once after", () => {
+    // Same grouping invariant as the chat path (`tool A, tool B, user(imgA,
+    // imgB)`): the Responses wire tolerates the interleave today, but the
+    // grouped shape is the documented contract (docs/multimodal.md) and what
+    // the worker path already emits.
+    const { payload } = build({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call_A", name: "Read", input: {} },
+            { type: "tool_use", id: "call_B", name: "Read", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_A",
+              content: [
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+              ],
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_B",
+              content: [
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "REVG" } },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(payload.input).toEqual([
+      { type: "function_call", call_id: "call_A", name: "Read", arguments: "{}" },
+      { type: "function_call", call_id: "call_B", name: "Read", arguments: "{}" },
+      { type: "function_call_output", call_id: "call_A", output: "[image result below]" },
+      { type: "function_call_output", call_id: "call_B", output: "[image result below]" },
+      {
+        role: "user",
+        content: [
+          { type: "input_image", image_url: "data:image/png;base64,QUJD" },
+          { type: "input_image", image_url: "data:image/png;base64,REVG" },
+        ],
+      },
+    ])
+  })
+
   test("I7: is_error is preserved as a text prefix on the function_call_output", () => {
     const { payload } = build({
       messages: [

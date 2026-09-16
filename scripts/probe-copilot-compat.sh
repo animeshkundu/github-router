@@ -225,6 +225,8 @@ declare -a PROBE_REGISTRY=(
   "passthrough_image_claude|exploratory|base64 RGB PNG image block on /v1/messages → claude-opus-5 NATIVE passthrough (no copilot-vision-request header): 200 + well-formed Anthropic message"
   "copilot_usage_reported|exploratory|/v1/messages non-stream (claude-haiku-4-5) returns top-level copilot_usage with total_nano_aiu beside usage (verified live 2026-09-14; feeds the AIC ledger/status line/exit summary)"  "shim_image_tool_result_gpt55|exploratory|image inside a tool_result on /v1/messages → gpt-5.5 /responses shim: 200 (the shape a subagent reading a screenshot actually produces)"
   "shim_image_tool_result_gemini35flash|exploratory|image inside a tool_result on /v1/messages → gemini-3.5-flash /chat shim: 200 (same shape, chat egress)"
+  "shim_image_tool_result_multi_gpt55|exploratory|parallel image tool_results in separate user messages on /v1/messages → gpt-5.5 /responses shim: 200 (outputs stay contiguous, images flush once after)"
+  "shim_image_tool_result_multi_gemini38flash|exploratory|parallel image tool_results in separate user messages on /v1/messages → gemini-3.8-flash /chat shim: 200 (tool,tool,user — the interleaved tool,user,tool,user shape 400s upstream; see github/copilot-sdk#1922)"
   "vision_multi_image_gpt|exploratory|2 images to a max_prompt_images:1 gpt model → 200; the catalog field understates the real ceiling (gpt-5.5 accepted 120) and must not gate locally"
   "vision_ceiling_recovery_gemini|exploratory|12 images to gemini-3.8-flash (real upstream ceiling 10) → 200; the proxy prunes to the number upstream names and retries once"
   "shim_advisor_degrade_gpt55|exploratory|advisor beta header + advisor tool on /v1/messages → gpt-5.5 /responses shim: 200 graceful degrade (advisor tool stripped, no 400)"
@@ -1357,6 +1359,59 @@ probe_shim_image_tool_result_gemini35flash() {
       {"role":"user","content":[{"type":"text","text":"Take a screenshot."}]},
       {"role":"assistant","content":[{"type":"tool_use","id":"toolu_probe2","name":"screenshot","input":{}}]},
       {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_probe2","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}
+      ]}]}
+    ],
+    "tools":[{"name":"screenshot","description":"Capture the screen.","input_schema":{"type":"object","properties":{}}}]
+  }'
+  assert_status 200     && assert_anthropic_message
+}
+
+probe_shim_image_tool_result_multi_gpt55() {
+  # Parallel image tool_results spanning SEPARATE user messages (one
+  # tool_result per message — the shape Claude Code emits for parallel Reads).
+  # The shim must keep the function_call_outputs contiguous and flush the
+  # images once, after the last one.
+  do_request POST /v1/messages '{
+    "model": "gpt-5.5",
+    "max_tokens": 128,
+    "messages": [
+      {"role":"user","content":[{"type":"text","text":"Take two screenshots."}]},
+      {"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_m1","name":"screenshot","input":{}},
+        {"type":"tool_use","id":"toolu_m2","name":"screenshot","input":{}}
+      ]},
+      {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_m1","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}
+      ]}]},
+      {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_m2","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}
+      ]}]}
+    ],
+    "tools":[{"name":"screenshot","description":"Capture the screen.","input_schema":{"type":"object","properties":{}}}]
+  }'
+  assert_status 200     && assert_anthropic_message
+}
+
+probe_shim_image_tool_result_multi_gemini38flash() {
+  # Same multi-image shape through the chat egress. Before the grouping fix
+  # the shim emitted `tool,user,tool,user…`, which Copilot's
+  # `/chat/completions` validator rejects with a generic 400
+  # `invalid_request_body` (verified live: interleaved → 400, batched
+  # tool,tool,user → 200; see github/copilot-sdk#1922). Must stay 200.
+  do_request POST /v1/messages '{
+    "model": "gemini-3.8-flash",
+    "max_tokens": 128,
+    "messages": [
+      {"role":"user","content":[{"type":"text","text":"Take two screenshots."}]},
+      {"role":"assistant","content":[
+        {"type":"tool_use","id":"toolu_m1","name":"screenshot","input":{}},
+        {"type":"tool_use","id":"toolu_m2","name":"screenshot","input":{}}
+      ]},
+      {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_m1","content":[
+        {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}
+      ]}]},
+      {"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_m2","content":[
         {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}}
       ]}]}
     ],
