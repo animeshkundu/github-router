@@ -376,8 +376,11 @@ function anthropicMessageToNeutral(msg: AnyRecord): Array<NeutralMessage> {
         // own neutral message so it lands as a Responses function_call_output
         // (a string-only item). Image blocks inside the tool_result (e.g.
         // Claude Code browser screenshots) can't ride in that item, so they're
-        // emitted as a follow-up user message in wire order right after it —
-        // otherwise the model never sees the pixels it asked for.
+        // emitted as a follow-up user message right after it — otherwise the
+        // model never sees the pixels it asked for. Per-message order only:
+        // `groupToolResultImages` (in `parseAnthropicRequest`) later hoists
+        // these follow-ups past the whole contiguous tool run, because the
+        // wire requires tool messages to be contiguous.
         flushUser()
         const { output, images } = parseToolResultContent(
           b.content,
@@ -553,6 +556,86 @@ function parseOutputConfigEffort(
 }
 
 /**
+ * True for a `user` message carrying ONLY image parts.
+ *
+ * These are the synthetic follow-ups `anthropicMessageToNeutral` emits for
+ * images found inside `tool_result` blocks (a `function_call_output` / chat
+ * `tool` item cannot carry pixels). A genuine image-only user turn also
+ * matches, but such a turn never appears mid-tool-run from Claude Code — and
+ * even if it did, deferring it past the tool block is still the valid shape.
+ */
+function isImageOnlyUserMessage(
+  m: NeutralMessage,
+): m is Extract<NeutralMessage, { role: "user" }> {
+  return (
+    m.role === "user"
+    && Array.isArray(m.content)
+    && m.content.length > 0
+    && m.content.every((c) => c.type === "image")
+  )
+}
+
+/**
+ * Hoist `tool_result`-extracted images to the END of each contiguous run of
+ * tool results.
+ *
+ * A tool-output wire item cannot carry an image on any endpoint, so images
+ * have to ride in a separate user message. Fanning each `toolResult` out to
+ * `[tool, user]` independently is WRONG for parallel tool calls: it yields
+ * `tool A, user A, tool B, user B`, and providers require the tool messages
+ * answering one assistant turn to be CONTIGUOUS — the interjected user message
+ * orphans the following tool message and the request is rejected outright
+ * (verified live on `gemini-3.8-flash` `/chat/completions`: interleaved →
+ * `400 invalid_request_body`, batched → `200`; see also
+ * `github/copilot-sdk#1922`). Mirrors `translateMessages` in
+ * `src/lib/worker-agent/stream-fn.ts`, which implements the same invariant
+ * for the worker path.
+ *
+ * So images accumulate across the run and flush once, after the last tool
+ * message of that run: `tool A, tool B, user(imgA, imgB)`. Any other message
+ * ends the run and the pending images flush before it. Runs at parse time
+ * over the FULL neutral sequence (a run routinely spans several Anthropic
+ * messages — one `tool_result` per message), never written back to state.
+ * Single-image and image-free inputs are returned unchanged in shape.
+ */
+function groupToolResultImages(
+  messages: ReadonlyArray<NeutralMessage>,
+): Array<NeutralMessage> {
+  const out: Array<NeutralMessage> = []
+  let pending: Array<Extract<NeutralContentPart, { type: "image" }>> = []
+  let inToolRun = false
+
+  const flushImages = (): void => {
+    if (pending.length === 0) return
+    out.push({ role: "user", content: pending })
+    pending = []
+  }
+
+  for (const m of messages) {
+    if (m.role === "toolResult") {
+      out.push(m)
+      inToolRun = true
+      continue
+    }
+    if (inToolRun && isImageOnlyUserMessage(m)) {
+      pending.push(
+        ...(m.content as Array<Extract<NeutralContentPart, { type: "image" }>>),
+      )
+      continue
+    }
+    // Any other message ends the run: pending images land after the last
+    // tool message rather than in the middle of the run.
+    if (inToolRun) {
+      flushImages()
+      inToolRun = false
+    }
+    out.push(m)
+  }
+  flushImages()
+  return out
+}
+
+/**
  * Parse an already-JSON-parsed Anthropic Messages body into the neutral shape.
  * `resolvedModel` is the catalog id the request will run on; `model` its
  * catalog entry (for the reasoning-effort allowlist).
@@ -591,7 +674,12 @@ export function parseAnthropicRequest(
     model: resolvedModel,
     instructions: system.stable,
     dynamicInstructions: system.dynamic,
-    messages,
+    // Group tool_result images AFTER the loop: a contiguous tool run
+    // routinely spans several Anthropic messages (one tool_result per
+    // message), so per-message fan-out cannot see the run. See
+    // `groupToolResultImages` — without this the chat egress emits
+    // `tool,user,tool,user…` and Copilot 400s the whole turn.
+    messages: groupToolResultImages(messages),
     tools,
     toolChoice: parseToolChoice(body.tool_choice),
     parallelToolCalls: parseDisableParallelToolUse(body.tool_choice),

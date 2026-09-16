@@ -120,7 +120,7 @@ Anthropic → neutral correspondence (both paths):
 |---|---|
 | `system` (string or text-block array) | flattened to `instructions` (→ Responses `instructions` / chat `messages[0]` system) |
 | user `text` / `image` blocks | user message with text / image parts |
-| user `tool_result` block | its own `toolResult` message (→ Responses `function_call_output` / chat `role:"tool"`); images inside it can't ride in that item, so they're re-emitted as a follow-up user message in wire order |
+| user `tool_result` block | its own `toolResult` message (→ Responses `function_call_output` / chat `role:"tool"`); images inside it can't ride in that item, so they're re-emitted as a follow-up user message — accumulated across the contiguous tool run and flushed once, after its last tool message (`tool A, tool B, user(imgA, imgB)`), never interleaved (`tool,user,tool,user…` is rejected by `/chat/completions` with a generic `400 invalid_request_body`; see `github/copilot-sdk#1922`) |
 | assistant `text` blocks | assistant text parts |
 | assistant `tool_use` blocks | assistant `toolCall` parts (→ Responses `function_call` / chat `tool_calls[]`) |
 | assistant `thinking` / `redacted_thinking` | **dropped** (not replayable as input to either endpoint) |

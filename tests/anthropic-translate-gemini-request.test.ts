@@ -392,6 +392,132 @@ describe("anthropic-translate chat request mapping (Gemini)", () => {
     ])
   })
 
+  test("parallel image tool_results across user messages → tool,tool then ONE merged user (chat contiguity)", () => {
+    // Regression for a live `gemini-3.8-flash` 400 (`invalid_request_body`):
+    // per-tool_result fan-out emitted `tool,user,tool,user…`, orphaning every
+    // tool message after the first on `/chat/completions` (see
+    // `github/copilot-sdk#1922`). Images must flush once, after the last tool.
+    const { payload } = build({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call_A", name: "Read", input: {} },
+            { type: "tool_use", id: "call_B", name: "Read", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_A",
+              content: [
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+              ],
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_B",
+              content: [
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "REVG" } },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(payload.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_A", type: "function", function: { name: "Read", arguments: "{}" } },
+          { id: "call_B", type: "function", function: { name: "Read", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_A", content: "[image result below]" },
+      { role: "tool", tool_call_id: "call_B", content: "[image result below]" },
+      {
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } },
+          { type: "image_url", image_url: { url: "data:image/png;base64,REVG" } },
+        ],
+      },
+    ])
+  })
+
+  test("trailing genuine user text lands AFTER the flushed tool-result images", () => {
+    const { payload } = build({
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "call_A", name: "Read", input: {} }],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "call_A",
+              content: [
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+              ],
+            },
+          ],
+        },
+        { role: "user", content: "what do you see?" },
+      ],
+    })
+    const roles = payload.messages.map((m) => m.role)
+    expect(roles).toEqual(["assistant", "tool", "user", "user"])
+    expect(payload.messages[2]).toEqual({
+      role: "user",
+      content: [{ type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } }],
+    })
+    expect(payload.messages[3]).toEqual({ role: "user", content: "what do you see?" })
+  })
+
+  test("text-only parallel tool_results → adjacent tools, no synthetic user (no-op)", () => {
+    const { payload } = build({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call_A", name: "Bash", input: {} },
+            { type: "tool_use", id: "call_B", name: "Bash", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "call_A", content: "out-a" }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "call_B", content: "out-b" }],
+        },
+      ],
+    })
+    expect(payload.messages).toEqual([
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          { id: "call_A", type: "function", function: { name: "Bash", arguments: "{}" } },
+          { id: "call_B", type: "function", function: { name: "Bash", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_A", content: "out-a" },
+      { role: "tool", tool_call_id: "call_B", content: "out-b" },
+    ])
+  })
+
   test("complex nested tool input_schema → chat function parameters unchanged", () => {
     const inputSchema = {
       type: "object",
