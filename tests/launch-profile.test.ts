@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test"
 
 import {
+  CHEAPEST_EXPLORE_ALIAS_ID,
+  CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
+  CHEAPEST_IMPLEMENTER_ALIAS_ID,
+  CHEAPEST_PLAN_ALIAS_ID,
+  CHEAPEST_REVIEWER_ALIAS_ID,
+  CHEAP_EXPLORE_ALIAS_ID,
+  CHEAP_GENERAL_PURPOSE_ALIAS_ID,
+  CHEAP_IMPLEMENTER_ALIAS_ID,
+  CHEAP_PLAN_ALIAS_ID,
+  CHEAP_REVIEWER_ALIAS_ID,
   FAST_CRITIC_ALIAS_ID,
   LUNA_DRIVER_ALIAS_ID,
   LUNA_HAIKU_ALIAS_ID,
@@ -30,6 +40,14 @@ import {
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 import { CHEAP_PROFILE_DELEGATION_GRAPH } from "../src/lib/cheap-profile-contract"
+import {
+  CHEAP_PROFILE_NATIVE_EFFORTS,
+  CHEAP_PROFILE_MODELS,
+} from "../src/lib/cheap-profile-contract"
+import {
+  CHEAPEST_PROFILE_NATIVE_EFFORTS,
+  CHEAPEST_PROFILE_MODELS,
+} from "../src/lib/cheapest-profile-contract"
 import { FAST_PROFILE_DELEGATION_GRAPH } from "../src/lib/fast-profile-contract"
 
 const model = (id: string, opts: {
@@ -133,6 +151,55 @@ describe("Luna aliases", () => {
     expect(resolveEffortWithAliasDefault({ aliasId: LUNA_DRIVER_ALIAS_ID, thinkingBucketedEffort: "medium" })).toBe("medium")
     expect(resolveEffortWithAliasDefault({ aliasId: LUNA_DRIVER_ALIAS_ID, thinkingBucketedEffort: "medium", explicitEffort: "low" })).toBe("low")
     expect(resolveEffortWithAliasDefault({ aliasId: "gpt-5.6-sol" })).toBeUndefined()
+  })
+})
+
+describe("cheap-family subagent aliases", () => {
+  const cheapRows = [
+    [CHEAP_EXPLORE_ALIAS_ID, CHEAP_PROFILE_MODELS.explore, "high"],
+    [CHEAP_PLAN_ALIAS_ID, CHEAP_PROFILE_MODELS.plan, "high"],
+    [CHEAP_GENERAL_PURPOSE_ALIAS_ID, CHEAP_PROFILE_MODELS["general-purpose"], "max"],
+    [CHEAP_IMPLEMENTER_ALIAS_ID, CHEAP_PROFILE_MODELS.implementer, "high"],
+    [CHEAP_REVIEWER_ALIAS_ID, CHEAP_PROFILE_MODELS.reviewer, "max"],
+  ] as const
+  const cheapestRows = [
+    [CHEAPEST_EXPLORE_ALIAS_ID, CHEAPEST_PROFILE_MODELS.explore, "high"],
+    [CHEAPEST_PLAN_ALIAS_ID, CHEAPEST_PROFILE_MODELS.plan, "high"],
+    [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, CHEAPEST_PROFILE_MODELS["general-purpose"], "xhigh"],
+    [CHEAPEST_IMPLEMENTER_ALIAS_ID, CHEAPEST_PROFILE_MODELS.implementer, "max"],
+    [CHEAPEST_REVIEWER_ALIAS_ID, CHEAPEST_PROFILE_MODELS.reviewer, "high"],
+  ] as const
+
+  test("resolve and canonicalize (bare and bracketed) to the contract real id", () => {
+    for (const [alias, real, effort] of [...cheapRows, ...cheapestRows]) {
+      expect(resolveModelAlias(alias)?.realModel).toBe(real)
+      expect(resolveModelAlias(alias)?.absentEffortDefault).toBe(effort)
+      expect(resolveModelAlias(`${alias}[1m]`)?.realModel).toBe(real)
+      expect(canonicalizeAliasModel(alias)).toBe(real)
+      expect(canonicalizeAliasModel(`${alias}[1m]`)).toBe(`${real}[1m]`)
+      expect(isRetiredFastModelAlias(alias)).toBe(false)
+    }
+  })
+
+  test("alias efforts match the profile native-effort contracts (drift pin)", () => {
+    expect(resolveModelAlias(CHEAP_EXPLORE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS.Explore)
+    expect(resolveModelAlias(CHEAP_PLAN_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS.Plan)
+    expect(resolveModelAlias(CHEAP_GENERAL_PURPOSE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS["general-purpose"])
+    expect(resolveModelAlias(CHEAP_IMPLEMENTER_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS.implementer)
+    expect(resolveModelAlias(CHEAP_REVIEWER_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS.reviewer)
+    expect(resolveModelAlias(CHEAPEST_EXPLORE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.Explore)
+    expect(resolveModelAlias(CHEAPEST_PLAN_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.Plan)
+    expect(resolveModelAlias(CHEAPEST_GENERAL_PURPOSE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS["general-purpose"])
+    expect(resolveModelAlias(CHEAPEST_IMPLEMENTER_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.implementer)
+    expect(resolveModelAlias(CHEAPEST_REVIEWER_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.reviewer)
+  })
+
+  test("alias real ids match the profile native-model contracts (drift pin)", () => {
+    expect(resolveModelAlias(CHEAP_EXPLORE_ALIAS_ID)?.realModel).toBe(CHEAP_PROFILE_MODELS.explore)
+    expect(resolveModelAlias(CHEAP_PLAN_ALIAS_ID)?.realModel).toBe(CHEAP_PROFILE_MODELS.plan)
+    expect(resolveModelAlias(CHEAPEST_EXPLORE_ALIAS_ID)?.realModel).toBe(CHEAPEST_PROFILE_MODELS.explore)
+    expect(resolveModelAlias(CHEAPEST_PLAN_ALIAS_ID)?.realModel).toBe(CHEAPEST_PROFILE_MODELS.plan)
+    expect(resolveModelAlias(CHEAPEST_REVIEWER_ALIAS_ID)?.realModel).toBe(CHEAPEST_PROFILE_MODELS.reviewer)
   })
 })
 

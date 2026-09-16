@@ -2,6 +2,14 @@ import { describe, expect, test } from "bun:test"
 
 import { preprocessFastRequest } from "../src/lib/fast-request-preprocess"
 import {
+  CHEAPEST_EXPLORE_ALIAS_ID,
+  CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
+  CHEAPEST_PLAN_ALIAS_ID,
+  CHEAPEST_REVIEWER_ALIAS_ID,
+  CHEAP_EXPLORE_ALIAS_ID,
+  CHEAP_IMPLEMENTER_ALIAS_ID,
+  CHEAP_PLAN_ALIAS_ID,
+  CHEAP_REVIEWER_ALIAS_ID,
   FAST_CRITIC_ALIAS_ID,
   LUNA_IMPLEMENTER_ALIAS_ID,
 } from "../src/lib/launch-profile"
@@ -196,8 +204,43 @@ describe("fast request preprocessing", () => {
     test("rejects aliases and models outside the fixed cheap set", () => {
       expect(preprocessFastRequest(body("gh-router-luna-scout-high[1m]"), undefined).rejectedAlias)
         .toBe("gh-router-luna-scout-high[1m]")
+      expect(preprocessFastRequest(body(CHEAP_PLAN_ALIAS_ID), undefined).rejectedAlias)
+        .toBe(CHEAP_PLAN_ALIAS_ID)
       expect(preprocessFastRequest(body("gpt-5.5"), cheapLaunch).rejectedModel).toBe("gpt-5.5")
       expect(preprocessFastRequest(body("claude-opus-4-7"), cheapLaunch).rejectedModel).toBe("claude-opus-4-7")
+    })
+
+    test("cheap role aliases canonicalize bare with alias effort on subagents", () => {
+      // Subagent traffic always takes the alias default, even over an
+      // explicit effort — and a client-added [1m] is stripped after
+      // canonicalization, so the wire id is the bare real model.
+      for (const [alias, real, effort] of [
+        [CHEAP_EXPLORE_ALIAS_ID, "gpt-5.6-luna", "high"],
+        [CHEAP_PLAN_ALIAS_ID, "gpt-5.6-sol", "high"],
+        [CHEAP_IMPLEMENTER_ALIAS_ID, "gemini-3.8-flash", "high"],
+        [CHEAP_REVIEWER_ALIAS_ID, "gpt-5.6-luna", "max"],
+      ] as const) {
+        for (const wire of [alias, `${alias}[1m]`]) {
+          const sub = preprocessFastRequest(
+            body(wire, { output_config: { effort: "low" } }),
+            cheapLaunch,
+            true,
+          )
+          expect(sub.rejectedAlias).toBeUndefined()
+          const parsed = JSON.parse(sub.body)
+          expect(parsed.model).toBe(real)
+          expect(parsed.output_config.effort).toBe(effort)
+        }
+      }
+      // Lead keeps an explicit effort; the id still canonicalizes bare.
+      const lead = JSON.parse(
+        preprocessFastRequest(
+          body(CHEAP_PLAN_ALIAS_ID, { output_config: { effort: "low" } }),
+          cheapLaunch,
+        ).body,
+      )
+      expect(lead.model).toBe("gpt-5.6-sol")
+      expect(lead.output_config.effort).toBe("low")
     })
 
     test("still rejects retired fast role aliases", () => {
@@ -292,6 +335,27 @@ describe("fast request preprocessing", () => {
       )
       expect(sub.model).toBe("gpt-5.6-sol")
       expect(sub.output_config.effort).toBe("high")
+    })
+
+    test("cheapest role aliases canonicalize bare with alias effort on subagents", () => {
+      for (const [alias, real, effort] of [
+        [CHEAPEST_EXPLORE_ALIAS_ID, "gpt-5.6-luna", "high"],
+        [CHEAPEST_PLAN_ALIAS_ID, "gpt-5.6-sol", "high"],
+        [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, "gpt-5.6-luna", "xhigh"],
+        [CHEAPEST_REVIEWER_ALIAS_ID, "gemini-3.8-flash", "high"],
+      ] as const) {
+        for (const wire of [alias, `${alias}[1m]`]) {
+          const sub = preprocessFastRequest(
+            body(wire, { output_config: { effort: "low" } }),
+            cheapestLaunch,
+            true,
+          )
+          expect(sub.rejectedAlias).toBeUndefined()
+          const parsed = JSON.parse(sub.body)
+          expect(parsed.model).toBe(real)
+          expect(parsed.output_config.effort).toBe(effort)
+        }
+      }
     })
   })
 })

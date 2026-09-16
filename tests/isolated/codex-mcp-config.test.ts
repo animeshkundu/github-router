@@ -17,6 +17,18 @@ import {
 } from "../../src/lib/codex-mcp-config"
 import { PEER_AGENT_MD_FILENAME } from "../../src/lib/paths"
 import { MCP_GROUPS } from "../../src/lib/peer-mcp-personas"
+import {
+  CHEAPEST_EXPLORE_ALIAS_ID,
+  CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
+  CHEAPEST_IMPLEMENTER_ALIAS_ID,
+  CHEAPEST_PLAN_ALIAS_ID,
+  CHEAPEST_REVIEWER_ALIAS_ID,
+  CHEAP_EXPLORE_ALIAS_ID,
+  CHEAP_GENERAL_PURPOSE_ALIAS_ID,
+  CHEAP_IMPLEMENTER_ALIAS_ID,
+  CHEAP_PLAN_ALIAS_ID,
+  CHEAP_REVIEWER_ALIAS_ID,
+} from "../../src/lib/launch-profile"
 import { state } from "../../src/lib/state"
 
 const NONCE = "0".repeat(64)
@@ -961,13 +973,13 @@ describe("buildPeerAgentDefinitions", () => {
       ]) expect(agents[absent]).toBeUndefined()
     })
 
-    test("pins BARE 200K role models (no [1m]) and the same fixed efforts", () => {
+    test("pins BARE alias role models (no [1m], no catalog-resolvable id) and the same fixed efforts", () => {
       const agents = buildCheapAgents()
-      expect(agents.Explore!.model).toBe("gpt-5.6-luna")
-      expect(agents.Plan!.model).toBe("gpt-5.6-sol")
-      expect(agents["general-purpose"]!.model).toBe("gpt-5.6-luna")
-      expect(agents.implementer!.model).toBe("gemini-3.8-flash")
-      expect(agents.reviewer!.model).toBe("gpt-5.6-luna")
+      expect(agents.Explore!.model).toBe(CHEAP_EXPLORE_ALIAS_ID)
+      expect(agents.Plan!.model).toBe(CHEAP_PLAN_ALIAS_ID)
+      expect(agents["general-purpose"]!.model).toBe(CHEAP_GENERAL_PURPOSE_ALIAS_ID)
+      expect(agents.implementer!.model).toBe(CHEAP_IMPLEMENTER_ALIAS_ID)
+      expect(agents.reviewer!.model).toBe(CHEAP_REVIEWER_ALIAS_ID)
       for (const def of Object.values(agents)) expect(def.model).not.toMatch(/\[1m\]/)
 
       expect(agents.Explore!.effort).toBe("high")
@@ -997,7 +1009,7 @@ describe("buildPeerAgentDefinitions", () => {
       const agents = buildCheapAgents({ browseAvailable: true })
       expect(agents["worker-browse"]).toBeDefined()
       expect(agents["worker-browse"]!.tools).toEqual(["mcp__workers__*"])
-      expect(agents["worker-browse"]!.model).toBe("gpt-5.6-luna")
+      expect(agents["worker-browse"]!.model).toBe(CHEAP_EXPLORE_ALIAS_ID)
       expect(agents["worker-browse"]!.effort).toBe("high")
     })
 
@@ -1008,6 +1020,92 @@ describe("buildPeerAgentDefinitions", () => {
 
     test("every cheap agent name matches the permanent sweep allowlist", () => {
       const agents = buildCheapAgents({ browseAvailable: true })
+      for (const name of Object.keys(agents)) {
+        expect(PEER_AGENT_MD_FILENAME.test(`peer-123-${"a".repeat(8)}-${name}.md`)).toBe(true)
+      }
+    })
+  })
+
+  describe("cheapest launch profile", () => {
+    const CHEAPEST_ROSTER = ["Explore", "Plan", "general-purpose", "implementer", "reviewer"]
+
+    function buildCheapestAgents(extra?: Partial<Parameters<typeof buildPeerAgentDefinitions>[0]>) {
+      return buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        cheapestProfile: true,
+        serverUrl: URL,
+        nativeRoster: CHEAPEST_ROSTER,
+        includeCoordinator: false,
+        // Real catalog ids, as the launcher passes them: the pinned roster
+        // must still emit aliases (a bare real id would be catalog-resolved
+        // to [1m] by the client).
+        cheapestExploreModel: "gpt-5.6-luna",
+        cheapestPlanModel: "gpt-5.6-sol",
+        cheapestGeneralPurposeModel: "gpt-5.6-luna",
+        cheapestImplementerModel: "gpt-5.6-luna",
+        cheapestReviewerModel: "gemini-3.8-flash",
+        ...extra,
+      })
+    }
+
+    test("emits exactly the same five-agent roster as cheap", () => {
+      const agents = buildCheapestAgents()
+      expect(Object.keys(agents).sort()).toEqual(["Explore", "Plan", "general-purpose", "implementer", "reviewer"])
+      for (const absent of [
+        "peer-review-coordinator", "codex-critic", "gemini-critic", "opus-critic",
+        "implementer-fast", "reviewer-fast", "brainstorm", "scribe", "general-purpose-fast", "critic", "planner",
+      ]) expect(agents[absent]).toBeUndefined()
+    })
+
+    test("pins BARE alias role models (no [1m], no catalog-resolvable id) and the fixed efforts", () => {
+      const agents = buildCheapestAgents()
+      expect(agents.Explore!.model).toBe(CHEAPEST_EXPLORE_ALIAS_ID)
+      expect(agents.Plan!.model).toBe(CHEAPEST_PLAN_ALIAS_ID)
+      expect(agents["general-purpose"]!.model).toBe(CHEAPEST_GENERAL_PURPOSE_ALIAS_ID)
+      expect(agents.implementer!.model).toBe(CHEAPEST_IMPLEMENTER_ALIAS_ID)
+      expect(agents.reviewer!.model).toBe(CHEAPEST_REVIEWER_ALIAS_ID)
+      for (const def of Object.values(agents)) {
+        expect(def.model).not.toMatch(/\[1m\]/)
+        expect(def.model).toMatch(/^gh-router-cheapest-/)
+      }
+
+      expect(agents.Explore!.effort).toBe("high")
+      expect(agents.Plan!.effort).toBe("high")
+      expect(agents["general-purpose"]!.effort).toBe("xhigh")
+      expect(agents.implementer!.effort).toBe("max")
+      expect(agents.reviewer!.effort).toBe("high")
+
+      expect(agents.Explore!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
+      expect(agents.reviewer!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
+      expect(agents.Plan!.tools).toContain("Agent")
+      expect(agents.Plan!.tools).toContain("mcp__peers__oracle")
+      expect(agents.Plan!.tools).toContain("mcp__search__*")
+      expect(agents.reviewer!.tools).not.toContain("mcp__peers__oracle")
+      expect(agents.reviewer!.mcpServers).not.toHaveProperty("peers")
+      expect(agents.Plan!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything(), search: expect.anything() }))
+      expect(agents.Plan!.prompt).toContain("Oracle")
+      expect(agents.reviewer!.prompt).not.toContain("Oracle")
+    })
+
+    test("browseAvailable with workers group adds an identical bare worker-browse", () => {
+      const agents = buildCheapestAgents({ browseAvailable: true })
+      expect(agents["worker-browse"]).toBeDefined()
+      expect(agents["worker-browse"]!.tools).toEqual(["mcp__workers__*"])
+      expect(agents["worker-browse"]!.model).toBe(CHEAPEST_EXPLORE_ALIAS_ID)
+      expect(agents["worker-browse"]!.effort).toBe("high")
+    })
+
+    test("nativeRoster remains a hard filter on the cheapest definitions", () => {
+      const agents = buildCheapestAgents({ nativeRoster: ["Plan"] })
+      expect(Object.keys(agents)).toEqual(["Plan"])
+    })
+
+    test("every cheapest agent name matches the permanent sweep allowlist", () => {
+      const agents = buildCheapestAgents({ browseAvailable: true })
       for (const name of Object.keys(agents)) {
         expect(PEER_AGENT_MD_FILENAME.test(`peer-123-${"a".repeat(8)}-${name}.md`)).toBe(true)
       }

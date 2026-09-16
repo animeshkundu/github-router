@@ -234,6 +234,37 @@ export const LUNA_SCOUT_ALIAS_ID = "gh-router-luna-scout-high"
 export const LUNA_IMPLEMENTER_ALIAS_ID = "gh-router-luna-implementer-max"
 export const FAST_CRITIC_ALIAS_ID = "gh-router-fast-critic-medium"
 
+/**
+ * Cheap-family subagent aliases (`-m cheap`/`-m cheap1m`). Router-owned,
+ * non-catalog identities: Claude Code resolves a bare REAL model id against
+ * the live catalog and upgrades Task subagents to `[1m]` accounting when the
+ * entry advertises >=1M, defeating the cheap family's whole 200K cost lever.
+ * An alias matches no catalog entry, so the client holds the 200K default and
+ * the proxy canonicalizes to the real id upstream with the alias's fixed
+ * effort. `absentEffortDefault` mirrors `CHEAP_PROFILE_NATIVE_EFFORTS` per
+ * role (a drift test pins this). Emitted BARE (no `[1m]`) by
+ * `buildCheapProfileAgentDefinitions`.
+ */
+export const CHEAP_EXPLORE_ALIAS_ID = "gh-router-cheap-explore-high"
+export const CHEAP_PLAN_ALIAS_ID = "gh-router-cheap-plan-high"
+export const CHEAP_GENERAL_PURPOSE_ALIAS_ID = "gh-router-cheap-general-purpose-max"
+export const CHEAP_IMPLEMENTER_ALIAS_ID = "gh-router-cheap-implementer-high"
+export const CHEAP_REVIEWER_ALIAS_ID = "gh-router-cheap-reviewer-max"
+
+/**
+ * Cheapest-profile subagent aliases (`-m cheapest`). Same non-catalog
+ * mechanism as the cheap aliases above, with the cheapest roster's own
+ * identities and efforts (`CHEAPEST_PROFILE_NATIVE_MODELS` /
+ * `CHEAPEST_PROFILE_NATIVE_EFFORTS`, pinned by a drift test). Emitted BARE by
+ * `buildCheapestProfileAgentDefinitions`.
+ */
+export const CHEAPEST_EXPLORE_ALIAS_ID = "gh-router-cheapest-explore-high"
+export const CHEAPEST_PLAN_ALIAS_ID = "gh-router-cheapest-plan-high"
+export const CHEAPEST_GENERAL_PURPOSE_ALIAS_ID =
+  "gh-router-cheapest-general-purpose-xhigh"
+export const CHEAPEST_IMPLEMENTER_ALIAS_ID = "gh-router-cheapest-implementer-max"
+export const CHEAPEST_REVIEWER_ALIAS_ID = "gh-router-cheapest-reviewer-high"
+
 export const LUNA_SONNET_ALIAS_ID = "gh-router-luna-sonnet-xhigh"
 
 /**
@@ -329,6 +360,46 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   [
     LUNA_HAIKU_ALIAS_ID,
     { aliasId: LUNA_HAIKU_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "high" },
+  ],
+  [
+    CHEAP_EXPLORE_ALIAS_ID,
+    { aliasId: CHEAP_EXPLORE_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS.explore, absentEffortDefault: "high" },
+  ],
+  [
+    CHEAP_PLAN_ALIAS_ID,
+    { aliasId: CHEAP_PLAN_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS.plan, absentEffortDefault: "high" },
+  ],
+  [
+    CHEAP_GENERAL_PURPOSE_ALIAS_ID,
+    { aliasId: CHEAP_GENERAL_PURPOSE_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS["general-purpose"], absentEffortDefault: "max" },
+  ],
+  [
+    CHEAP_IMPLEMENTER_ALIAS_ID,
+    { aliasId: CHEAP_IMPLEMENTER_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS.implementer, absentEffortDefault: "high" },
+  ],
+  [
+    CHEAP_REVIEWER_ALIAS_ID,
+    { aliasId: CHEAP_REVIEWER_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS.reviewer, absentEffortDefault: "max" },
+  ],
+  [
+    CHEAPEST_EXPLORE_ALIAS_ID,
+    { aliasId: CHEAPEST_EXPLORE_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS.explore, absentEffortDefault: "high" },
+  ],
+  [
+    CHEAPEST_PLAN_ALIAS_ID,
+    { aliasId: CHEAPEST_PLAN_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS.plan, absentEffortDefault: "high" },
+  ],
+  [
+    CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
+    { aliasId: CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS["general-purpose"], absentEffortDefault: "xhigh" },
+  ],
+  [
+    CHEAPEST_IMPLEMENTER_ALIAS_ID,
+    { aliasId: CHEAPEST_IMPLEMENTER_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS.implementer, absentEffortDefault: "max" },
+  ],
+  [
+    CHEAPEST_REVIEWER_ALIAS_ID,
+    { aliasId: CHEAPEST_REVIEWER_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS.reviewer, absentEffortDefault: "high" },
   ],
 ])
 

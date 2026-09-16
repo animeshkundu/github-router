@@ -11,18 +11,26 @@ import {
   FAST_PROFILE_NATIVE_MODELS,
 } from "./fast-profile-contract"
 import {
-  CHEAP_PROFILE_MODELS,
   CHEAP_PROFILE_NATIVE_AGENT_NAMES,
   CHEAP_PROFILE_NATIVE_EFFORTS,
-  CHEAP_PROFILE_NATIVE_MODELS,
 } from "./cheap-profile-contract"
 import {
-  CHEAPEST_PROFILE_MODELS,
   CHEAPEST_PROFILE_NATIVE_AGENT_NAMES,
   CHEAPEST_PROFILE_NATIVE_EFFORTS,
-  CHEAPEST_PROFILE_NATIVE_MODELS,
 } from "./cheapest-profile-contract"
-import { LUNA_SCOUT_ALIAS_ID } from "./launch-profile"
+import {
+  CHEAPEST_EXPLORE_ALIAS_ID,
+  CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
+  CHEAPEST_IMPLEMENTER_ALIAS_ID,
+  CHEAPEST_PLAN_ALIAS_ID,
+  CHEAPEST_REVIEWER_ALIAS_ID,
+  CHEAP_EXPLORE_ALIAS_ID,
+  CHEAP_GENERAL_PURPOSE_ALIAS_ID,
+  CHEAP_IMPLEMENTER_ALIAS_ID,
+  CHEAP_PLAN_ALIAS_ID,
+  CHEAP_REVIEWER_ALIAS_ID,
+  LUNA_SCOUT_ALIAS_ID,
+} from "./launch-profile"
 
 import { type SelfInvocation } from "./hook-launcher/self-invocation"
 import { buildCodexProviderConfigFlags } from "./launch"
@@ -973,25 +981,21 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
 }
 
 /** Build the literal `-m cheap` native roster. Identical fixed five-agent
- * surface and roles to `-m fast`, but every SUBAGENT model is emitted BARE
- * (no `oneM()`/`decorateGuaranteedOneM` bracket) so Claude Code budgets each
- * role at its 200K default window — the profile's whole cost lever. */
+ * surface and roles to `-m fast`, but every SUBAGENT model is a BARE
+ * router-owned alias (`gh-router-cheap-*`, no `[1m]` bracket) rather than a
+ * real catalog id. A bare real id is resolved by Claude Code against the live
+ * catalog and upgraded to `[1m]` accounting when the entry advertises >=1M,
+ * defeating the profile's whole 200K cost lever; an alias matches no catalog
+ * entry, so the client holds the 200K default while the proxy canonicalizes
+ * to the real model upstream with the alias's fixed effort. Caller-supplied
+ * `opts.cheap*Model` values are deliberately ignored: the pinned roster is
+ * fixed even when the launcher passes the contract's real ids. */
 function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
-  const modelFor = (value: string | undefined, fallback: string): string =>
-    nonEmptyModel(value) ?? fallback
-  const planModel = modelFor(opts.cheapPlanModel, CHEAP_PROFILE_NATIVE_MODELS.Plan)
-  const generalModel = modelFor(
-    opts.cheapGeneralPurposeModel,
-    CHEAP_PROFILE_NATIVE_MODELS["general-purpose"],
-  )
-  const implementerModel = modelFor(
-    opts.cheapImplementerModel,
-    CHEAP_PROFILE_NATIVE_MODELS.implementer,
-  )
-  const reviewerModel = modelFor(
-    opts.cheapReviewerModel,
-    CHEAP_PROFILE_NATIVE_MODELS.reviewer,
-  )
+  const exploreModel = CHEAP_EXPLORE_ALIAS_ID
+  const planModel = CHEAP_PLAN_ALIAS_ID
+  const generalModel = CHEAP_GENERAL_PURPOSE_ALIAS_ID
+  const implementerModel = CHEAP_IMPLEMENTER_ALIAS_ID
+  const reviewerModel = CHEAP_REVIEWER_ALIAS_ID
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
   const peersKey = peersKeyOf(opts.groupKeys)
@@ -1044,7 +1048,7 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
         + "Gaps and unknowns: what you could not confirm, and where you would look next.\n\n"
         + readOnlyToolSteer(),
       tools: readSearchTools,
-      model: modelFor(opts.cheapExploreModel, CHEAP_PROFILE_MODELS.explore),
+      model: exploreModel,
       effort: effort("Explore"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
@@ -1152,7 +1156,7 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
     out["worker-browse"] = {
       description: dispatcherDescription("browse"),
       prompt: dispatcherPrompt("browse", workersKey),
-      model: modelFor(opts.cheapExploreModel, CHEAP_PROFILE_MODELS.explore),
+      model: exploreModel,
       effort: "high",
       tools: dispatcherTools("browse", workersKey),
       ...(opts.serverUrl
@@ -1183,25 +1187,20 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
 
 /** Build the literal `-m cheapest` native roster. Same fixed five-agent
  * surface and roles as `-m cheap`, but Luna-led with a Gemini reviewer —
- * every SUBAGENT model emitted BARE (200K default window). The Plan prompt
- * additionally directs the planner to do the minimal synthesis itself and
- * delegate discovery/execution heavily to `Explore` and `general-purpose`. */
+ * every SUBAGENT model is a BARE router-owned alias
+ * (`gh-router-cheapest-*`, no `[1m]`) rather than a real catalog id, for the
+ * same client catalog-resolution reason as the cheap builder below: a bare
+ * real id is upgraded to `[1m]` accounting by Claude Code whenever the entry
+ * advertises >=1M. Caller-supplied `opts.cheapest*Model` values are
+ * deliberately ignored. The Plan prompt additionally directs the planner to
+ * do the minimal synthesis itself and delegate discovery/execution heavily to
+ * `Explore` and `general-purpose`. */
 function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
-  const modelFor = (value: string | undefined, fallback: string): string =>
-    nonEmptyModel(value) ?? fallback
-  const planModel = modelFor(opts.cheapestPlanModel, CHEAPEST_PROFILE_NATIVE_MODELS.Plan)
-  const generalModel = modelFor(
-    opts.cheapestGeneralPurposeModel,
-    CHEAPEST_PROFILE_NATIVE_MODELS["general-purpose"],
-  )
-  const implementerModel = modelFor(
-    opts.cheapestImplementerModel,
-    CHEAPEST_PROFILE_NATIVE_MODELS.implementer,
-  )
-  const reviewerModel = modelFor(
-    opts.cheapestReviewerModel,
-    CHEAPEST_PROFILE_NATIVE_MODELS.reviewer,
-  )
+  const exploreModel = CHEAPEST_EXPLORE_ALIAS_ID
+  const planModel = CHEAPEST_PLAN_ALIAS_ID
+  const generalModel = CHEAPEST_GENERAL_PURPOSE_ALIAS_ID
+  const implementerModel = CHEAPEST_IMPLEMENTER_ALIAS_ID
+  const reviewerModel = CHEAPEST_REVIEWER_ALIAS_ID
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
   const peersKey = peersKeyOf(opts.groupKeys)
@@ -1254,7 +1253,7 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
         + "Gaps and unknowns: what you could not confirm, and where you would look next.\n\n"
         + readOnlyToolSteer(),
       tools: readSearchTools,
-      model: modelFor(opts.cheapestExploreModel, CHEAPEST_PROFILE_MODELS.explore),
+      model: exploreModel,
       effort: effort("Explore"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
@@ -1362,7 +1361,7 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     out["worker-browse"] = {
       description: dispatcherDescription("browse"),
       prompt: dispatcherPrompt("browse", workersKey),
-      model: modelFor(opts.cheapestExploreModel, CHEAPEST_PROFILE_MODELS.explore),
+      model: exploreModel,
       effort: "high",
       tools: dispatcherTools("browse", workersKey),
       ...(opts.serverUrl
