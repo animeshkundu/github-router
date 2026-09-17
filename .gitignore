@@ -20,3 +20,4 @@ dist/
 .claude/
 # gate-b fixture server writes this at runtime (live ports) — never commit
 tests/fixtures/browser/manifest.runtime.json
+.claude-attachments/

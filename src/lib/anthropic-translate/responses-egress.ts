@@ -31,7 +31,12 @@
 import { randomUUID } from "node:crypto"
 
 import type { ResponsesApiResponse } from "~/services/copilot/create-responses"
-import { extractAndRecordAic, extractAndRecordPricedAic } from "~/lib/aic-ledger"
+import { extractAndRecordAic, recordAic } from "~/lib/aic-ledger"
+import {
+  copilotUsageToWire,
+  extractCopilotUsage,
+  type CopilotUsageWire,
+} from "~/lib/aic-usage"
 import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 
 import {
@@ -75,6 +80,8 @@ interface ResponsesSseEvent {
     incomplete_details?: { reason?: string }
     error?: { message?: string }
   }
+  /** Upstream AIC — top-level sibling of `response` on the terminal event. */
+  copilot_usage?: unknown
 }
 
 interface ResponsesUsage {
@@ -313,8 +320,12 @@ export async function* synthAnthropicFromResponses(
   // upstream iterable ends without one, the stream was truncated mid-flight and
   // must NOT be synthesized as a clean, successful message.
   let sawTerminal = false
-  // Upstream AIC recorded at most once per stream (see terminal case below).
-  let aicRecorded = false
+  // Priced AIC retained from the FIRST terminal frame. `undefined` doubles as
+  // the record-once latch: recording is gated on it and it is set the same time
+  // we record, so a repeated terminal frame can never double-count. Replayed
+  // client-facing on the terminal `message_delta` — the CLI reads only
+  // `total_nano_aiu`, and this is the exact frame we already recorded.
+  let aicCopilotUsageWire: CopilotUsageWire | undefined = undefined
 
   const closeCurrent = (): void => {
     if (!current) return
@@ -535,11 +546,15 @@ export async function* synthAnthropicFromResponses(
       case "response.incomplete": {
         sawTerminal = true
         // Upstream AIC rides top-level on the terminal event (verified live).
-        // Record once — a repeated terminal frame must not double-count.
-        // Priced variant: skips a zero-nano terminal should one ever appear.
-        if (!aicRecorded) {
-          if (extractAndRecordPricedAic(opts.modelId, ev) !== undefined) {
-            aicRecorded = true
+        // Record ONCE — as chat-egress: parse the first PRICED reading here,
+        // retain it for the client-facing terminal replay below, and never
+        // re-record. Skipping the priced variant keeps the interim zero-nano
+        // frame from latching and the flag replacing the priced latch.
+        if (aicCopilotUsageWire === undefined) {
+          const usage = extractCopilotUsage(ev.copilot_usage)
+          if (usage && usage.totalNanoAiu > 0) {
+            recordAic(opts.modelId, usage)
+            aicCopilotUsageWire = copilotUsageToWire(usage)
           }
         }
         const u = ev.response?.usage
@@ -610,7 +625,7 @@ export async function* synthAnthropicFromResponses(
       output_tokens: usage.output,
       cache_read_input_tokens: usage.cacheRead,
       cache_creation_input_tokens: usage.cacheWrite,
-    }),
+    }, aicCopilotUsageWire),
   )
   q.push(makeMessageStop())
   for (const e of q) yield e

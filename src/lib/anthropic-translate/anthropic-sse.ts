@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto"
 import consola from "consola"
 
 import { buildAnthropicErrorEvent, isControllerClosedError } from "~/lib/stream-relay"
+import type { CopilotUsageWire } from "~/lib/aic-usage"
 
 export interface AnthropicUsage {
   input_tokens?: number
@@ -117,6 +118,7 @@ export function makeMessageDelta(
   stopReason: string,
   stopSequence: string | null,
   usage: AnthropicUsage,
+  copilotUsage?: CopilotUsageWire,
 ): AnthropicStreamEvent {
   return {
     type: "message_delta",
@@ -127,6 +129,10 @@ export function makeMessageDelta(
       cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
       cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
     },
+    // Client-facing replay of the SAME priced reading the synthesizer already
+    // recorded to the ledger — surfaces Claude Code's native AIC strip on
+    // shimmed leads. Omitting it (the normal case) changes nothing on the wire.
+    ...(copilotUsage ? { copilot_usage: copilotUsage } : {}),
   }
 }
 

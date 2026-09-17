@@ -41,7 +41,12 @@ import {
   makeMessageStop,
   makeTextDelta,
 } from "./anthropic-sse"
-import { extractAndRecordAic, extractAndRecordPricedAic } from "~/lib/aic-ledger"
+import { extractAndRecordAic, recordAic } from "~/lib/aic-ledger"
+import {
+  copilotUsageToWire,
+  extractCopilotUsage,
+  type CopilotUsageWire,
+} from "~/lib/aic-usage"
 import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
 
 type AnyRecord = Record<string, unknown>
@@ -63,6 +68,8 @@ interface ChatSseChunk {
     finish_reason?: string | null
   }>
   usage?: ChatUsage
+  /** Upstream AIC — top-level sibling of `usage` on the trailing chunk. */
+  copilot_usage?: unknown
 }
 
 interface ChatUsage {
@@ -245,6 +252,10 @@ export async function* synthAnthropicFromChat(
   let usageCacheWrite = 0
   // Upstream AIC recorded at most once per stream (see usage-accumulation below).
   let aicRecorded = false
+  // The priced reading retained for client-facing replay on the terminal
+  // message_delta (Claude Code's native AIC strip). Client-only — the replay
+  // is the SAME value already recorded above, never re-recorded downstream.
+  let aicCopilotUsageWire: CopilotUsageWire | undefined
   // The last finish_reason seen — informs stop_reason ONLY (null → end_turn).
   let finishReason: string | null = null
   // The `[DONE]` sentinel is the authoritative clean-end marker. A stream that
@@ -274,12 +285,15 @@ export async function* synthAnthropicFromChat(
     // Usage may ride on any chunk (typically a trailing choices-empty chunk).
     // Max-accumulate so a later zeroed frame can't clobber a real count.
     // Upstream AIC (`copilot_usage`) rides the same trailing chunk — record
-    // the first priced reading per stream (the priced variant skips interim
-    // zero-nano frames; the flag guards against a repeated terminal frame
-    // double-counting).
+    // the FIRST priced reading per stream (skipping interim zero-nano frames;
+    // the flag guards against a repeated terminal frame double-counting); the
+    // same priced reading is re-emitted to the client on the terminal delta.
     if (!aicRecorded) {
-      if (extractAndRecordPricedAic(opts.modelId, chunk) !== undefined) {
+      const pricedUsage = extractCopilotUsage(chunk.copilot_usage)
+      if (pricedUsage && pricedUsage.totalNanoAiu > 0) {
+        recordAic(opts.modelId, pricedUsage)
         aicRecorded = true
+        aicCopilotUsageWire = copilotUsageToWire(pricedUsage)
       }
     }
     if (chunk.usage) {
@@ -386,11 +400,16 @@ export async function* synthAnthropicFromChat(
       cache_write_tokens: usageCacheWrite,
     },
   })
-  yield makeMessageDelta(stopReason, null, {
-    input_tokens: usage.uncachedInput,
-    output_tokens: usage.output,
-    cache_read_input_tokens: usage.cacheRead,
-    cache_creation_input_tokens: usage.cacheWrite,
-  })
+  yield makeMessageDelta(
+    stopReason,
+    null,
+    {
+      input_tokens: usage.uncachedInput,
+      output_tokens: usage.output,
+      cache_read_input_tokens: usage.cacheRead,
+      cache_creation_input_tokens: usage.cacheWrite,
+    },
+    aicCopilotUsageWire,
+  )
   yield makeMessageStop()
 }
