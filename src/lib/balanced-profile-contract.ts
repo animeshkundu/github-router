@@ -1,9 +1,9 @@
 /**
  * Fixed identities for the literal `github-router claude -m balanced` profile.
  *
- * The most-complex-tasks tier: a `gpt-5.6-sol`/high LEAD at Claude Code's
+ * The most-complex-tasks tier: a `gpt-5.6-sol`/medium LEAD at Claude Code's
  * DEFAULT (bare-slug) 200K window, every subagent at the same 200K default,
- * a `gpt-5.6-sol`/high Advisor (bare slug), and a `grok-4.6`/medium primary
+ * a `gpt-5.6-sol`/medium Advisor (bare slug), and a `grok-4.6`/medium primary
  * Oracle. Oracle-only peer set (no `astra`), same exact four-agent surface
  * and authority structure as the cheap family minus `implementer`.
  *
@@ -75,7 +75,8 @@ export const BALANCED_PROFILE_ADVISOR_CLIENT_MODEL =
 /** Advisor context window for balanced mode (tokens). */
 export const BALANCED_PROFILE_ADVISOR_CONTEXT_TOKENS =
   BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS
-export const BALANCED_PROFILE_ADVISOR_EFFORT = "high" as const
+export const BALANCED_PROFILE_LEAD_EFFORT = "medium" as const
+export const BALANCED_PROFILE_ADVISOR_EFFORT = "medium" as const
 export const BALANCED_PROFILE_ORACLE_MODEL = BALANCED_PROFILE_MODELS.oracle
 export const BALANCED_PROFILE_ORACLE_EFFORT = "medium" as const
 

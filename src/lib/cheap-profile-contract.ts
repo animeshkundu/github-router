@@ -5,8 +5,8 @@
  * A cost-lean sibling of `-m fast`: identical fixed four-agent surface, but
  * every SUBAGENT runs at Claude Code's 200K DEFAULT context window (bare
  * slug, no `[1m]` accounting bracket). `-m cheap` also drives the Gemini
- * LEAD at the same 200K default (bare slug, no `[1m]`), so its only peer is
- * the `grok-4.6`/medium Oracle. `-m cheap1m` is the named successor of the
+ * LEAD at the same 200K default (bare slug, no `[1m]`) with medium effort,
+ * so its only peer is the `grok-4.6`/medium Oracle. `-m cheap1m` is the named successor of the
  * original cheap launch: the leader keeps its full 1M window (`[1m]`) and
  * the `astra` peer (`gpt-6-astra`) remains available next to Oracle — still
  * at the 200K default window and medium effort.
@@ -87,7 +87,8 @@ export const CHEAP_PROFILE_ADVISOR_CLIENT_MODEL = CHEAP_PROFILE_MODELS.advisor
 /** Advisor context window for cheap mode (tokens). */
 export const CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS =
   CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS
-export const CHEAP_PROFILE_ADVISOR_EFFORT = "high" as const
+export const CHEAP_PROFILE_LEAD_EFFORT = "medium" as const
+export const CHEAP_PROFILE_ADVISOR_EFFORT = "medium" as const
 export const CHEAP_PROFILE_ORACLE_MODEL = CHEAP_PROFILE_MODELS.oracle
 export const CHEAP_PROFILE_ORACLE_EFFORT = "medium" as const
 /** Astra identity for the `-m cheap1m` successor only (`-m cheap` has no
