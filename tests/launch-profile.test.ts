@@ -172,8 +172,8 @@ describe("cheap-family subagent aliases", () => {
   const cheapRows = [
     [CHEAP_EXPLORE_ALIAS_ID, CHEAP_PROFILE_MODELS.explore, "high"],
     [CHEAP_PLAN_ALIAS_ID, CHEAP_PROFILE_MODELS.plan, "high"],
-    [CHEAP_GENERAL_PURPOSE_ALIAS_ID, CHEAP_PROFILE_MODELS["General-Purpose"], "high"],
-    [CHEAP_IMPLEMENTER_ALIAS_ID, CHEAP_PROFILE_MODELS["General-Purpose"], "high"],
+    [CHEAP_GENERAL_PURPOSE_ALIAS_ID, CHEAP_PROFILE_MODELS["General-Purpose"], "max"],
+    [CHEAP_IMPLEMENTER_ALIAS_ID, CHEAP_PROFILE_MODELS["General-Purpose"], "max"],
     [CHEAP_REVIEWER_ALIAS_ID, CHEAP_PROFILE_MODELS.reviewer, "max"],
   ] as const
   const cheapestRows = [

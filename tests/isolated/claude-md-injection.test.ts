@@ -608,8 +608,12 @@ test("operating-defaults directive: orchestrator posture + concrete excellence p
   expect(low).toContain("first principles")
   expect(low).toMatch(/works backwards|work backwards/)
   expect(low).toContain("derive, reproduce, or test")
-  // Overridable default.
-  expect(low).toContain("override")
+  // Layered default, not a replacement: domain standards and user direction
+  // add on top, with an explicit conflict precedence (user, then domain,
+  // then default) instead of an unfalsifiable "override" license that could
+  // be read as permission to drop safety-critical defaults on thin prose.
+  expect(low).toContain("addons")
+  expect(low).toContain("on a direct conflict")
   // Self-compliant with the style directive: no em dash; no Claude/AI/Anthropic
   // attribution (this directive is behavioral, not the attribution rule).
   expect(d).not.toContain("—")

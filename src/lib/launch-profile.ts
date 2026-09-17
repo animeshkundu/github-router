@@ -410,11 +410,11 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   ],
   [
     CHEAP_GENERAL_PURPOSE_ALIAS_ID,
-    { aliasId: CHEAP_GENERAL_PURPOSE_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "high" },
+    { aliasId: CHEAP_GENERAL_PURPOSE_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "max" },
   ],
   [
     CHEAP_IMPLEMENTER_ALIAS_ID,
-    { aliasId: CHEAP_IMPLEMENTER_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "high" },
+    { aliasId: CHEAP_IMPLEMENTER_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "max" },
   ],
   [
     CHEAP_REVIEWER_ALIAS_ID,

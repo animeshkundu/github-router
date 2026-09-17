@@ -581,18 +581,27 @@ function fileToolSteer(bashUses: string): string {
   )
 }
 
-/** The read-only half of `fileToolSteer`, for agents that never write. */
-function readOnlyToolSteer(): string {
+/** The read-only half of `fileToolSteer`, for agents that never write.
+ *  Names the semantic code-search tool only when the launch enabled it;
+ *  otherwise the `code` tool is lexical-only and naming semantic search
+ *  would send the agent at a mode that just degrades to lexical. */
+function readOnlyToolSteer(semanticAvailable = true): string {
+  const searchTools = semanticAvailable
+    ? "Grep/Glob plus the semantic code search tool"
+    : "Grep/Glob"
   return (
-    "Use Read to read files and Grep/Glob plus the semantic code search tool to find them; "
+    `Use Read to read files and ${searchTools} to find them; `
     + "Bash is for read-only inspection such as git log, git blame, and git show. "
     + "Do not modify any file, and do not run mutating commands."
   )
 }
 
-function reviewerToolSteer(): string {
+function reviewerToolSteer(semanticAvailable = true): string {
+  const searchTools = semanticAvailable
+    ? "Grep/Glob plus the semantic code search tool"
+    : "Grep/Glob"
   return (
-    "Use Read to read files and Grep/Glob plus the semantic code search tool to find them. "
+    `Use Read to read files and ${searchTools} to find them. `
     + "Use Bash for builds, tests, reproductions, and read-only git inspection; do not modify source-controlled files or use the shell to edit them."
   )
 }
@@ -816,28 +825,42 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
  *     `Plan`-first architecture, `General-Purpose` mixed execution, and
  *     post-integration `reviewer` verification.
  */
-function pinnedSearchGuidance(semanticAvailable: boolean): string {
-  const lexical = "Start with exact lexical and symbol search (`code` with mode:\"lexical\" or \"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys — it costs no model call"
+function pinnedSearchGuidance(semanticAvailable: boolean, capitalize = true): string {
+  const start = capitalize ? "Start with" : "start with"
+  const lexical = `${start} exact lexical and symbol search (\`code\` with mode:"lexical" or "exact", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys — it costs no model call`
   if (!semanticAvailable) {
     return `${lexical}. Pair it with surrounding context lines so callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer.`
   }
   return `${lexical}; pair semantic search (meaning-ranked, best for intent/concept questions where literal keywords may not appear) with exact lexical and symbol search so that neither naming drift nor synonym mismatch hides a result. Include surrounding context lines in your search results so that callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer.`
 }
 
+/**
+ * Implicit (cheapest) tuning is composed from the SAME shared remainder as
+ * the explicit base — only the proactive-delegation head sentences differ.
+ * The tails below are each written once and copied by both variants, so a
+ * fix to shared wording lands everywhere and the implicit/explicit diff
+ * stays exactly the few sentences that carry the tuning.
+ */
+const EXPLORE_DESC_TAIL =
+  "Use when the question spans more than a couple of files. Do not use for planning, edits, or single-file reads. Returns a structured evidence report with file:line citations. Never edits files."
+
 function pinnedExploreDescription(explicit: boolean): string {
-  if (!explicit) {
-    return "Read-only codebase exploration specialist for mapping architecture, tracing call chains, or locating the files and symbols a task touches. Use when the question spans more than a couple of files. Do not use for planning, edits, or single-file reads. Returns a structured evidence report with file:line citations. Never edits files."
-  }
-  return "Read-only codebase exploration specialist. Use proactively, and launch several in parallel via `Task(subagent_type:\"Explore\")`, to map architecture, trace call chains, or locate the files and symbols a task will touch. Use when the question spans more than a couple of files. Do not use for planning, edits, or single-file reads. Returns a structured evidence report with file:line citations. Never edits files."
+  const head = explicit
+    ? "Read-only codebase exploration specialist. Use proactively, and launch several in parallel via `Task(subagent_type:\"Explore\")`, to map architecture, trace call chains, or locate the files and symbols a task will touch. "
+    : "Read-only codebase exploration specialist for mapping architecture, tracing call chains, or locating the files and symbols a task touches. "
+  return head + EXPLORE_DESC_TAIL
 }
 
 function pinnedExplorePrompt(opts: { explicit: boolean; semanticAvailable: boolean }): string {
+  // After the "…and " parallel prefix the guidance continues the sentence
+  // (lowercase); standalone it opens one (capitalized).
+  const searchGuidance = pinnedSearchGuidance(opts.semanticAvailable, !opts.explicit)
   const parallel = opts.explicit
     ? "Issue independent searches in parallel in one turn rather than one at a time, and "
     : ""
   return "You are a codebase exploration specialist. Your mission is to map repository structure, discover implementation patterns, trace call chains, and locate the exact files, symbols, and declarations that are relevant to the request. "
     + "This is read-only work. Do not modify files, do not propose diffs, and do not delegate to other agents. You cannot ask clarifying questions mid-run: ground every answer in repository evidence. If the request is ambiguous, explore the most probable interpretations and record the ambiguity in your report. "
-    + `Start broad, then converge. ${parallel}${pinnedSearchGuidance(opts.semanticAvailable)} Confirm every claim at the source before you report it. `
+    + `Start broad, then converge. ${parallel}${searchGuidance} Confirm every claim at the source before you report it. `
     + "Stop when further searching stops changing your answer. When you can name the exact files and lines a change would touch, you are done. "
     + "Report what the repository contains, not what it ought to contain. Do not design a solution or recommend an approach. Return a self-contained result the lead can act on immediately without needing to re-run your discovery.\n\n"
     + "Return format:\n"
@@ -846,17 +869,21 @@ function pinnedExplorePrompt(opts: { explicit: boolean; semanticAvailable: boole
     + "Entry points: where control enters this area, as file:line.\n"
     + "Conventions in use: the patterns, idioms, error handling, and test style that any change here would be expected to follow, each with a file:line example.\n"
     + "Gaps and unknowns: what you could not confirm, and where you would look next.\n\n"
-    + readOnlyToolSteer()
+    + readOnlyToolSteer(opts.semanticAvailable)
 }
+
+const PLAN_DESC_HEAD = "Architecture and implementation planning specialist"
+const PLAN_DESC_TAIL =
+  " Returns a decision-complete, ordered implementation plan with runnable acceptance criteria. Never edits files."
 
 function pinnedPlanDescription(explicit: boolean): string {
-  if (!explicit) {
-    return "Architecture and implementation planning specialist for sequencing, cross-boundary interfaces, invariants, migration risk, and acceptance criteria before any code is written. Returns a decision-complete, ordered implementation plan with runnable acceptance criteria. Never edits files."
-  }
-  return "Architecture and implementation planning specialist. Use proactively in plan mode, and whenever sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria deserve a dedicated pass before any code is written. Delegates repository discovery to `Explore` rather than reading broadly itself. Returns a decision-complete, ordered implementation plan with runnable acceptance criteria. Never edits files."
+  const middle = explicit
+    ? ". Use proactively in plan mode, and whenever sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria deserve a dedicated pass before any code is written. Delegates repository discovery to `Explore` rather than reading broadly itself."
+    : " for sequencing, cross-boundary interfaces, invariants, migration risk, and acceptance criteria before any code is written."
+  return PLAN_DESC_HEAD + middle + PLAN_DESC_TAIL
 }
 
-function pinnedPlanPrompt(opts: { explicit: boolean }): string {
+function pinnedPlanPrompt(opts: { explicit: boolean; semanticAvailable: boolean }): string {
   const discovery = opts.explicit
     ? "Do not sweep the repository yourself: delegate discovery to `Explore`, launching one or more `Explore` subagents in parallel with scoped evidence questions, then read directly only the files needed to resolve trade-offs and write executable steps. "
     : "Do not sweep the repository broadly yourself: keep discovery narrow, read directly only the files needed to resolve trade-offs and write executable steps, and record any repository fact you could not confirm as an explicit gap. "
@@ -874,14 +901,17 @@ function pinnedPlanPrompt(opts: { explicit: boolean }): string {
     + "Acceptance criteria: the exact commands to run and the observable result that counts as passing.\n"
     + "Critical files: the files an executor must read before starting, as file:line, with why each matters.\n"
     + "Open questions: any unresolved trade-off, as options with a recommendation. Omit this section if there are none.\n\n"
-    + readOnlyToolSteer()
+    + readOnlyToolSteer(opts.semanticAvailable)
 }
 
+const GENERAL_PURPOSE_DESC_TAIL =
+  "Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore) or verification-only (use reviewer)."
+
 function pinnedGeneralPurposeDescription(explicit: boolean): string {
-  if (!explicit) {
-    return "Autonomous multi-step execution agent for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore) or verification-only (use reviewer)."
-  }
-  return "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Follows a Plan handoff when one exists and otherwise investigates before acting. Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore) or verification-only (use reviewer)."
+  const head = explicit
+    ? "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Follows a Plan handoff when one exists and otherwise investigates before acting. "
+    : "Autonomous multi-step execution agent for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. "
+  return head + GENERAL_PURPOSE_DESC_TAIL
 }
 
 function pinnedGeneralPurposePrompt(): string {
@@ -899,17 +929,20 @@ function pinnedGeneralPurposePrompt(): string {
     + "Verification: the commands you ran, exit status, and decisive output.\n"
     + "Assumptions: every interpretation you had to choose.\n"
     + "Remaining items: anything deliberately not done, and why.\n\n"
-    + fileToolSteer("builds, tests, and git")
+    + fileToolSteer("builds")
 }
+
+const REVIEWER_DESC_TAIL =
+  "Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source."
 
 function pinnedReviewerDescription(explicit: boolean): string {
-  if (!explicit) {
-    return "Adversarial evidence-based reviewer for behavior-changing, cross-boundary, or risk-sensitive changes. Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source."
-  }
-  return "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, before done. Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source."
+  const head = explicit
+    ? "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, before done. "
+    : "Adversarial evidence-based reviewer for behavior-changing, cross-boundary, or risk-sensitive changes. "
+  return head + REVIEWER_DESC_TAIL
 }
 
-function pinnedReviewerPrompt(): string {
+function pinnedReviewerPrompt(semanticAvailable = true): string {
   return "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
     + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
     + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
@@ -929,7 +962,7 @@ function pinnedReviewerPrompt(): string {
     + "Suggestion: non-blocking improvements or stylistic suggestions.\n"
     + "Evidence: the commands you ran, exit status, and decisive output.\n"
     + "Unverified surface: what you could not exercise, and why.\n\n"
-    + reviewerToolSteer()
+    + reviewerToolSteer(semanticAvailable)
 }
 
 /** Build the literal `-m fast` native roster. This is intentionally separate
@@ -995,7 +1028,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     },
     Plan: {
       description: pinnedPlanDescription(true),
-      prompt: pinnedPlanPrompt({ explicit: true }),
+      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable }),
       tools: planTools,
       model: oneM(planModel),
       effort: effort("Plan"),
@@ -1013,7 +1046,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     },
     reviewer: {
       description: pinnedReviewerDescription(true),
-      prompt: pinnedReviewerPrompt(),
+      prompt: pinnedReviewerPrompt(semanticAvailable),
       model: oneM(reviewerModel),
       effort: effort("reviewer"),
       tools: readSearchTools,
@@ -1116,7 +1149,7 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
     },
     Plan: {
       description: pinnedPlanDescription(true),
-      prompt: pinnedPlanPrompt({ explicit: true }),
+      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1134,7 +1167,7 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
     },
     reviewer: {
       description: pinnedReviewerDescription(true),
-      prompt: pinnedReviewerPrompt(),
+      prompt: pinnedReviewerPrompt(semanticAvailable),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,
@@ -1237,7 +1270,7 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     },
     Plan: {
       description: pinnedPlanDescription(false),
-      prompt: pinnedPlanPrompt({ explicit: false }),
+      prompt: pinnedPlanPrompt({ explicit: false, semanticAvailable }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1255,7 +1288,7 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     },
     reviewer: {
       description: pinnedReviewerDescription(false),
-      prompt: pinnedReviewerPrompt(),
+      prompt: pinnedReviewerPrompt(semanticAvailable),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,
@@ -1357,7 +1390,7 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     },
     Plan: {
       description: pinnedPlanDescription(true),
-      prompt: pinnedPlanPrompt({ explicit: true }),
+      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1375,7 +1408,7 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     },
     reviewer: {
       description: pinnedReviewerDescription(true),
-      prompt: pinnedReviewerPrompt(),
+      prompt: pinnedReviewerPrompt(semanticAvailable),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,

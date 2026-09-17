@@ -86,8 +86,9 @@ const STYLE_DIRECTIVE =
  * Operating-defaults directive injected at the TOP of the mirrored CLAUDE.md.
  * The main agent's system prompt (`--append-system-prompt`) gets
  * OPERATING_DEFAULTS_DIGEST instead, with this full statement available through
- * CLAUDE.md. Three defaults, each explicitly overridden by the user's own
- * direction and the domain's standards:
+ * CLAUDE.md. Three defaults, layered under the user's own
+ * direction and the domain's standards as addons (on a direct conflict the
+ * user's direction wins, then the domain standard, then the default below):
  *
  *   1. Orchestrate (strong default): delegate the heavy / parallel /
  *      context-heavy work to the right subagent / worker / model, keeping the
@@ -366,7 +367,7 @@ export function buildOperatingDefaultsDirective(
       ? ` Live human review is available in the artifact panel via \`mcp__${peersKey}__artifact_*\`.`
       : ""
     return (
-      "## Operating defaults (apply when the user has not specified otherwise; the user's explicit direction and the domain's own standards always override)\n\n"
+      "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + "Max launch profile. The lead owns the outcome. Start with direct repository or runtime evidence. Handle narrow, obvious, surgical, and single-command work directly; delegate a bounded workstream when it is broad, slow, context-heavy, or benefits from a genuinely independent perspective. "
       + MAX_PARALLELISM_RULE
       + " Brief each role with the desired outcome, relevant context, constraints, expected evidence, and verification. Use the roster as complementary capabilities, never as a required Explore → Plan → implement → review sequence. Avoid overlapping assignments and do not ask several models the same generic question. Synthesize results against the repository and executable checks: model agreement is not verification. Use one fresh-context peer only when a consequential judgment remains after direct checks; use the coordinator only when several distinct lenses could change the decision. Advisor is optional, non-binding counsel for one focused consequential uncertainty that evidence and the appropriate roles cannot settle; it has no approval or workflow authority, and a further consultation requires materially new or conflicting evidence."
@@ -389,8 +390,7 @@ export function buildOperatingDefaultsDirective(
       : "Search strategy (cheapest first): LEXICAL `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys — zero model cost. `Explore` subagents read the narrowed files and return file:line conclusions — expensive models (Plan, reviewer, Oracle) see only the synthesized subset, never raw search output. "
     if (opts.fastRuntimeAvailable === false) {
       return (
-        "## Operating defaults (apply when the user has not specified otherwise; the "
-        + "user's explicit direction and the domain's own standards always override)\n\n"
+        "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
         + `${profileLabel} profile runtime wiring is unavailable. Work directly, use only tools actually listed in this session, verify with the repository's relevant build/tests before declaring done, report uncertainty, and do not invent unavailable capabilities.`
       )
     }
@@ -435,8 +435,7 @@ export function buildOperatingDefaultsDirective(
         + "Delegation graph: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
 
     return (
-      "## Operating defaults (apply when the user has not specified otherwise; the "
-      + "user's explicit direction and the domain's own standards always override)\n\n"
+      "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + pipeline
       + "Consultation guidance: Follow an evidence-first escalation ladder. Direct empirical evidence (search, code, tests, builds) settles factual questions first. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance or framing checks (direction, not dictation), and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
       + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, an expert consultant available to the lead and \`Plan\`, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. \`Plan\` may consult Oracle on unresolved trade-offs, and reports any remaining tie-breaking gap to the lead.${astraClause} `
@@ -446,8 +445,7 @@ export function buildOperatingDefaultsDirective(
     )
   }
   return (
-    "## Operating defaults (apply when the user has not specified otherwise; the "
-    + "user's explicit direction and the domain's own standards always override)\n\n"
+    "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
     + "Orchestrate. Delegate research, implementation, review, and large reads to the "
     + "right subagent, worker, or model. Reach for "
     + buildNativeReachClauses(opts)
@@ -465,7 +463,7 @@ export function buildOperatingDefaultsDirective(
 export const OPERATING_DEFAULTS_DIRECTIVE = buildOperatingDefaultsDirective()
 
 const STANDARD_OPERATING_DEFAULTS_DIGEST =
-  "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
+  "## Operating defaults (these layer with the user's direction and the domain's standards as addons: follow all three; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
   + "Delegate when the work is WIDE (many files or sources to sweep) or SLOW and you need only the "
   + "conclusion, to protect the main thread's finite context and keep it free for reasoning and "
   + "interacting with the user; prefer parallel delegation for independent work. Do NOT delegate "
@@ -494,7 +492,7 @@ export function buildOperatingDefaultsDigest(
 ): string {
   if (opts.profile === "max") {
     return (
-      "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
+      "## Operating defaults (these layer with the user's direction and the domain's standards as addons: follow all three; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + "Max launch profile. The lead owns the outcome. Start with direct repository or runtime evidence. Do narrow, obvious, surgical, and single-command work directly; delegate bounded work that is broad, slow, context-heavy, or independently valuable. "
       + MAX_PARALLELISM_RULE
       + " Give delegated workstreams non-overlapping scopes and state the outcome, constraints, evidence, and verification expected.\n\n"
@@ -520,7 +518,7 @@ export function buildOperatingDefaultsDigest(
       ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`Plan\` in plan mode or for complex sequencing, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
       : `${profileLabel} launch profile. The lead coordinates execution across specialized roles: delegate broad discovery to \`Explore\` in parallel and do not sweep the repo yourself (read directly only files you will act on); delegate to \`Plan\` in plan mode or when structuring complex multi-step sequencing (\`Plan\` is an advisory planning capability, not an approval gate, and writes handoff-ready steps for \`General-Purpose\`); delegate mixed multi-step execution and Plan handoffs to \`General-Purpose\` in a fresh context; delegate to \`reviewer\` after behavior-changing or risk-sensitive implementation to verify correctness before declaring done; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
     return (
-      "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
+      "## Operating defaults (these layer with the user's direction and the domain's standards as addons: follow all three; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + delegation
       + "Verify claims against real evidence: run relevant commands and tests. Follow a disciplined consultation ladder for unresolved decisions: (1) direct code inspection, search, builds, and tests settle factual questions; (2) `advisor` "
       + advisorDescriptor

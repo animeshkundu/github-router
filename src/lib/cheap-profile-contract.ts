@@ -52,7 +52,7 @@ export const CHEAP_PROFILE_NATIVE_MODELS: Readonly<
 export const CHEAP_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Explore: "high",
   Plan: "high",
-  "General-Purpose": "high",
+  "General-Purpose": "max",
   reviewer: "max",
 } as const)
 
