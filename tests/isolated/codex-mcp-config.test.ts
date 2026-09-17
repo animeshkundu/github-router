@@ -981,7 +981,7 @@ describe("buildPeerAgentDefinitions", () => {
 
       expect(agents.Explore!.effort).toBe("high")
       expect(agents.Plan!.effort).toBe("high")
-      expect(agents["General-Purpose"]!.effort).toBe("high")
+      expect(agents["General-Purpose"]!.effort).toBe("max")
       expect(agents.reviewer!.effort).toBe("max")
 
       expect(agents.Explore!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
