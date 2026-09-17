@@ -109,6 +109,36 @@ export function nanoAiuToCredits(nanoAiu: number): number {
   return nanoAiu / NANO_AIU_PER_CREDIT
 }
 
+/** Wire form of `copilot_usage` (as Copilot emits it) for client-facing replay. */
+export interface CopilotUsageWire {
+  total_nano_aiu: number
+  token_details: Array<{
+    batch_size: number
+    cost_per_batch: number
+    token_count: number
+    token_type?: string
+    model?: string
+  }>
+}
+
+/**
+ * Map a parsed `CopilotUsage` to the upstream wire shape. Client-facing only:
+ * used to re-emit the SAME priced reading a synthesizer already recorded to
+ * the ledger — the replay must never be recorded again.
+ */
+export function copilotUsageToWire(usage: CopilotUsage): CopilotUsageWire {
+  return {
+    total_nano_aiu: usage.totalNanoAiu,
+    token_details: usage.tokenDetails.map((d) => ({
+      batch_size: d.batchSize,
+      cost_per_batch: d.costPerBatch,
+      token_count: d.tokenCount,
+      ...(d.tokenType ? { token_type: d.tokenType } : {}),
+      ...(d.model ? { model: d.model } : {}),
+    })),
+  }
+}
+
 /** Credits for one token-detail entry. */
 export function creditsForDetail(detail: CopilotTokenDetail): number {
   return nanoAiuToCredits(

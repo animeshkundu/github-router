@@ -1460,6 +1460,14 @@ export function buildAdvisorStream(opts: {
         tokenType?: string
         model?: string
       }> = []
+      // Per-turn advisor-model AIC latch. `captureMessageDelta` records each
+      // turn's terminal PRICED reading under the LEAD model. Interim zero-nano
+      // `copilot_usage` frames and a repeated terminal frame are skipped by the
+      // price-gate + latch inside `captureMessageDelta`; this outer latch
+      // resets once per turn (top of `processOneTurn`) so MULTI-turn advisor
+      // continuations each record their own turn's reading instead of being
+      // collapsed into a single record — matching the ever-streaming reads.
+      let aicRecordedThisTurn = false
       const leadModelForAic =
         typeof opts.baseBody.model === "string" && opts.baseBody.model.length > 0
           ? (opts.baseBody.model as string)
@@ -1518,11 +1526,12 @@ export function buildAdvisorStream(opts: {
           }
         }
         const turnAic = extractCopilotUsage(payload.copilot_usage)
-        if (turnAic) {
-          pendingCopilotNano += turnAic.totalNanoAiu
-          pendingCopilotDetails.push(...turnAic.tokenDetails)
-          recordAic(leadModelForAic, turnAic)
-        }
+        if (!turnAic || turnAic.totalNanoAiu <= 0) return
+        if (aicRecordedThisTurn) return
+        aicRecordedThisTurn = true
+        pendingCopilotNano += turnAic.totalNanoAiu
+        pendingCopilotDetails.push(...turnAic.tokenDetails)
+        recordAic(leadModelForAic, turnAic)
       }
 
       const emitTerminal = (forcedStopReason?: string): boolean => {
@@ -1575,6 +1584,9 @@ export function buildAdvisorStream(opts: {
         advisorToolUses: Array<ToolUseTracker>
         clientToolUseCount: number
       }> {
+        // Per-turn AIC latch: each Copilot "turn" within this response gets its
+        // own priced reading recorded once (see `aicRecordedThisTurn`).
+        aicRecordedThisTurn = false
         const capturedBlocks: Array<CapturedBlock> = []
         const advisorToolUses: Array<ToolUseTracker> = []
         let clientToolUseCount = 0
