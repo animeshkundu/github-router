@@ -86,8 +86,9 @@ const STYLE_DIRECTIVE =
  * Operating-defaults directive injected at the TOP of the mirrored CLAUDE.md.
  * The main agent's system prompt (`--append-system-prompt`) gets
  * OPERATING_DEFAULTS_DIGEST instead, with this full statement available through
- * CLAUDE.md. Three defaults, each explicitly overridden by the user's own
- * direction and the domain's standards:
+ * CLAUDE.md. Three defaults, layered under the user's own
+ * direction and the domain's standards as addons (on a direct conflict the
+ * user's direction wins, then the domain standard, then the default below):
  *
  *   1. Orchestrate (strong default): delegate the heavy / parallel /
  *      context-heavy work to the right subagent / worker / model, keeping the
@@ -163,16 +164,18 @@ export interface NativeAgentAvailability {
    *  restricted roster prose with the cheap family's oracle identities
    *  (`"cheap1m"` additionally wires the astra peer). `"cheapest"` selects
    *  the same restricted roster prose with the cheapest identities
-   *  (Luna lead, Gemini reviewer/Advisor, Sol Oracle; never astra). When set,
+   *  (Luna lead, Gemini reviewer/Advisor, Sol Oracle; never astra).
+   *  `"balanced"` selects the same restricted roster prose Sol-led with the
+   *  Grok Oracle (never astra). When set,
    *  `buildNativeReachClauses` and
    *  `buildOperatingDefaultsDirective` return a short, self-contained
-   *  rendering naming only `Explore`/`Plan`/`general-purpose`/`implementer`/`reviewer`,
+   *  rendering naming only `Explore`/`Plan`/`General-Purpose`/`reviewer`,
    *  Advisor, and Oracle — it must never name the standard-only `*-fast`/
    *  `brainstorm`/`scribe`/`general-purpose-fast`, `peer-review-coordinator`,
    *  `worker-*`/`orchestrate` tools or skills, or `stand_in`, since none of
    *  those are registered in this profile regardless of catalog state.
    *  Absent/`"standard"` is today's catalog-driven full roster. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
   /** False when a fast launch disabled or failed its MCP/native runtime wiring.
    *  The fallback directive must not advertise agents/tools that do not exist. */
   fastRuntimeAvailable?: boolean
@@ -184,6 +187,10 @@ export interface NativeAgentAvailability {
   agentToolsAvailable?: boolean
   artifactAvailable?: boolean
   astraAvailable?: boolean
+  /** Whether ColBERT semantic code search is enabled for this launch. When
+   *  false/absent the `code` tool is lexical-only, so generated guidance
+   *  describes lexical-first discovery and never names semantic search. */
+  semanticSearchAvailable?: boolean
   groupKeys?: Partial<Record<string, string>>
   peersKey?: string
 }
@@ -213,13 +220,20 @@ function joinClauses(parts: ReadonlyArray<string>): string {
  *  there is no quality-for-cost trade being hidden by leading with the cheap
  *  tier; reserve `reviewer` for the higher-stakes assessment it is there for. */
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
+    if (opts.profile === "cheapest") {
+      return joinClauses([
+        "`Explore` for broad repository discovery, dependency mapping, and convention tracking",
+        "`Plan` for architectural sequencing, interface contracts, migration risk, and runnable acceptance criteria",
+        "`General-Purpose` for mixed, iterative, or multi-step execution tasks",
+        "`reviewer` for independent adversarial verification, reproduction, and root-causing",
+      ])
+    }
     return joinClauses([
-      "`Explore` for broad repository discovery, dependency mapping, and convention tracking",
-      "`Plan` for architectural sequencing, interface contracts, migration risk, and runnable acceptance criteria",
-      "`general-purpose` for mixed, iterative, or multi-step execution tasks",
-      "`implementer` for surgical coding changes matching existing conventions",
-      "`reviewer` for independent adversarial verification, reproduction, and root-causing",
+      "`Explore` for broad repository discovery, dependency mapping, and convention tracking (launch in parallel)",
+      "`Plan` for architectural sequencing, interface contracts, migration risk, and runnable acceptance criteria (delegates discovery to `Explore`)",
+      "`General-Purpose` for mixed, iterative, or multi-step execution tasks (follows a Plan handoff when one exists)",
+      "`reviewer` for independent adversarial verification, reproduction, and root-causing after non-trivial changes",
     ])
   }
   const clauses: Array<string> = []
@@ -353,27 +367,30 @@ export function buildOperatingDefaultsDirective(
       ? ` Live human review is available in the artifact panel via \`mcp__${peersKey}__artifact_*\`.`
       : ""
     return (
-      "## Operating defaults (apply when the user has not specified otherwise; the user's explicit direction and the domain's own standards always override)\n\n"
+      "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + "Max launch profile. The lead owns the outcome. Start with direct repository or runtime evidence. Handle narrow, obvious, surgical, and single-command work directly; delegate a bounded workstream when it is broad, slow, context-heavy, or benefits from a genuinely independent perspective. "
       + MAX_PARALLELISM_RULE
       + " Brief each role with the desired outcome, relevant context, constraints, expected evidence, and verification. Use the roster as complementary capabilities, never as a required Explore → Plan → implement → review sequence. Avoid overlapping assignments and do not ask several models the same generic question. Synthesize results against the repository and executable checks: model agreement is not verification. Use one fresh-context peer only when a consequential judgment remains after direct checks; use the coordinator only when several distinct lenses could change the decision. Advisor is optional, non-binding counsel for one focused consequential uncertainty that evidence and the appropriate roles cannot settle; it has no approval or workflow authority, and a further consultation requires materially new or conflicting evidence."
       + artifactClause
     )
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
     const isCheapest = opts.profile === "cheapest"
-    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : "Fast"
+    const isBalanced = opts.profile === "balanced"
+    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
     const oracleDescriptor = isCheapest
       ? "GPT-5.6 Sol (200K/high)"
-      : isCheap
+      : isCheap || isBalanced
         ? "Grok 4.6 (200K/medium)"
         : "exact Opus 5 (1M/high)"
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
+    const searchGuidance = opts.semanticSearchAvailable === true
+      ? "Search strategy (cheapest first): (1) LEXICAL `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys — zero model cost; (2) SEMANTIC `code` search for intent/concept questions where literal keywords may not appear; (3) `Explore` subagents read the narrowed files and return file:line conclusions — expensive models (Plan, reviewer, Oracle) see only the synthesized subset, never raw search output. "
+      : "Search strategy (cheapest first): LEXICAL `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys — zero model cost. `Explore` subagents read the narrowed files and return file:line conclusions — expensive models (Plan, reviewer, Oracle) see only the synthesized subset, never raw search output. "
     if (opts.fastRuntimeAvailable === false) {
       return (
-        "## Operating defaults (apply when the user has not specified otherwise; the "
-        + "user's explicit direction and the domain's own standards always override)\n\n"
+        "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
         + `${profileLabel} profile runtime wiring is unavailable. Work directly, use only tools actually listed in this session, verify with the repository's relevant build/tests before declaring done, report uncertainty, and do not invent unavailable capabilities.`
       )
     }
@@ -394,27 +411,41 @@ export function buildOperatingDefaultsDirective(
       ? ` \`mcp__${peersKey}__astra\` (GPT-6 Astra ${astraDescriptor}) is the terminal escalation consultant for the lead only, reserved strictly for the hardest dead ends when direct evidence, Advisor, and Oracle have all failed to produce a defensible path (consulted at most 1-2 times per decision with concise context and specific questions).`
       : ""
 
+    // Cheapest is tuned for straightforward tasks: no proactive fan-out push,
+    // so the lead handles simple work inline instead of paying handoff
+    // overhead. The other pinned profiles run the explicit phase pipeline:
+    // budget gather (Explore) → expensive plan (Plan + Oracle) → budget
+    // execution (General-Purpose) → expensive verification (reviewer).
+    const pipeline = isCheapest
+      ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly. `
+        + buildNativeReachClauses(opts)
+        + ". Handle trivial, surgical, single-file, or single-command tasks directly; you do not need to justify skipping delegation. "
+        + "`Explore` may be used for discovery spanning more than a couple of files; `Plan` for sequencing with complex interfaces or acceptance criteria; `General-Purpose` for mixed multi-step execution; `reviewer` for behavior-changing or risk-sensitive changes. "
+        + "Delegation graph: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
+      : `${profileLabel} launch profile. The lead coordinates execution across specialized native roles: `
+        + buildNativeReachClauses(opts)
+        + ". In plan mode or when designing changes with complex sequencing, interface contracts, or acceptance criteria, delegate architectural planning to `Plan` (in plan mode, produce the plan and acceptance criteria; do not edit files). "
+        + "Phase pipeline (budget gather, expensive plan, budget execution, expensive verification). "
+        + "GATHER: delegate to `Explore` instead of exploring yourself. For any question spanning more than a couple of files, launch one or more `Explore` subagents in parallel with scoped evidence questions and let them return file:line citations; read directly only the small subset you must touch to decide or edit. `Plan` follows the same rule when it needs repository facts. "
+        + "PLAN: `Plan` produces handoff-ready steps (ordered, file:line, done conditions, acceptance criteria) for a `General-Purpose` executor that cannot see its reasoning; `Plan` may consult Oracle on unresolved trade-offs and reports any remaining gap to the lead. "
+        + "EXECUTE: delegate mixed multi-step work and Plan handoffs to `General-Purpose` in a fresh context to preserve lead context; brief with outcome, constraints, files in scope, and verification. "
+        + "VERIFY: after behavior-changing, cross-boundary, or risk-sensitive implementation, run relevant build/tests then invoke `reviewer` before declaring done. "
+        + "Handle trivial, surgical, single-file, or single-command tasks directly; you do not need to justify skipping delegation. "
+        + "`Explore` is cheap and may be launched in parallel across independent discovery questions. Send independent subagent calls in parallel within a single turn. "
+        + "Delegation graph: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
+
     return (
-      "## Operating defaults (apply when the user has not specified otherwise; the "
-      + "user's explicit direction and the domain's own standards always override)\n\n"
-      + `${profileLabel} launch profile. The lead coordinates execution across specialized native roles: `
-      + buildNativeReachClauses(opts)
-      + ". In plan mode or when designing changes with complex sequencing, interface contracts, or acceptance criteria, delegate architectural planning to `Plan` (in plan mode, produce the plan and acceptance criteria; do not edit files). "
-      + "Discovery rule: delegate to `Explore` instead of exploring yourself. For any question spanning more than a couple of files, launch one or more `Explore` subagents in parallel with scoped evidence questions and let them return file:line citations; read directly only the small subset you must touch to decide or edit. `Plan` follows the same rule when it needs repository facts. "
-      + "Implementation rule: delegate bounded implementation to `implementer` whenever a fresh context helps or lead-context pressure matters; brief with outcome, constraints, files in scope, and verification. "
-      + "Review rule: after behavior-changing, cross-boundary, or risk-sensitive implementation, and always after `implementer` completes, run relevant build/tests then invoke `reviewer` before declaring done. "
-      + "Handle trivial, surgical, single-file, or single-command tasks directly; you do not need to justify skipping delegation. "
-      + "`Explore` is cheap and may be launched in parallel across independent discovery questions. Send independent subagent calls in parallel within a single turn. "
-      + "Delegation graph: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
+      "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
+      + pipeline
       + "Consultation guidance: Follow an evidence-first escalation ladder. Direct empirical evidence (search, code, tests, builds) settles factual questions first. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance or framing checks (direction, not dictation), and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
       + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, an expert consultant available to the lead and \`Plan\`, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. \`Plan\` may consult Oracle on unresolved trade-offs, and reports any remaining tie-breaking gap to the lead.${astraClause} `
-      + `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable sources.${browserClause}${workerBrowseClause}${artifactClause}\n\n`
+      + searchGuidance
+      + `\`mcp__${searchKey}__web\` provides citable sources.${browserClause}${workerBrowseClause}${artifactClause}\n\n`
       + "Verify claims with concrete repository evidence and tests before declaring work done. User instructions outrank delegation triggers. Stop named teammates when finished."
     )
   }
   return (
-    "## Operating defaults (apply when the user has not specified otherwise; the "
-    + "user's explicit direction and the domain's own standards always override)\n\n"
+    "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
     + "Orchestrate. Delegate research, implementation, review, and large reads to the "
     + "right subagent, worker, or model. Reach for "
     + buildNativeReachClauses(opts)
@@ -432,7 +463,7 @@ export function buildOperatingDefaultsDirective(
 export const OPERATING_DEFAULTS_DIRECTIVE = buildOperatingDefaultsDirective()
 
 const STANDARD_OPERATING_DEFAULTS_DIGEST =
-  "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
+  "## Operating defaults (these layer with the user's direction and the domain's standards as addons: follow all three; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
   + "Delegate when the work is WIDE (many files or sources to sweep) or SLOW and you need only the "
   + "conclusion, to protect the main thread's finite context and keep it free for reasoning and "
   + "interacting with the user; prefer parallel delegation for independent work. Do NOT delegate "
@@ -457,24 +488,25 @@ const STANDARD_OPERATING_DEFAULTS_DIGEST =
   + "without a lookup."
 
 export function buildOperatingDefaultsDigest(
-  opts: { profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"; astraAvailable?: boolean } = {},
+  opts: { profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"; astraAvailable?: boolean } = {},
 ): string {
   if (opts.profile === "max") {
     return (
-      "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
+      "## Operating defaults (these layer with the user's direction and the domain's standards as addons: follow all three; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + "Max launch profile. The lead owns the outcome. Start with direct repository or runtime evidence. Do narrow, obvious, surgical, and single-command work directly; delegate bounded work that is broad, slow, context-heavy, or independently valuable. "
       + MAX_PARALLELISM_RULE
       + " Give delegated workstreams non-overlapping scopes and state the outcome, constraints, evidence, and verification expected.\n\n"
       + "Synthesize and verify: run the code, inspect outputs, and check tests. Agent count and agreement are not evidence. Use a fresh-context peer only for consequential judgment that remains after direct checks, and use the coordinator only when several distinct lenses could change the decision. Advisor is optional, non-binding, primary-lead-only counsel for one focused consequential uncertainty; it is not an approval or completion gate."
     )
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
     const isCheapest = opts.profile === "cheapest"
-    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : "Fast"
+    const isBalanced = opts.profile === "balanced"
+    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
     const oracleDescriptor = isCheapest
       ? "(GPT-5.6 Sol 200K/high, lead and Plan)"
-      : isCheap
+      : isCheap || isBalanced
         ? "(Grok 4.6 200K/medium, lead and Plan)"
         : "(Opus 5 1M/high, lead and Plan)"
     const advisorDescriptor = isCheapest ? "(Gemini/high, lead-only)" : "(Sol/high, lead-only)"
@@ -482,9 +514,12 @@ export function buildOperatingDefaultsDigest(
     opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? `; (4) \`astra\` (GPT-6 Astra 200K/${isCheap ? "medium" : "high"}, lead-only) only as a last resort when direct evidence, Advisor, and Oracle cannot produce a defensible path (at most 1-2 calls per decision).`
       : "."
+    const delegation = isCheapest
+      ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`Plan\` in plan mode or for complex sequencing, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
+      : `${profileLabel} launch profile. The lead coordinates execution across specialized roles: delegate broad discovery to \`Explore\` in parallel and do not sweep the repo yourself (read directly only files you will act on); delegate to \`Plan\` in plan mode or when structuring complex multi-step sequencing (\`Plan\` is an advisory planning capability, not an approval gate, and writes handoff-ready steps for \`General-Purpose\`); delegate mixed multi-step execution and Plan handoffs to \`General-Purpose\` in a fresh context; delegate to \`reviewer\` after behavior-changing or risk-sensitive implementation to verify correctness before declaring done; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
     return (
-      "## Operating defaults (the user's explicit direction and the domain's standards always override)\n\n"
-      + `${profileLabel} launch profile. The lead coordinates execution across specialized roles: delegate broad discovery to \`Explore\` in parallel and do not sweep the repo yourself (read directly only files you will act on); delegate to \`Plan\` in plan mode or when structuring complex multi-step sequencing (\`Plan\` is an advisory planning capability, not an approval gate); delegate bounded implementation to \`implementer\` in a fresh context to preserve lead context (\`general-purpose\` for mixed multi-step execution); delegate to \`reviewer\` after behavior-changing or risk-sensitive implementation, and always after \`implementer\` completes, to verify correctness before declaring done; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
+      "## Operating defaults (these layer with the user's direction and the domain's standards as addons: follow all three; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
+      + delegation
       + "Verify claims against real evidence: run relevant commands and tests. Follow a disciplined consultation ladder for unresolved decisions: (1) direct code inspection, search, builds, and tests settle factual questions; (2) `advisor` "
       + advisorDescriptor
       + " for transcript-aware framing checks or trajectory guidance; (3) `oracle` "

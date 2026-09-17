@@ -279,6 +279,11 @@ mock.module("~/lib/mcp-capabilities", () => ({
   cheapestOracleModel: mock(() => "gpt-5.6-sol"),
   cheapestAdvisorModel: mock(() => "gemini-3.8-flash"),
   cheapestReviewerModel: mock(() => "gemini-3.8-flash"),
+  // Balanced-profile resolvers (only exercised under `-m balanced`); stubbed
+  // for the same static-import-graph reason as the cheap entries above.
+  balancedOracleModel: mock(() => "grok-4.6"),
+  balancedAdvisorModel: mock(() => "gpt-5.6-sol"),
+  balancedReviewerModel: mock(() => "gpt-5.6-luna"),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
   FAST_GENERAL_PURPOSE_EFFORT: "max",
@@ -1534,7 +1539,7 @@ describe("claude command", () => {
       expect(writePeerMcpRuntimeFilesMock).toHaveBeenCalledTimes(1)
       const [, opts] = writePeerMcpRuntimeFilesMock.mock.calls[0]
       // Hard roster/persona/coordinator restriction per FAST_PROFILE.
-      expect(opts.nativeRoster).toEqual(new Set(["Explore", "Plan", "general-purpose", "implementer", "reviewer"]))
+      expect(opts.nativeRoster).toEqual(new Set(["Explore", "Plan", "General-Purpose", "reviewer"]))
       expect(opts.personaAllowlist).toBeUndefined()
       expect(opts.includeCoordinator).toBe(false)
       expect(opts.fastProfile).toBe(true)
@@ -1543,7 +1548,7 @@ describe("claude command", () => {
       expect(opts.fastExploreModel).toBe("gpt-5.6-luna")
       expect(opts.fastPlanModel).toBe("gpt-5.6-sol")
       expect(opts.fastGeneralPurposeModel).toBe("gpt-5.6-luna")
-      expect(opts.fastImplementerModel).toBe("gemini-3.8-flash")
+      expect(opts.fastImplementerModel).toBeUndefined()
       expect(opts.fastReviewerModel).toBe("claude-sonnet-5")
       expect(opts.plannerModel).toBeUndefined()
       expect(opts.criticModel).toBeUndefined()

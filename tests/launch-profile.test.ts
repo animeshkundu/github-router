@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
 
 import {
+  BALANCED_EXPLORE_ALIAS_ID,
+  BALANCED_GENERAL_PURPOSE_ALIAS_ID,
+  BALANCED_PLAN_ALIAS_ID,
+  BALANCED_REVIEWER_ALIAS_ID,
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
   CHEAPEST_IMPLEMENTER_ALIAS_ID,
@@ -17,6 +21,7 @@ import {
   LUNA_REAL_MODEL_ID,
   LUNA_SONNET_ALIAS_ID,
   canonicalizeAliasModel,
+  formatBalancedPrerequisiteFailure,
   formatCheap1mPrerequisiteFailure,
   formatCheapPrerequisiteFailure,
   formatFastPrerequisiteFailure,
@@ -25,6 +30,7 @@ import {
   resolveEffortWithAliasDefault,
   resolveLaunchProfile,
   resolveModelAlias,
+  validateBalancedProfilePrerequisites,
   validateCheap1mProfilePrerequisites,
   validateCheapProfilePrerequisites,
   validateFastProfilePrerequisites,
@@ -48,6 +54,10 @@ import {
   CHEAPEST_PROFILE_NATIVE_EFFORTS,
   CHEAPEST_PROFILE_MODELS,
 } from "../src/lib/cheapest-profile-contract"
+import {
+  BALANCED_PROFILE_NATIVE_EFFORTS,
+  BALANCED_PROFILE_MODELS,
+} from "../src/lib/balanced-profile-contract"
 import { FAST_PROFILE_DELEGATION_GRAPH } from "../src/lib/fast-profile-contract"
 
 const model = (id: string, opts: {
@@ -129,8 +139,12 @@ describe("launch profile selection", () => {
     expect(resolveLaunchProfile(" CHEAP ")).toBe("cheap")
     expect(resolveLaunchProfile("cheap1m")).toBe("cheap1m")
     expect(resolveLaunchProfile("cheap1m ")).toBe("cheap1m")
+    expect(resolveLaunchProfile("balanced")).toBe("balanced")
+    expect(resolveLaunchProfile(" BALANCED ")).toBe("balanced")
     expect([...profileDescriptor("cheap").personaAllowlist!]).toEqual(["oracle"])
     expect([...profileDescriptor("cheap1m").personaAllowlist!]).toEqual(["oracle", "astra"])
+    expect([...profileDescriptor("balanced").personaAllowlist!]).toEqual(["oracle"])
+    expect([...profileDescriptor("balanced").nativeRoster!].sort()).toEqual(["Explore", "General-Purpose", "Plan", "reviewer"])
   })
 })
 
@@ -158,20 +172,26 @@ describe("cheap-family subagent aliases", () => {
   const cheapRows = [
     [CHEAP_EXPLORE_ALIAS_ID, CHEAP_PROFILE_MODELS.explore, "high"],
     [CHEAP_PLAN_ALIAS_ID, CHEAP_PROFILE_MODELS.plan, "high"],
-    [CHEAP_GENERAL_PURPOSE_ALIAS_ID, CHEAP_PROFILE_MODELS["general-purpose"], "max"],
-    [CHEAP_IMPLEMENTER_ALIAS_ID, CHEAP_PROFILE_MODELS.implementer, "high"],
+    [CHEAP_GENERAL_PURPOSE_ALIAS_ID, CHEAP_PROFILE_MODELS["General-Purpose"], "max"],
+    [CHEAP_IMPLEMENTER_ALIAS_ID, CHEAP_PROFILE_MODELS["General-Purpose"], "max"],
     [CHEAP_REVIEWER_ALIAS_ID, CHEAP_PROFILE_MODELS.reviewer, "max"],
   ] as const
   const cheapestRows = [
     [CHEAPEST_EXPLORE_ALIAS_ID, CHEAPEST_PROFILE_MODELS.explore, "high"],
     [CHEAPEST_PLAN_ALIAS_ID, CHEAPEST_PROFILE_MODELS.plan, "high"],
-    [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, CHEAPEST_PROFILE_MODELS["general-purpose"], "xhigh"],
-    [CHEAPEST_IMPLEMENTER_ALIAS_ID, CHEAPEST_PROFILE_MODELS.implementer, "max"],
+    [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, CHEAPEST_PROFILE_MODELS["General-Purpose"], "max"],
+    [CHEAPEST_IMPLEMENTER_ALIAS_ID, CHEAPEST_PROFILE_MODELS["General-Purpose"], "max"],
     [CHEAPEST_REVIEWER_ALIAS_ID, CHEAPEST_PROFILE_MODELS.reviewer, "high"],
+  ] as const
+  const balancedRows = [
+    [BALANCED_EXPLORE_ALIAS_ID, BALANCED_PROFILE_MODELS.explore, "high"],
+    [BALANCED_PLAN_ALIAS_ID, BALANCED_PROFILE_MODELS.plan, "high"],
+    [BALANCED_GENERAL_PURPOSE_ALIAS_ID, BALANCED_PROFILE_MODELS["General-Purpose"], "high"],
+    [BALANCED_REVIEWER_ALIAS_ID, BALANCED_PROFILE_MODELS.reviewer, "max"],
   ] as const
 
   test("resolve and canonicalize (bare and bracketed) to the contract real id", () => {
-    for (const [alias, real, effort] of [...cheapRows, ...cheapestRows]) {
+    for (const [alias, real, effort] of [...cheapRows, ...cheapestRows, ...balancedRows]) {
       expect(resolveModelAlias(alias)?.realModel).toBe(real)
       expect(resolveModelAlias(alias)?.absentEffortDefault).toBe(effort)
       expect(resolveModelAlias(`${alias}[1m]`)?.realModel).toBe(real)
@@ -184,14 +204,16 @@ describe("cheap-family subagent aliases", () => {
   test("alias efforts match the profile native-effort contracts (drift pin)", () => {
     expect(resolveModelAlias(CHEAP_EXPLORE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS.Explore)
     expect(resolveModelAlias(CHEAP_PLAN_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS.Plan)
-    expect(resolveModelAlias(CHEAP_GENERAL_PURPOSE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS["general-purpose"])
-    expect(resolveModelAlias(CHEAP_IMPLEMENTER_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS.implementer)
+    expect(resolveModelAlias(CHEAP_GENERAL_PURPOSE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS["General-Purpose"])
     expect(resolveModelAlias(CHEAP_REVIEWER_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS.reviewer)
     expect(resolveModelAlias(CHEAPEST_EXPLORE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.Explore)
     expect(resolveModelAlias(CHEAPEST_PLAN_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.Plan)
-    expect(resolveModelAlias(CHEAPEST_GENERAL_PURPOSE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS["general-purpose"])
-    expect(resolveModelAlias(CHEAPEST_IMPLEMENTER_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.implementer)
+    expect(resolveModelAlias(CHEAPEST_GENERAL_PURPOSE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS["General-Purpose"])
     expect(resolveModelAlias(CHEAPEST_REVIEWER_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.reviewer)
+    expect(resolveModelAlias(BALANCED_EXPLORE_ALIAS_ID)?.absentEffortDefault).toBe(BALANCED_PROFILE_NATIVE_EFFORTS.Explore)
+    expect(resolveModelAlias(BALANCED_PLAN_ALIAS_ID)?.absentEffortDefault).toBe(BALANCED_PROFILE_NATIVE_EFFORTS.Plan)
+    expect(resolveModelAlias(BALANCED_GENERAL_PURPOSE_ALIAS_ID)?.absentEffortDefault).toBe(BALANCED_PROFILE_NATIVE_EFFORTS["General-Purpose"])
+    expect(resolveModelAlias(BALANCED_REVIEWER_ALIAS_ID)?.absentEffortDefault).toBe(BALANCED_PROFILE_NATIVE_EFFORTS.reviewer)
   })
 
   test("alias real ids match the profile native-model contracts (drift pin)", () => {
@@ -395,13 +417,16 @@ describe("cheap-family startup prerequisites", () => {
     expect(cheap1mMessage).toContain("github-router claude -m cheap1m")
   })
 
-  test("cheap shares fast's exact delegation graph by alias, not by copy", () => {
-    // The PreToolUse ACL enforces FAST_PROFILE_DELEGATION_GRAPH for both
-    // profiles; a restated literal would be dead and drift-prone.
-    expect(CHEAP_PROFILE_DELEGATION_GRAPH).toBe(FAST_PROFILE_DELEGATION_GRAPH)
-    expect(Object.keys(CHEAP_PROFILE_DELEGATION_GRAPH).sort()).toEqual(
-      ["Explore", "Plan", "general-purpose", "implementer", "reviewer"],
-    )
+  test("each pinned profile owns its delegation graph with the four-agent shape", () => {
+    // Every pinned profile owns its own graph literal (a shared alias would
+    // silently retune every roster at once); all four share the same shape.
+    expect(CHEAP_PROFILE_DELEGATION_GRAPH).not.toBe(FAST_PROFILE_DELEGATION_GRAPH)
+    for (const graph of [FAST_PROFILE_DELEGATION_GRAPH, CHEAP_PROFILE_DELEGATION_GRAPH]) {
+      expect(Object.keys(graph).sort()).toEqual(
+        ["Explore", "General-Purpose", "Plan", "reviewer"],
+      )
+    }
+    expect(CHEAP_PROFILE_DELEGATION_GRAPH).toEqual(FAST_PROFILE_DELEGATION_GRAPH)
   })
 
   test("rejects the oracle when context metadata is unusable", () => {    const noPrompt = cheapCatalog()
@@ -416,6 +441,34 @@ describe("cheap-family startup prerequisites", () => {
     expect(validateCheap1mProfilePrerequisites(noPrompt as never).missing).toEqual([
       "grok-4.6: no usable max_prompt_tokens metadata",
     ])
+  })
+})
+
+describe("balanced startup prerequisites", () => {
+  const balancedCatalog = () => ({
+    object: "list" as const,
+    data: [
+      model("gpt-5.6-sol", { context: 500_000, prompt: 372_000, efforts: ["high"], endpoints: ["/responses"] }),
+      model("gpt-5.6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
+      model("gemini-3.8-flash", { context: 500_000, efforts: ["medium", "high"], endpoints: ["/chat/completions"] }),
+      model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["low", "medium"], endpoints: ["/responses"] }),
+    ],
+  })
+
+  test("accepts the Sol-led 200K catalog", () => {
+    expect(validateBalancedProfilePrerequisites(balancedCatalog() as never)).toEqual({ ok: true, missing: [] })
+  })
+
+  test("reports every missing role and the rollback command", () => {
+    const result = validateBalancedProfilePrerequisites({ object: "list", data: [] } as never)
+    expect(result.ok).toBe(false)
+    expect(result.missing).toHaveLength(4)
+    const message = formatBalancedPrerequisiteFailure(result.missing)
+    expect(message).toContain("gpt-5.6-sol")
+    expect(message).toContain("gpt-5.6-luna")
+    expect(message).toContain("gemini-3.8-flash")
+    expect(message).toContain("grok-4.6")
+    expect(message).toContain("github-router claude -m balanced")
   })
 })
 

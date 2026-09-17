@@ -30,11 +30,8 @@ export const FAST_DISPATCH_GRAPH: Readonly<
 > = Object.freeze({
   Explore: new Set<FastDispatchTargetName>(FAST_PROFILE_DELEGATION_GRAPH.Explore),
   Plan: new Set<FastDispatchTargetName>(FAST_PROFILE_DELEGATION_GRAPH.Plan),
-  "general-purpose": new Set<FastDispatchTargetName>(
-    FAST_PROFILE_DELEGATION_GRAPH["general-purpose"],
-  ),
-  implementer: new Set<FastDispatchTargetName>(
-    FAST_PROFILE_DELEGATION_GRAPH.implementer,
+  "General-Purpose": new Set<FastDispatchTargetName>(
+    FAST_PROFILE_DELEGATION_GRAPH["General-Purpose"],
   ),
   reviewer: new Set<FastDispatchTargetName>(FAST_PROFILE_DELEGATION_GRAPH.reviewer),
   "worker-browse": new Set<FastDispatchTargetName>([]),

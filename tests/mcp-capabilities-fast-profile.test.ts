@@ -95,34 +95,38 @@ afterEach(() => {
   state.models = savedModels
 })
 
-test("fast Explore and general-purpose pin to Luna, requiring tool_calls + 1M + Responses", () => {
+test("fast Explore pins to Luna and General-Purpose pins to Gemini, requiring tool_calls + 1M", () => {
   expect(FAST_EXPLORE_MODEL).toBe("gpt-5.6-luna")
   expect(FAST_EXPLORE_EFFORT).toBe("high")
-  expect(FAST_GENERAL_PURPOSE_MODEL).toBe("gpt-5.6-luna")
-  expect(FAST_GENERAL_PURPOSE_EFFORT).toBe("max")
+  expect(FAST_GENERAL_PURPOSE_MODEL).toBe("gemini-3.8-flash")
+  expect(FAST_GENERAL_PURPOSE_EFFORT).toBe("high")
 
   setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000, efforts: ["high", "max"], endpoints: ["/responses"] }))
   expect(fastScoutModel()).toBe("gpt-5.6-luna")
-  expect(fastGeneralPurposeModel()).toBe("gpt-5.6-luna")
+
+  setCatalog(entry("gemini-3.8-flash", { ctx: ONE_M, efforts: ["high"], endpoints: ["/chat/completions"] }))
+  expect(fastGeneralPurposeModel()).toBe("gemini-3.8-flash")
 
   // Below the 1M floor -> dropped, not downgraded.
   setCatalog(entry("gpt-5.6-luna", { ctx: 400_000, efforts: ["high", "max"], endpoints: ["/responses"] }))
   expect(fastScoutModel()).toBeUndefined()
+  setCatalog(entry("gemini-3.8-flash", { ctx: 400_000, efforts: ["high"], endpoints: ["/chat/completions"] }))
   expect(fastGeneralPurposeModel()).toBeUndefined()
 
   // No tool_calls -> dropped.
   setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000, toolCalls: false, efforts: ["high", "max"], endpoints: ["/responses"] }))
   expect(fastScoutModel()).toBeUndefined()
+  setCatalog(entry("gemini-3.8-flash", { ctx: ONE_M, toolCalls: false, efforts: ["high"], endpoints: ["/chat/completions"] }))
   expect(fastGeneralPurposeModel()).toBeUndefined()
 
   // Missing required effort -> dropped.
   setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000, efforts: ["high"], endpoints: ["/responses"] }))
   expect(fastScoutModel()).toBe("gpt-5.6-luna")
-  expect(fastGeneralPurposeModel()).toBeUndefined()
 
   // Wrong endpoint -> dropped.
   setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000, efforts: ["high", "max"], endpoints: ["/chat/completions"] }))
   expect(fastScoutModel()).toBeUndefined()
+  setCatalog(entry("gemini-3.8-flash", { ctx: ONE_M, efforts: ["high"], endpoints: ["/responses"] }))
   expect(fastGeneralPurposeModel()).toBeUndefined()
 })
 
@@ -146,7 +150,7 @@ test("fast Plan pins to Sol high, requiring tool_calls + 1M + Responses", () => 
   expect(fastPlanModel()).toBeUndefined()
 })
 
-test("fast implementer pins to Gemini Flash with tool calls, 1M, high, and chat", () => {
+test("retired fast implementer alias still resolves to Gemini Flash for compat", () => {
   expect(FAST_IMPLEMENTER_MODEL).toBe("gemini-3.8-flash")
   expect(FAST_IMPLEMENTER_EFFORT).toBe("high")
   setCatalog(entry("gemini-3.8-flash", { ctx: ONE_M, efforts: ["high"], endpoints: ["/chat/completions"] }))
@@ -189,24 +193,24 @@ test("fast Advisor decouples to dedicated GPT-5.6 Sol 1M high on responses", () 
   expect(fastAdvisorModel()).toBe("gpt-5.6-sol")
 })
 
-test("cheap Advisor pins to Sol/high at the 200K default window on responses (no 1M gate)", () => {
-  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["high"], endpoints: ["/responses"] }))
+test("cheap Advisor pins to Sol/medium at the 200K default window on responses (no 1M gate)", () => {
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["medium"], endpoints: ["/responses"] }))
   expect(cheapAdvisorModel()).toBe("gpt-5.6-sol")
 
   // Below the 200K subagent floor -> dropped.
-  setCatalog(entry("gpt-5.6-sol", { ctx: 100_000, efforts: ["high"], endpoints: ["/responses"] }))
+  setCatalog(entry("gpt-5.6-sol", { ctx: 100_000, efforts: ["medium"], endpoints: ["/responses"] }))
   expect(cheapAdvisorModel()).toBeUndefined()
 
-  // Missing high effort -> dropped.
-  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["medium"], endpoints: ["/responses"] }))
+  // Missing medium effort -> dropped.
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["high"], endpoints: ["/responses"] }))
   expect(cheapAdvisorModel()).toBeUndefined()
 
   // No tool_calls -> dropped.
-  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, toolCalls: false, efforts: ["high"], endpoints: ["/responses"] }))
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, toolCalls: false, efforts: ["medium"], endpoints: ["/responses"] }))
   expect(cheapAdvisorModel()).toBeUndefined()
 
   // Wrong endpoint -> dropped.
-  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["high"], endpoints: ["/v1/messages"] }))
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["medium"], endpoints: ["/v1/messages"] }))
   expect(cheapAdvisorModel()).toBeUndefined()
 })
 

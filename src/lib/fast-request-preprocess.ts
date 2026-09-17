@@ -22,7 +22,7 @@ export interface FastRequestPreprocessResult {
 }
 
 const cheapFamily = (profileId?: string): boolean =>
-  profileId === "cheap" || profileId === "cheap1m" || profileId === "cheapest"
+  profileId === "cheap" || profileId === "cheap1m" || profileId === "cheapest" || profileId === "balanced"
 
 const pinnedProfile = (profileId?: string): boolean =>
   profileId === "fast" || cheapFamily(profileId)
@@ -34,7 +34,7 @@ const pinnedProfile = (profileId?: string): boolean =>
  * the lead only (its subagents are bare-by-construction).
  */
 const bareEnforcedProfile = (profileId?: string): boolean =>
-  profileId === "cheap" || profileId === "cheapest"
+  profileId === "cheap" || profileId === "cheapest" || profileId === "balanced"
 
 function explicitEffortOf(value: unknown): FastFixedEffort | undefined {
   return typeof value === "string" && value.trim() !== ""
@@ -43,19 +43,20 @@ function explicitEffortOf(value: unknown): FastFixedEffort | undefined {
 }
 
 /**
- * Apply authenticated fast/cheap-profile model and effort policy before
+ * Apply authenticated fast/cheap/balanced-profile model and effort policy before
  * ordinary model resolution. Synthetic aliases are refused outside an
  * authenticated pinned launch, so raw/BYO traffic cannot opt itself into
- * private profile semantics. The cheap family (including cheapest) shares
- * fast's effort mapping (same model-to-effort rows, just bare subagent
- * slugs at the wiring layer), so this preprocess is shared.
+ * private profile semantics. The cheap family (including cheapest and
+ * balanced) shares fast's effort mapping (same model-to-effort rows, just
+ * bare subagent slugs at the wiring layer), so this preprocess is shared.
  * Note the reviewer differs: fast reviews on Sonnet 5/xhigh while cheap
- * reviews on Luna/max and cheapest reviews on Gemini/high — all rows exist
- * here, so each profile's reviewer resolves to its fixed effort.
+ * reviews on Luna/max, cheapest reviews on Gemini/high, and balanced reviews
+ * on Luna/max — all rows exist here, so each profile's reviewer resolves to
+ * its fixed effort.
  *
- * Pinned-profile isolation (fast/cheap/cheap1m/cheapest): only
+ * Pinned-profile isolation (fast/cheap/cheap1m/cheapest/balanced): only
  * router-provided models are accepted (anything else is `rejectedModel`).
- * Context: cheap/cheapest traffic is stripped to the bare 200K id;
+ * Context: cheap/cheapest/balanced traffic is stripped to the bare 200K id;
  * cheap1m subagent traffic is stripped while its lead keeps 1M; fast
  * keeps 1M on both. Effort: picker changes apply to the lead session
  * only — lead requests keep an explicit `output_config.effort` when

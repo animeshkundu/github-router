@@ -641,11 +641,16 @@ export function buildPeerAwarenessSnippet(opts: {
    *  renders only its fixed native roles, Oracle, and search. Cheap renders the
    *  same restricted surface with its own oracle/astra identities. Cheapest
    *  renders the same restricted surface with the Sol Oracle and Gemini
-   *  reviewer/Advisor identities (never astra). Max renders its own
-   *  native/peer roster and gated retained groups. Absent/`"standard"`
-   *  preserves the full standard surface. Same field as
+   *  reviewer/Advisor identities (never astra). Balanced renders the same
+   *  restricted surface Sol-led with the Grok Oracle (never astra). Max
+   *  renders its own native/peer roster and gated retained groups.
+   *  Absent/`"standard"` preserves the full standard surface. Same field as
    *  `NativeAgentAvailability.profile` in claude-md-injection.ts. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
+  /** Whether ColBERT semantic code search is enabled for this launch. When
+   *  false/absent the `code` tool is lexical-only, so the snippet describes
+   *  lexical-first discovery and never names semantic search. */
+  semanticSearchAvailable?: boolean
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
@@ -674,13 +679,14 @@ export function buildPeerAwarenessSnippet(opts: {
       `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is transcript-aware, primary-lead-only, and unavailable to native subagents and browse workers; it can detect framing drift but is not independent verification.${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
     ].join("\n")
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
     const isCheapest = opts.profile === "cheapest"
-    const profileLabel = isCheapest ? "cheapest" : isCheap ? "cheap" : "fast"
+    const isBalanced = opts.profile === "balanced"
+    const profileLabel = isCheapest ? "cheapest" : isCheap ? "cheap" : isBalanced ? "balanced" : "fast"
     const oracleDescriptor = isCheapest
       ? "GPT-5.6 Sol (200K/high)"
-      : isCheap
+      : isCheap || isBalanced
         ? "Grok 4.6 (200K/medium)"
         : "exact Opus 5 (1M/high)"
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
@@ -699,13 +705,24 @@ export function buildPeerAwarenessSnippet(opts: {
     const astraClause = opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? ` \`mcp__${fastPeersKey}__astra\` is GPT-6 Astra (${astraDescriptor}), an expensive terminal escalation consultant available to the lead only for hardest dead ends.`
       : ""
+    const searchClause = opts.semanticSearchAvailable === true
+      ? `\`mcp__${fastSearchKey}__code\` is semantic-first code search (meaning-ranked; start lexical with mode:"lexical"/"exact" for symbols, filenames, errors, and config keys, then semantic for concepts) and \`mcp__${fastSearchKey}__web\` surfaces citable sources.`
+      : `\`mcp__${fastSearchKey}__code\` is lexical code search (mode:"lexical"/"exact" for symbols, filenames, errors, and config keys; no model call) and \`mcp__${fastSearchKey}__web\` surfaces citable sources.`
+    // Cheapest is tuned for straightforward tasks: no proactive fan-out push,
+    // so the lead handles simple work inline instead of paying handoff
+    // overhead. The other pinned profiles explicitly push parallel Explore,
+    // Plan-first architecture, General-Purpose execution, and reviewer
+    // verification.
+    const rosterClause = isCheapest
+      ? "Native Task roster: `Explore` (broad repository discovery spanning more than a couple of files), `Plan` (sequencing, interfaces, migration risk, acceptance criteria in plan mode), `General-Purpose` (mixed investigation and execution, follows a Plan handoff when one exists), and `reviewer` (repo-aware verification of behavior-changing or risk-sensitive changes). Handle straightforward tasks directly and verify claims with concrete repository evidence and tests before declaring done."
+      : "Native Task roster: `Explore` (mandatory cheap broad discovery, launch in parallel; lead/`Plan` delegate rather than self-sweep), `Plan` (sequencing, interfaces, migration risk, acceptance criteria in plan mode; delegate discovery to `Explore` and write handoff-ready steps for `General-Purpose`), `General-Purpose` (mixed execution; follows a Plan handoff when one exists and drives to a verified end state), and `reviewer` (repo-aware verification after non-trivial changes, before done). In plan mode, delegate planning to `Plan` and do not edit files. Verify claims with concrete repository evidence and tests before declaring done."
     return [
       "## Peer review and advisor",
       "",
       `This is the ${profileLabel} launch profile. Follow an evidence-first escalation ladder: settle factual claims directly through code, tests, and builds. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance, framing checks, or conflicting signals (direction, not dictation), not routine progress, waiting, verification, or completion. \`mcp__${fastPeersKey}__oracle\` is ${oracleDescriptor}, an expert consultant available to the lead and \`Plan\`, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle.${astraClause}`,
       "",
-      `\`mcp__${fastSearchKey}__code\` is semantic-first code search and \`mcp__${fastSearchKey}__web\` surfaces citable sources. Native Task roster: \`Explore\` (mandatory cheap broad discovery, launch in parallel; lead/\`Plan\` delegate rather than self-sweep), \`Plan\` (sequencing, interfaces, migration risk, acceptance criteria in plan mode), \`general-purpose\` (mixed execution), \`implementer\` (bounded coding in a fresh context to preserve lead context), and \`reviewer\` (repo-aware verification after non-trivial changes and always after \`implementer\`). In plan mode, delegate planning to \`Plan\` and do not edit files. Verify claims with concrete repository evidence and tests before declaring done.${browserClause}${workerBrowseClause}${artifactClause}`,
-      "Native delegation is ACL-scoped: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
+      `${searchClause} ${rosterClause}${browserClause}${workerBrowseClause}${artifactClause}`,
+      "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
     ].join("\n")
   }
   const peersKey = key("peers")
@@ -829,6 +846,7 @@ export type NativeAgentName =
   | "scribe"
   | "general-purpose-fast"
   | "general-purpose"
+  | "General-Purpose"
   | "Plan"
   | "peer-review-coordinator"
 
@@ -878,7 +896,7 @@ export function buildPeerAwarenessSummary(opts: {
    *  matching option on `buildPeerAwarenessSnippet`). Every other flag on
    *  this call is ignored in favor of a short fast-profile rendering. Same
    *  field name/values as `NativeAgentAvailability.profile`. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
@@ -889,13 +907,14 @@ export function buildPeerAwarenessSummary(opts: {
       "Native roles can inspect the repository within their listed tools. Fresh-context peers see only the artifact and constraints supplied to them. Advisor is transcript-aware, optional, non-binding, and primary-lead-only; it can identify framing drift but is not independent verification or an approval gate. Detailed routing lives in each role or tool description, and the full gated capability inventory lives in CLAUDE.md.",
     ].join("\n")
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
     const isCheapest = opts.profile === "cheapest"
-    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : "Fast"
+    const isBalanced = opts.profile === "balanced"
+    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
     const oracleDescriptor = isCheapest
       ? "GPT-5.6 Sol (200K/high)"
-      : isCheap
+      : isCheap || isBalanced
         ? "Grok 4.6 (200K/medium)"
         : "exact Opus 5 (1M/high)"
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
@@ -905,11 +924,14 @@ export function buildPeerAwarenessSummary(opts: {
     const astraClause = opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? ` \`mcp__${key("peers")}__astra\` is GPT-6 Astra (${astraDescriptor}), lead-only escalation for hardest dead ends.`
       : ""
+    const rosterLine = isCheapest
+      ? `${profileLabel} launch profile. Task roster: \`Explore\` (broad discovery), \`Plan\` (planning in plan mode), \`General-Purpose\` (mixed execution), \`reviewer\` (verification of behavior-changing or risk-sensitive changes). Handle straightforward tasks directly. Verify claims with concrete repository evidence and tests before declaring done.`
+      : `${profileLabel} launch profile. Task roster: \`Explore\` (mandatory parallel discovery delegate), \`Plan\` (planning in plan mode, writes handoff-ready steps for \`General-Purpose\`), \`General-Purpose\` (mixed execution, follows a Plan handoff when one exists), \`reviewer\` (verification after implementation, before done). Verify claims with concrete repository evidence and tests before declaring done.`
     return [
       "## Injected capabilities (summary)",
       "",
-      `${profileLabel} launch profile. Task roster: \`Explore\` (mandatory parallel discovery delegate), \`Plan\` (planning in plan mode), \`general-purpose\` (mixed execution), \`implementer\` (fresh-context bounded implementation), \`reviewer\` (verification after implementation, always after \`implementer\`). Verify claims with concrete repository evidence and tests before declaring done.`,
-      "Native delegation is ACL-scoped: the lead may invoke all five; `Plan` may invoke `Explore` and `reviewer`; `implementer` and `general-purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
+      rosterLine,
+      "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
       `Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). \`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, an expert consultant for the lead and \`Plan\`, preferred over advisor for substantive trade-offs.${astraClause} \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
     ].join("\n")
   }
@@ -1369,7 +1391,7 @@ export type WorkspaceSource = "argument" | "session" | "absent"
  *  changing standard/BYO behavior. */
 export interface McpToolCallContext {
   workspaceSource: WorkspaceSource
-  profileId?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"
+  profileId?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
 }
 
 const WEB_SEARCH_DESCRIPTION =

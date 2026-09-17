@@ -16,8 +16,7 @@ export const FAST_PROFILE_MODELS = Object.freeze({
   lead: "gemini-3.8-flash",
   explore: "gpt-5.6-luna",
   plan: "gpt-5.6-sol",
-  "general-purpose": "gpt-5.6-luna",
-  implementer: "gemini-3.8-flash",
+  "General-Purpose": "gemini-3.8-flash",
   reviewer: "claude-sonnet-5",
   advisor: "gpt-5.6-sol",
   oracle: "claude-opus-5",
@@ -27,8 +26,7 @@ export const FAST_PROFILE_MODELS = Object.freeze({
 export const FAST_PROFILE_NATIVE_AGENT_NAMES = [
   "Explore",
   "Plan",
-  "general-purpose",
-  "implementer",
+  "General-Purpose",
   "reviewer",
 ] as const
 
@@ -40,16 +38,14 @@ export const FAST_PROFILE_NATIVE_MODELS: Readonly<
 > = Object.freeze({
   Explore: FAST_PROFILE_MODELS.luna,
   Plan: FAST_PROFILE_MODELS.sol,
-  "general-purpose": FAST_PROFILE_MODELS.luna,
-  implementer: FAST_PROFILE_MODELS.gemini,
+  "General-Purpose": FAST_PROFILE_MODELS.gemini,
   reviewer: FAST_PROFILE_MODELS.reviewer,
 })
 
 export const FAST_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Explore: "high",
   Plan: "high",
-  "general-purpose": "max",
-  implementer: "high",
+  "General-Purpose": "high",
   reviewer: "xhigh",
 } as const)
 
@@ -71,8 +67,7 @@ export type FastProfileSynthesizedPeer = (typeof FAST_PROFILE_SYNTHESIZED_PEERS)
 export const FAST_PROFILE_DELEGATION_GRAPH = Object.freeze({
   Explore: Object.freeze([]),
   Plan: Object.freeze(["Explore", "reviewer"]),
-  "general-purpose": Object.freeze(["reviewer"]),
-  implementer: Object.freeze(["reviewer"]),
+  "General-Purpose": Object.freeze(["reviewer"]),
   reviewer: Object.freeze([]),
 } as const satisfies Record<
   FastProfileNativeAgentName,

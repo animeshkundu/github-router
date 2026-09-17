@@ -80,8 +80,8 @@ const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
 
 const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   // Cheapest reuses cheap's 200K pinning (`neverOneM`) but drops Grok (not in
-  // the cheapest roster) — rows are Luna (lead/GP/implementer), Sol (Plan +
-  // Oracle), and Gemini Flash (reviewer + Advisor).
+  // the cheapest roster) — rows are Luna (lead/GP), Sol (Plan + Oracle), and
+  // Gemini Flash (reviewer + Advisor).
   {
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
@@ -97,6 +97,36 @@ const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
   {
     id: "gemini-3.8-flash",
     label: "Gemini 3.8 Flash",
+    behavesAs: "claude-sonnet-5",
+    neverOneM: true,
+  },
+])
+
+const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
+  // Balanced reuses cheap's 200K pinning (`neverOneM`) with Sol leading:
+  // rows are Sol (lead/Plan/Advisor), Luna (Explore/reviewer), Gemini Flash
+  // (General-Purpose), and Grok 4.6 (Oracle).
+  {
+    id: "gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
+    behavesAs: "claude-opus-5",
+    neverOneM: true,
+  },
+  {
+    id: "gpt-5.6-luna",
+    label: "GPT-5.6 Luna",
+    behavesAs: "claude-opus-5",
+    neverOneM: true,
+  },
+  {
+    id: "gemini-3.8-flash",
+    label: "Gemini 3.8 Flash",
+    behavesAs: "claude-sonnet-5",
+    neverOneM: true,
+  },
+  {
+    id: "grok-4.6",
+    label: "Grok 4.6",
     behavesAs: "claude-sonnet-5",
     neverOneM: true,
   },
@@ -129,7 +159,9 @@ export function selectableModelsInCatalog(
         ? CHEAP_PICKER_MODELS
         : profile === "cheapest"
           ? CHEAPEST_PICKER_MODELS
-          : STANDARD_PICKER_MODELS
+          : profile === "balanced"
+            ? BALANCED_PICKER_MODELS
+            : STANDARD_PICKER_MODELS
   return declared
     .filter((entry) => present.has(entry.id))
     .map((entry) => ({
@@ -197,6 +229,7 @@ function routerWinsPicker(profile: LaunchProfileId): boolean {
     || profile === "cheap"
     || profile === "cheap1m"
     || profile === "cheapest"
+    || profile === "balanced"
 }
 
 function modelIdsFromExistingPicker(value: unknown): string[] {

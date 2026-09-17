@@ -217,7 +217,7 @@ describe("fast request preprocessing", () => {
       for (const [alias, real, effort] of [
         [CHEAP_EXPLORE_ALIAS_ID, "gpt-5.6-luna", "high"],
         [CHEAP_PLAN_ALIAS_ID, "gpt-5.6-sol", "high"],
-        [CHEAP_IMPLEMENTER_ALIAS_ID, "gemini-3.8-flash", "high"],
+        [CHEAP_IMPLEMENTER_ALIAS_ID, "gemini-3.8-flash", "max"],
         [CHEAP_REVIEWER_ALIAS_ID, "gpt-5.6-luna", "max"],
       ] as const) {
         for (const wire of [alias, `${alias}[1m]`]) {
@@ -341,7 +341,7 @@ describe("fast request preprocessing", () => {
       for (const [alias, real, effort] of [
         [CHEAPEST_EXPLORE_ALIAS_ID, "gpt-5.6-luna", "high"],
         [CHEAPEST_PLAN_ALIAS_ID, "gpt-5.6-sol", "high"],
-        [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, "gpt-5.6-luna", "xhigh"],
+        [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, "gpt-5.6-luna", "max"],
         [CHEAPEST_REVIEWER_ALIAS_ID, "gemini-3.8-flash", "high"],
       ] as const) {
         for (const wire of [alias, `${alias}[1m]`]) {

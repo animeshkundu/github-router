@@ -2,33 +2,28 @@
  * Fixed identities for the literal `github-router claude -m cheap` and
  * `-m cheap1m` cheap-family profiles.
  *
- * A cost-lean sibling of `-m fast`: identical fixed five-agent surface, but
+ * A cost-lean sibling of `-m fast`: identical fixed four-agent surface, but
  * every SUBAGENT runs at Claude Code's 200K DEFAULT context window (bare
  * slug, no `[1m]` accounting bracket). `-m cheap` also drives the Gemini
- * LEAD at the same 200K default (bare slug, no `[1m]`), so its only peer is
- * the `grok-4.6`/medium Oracle. `-m cheap1m` is the named successor of the
+ * LEAD at the same 200K default (bare slug, no `[1m]`) with medium effort,
+ * so its only peer is the `grok-4.6`/medium Oracle. `-m cheap1m` is the named successor of the
  * original cheap launch: the leader keeps its full 1M window (`[1m]`) and
  * the `astra` peer (`gpt-6-astra`) remains available next to Oracle — still
  * at the 200K default window and medium effort.
  *
- * This module is deliberately dependency-free, except for the delegation
- * graph below: the cheap family shares fast's exact authority structure, so
- * it aliases `FAST_PROFILE_DELEGATION_GRAPH` rather than restating it. A
- * duplicated literal here would be unenforced (the PreToolUse ACL reads the
- * fast graph for both profiles) and could silently disagree with it.
- * Launch validation, request routing, native-agent generation, and the
- * PreToolUse ACL all import the same literals so a role cannot silently
- * mean different things at each boundary.
+ * This module is deliberately dependency-free, including its own delegation
+ * graph literal: the cheap family shares fast's exact authority shape today,
+ * but each pinned profile owns its graph so tuning one roster cannot silently
+ * retune another. Launch validation, request routing, native-agent
+ * generation, and the PreToolUse ACL all import the same literals so a role
+ * cannot silently mean different things at each boundary.
  */
-
-import { FAST_PROFILE_DELEGATION_GRAPH } from "./fast-profile-contract"
 
 export const CHEAP_PROFILE_MODELS = Object.freeze({
   lead: "gemini-3.8-flash",
   explore: "gpt-5.6-luna",
   plan: "gpt-5.6-sol",
-  "general-purpose": "gpt-5.6-luna",
-  implementer: "gemini-3.8-flash",
+  "General-Purpose": "gemini-3.8-flash",
   reviewer: "gpt-5.6-luna",
   advisor: "gpt-5.6-sol",
   oracle: "grok-4.6",
@@ -38,8 +33,7 @@ export const CHEAP_PROFILE_MODELS = Object.freeze({
 export const CHEAP_PROFILE_NATIVE_AGENT_NAMES = [
   "Explore",
   "Plan",
-  "general-purpose",
-  "implementer",
+  "General-Purpose",
   "reviewer",
 ] as const
 
@@ -51,16 +45,14 @@ export const CHEAP_PROFILE_NATIVE_MODELS: Readonly<
 > = Object.freeze({
   Explore: CHEAP_PROFILE_MODELS.explore,
   Plan: CHEAP_PROFILE_MODELS.plan,
-  "general-purpose": CHEAP_PROFILE_MODELS["general-purpose"],
-  implementer: CHEAP_PROFILE_MODELS.implementer,
+  "General-Purpose": CHEAP_PROFILE_MODELS["General-Purpose"],
   reviewer: CHEAP_PROFILE_MODELS.reviewer,
 })
 
 export const CHEAP_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Explore: "high",
   Plan: "high",
-  "general-purpose": "max",
-  implementer: "high",
+  "General-Purpose": "max",
   reviewer: "max",
 } as const)
 
@@ -95,7 +87,8 @@ export const CHEAP_PROFILE_ADVISOR_CLIENT_MODEL = CHEAP_PROFILE_MODELS.advisor
 /** Advisor context window for cheap mode (tokens). */
 export const CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS =
   CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS
-export const CHEAP_PROFILE_ADVISOR_EFFORT = "high" as const
+export const CHEAP_PROFILE_LEAD_EFFORT = "medium" as const
+export const CHEAP_PROFILE_ADVISOR_EFFORT = "medium" as const
 export const CHEAP_PROFILE_ORACLE_MODEL = CHEAP_PROFILE_MODELS.oracle
 export const CHEAP_PROFILE_ORACLE_EFFORT = "medium" as const
 /** Astra identity for the `-m cheap1m` successor only (`-m cheap` has no
@@ -118,7 +111,13 @@ export type CheapProfileSynthesizedPeer =
 /** Peer set for the `-m cheap1m` successor (Oracle + Astra). */
 export const CHEAP1M_PROFILE_SYNTHESIZED_PEERS = ["oracle", "astra"] as const
 
-/** Each native role's permitted native-agent targets. Aliased from the fast
- *  profile (not restated): the PreToolUse ACL enforces the fast graph for
- *  both profiles, so a separate literal here would be dead and drift-prone. */
-export const CHEAP_PROFILE_DELEGATION_GRAPH = FAST_PROFILE_DELEGATION_GRAPH
+/** Each native role's permitted native-agent targets. The lead gets the roster. */
+export const CHEAP_PROFILE_DELEGATION_GRAPH = Object.freeze({
+  Explore: Object.freeze([]),
+  Plan: Object.freeze(["Explore", "reviewer"]),
+  "General-Purpose": Object.freeze(["reviewer"]),
+  reviewer: Object.freeze([]),
+} as const satisfies Record<
+  CheapProfileNativeAgentName,
+  ReadonlyArray<CheapProfileNativeAgentName>
+>)

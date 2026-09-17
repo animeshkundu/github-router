@@ -12,6 +12,11 @@ import {
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
 } from "./cheapest-profile-contract"
 import {
+  BALANCED_PROFILE_MODELS,
+  BALANCED_PROFILE_NATIVE_AGENT_NAMES,
+  BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+} from "./balanced-profile-contract"
+import {
   FAST_PROFILE_MODELS,
   FAST_PROFILE_NATIVE_AGENT_NAMES,
 } from "./fast-profile-contract"
@@ -29,10 +34,10 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 *  group (`peers`/`search`/`workers`/`orchestrate`, plus the independently
  *  opted-in `browser`/`fleet`/`first-mate`/`decide` groups under their own
  *  predicates). `"fast"` is the deliberately lean `-m fast` profile: a
- *  `gpt-5.6-luna` lead, exactly five native agents, the fast-only Oracle,
+ *  Gemini lead, exactly four native agents, the fast-only Oracle,
  *  Artifact/search tools, and optional direct-browser plus browse-worker groups.
  *  `"cheap"` is the cost-lean `-m cheap` variant of `fast`: the same exact
- *  five-agent surface, but the Gemini leader also runs at the 200K default
+ *  four-agent surface, but the Gemini leader also runs at the 200K default
  *  window (bare slug), every subagent runs at 200K, and the only peer is the
  *  `grok-4.6`/medium Oracle. `"cheap1m"` is the named successor of the
  *  original cheap launch: identical to `cheap` except the Gemini leader keeps
@@ -40,15 +45,18 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  available next to Oracle. Both cheap variants share the same `CHEAP_*`
  *  contract values; the three gates that differ are the lead slug, the lead
  *  prereq window, and the cheap1m-only `astra` peer. `"cheapest"` is the
- *  all-200K cheapest tier: a Luna/max lead, Luna Explore/GP/implementer
- *  roles, a Sol/high Plan and Oracle, and Gemini/high reviewer and Advisor —
- *  Oracle-only peer set, no `astra` (see `./cheapest-profile-contract`).
+ *  all-200K cheapest tier: a Luna/max lead, Luna Explore/GP roles, a Sol/high
+ *  Plan and Oracle, and Gemini/high reviewer and Advisor — Oracle-only peer
+ *  set, no `astra` (see `./cheapest-profile-contract`). `"balanced"` is the
+ *  most-complex-tasks tier: a Sol/high lead at the 200K default window, the
+ *  same four-agent surface as cheap, and the Grok/medium Oracle-only peer
+ *  set (see `./balanced-profile-contract`).
  *
  *  Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
  *  from the resolved lead model id — so `-m gpt-5.6-luna` (a direct pin of
  *  the same model the fast profile drives) stays a standard-surface launch,
- *  and only the literal `fast`/`cheap`/`cheap1m`/`cheapest` aliases narrow
- *  the surface.
+ *  and only the literal `fast`/`cheap`/`cheap1m`/`cheapest`/`balanced`
+ *  aliases narrow the surface.
  */
 export type LaunchProfileId =
   | "standard"
@@ -57,6 +65,7 @@ export type LaunchProfileId =
   | "cheap"
   | "cheap1m"
   | "cheapest"
+  | "balanced"
 
 /**
  * Everything a launch profile needs to declare about its own surface.
@@ -90,8 +99,8 @@ export const STANDARD_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
- * The `-m fast` roster: exactly five native agents (`Explore`, `Plan`,
- * `general-purpose`, `implementer`, `reviewer`), the fast-only `oracle` peer
+ * The `-m fast` roster: exactly four native agents (`Explore`, `Plan`,
+ * `General-Purpose`, `Reviewer`), the fast-only `oracle` peer
  * tool, no coordinator, and `peers`/`search` plus optional browser and
  * browse-only worker groups. Core workers, `orchestrate`, `decide`, `fleet`,
  * and `first-mate` remain hard denies even when their standard gates pass.
@@ -152,6 +161,21 @@ export const CHEAPEST_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
+ * The `-m balanced` roster: the most-complex-tasks tier. A Sol/high lead at
+ * the 200K default window, the same four-agent surface as cheap
+ * (`Explore`/`Plan`/`General-Purpose`/`Reviewer`, every role at 200K), and
+ * the Grok-4.6/medium Oracle-only peer set. Hard-denies match fast's: core
+ * workers, `orchestrate`, `decide`, `fleet`, and `first-mate`.
+ */
+export const BALANCED_PROFILE: LaunchProfileDescriptor = Object.freeze({
+  id: "balanced",
+  nativeRoster: new Set(BALANCED_PROFILE_NATIVE_AGENT_NAMES),
+  personaAllowlist: new Set(["oracle"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser"]),
+  hasCoordinator: false,
+})
+
+/**
  * The `-m max` profile: Sol/Luna-led, browse-only workers, and explicit
  * cross-lab peer names. The descriptor is a hard projection for bound launch
  * requests; unbound/BYO traffic remains standard because it has no registry
@@ -180,6 +204,7 @@ export function profileDescriptor(id: LaunchProfileId): LaunchProfileDescriptor 
   if (id === "cheap1m") return CHEAP1M_PROFILE
   if (id === "cheap") return CHEAP_PROFILE
   if (id === "cheapest") return CHEAPEST_PROFILE
+  if (id === "balanced") return BALANCED_PROFILE
   return STANDARD_PROFILE
 }
 
@@ -201,6 +226,7 @@ export function resolveLaunchProfile(modelArg: string | undefined): LaunchProfil
   if (arg === "cheap1m") return "cheap1m"
   if (arg === "cheap") return "cheap"
   if (arg === "cheapest") return "cheapest"
+  if (arg === "balanced") return "balanced"
   return "standard"
 }
 
@@ -264,6 +290,19 @@ export const CHEAPEST_GENERAL_PURPOSE_ALIAS_ID =
   "gh-router-cheapest-general-purpose-xhigh"
 export const CHEAPEST_IMPLEMENTER_ALIAS_ID = "gh-router-cheapest-implementer-max"
 export const CHEAPEST_REVIEWER_ALIAS_ID = "gh-router-cheapest-reviewer-high"
+
+/**
+ * Balanced-profile subagent aliases (`-m balanced`). Same non-catalog
+ * mechanism as the cheap aliases above, with the balanced roster's own
+ * identities and efforts (`BALANCED_PROFILE_NATIVE_MODELS` /
+ * `BALANCED_PROFILE_NATIVE_EFFORTS`, pinned by a drift test). Emitted BARE by
+ * `buildBalancedProfileAgentDefinitions`.
+ */
+export const BALANCED_EXPLORE_ALIAS_ID = "gh-router-balanced-explore-high"
+export const BALANCED_PLAN_ALIAS_ID = "gh-router-balanced-plan-high"
+export const BALANCED_GENERAL_PURPOSE_ALIAS_ID =
+  "gh-router-balanced-general-purpose-high"
+export const BALANCED_REVIEWER_ALIAS_ID = "gh-router-balanced-reviewer-max"
 
 export const LUNA_SONNET_ALIAS_ID = "gh-router-luna-sonnet-xhigh"
 
@@ -371,11 +410,11 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   ],
   [
     CHEAP_GENERAL_PURPOSE_ALIAS_ID,
-    { aliasId: CHEAP_GENERAL_PURPOSE_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS["general-purpose"], absentEffortDefault: "max" },
+    { aliasId: CHEAP_GENERAL_PURPOSE_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "max" },
   ],
   [
     CHEAP_IMPLEMENTER_ALIAS_ID,
-    { aliasId: CHEAP_IMPLEMENTER_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS.implementer, absentEffortDefault: "high" },
+    { aliasId: CHEAP_IMPLEMENTER_ALIAS_ID, realModel: CHEAP_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "max" },
   ],
   [
     CHEAP_REVIEWER_ALIAS_ID,
@@ -391,15 +430,31 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   ],
   [
     CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
-    { aliasId: CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS["general-purpose"], absentEffortDefault: "xhigh" },
+    { aliasId: CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "max" },
   ],
   [
     CHEAPEST_IMPLEMENTER_ALIAS_ID,
-    { aliasId: CHEAPEST_IMPLEMENTER_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS.implementer, absentEffortDefault: "max" },
+    { aliasId: CHEAPEST_IMPLEMENTER_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "max" },
   ],
   [
     CHEAPEST_REVIEWER_ALIAS_ID,
     { aliasId: CHEAPEST_REVIEWER_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS.reviewer, absentEffortDefault: "high" },
+  ],
+  [
+    BALANCED_EXPLORE_ALIAS_ID,
+    { aliasId: BALANCED_EXPLORE_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS.explore, absentEffortDefault: "high" },
+  ],
+  [
+    BALANCED_PLAN_ALIAS_ID,
+    { aliasId: BALANCED_PLAN_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS.plan, absentEffortDefault: "high" },
+  ],
+  [
+    BALANCED_GENERAL_PURPOSE_ALIAS_ID,
+    { aliasId: BALANCED_GENERAL_PURPOSE_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "high" },
+  ],
+  [
+    BALANCED_REVIEWER_ALIAS_ID,
+    { aliasId: BALANCED_REVIEWER_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS.reviewer, absentEffortDefault: "max" },
   ],
 ])
 
@@ -510,10 +565,10 @@ function hasUsablePromptMetadata(model: Model | undefined): boolean {
  * than silently substituting or dropping an agent.
  *
  * Checks, per the fast-launch-profile design:
- *   - Luna lead/Explore/general-purpose: tool calls, >=1M, high+max, Responses.
+ *   - Luna Explore: tool calls, >=1M, high+max, Responses.
  *   - Sol Plan: tool calls, >=1M, high, Responses.
- *   - Grok reviewer: tool calls, medium, Responses, usable prompt metadata.
- *   - Gemini implementer/Advisor: tool calls, >=1M, high, chat-completions.
+ *   - Sonnet reviewer: tool calls, >=1M, xhigh, Messages, prompt metadata.
+ *   - Gemini lead/General-Purpose: tool calls, >=1M, high, chat-completions.
  *   - Opus Oracle: exact Opus 5, >=1M, adaptive/high, Messages, prompt metadata.
  *
  * Pure over the passed-in catalog snapshot so it's unit-testable without
@@ -582,18 +637,18 @@ export function validateFastProfilePrerequisites(
     }
   }
 
-  const gemini = findModel(catalog, FAST_PROFILE_MODELS.implementer)
+  const gemini = findModel(catalog, FAST_PROFILE_MODELS.gemini)
   if (!gemini) {
-    missing.push(`${FAST_PROFILE_MODELS.implementer}: absent from the live catalog`)
+    missing.push(`${FAST_PROFILE_MODELS.gemini}: absent from the live catalog`)
   } else {
     if (!hasToolCalls(gemini)) {
-      missing.push(`${FAST_PROFILE_MODELS.implementer}: does not advertise tool_calls`)
+      missing.push(`${FAST_PROFILE_MODELS.gemini}: does not advertise tool_calls`)
     }
     if (!hasContextAtLeast(gemini, FAST_REQUIRED_CONTEXT_TOKENS)) {
-      missing.push(`${FAST_PROFILE_MODELS.implementer}: advertised context window is below 1M`)
+      missing.push(`${FAST_PROFILE_MODELS.gemini}: advertised context window is below 1M`)
     }
     if (!supportsEffort(gemini, "high")) {
-      missing.push(`${FAST_PROFILE_MODELS.implementer}: does not advertise a "high" reasoning effort`)
+      missing.push(`${FAST_PROFILE_MODELS.gemini}: does not advertise a "high" reasoning effort`)
     }
     // Reuse the canonical catalog endpoint resolver. Copilot's live catalog
     // uses bare `/chat/completions`, while fixtures and older snapshots may use
@@ -601,7 +656,7 @@ export function validateFastProfilePrerequisites(
     // fully-capable live catalog fail the whole launch.
     if (!supportsEndpoint(gemini, "chat")) {
       missing.push(
-        `${FAST_PROFILE_MODELS.implementer}: does not advertise a supported chat-completions endpoint`,
+        `${FAST_PROFILE_MODELS.gemini}: does not advertise a supported chat-completions endpoint`,
       )
     }
   }
@@ -665,7 +720,7 @@ const CHEAP_SUBAGENT_MIN_CONTEXT_TOKENS = CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS
 /**
  * Shared cheap-family roster prerequisite check, parameterized only by the
  * LEAD's context gate. Both `-m cheap` (200K lead floor) and `-m cheap1m`
- * (1M lead window) validate the EXACT same five-agent roster: the lead gate
+ * (1M lead window) validate the EXACT same four-agent roster: the lead gate
  * is the only requirement that differs between the two cheap siblings, and
  * every subagent runs at the 200K default window either way. A non-1M
  * luna/sol/sonnet/grok is acceptable as long as the roster models advertise
@@ -955,6 +1010,133 @@ export function formatCheapestPrerequisiteFailure(
     + `which this account's catalog does not fully provide:\n`
     + missing.map((m) => `  - ${m}`).join("\n")
     + `\n\nFalling back or silently dropping an agent is not supported for the cheapest `
+    + `profile's exact roster. Run plain \`github-router claude\` instead.`
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Balanced-profile startup prerequisites (`-m balanced`, Sol-led 200K tier)
+// ---------------------------------------------------------------------------
+
+export interface BalancedPrerequisiteCheck {
+  ok: boolean
+  /** Human-readable description of each missing/invalid requirement, empty
+   *  when `ok`. */
+  missing: ReadonlyArray<string>
+}
+
+/** The subagent window floor: every balanced role runs at the 200K default. */
+const BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS =
+  BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS
+
+/**
+ * Validate the live Copilot catalog for `-m balanced`: Sol lead at the 200K
+ * default window, Luna Explore/Reviewer roles, Sol Plan, Gemini
+ * General-Purpose, and a Grok Oracle — all at the 200K default with their
+ * fixed efforts and supported endpoints.
+ */
+export function validateBalancedProfilePrerequisites(
+  catalog: ModelsResponse | undefined,
+): BalancedPrerequisiteCheck {
+  const missing: Array<string> = []
+
+  const sol = findModel(catalog, BALANCED_PROFILE_MODELS.lead)
+  if (!sol) {
+    missing.push(`${BALANCED_PROFILE_MODELS.lead}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(sol)) {
+      missing.push(`${BALANCED_PROFILE_MODELS.lead}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(sol, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${BALANCED_PROFILE_MODELS.lead}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(sol, "high")) {
+      missing.push(`${BALANCED_PROFILE_MODELS.lead}: does not advertise a "high" reasoning effort`)
+    }
+    if (!supportsEndpoint(sol, "responses")) {
+      missing.push(`${BALANCED_PROFILE_MODELS.lead}: does not advertise a supported Responses endpoint`)
+    }
+  }
+
+  const luna = findModel(catalog, BALANCED_PROFILE_MODELS.explore)
+  if (!luna) {
+    missing.push(`${BALANCED_PROFILE_MODELS.explore}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(luna)) {
+      missing.push(`${BALANCED_PROFILE_MODELS.explore}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(luna, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${BALANCED_PROFILE_MODELS.explore}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(luna, "high") || !supportsEffort(luna, "max")) {
+      missing.push(`${BALANCED_PROFILE_MODELS.explore}: does not advertise both "high" and "max" reasoning effort`)
+    }
+    if (!supportsEndpoint(luna, "responses")) {
+      missing.push(`${BALANCED_PROFILE_MODELS.explore}: does not advertise a supported Responses endpoint`)
+    }
+  }
+
+  const gemini = findModel(catalog, BALANCED_PROFILE_MODELS["General-Purpose"])
+  if (!gemini) {
+    missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(gemini)) {
+      missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(gemini, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${BALANCED_PROFILE_MODELS["General-Purpose"]}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(gemini, "high")) {
+      missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise a "high" reasoning effort`)
+    }
+    if (!supportsEndpoint(gemini, "chat")) {
+      missing.push(
+        `${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise a supported chat-completions endpoint`,
+      )
+    }
+  }
+
+  const grok = findModel(catalog, BALANCED_PROFILE_MODELS.oracle)
+  if (!grok) {
+    missing.push(`${BALANCED_PROFILE_MODELS.oracle}: absent from the live catalog`)
+  } else {
+    if (!hasContextAtLeast(grok, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${BALANCED_PROFILE_MODELS.oracle}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(grok, "medium")) {
+      missing.push(`${BALANCED_PROFILE_MODELS.oracle}: does not advertise a "medium" reasoning effort`)
+    }
+    if (!hasUsablePromptMetadata(grok)) {
+      missing.push(`${BALANCED_PROFILE_MODELS.oracle}: no usable max_prompt_tokens metadata`)
+    }
+    if (!supportsEndpoint(grok, "responses")) {
+      missing.push(`${BALANCED_PROFILE_MODELS.oracle}: does not advertise a supported Responses endpoint`)
+    }
+  }
+
+  return { ok: missing.length === 0, missing }
+}
+
+/**
+ * Format `validateBalancedProfilePrerequisites`'s failure list into the
+ * launch error message.
+ */
+export function formatBalancedPrerequisiteFailure(
+  missing: ReadonlyArray<string>,
+): string {
+  return (
+    `github-router claude -m balanced requires the following live-catalog capabilities, `
+    + `which this account's catalog does not fully provide:\n`
+    + missing.map((m) => `  - ${m}`).join("\n")
+    + `\n\nFalling back or silently dropping an agent is not supported for the balanced `
     + `profile's exact roster. Run plain \`github-router claude\` instead.`
   )
 }

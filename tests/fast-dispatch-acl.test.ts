@@ -44,17 +44,14 @@ describe("fast native dispatch ACL", () => {
     for (const target of roles) expectAllowed(dispatch(target, undefined, { agent_type: null, agent_id: null }))
   })
 
-  test("Plan, implementer, and general-purpose follow the exact graph", () => {
+  test("Plan and General-Purpose follow the exact graph", () => {
     for (const target of roles) {
       const planAllowed = FAST_DISPATCH_GRAPH.Plan.has(target)
-      const implementerAllowed = FAST_DISPATCH_GRAPH.implementer.has(target)
-      const gpAllowed = FAST_DISPATCH_GRAPH["general-purpose"].has(target)
+      const gpAllowed = FAST_DISPATCH_GRAPH["General-Purpose"].has(target)
       if (planAllowed) expectAllowed(dispatch(target, "Plan"))
       else expectDenied(dispatch(target, "Plan"))
-      if (implementerAllowed) expectAllowed(dispatch(target, "implementer"))
-      else expectDenied(dispatch(target, "implementer"))
-      if (gpAllowed) expectAllowed(dispatch(target, "general-purpose"))
-      else expectDenied(dispatch(target, "general-purpose"))
+      if (gpAllowed) expectAllowed(dispatch(target, "General-Purpose"))
+      else expectDenied(dispatch(target, "General-Purpose"))
     }
   })
 
@@ -65,8 +62,8 @@ describe("fast native dispatch ACL", () => {
   })
 
   test("supports Task and snake/camel target aliases, but rejects conflicts", () => {
-    expectAllowed(payload({ tool_name: "Task", tool_input: { subagent_type: "reviewer" }, agent_type: "implementer" }))
-    expectAllowed(payload({ tool_name: "Agent", tool_input: { subagentType: "reviewer" }, agentType: "implementer" }))
+    expectAllowed(payload({ tool_name: "Task", tool_input: { subagent_type: "reviewer" }, agent_type: "General-Purpose" }))
+    expectAllowed(payload({ tool_name: "Agent", tool_input: { subagentType: "reviewer" }, agentType: "General-Purpose" }))
     expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", subagentType: "Explore" } }))
     expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: 42 } }))
   })
@@ -84,7 +81,7 @@ describe("fast native dispatch ACL", () => {
     expectDenied(dispatch(FAST_BROWSE_DISPATCH_AGENT))
     expectAllowed(dispatch(FAST_BROWSE_DISPATCH_AGENT), { allowBrowse: true })
     expectDenied(dispatch(FAST_BROWSE_DISPATCH_AGENT, "Plan"), { allowBrowse: true })
-    expectDenied(dispatch(FAST_BROWSE_DISPATCH_AGENT, "implementer"), { allowBrowse: true })
+    expectDenied(dispatch(FAST_BROWSE_DISPATCH_AGENT, "General-Purpose"), { allowBrowse: true })
   })
 
   test("supports allowedTargets restriction option", () => {
@@ -97,7 +94,7 @@ describe("fast native dispatch ACL", () => {
     expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer" }, agent_id: "id" }))
     expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer" }, parent_tool_use_id: "parent" }))
     expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer" }, agent_type: 42 }))
-    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer" }, agent_type: "implementer", agentType: "Plan" }))
+    expectDenied(payload({ tool_name: "Agent", tool_input: { subagent_type: "reviewer" }, agent_type: "General-Purpose", agentType: "Plan" }))
   })
 
   test("malformed dispatch payloads fail closed while valid lead markers pass", () => {

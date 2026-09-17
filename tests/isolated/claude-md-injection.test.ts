@@ -608,8 +608,12 @@ test("operating-defaults directive: orchestrator posture + concrete excellence p
   expect(low).toContain("first principles")
   expect(low).toMatch(/works backwards|work backwards/)
   expect(low).toContain("derive, reproduce, or test")
-  // Overridable default.
-  expect(low).toContain("override")
+  // Layered default, not a replacement: domain standards and user direction
+  // add on top, with an explicit conflict precedence (user, then domain,
+  // then default) instead of an unfalsifiable "override" license that could
+  // be read as permission to drop safety-critical defaults on thin prose.
+  expect(low).toContain("addons")
+  expect(low).toContain("on a direct conflict")
   // Self-compliant with the style directive: no em dash; no Claude/AI/Anthropic
   // attribution (this directive is behavioral, not the attribution rule).
   expect(d).not.toContain("—")
@@ -1135,8 +1139,8 @@ test("profile:'fast' names exactly the fast roster and never a removed native/to
   expect(directive).not.toContain("`scout`")
   expect(directive).toContain("`Plan`")
   expect(directive).not.toContain("`planner`")
-  expect(directive).toContain("`general-purpose`")
-  expect(directive).toContain("`implementer`")
+  expect(directive).toContain("`General-Purpose`")
+  expect(directive).not.toContain("`implementer`")
   expect(directive).toContain("`reviewer`")
   expect(directive).not.toContain("`critic`")
   expect(directive).toContain("Advisor")
@@ -1175,7 +1179,7 @@ test("profile:'fast' with unavailable runtime does not advertise absent agents o
     fastRuntimeAvailable: false,
   })
   expect(directive).toContain("runtime wiring is unavailable")
-  for (const absent of ["`Plan`", "`planner`", "`reviewer`", "`oracle`", "`Explore`", "`implementer`", "`critic`", "`general-purpose`"]) {
+  for (const absent of ["`Plan`", "`planner`", "`reviewer`", "`oracle`", "`Explore`", "`implementer`", "`critic`", "`General-Purpose`"]) {
     expect(directive).not.toContain(absent)
   }
 })
@@ -1206,8 +1210,8 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(fastDigestWithoutAstra).toContain("Fast launch profile")
   expect(fastDigestWithoutAstra).toContain("`Explore`")
   expect(fastDigestWithoutAstra).toContain("`Plan`")
-  expect(fastDigestWithoutAstra).toContain("`general-purpose`")
-  expect(fastDigestWithoutAstra).toContain("`implementer`")
+  expect(fastDigestWithoutAstra).toContain("`General-Purpose`")
+  expect(fastDigestWithoutAstra).not.toContain("`implementer`")
   expect(fastDigestWithoutAstra).toContain("`reviewer`")
   expect(fastDigestWithoutAstra).toContain("not an approval gate")
   expect(fastDigestWithoutAstra).toContain("`oracle`")
@@ -1224,6 +1228,18 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(cheapDigestWithoutAstra).toContain("`oracle`")
   expect(cheapDigestWithoutAstra).toContain("Grok 4.6 200K/medium")
   expect(cheapDigestWithoutAstra).not.toContain("`astra`")
+
+  const balancedDigest = buildOperatingDefaultsDigest({ profile: "balanced" })
+  expect(balancedDigest).toContain("Balanced launch profile")
+  expect(balancedDigest).toContain("`Explore`")
+  expect(balancedDigest).toContain("`General-Purpose`")
+  expect(balancedDigest).toContain("`reviewer`")
+  expect(balancedDigest).toContain("Grok 4.6 200K/medium")
+  expect(balancedDigest).not.toContain("`astra`")
+
+  const cheapestDigest = buildOperatingDefaultsDigest({ profile: "cheapest" })
+  expect(cheapestDigest).toContain("Cheapest launch profile")
+  expect(cheapestDigest).toContain("directly")
 
   // `-m cheap` deliberately runs without astra even if the caller hints the
   // peer is "available" — the profile never wires it; only cheap1m does.

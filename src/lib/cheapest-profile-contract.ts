@@ -4,24 +4,20 @@
  * The cheapest all-200K tier: a `gpt-5.6-luna`/max LEAD at Claude Code's
  * DEFAULT (bare-slug) 200K window, every subagent at the same 200K default,
  * a `gemini-3.8-flash`/high Advisor (bare slug), and a `gpt-5.6-sol`/high
- * primary Oracle. Oracle-only peer set (no `astra`), same exact five-agent
+ * primary Oracle. Oracle-only peer set (no `astra`), same exact four-agent
  * surface and authority structure as the cheap family.
  *
- * This module is deliberately dependency-free, except for the delegation
- * graph below: cheapest shares fast's exact authority structure, so it
- * aliases `FAST_PROFILE_DELEGATION_GRAPH` rather than restating it. The
- * PreToolUse ACL reads the fast graph for every pinned profile, so a
- * duplicated literal here would be unenforced and drift-prone.
+ * This module is deliberately dependency-free, including its own delegation
+ * graph literal: cheapest shares the cheap family's authority shape today,
+ * but each pinned profile owns its graph so tuning one roster cannot silently
+ * retune another.
  */
-
-import { FAST_PROFILE_DELEGATION_GRAPH } from "./fast-profile-contract"
 
 export const CHEAPEST_PROFILE_MODELS = Object.freeze({
   lead: "gpt-5.6-luna",
   explore: "gpt-5.6-luna",
   plan: "gpt-5.6-sol",
-  "general-purpose": "gpt-5.6-luna",
-  implementer: "gpt-5.6-luna",
+  "General-Purpose": "gpt-5.6-luna",
   reviewer: "gemini-3.8-flash",
   advisor: "gemini-3.8-flash",
   oracle: "gpt-5.6-sol",
@@ -30,8 +26,7 @@ export const CHEAPEST_PROFILE_MODELS = Object.freeze({
 export const CHEAPEST_PROFILE_NATIVE_AGENT_NAMES = [
   "Explore",
   "Plan",
-  "general-purpose",
-  "implementer",
+  "General-Purpose",
   "reviewer",
 ] as const
 
@@ -43,16 +38,14 @@ export const CHEAPEST_PROFILE_NATIVE_MODELS: Readonly<
 > = Object.freeze({
   Explore: CHEAPEST_PROFILE_MODELS.explore,
   Plan: CHEAPEST_PROFILE_MODELS.plan,
-  "general-purpose": CHEAPEST_PROFILE_MODELS["general-purpose"],
-  implementer: CHEAPEST_PROFILE_MODELS.implementer,
+  "General-Purpose": CHEAPEST_PROFILE_MODELS["General-Purpose"],
   reviewer: CHEAPEST_PROFILE_MODELS.reviewer,
 })
 
 export const CHEAPEST_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Explore: "high",
   Plan: "high",
-  "general-purpose": "xhigh",
-  implementer: "max",
+  "General-Purpose": "max",
   reviewer: "high",
 } as const)
 
@@ -93,10 +86,16 @@ export const CHEAPEST_PROFILE_SYNTHESIZED_PEERS = ["oracle"] as const
 export type CheapestProfileSynthesizedPeer =
   (typeof CHEAPEST_PROFILE_SYNTHESIZED_PEERS)[number]
 
-/** Each native role's permitted native-agent targets. Aliased from the fast
- *  profile (not restated): the PreToolUse ACL enforces the fast graph for
- *  every pinned profile, so a separate literal here would be dead and
- *  drift-prone. `Plan` may invoke `Explore` and `reviewer`; the cheapest
- *  planner's heavy use of `Explore` and `general-purpose` is prompt-level
- *  guidance in its agent definition, not a graph change. */
-export const CHEAPEST_PROFILE_DELEGATION_GRAPH = FAST_PROFILE_DELEGATION_GRAPH
+/** Each native role's permitted native-agent targets. The lead gets the roster.
+ *  `Plan` may invoke `Explore` and `reviewer`; the cheapest planner's heavy
+ *  use of `Explore` and `General-Purpose` is prompt-level guidance in its
+ *  agent definition, not a graph change. */
+export const CHEAPEST_PROFILE_DELEGATION_GRAPH = Object.freeze({
+  Explore: Object.freeze([]),
+  Plan: Object.freeze(["Explore", "reviewer"]),
+  "General-Purpose": Object.freeze(["reviewer"]),
+  reviewer: Object.freeze([]),
+} as const satisfies Record<
+  CheapestProfileNativeAgentName,
+  ReadonlyArray<CheapestProfileNativeAgentName>
+>)
