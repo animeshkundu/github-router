@@ -55,6 +55,15 @@ import {
   CHEAPEST_PROFILE_ORACLE_MODEL,
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
 } from "./cheapest-profile-contract"
+import {
+  BALANCED_PROFILE_ADVISOR_EFFORT,
+  BALANCED_PROFILE_ADVISOR_MODEL,
+  BALANCED_PROFILE_MODELS,
+  BALANCED_PROFILE_NATIVE_EFFORTS,
+  BALANCED_PROFILE_ORACLE_EFFORT,
+  BALANCED_PROFILE_ORACLE_MODEL,
+  BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+} from "./balanced-profile-contract"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -392,18 +401,21 @@ export function generalPurposeFastModel(): string | undefined {
  * Fast-launch-profile ("-m fast") native model resolvers.
  *
  * These are deliberately separate from the standard resolvers above. The fast
- * profile is a hard, single-entry, no-fallback assignment: `Explore` and
- * `general-purpose` pin to Luna, `Plan` pins to Sol, `implementer` pins to
- * Gemini 3.8 Flash, and `reviewer` pins to Grok 4.6. Retuning a standard
- * resolver must never move a fast role silently.
+ * profile is a hard, single-entry, no-fallback assignment: `Explore` pins to
+ * Luna, `Plan` pins to Sol, `General-Purpose` pins to Gemini 3.8 Flash (the
+ * former implementer model), and `reviewer` pins to Sonnet 5. Retuning a
+ * standard resolver must never move a fast role silently.
  */
 
 export const FAST_EXPLORE_MODEL = FAST_PROFILE_NATIVE_MODELS.Explore
 /** @deprecated Fast `scout` was renamed to capitalized `Explore`. */
 export const FAST_SCOUT_MODEL = FAST_EXPLORE_MODEL
 export const FAST_PLAN_MODEL = FAST_PROFILE_NATIVE_MODELS.Plan
-export const FAST_GENERAL_PURPOSE_MODEL = FAST_PROFILE_NATIVE_MODELS["general-purpose"]
-export const FAST_IMPLEMENTER_MODEL = FAST_PROFILE_NATIVE_MODELS.implementer
+export const FAST_GENERAL_PURPOSE_MODEL = FAST_PROFILE_NATIVE_MODELS["General-Purpose"]
+/** @deprecated The fast `implementer` role was removed; `General-Purpose`
+ *  (same Gemini model) owns mixed execution now. Kept so existing imports
+ *  keep resolving to the same model id. */
+export const FAST_IMPLEMENTER_MODEL = FAST_PROFILE_MODELS.gemini
 /** Grok 4.6 advertises 500K total context / 372K max prompt, so it remains bare
  *  and is gated by max_prompt_tokens rather than the 1M floor. */
 export const FAST_REVIEWER_MODEL = FAST_PROFILE_NATIVE_MODELS.reviewer
@@ -415,8 +427,10 @@ export const FAST_EXPLORE_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.Explore
 /** @deprecated Fast `scout` was renamed to capitalized `Explore`. */
 export const FAST_SCOUT_EFFORT = FAST_EXPLORE_EFFORT
 export const FAST_PLAN_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.Plan
-export const FAST_GENERAL_PURPOSE_EFFORT = FAST_PROFILE_NATIVE_EFFORTS["general-purpose"]
-export const FAST_IMPLEMENTER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.implementer
+export const FAST_GENERAL_PURPOSE_EFFORT = FAST_PROFILE_NATIVE_EFFORTS["General-Purpose"]
+/** @deprecated The fast `implementer` role was removed; matches the
+ *  `General-Purpose` effort now. */
+export const FAST_IMPLEMENTER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS["General-Purpose"]
 export const FAST_REVIEWER_EFFORT = FAST_PROFILE_NATIVE_EFFORTS.reviewer
 export const FAST_ORACLE_EFFORT = FAST_PROFILE_ORACLE_EFFORT
 export const FAST_ADVISOR_EFFORT = FAST_PROFILE_ADVISOR_EFFORT
@@ -458,7 +472,7 @@ export function fastGeneralPurposeModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === id)
   const efforts = found?.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(FAST_GENERAL_PURPOSE_EFFORT)) return undefined
-  return found && fastEndpointForModel(found) === "responses" ? id : undefined
+  return found && fastEndpointForModel(found) === "chat" ? id : undefined
 }
 
 export function fastImplementerModel(): string | undefined {
@@ -617,6 +631,42 @@ export function cheapAstraModel(): string | undefined {
   if (!Array.isArray(efforts) || !efforts.includes(CHEAP_PROFILE_ASTRA_EFFORT)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
   return CHEAP_PROFILE_ASTRA_MODEL
+}
+
+/** Sol/high Advisor for the balanced profile at the 200K default window. */
+export function balancedAdvisorModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === BALANCED_PROFILE_ADVISOR_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(BALANCED_PROFILE_ADVISOR_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return BALANCED_PROFILE_ADVISOR_MODEL
+}
+
+/** Exact Grok 4.6 only: the balanced Oracle at 200K/medium, like cheap. */
+export function balancedOracleModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === BALANCED_PROFILE_ORACLE_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) <= 0) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(BALANCED_PROFILE_ORACLE_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return BALANCED_PROFILE_ORACLE_MODEL
+}
+
+/** Luna/max reviewer for the balanced profile at the 200K default window. */
+export function balancedReviewerModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === BALANCED_PROFILE_MODELS.reviewer)
+  if (!found) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(BALANCED_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return BALANCED_PROFILE_MODELS.reviewer
 }
 
 // Compatibility aliases for tests and callers on the first fast-profile commit.

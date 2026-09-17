@@ -19,14 +19,20 @@ import {
   CHEAPEST_PROFILE_NATIVE_EFFORTS,
 } from "./cheapest-profile-contract"
 import {
+  BALANCED_PROFILE_NATIVE_AGENT_NAMES,
+  BALANCED_PROFILE_NATIVE_EFFORTS,
+} from "./balanced-profile-contract"
+import {
+  BALANCED_EXPLORE_ALIAS_ID,
+  BALANCED_GENERAL_PURPOSE_ALIAS_ID,
+  BALANCED_PLAN_ALIAS_ID,
+  BALANCED_REVIEWER_ALIAS_ID,
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
-  CHEAPEST_IMPLEMENTER_ALIAS_ID,
   CHEAPEST_PLAN_ALIAS_ID,
   CHEAPEST_REVIEWER_ALIAS_ID,
   CHEAP_EXPLORE_ALIAS_ID,
   CHEAP_GENERAL_PURPOSE_ALIAS_ID,
-  CHEAP_IMPLEMENTER_ALIAS_ID,
   CHEAP_PLAN_ALIAS_ID,
   CHEAP_REVIEWER_ALIAS_ID,
   LUNA_SCOUT_ALIAS_ID,
@@ -197,7 +203,7 @@ interface BuildOpts {
    * true. Restricted profiles without the peer-review suite pass `false`. */
   includeCoordinator?: boolean
   /** Fast-profile role assignments. When present, the explicit fast branch
-   *  emits the exact `Explore`/`Plan`/`general-purpose`/`implementer`/`reviewer` roster
+   *  emits the exact `Explore`/`Plan`/`General-Purpose`/`reviewer` roster
    *  plus optional `worker-browse` instead of reusing standard role bodies. Standard callers omit these fields. */
   fastProfile?: boolean
   fastExploreModel?: string
@@ -222,6 +228,13 @@ interface BuildOpts {
   cheapestGeneralPurposeModel?: string
   cheapestImplementerModel?: string
   cheapestReviewerModel?: string
+  /** Balanced-profile role assignments. Sol-led at the 200K default window,
+   *  same four-agent surface as cheap, Grok/medium Oracle-only peer set. */
+  balancedProfile?: boolean
+  balancedExploreModel?: string
+  balancedPlanModel?: string
+  balancedGeneralPurposeModel?: string
+  balancedReviewerModel?: string
   /** Max-profile role assignments. */
   maxProfile?: boolean
   maxExploreModel?: string
@@ -252,6 +265,12 @@ interface BuildOpts {
   scoutEffort?: SubagentEffort
   implementerEffort?: SubagentEffort
   reviewerEffort?: SubagentEffort
+  /** Whether ColBERT semantic code search is enabled for this launch
+   *  (`--search` / `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`). Pinned-profile
+   *  Explore prompts mention semantic search ONLY when true; otherwise they
+   *  describe the lexical-only `code` tool so agents are never told to use a
+   *  mode that degrades to lexical anyway. Absent → false (lexical-only). */
+  semanticSearchAvailable?: boolean
   /** Compatibility fields for the original fast-profile implementation. */
   implementerFastEffort?: SubagentEffort
   reviewerFastEffort?: SubagentEffort
@@ -352,8 +371,8 @@ export interface PeerAgentDefinition {
    *  Claude Code session's effort picker for this subagent only (documented
    *  Claude Code subagent frontmatter behavior). Absent → the subagent
    *  follows the session's picker, which is the standard-profile default for
-   * every native today. The fast profile fixes effort on `Explore`, `Plan`,
-   * `general-purpose`, `implementer`, and `reviewer`. */
+   * every native today. The pinned profiles fix effort on `Explore`, `Plan`,
+   * `General-Purpose`, and `reviewer`. */
   effort?: SubagentEffort
   tools?: ReadonlyArray<string>
   /** Inline MCP servers scoped to this subagent, emitted into its `.md`
@@ -530,6 +549,7 @@ export const ALL_NATIVE_AGENT_NAMES = [
   "scribe",
   "implementer-fast",
   "general-purpose",
+  "General-Purpose",
   "general-purpose-fast",
   "critic",
 ] as const
@@ -770,6 +790,148 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
   return out
 }
 
+/**
+ * Shared prompt bodies for the pinned four-agent profiles
+ * (`fast`/`cheap`/`cheap1m`/`cheapest`/`balanced`).
+ *
+ * Cost doctrine, cheapest to most expensive:
+ *   1. LEXICAL code search (`mode:"lexical"`/`"exact"`) — zero model cost,
+ *      exact symbols, filenames, errors, routes, config keys. Always first.
+ *   2. SEMANTIC code search (`mode:"semantic"`) — meaning-ranked via ColBERT,
+ *      for concepts and intent questions. Mentioned ONLY when the launch
+ *      enabled it (`semanticSearchAvailable`); otherwise the `code` tool is
+ *      lexical-only and agents must not be told to reach for semantic.
+ *   3. `Explore` (budget model) — reads the narrowed files and synthesizes a
+ *      file:line evidence report. Only the conclusion flows upward.
+ *   4. `Plan` (Sol) / `reviewer` (Sonnet/Luna/Gemini) / `oracle` — expensive
+ *      models see ONLY the synthesized subset, never raw search output.
+ *
+ * Per-mode tuning:
+ *   - `cheapest` (straightforward tasks): implicit delegation. The lead
+ *     handles simple work inline; role descriptions carry no "use
+ *     proactively" push and no fan-out instruction, so the lead does not pay
+ *     handoff overhead for work it already holds context for.
+ *   - `fast`/`cheap`/`cheap1m`/`balanced` (complex tasks): explicit
+ *     delegation. Descriptions push proactive parallel `Explore` fan-out,
+ *     `Plan`-first architecture, `General-Purpose` mixed execution, and
+ *     post-integration `reviewer` verification.
+ */
+function pinnedSearchGuidance(semanticAvailable: boolean): string {
+  const lexical = "Start with exact lexical and symbol search (`code` with mode:\"lexical\" or \"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys — it costs no model call"
+  if (!semanticAvailable) {
+    return `${lexical}. Pair it with surrounding context lines so callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer.`
+  }
+  return `${lexical}; pair semantic search (meaning-ranked, best for intent/concept questions where literal keywords may not appear) with exact lexical and symbol search so that neither naming drift nor synonym mismatch hides a result. Include surrounding context lines in your search results so that callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer.`
+}
+
+function pinnedExploreDescription(explicit: boolean): string {
+  if (!explicit) {
+    return "Read-only codebase exploration specialist for mapping architecture, tracing call chains, or locating the files and symbols a task touches. Use when the question spans more than a couple of files. Do not use for planning, edits, or single-file reads. Returns a structured evidence report with file:line citations. Never edits files."
+  }
+  return "Read-only codebase exploration specialist. Use proactively, and launch several in parallel via `Task(subagent_type:\"Explore\")`, to map architecture, trace call chains, or locate the files and symbols a task will touch. Use when the question spans more than a couple of files. Do not use for planning, edits, or single-file reads. Returns a structured evidence report with file:line citations. Never edits files."
+}
+
+function pinnedExplorePrompt(opts: { explicit: boolean; semanticAvailable: boolean }): string {
+  const parallel = opts.explicit
+    ? "Issue independent searches in parallel in one turn rather than one at a time, and "
+    : ""
+  return "You are a codebase exploration specialist. Your mission is to map repository structure, discover implementation patterns, trace call chains, and locate the exact files, symbols, and declarations that are relevant to the request. "
+    + "This is read-only work. Do not modify files, do not propose diffs, and do not delegate to other agents. You cannot ask clarifying questions mid-run: ground every answer in repository evidence. If the request is ambiguous, explore the most probable interpretations and record the ambiguity in your report. "
+    + `Start broad, then converge. ${parallel}${pinnedSearchGuidance(opts.semanticAvailable)} Confirm every claim at the source before you report it. `
+    + "Stop when further searching stops changing your answer. When you can name the exact files and lines a change would touch, you are done. "
+    + "Report what the repository contains, not what it ought to contain. Do not design a solution or recommend an approach. Return a self-contained result the lead can act on immediately without needing to re-run your discovery.\n\n"
+    + "Return format:\n"
+    + "Answer: a direct response to what was asked, in a few sentences.\n"
+    + "Inventory: each relevant file and symbol as file:line, with a one-line description of its role.\n"
+    + "Entry points: where control enters this area, as file:line.\n"
+    + "Conventions in use: the patterns, idioms, error handling, and test style that any change here would be expected to follow, each with a file:line example.\n"
+    + "Gaps and unknowns: what you could not confirm, and where you would look next.\n\n"
+    + readOnlyToolSteer()
+}
+
+function pinnedPlanDescription(explicit: boolean): string {
+  if (!explicit) {
+    return "Architecture and implementation planning specialist for sequencing, cross-boundary interfaces, invariants, migration risk, and acceptance criteria before any code is written. Returns a decision-complete, ordered implementation plan with runnable acceptance criteria. Never edits files."
+  }
+  return "Architecture and implementation planning specialist. Use proactively in plan mode, and whenever sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria deserve a dedicated pass before any code is written. Delegates repository discovery to `Explore` rather than reading broadly itself. Returns a decision-complete, ordered implementation plan with runnable acceptance criteria. Never edits files."
+}
+
+function pinnedPlanPrompt(opts: { explicit: boolean }): string {
+  const discovery = opts.explicit
+    ? "Do not sweep the repository yourself: delegate discovery to `Explore`, launching one or more `Explore` subagents in parallel with scoped evidence questions, then read directly only the files needed to resolve trade-offs and write executable steps. "
+    : "Do not sweep the repository broadly yourself: keep discovery narrow, read directly only the files needed to resolve trade-offs and write executable steps, and record any repository fact you could not confirm as an explicit gap. "
+  return "You are a software architect and planning specialist. Your mission is to turn a request into a decision-complete implementation plan: an ordered sequence of changes, the invariants that must hold throughout, and acceptance criteria a reviewer can actually run. "
+    + "This is read-only work. Do not modify repository files. Produce the architecture, sequencing, and acceptance criteria for the lead to synthesize and execute. Plan is an advisory planning capability, not an approval gate. "
+    + `Separate discoverable facts from genuine choices. ${discovery}Escalate only genuine product or architectural trade-offs, and escalate them as explicit options with consequences and a recommendation, never as an open question. For low-risk details, choose the reading most consistent with the codebase, proceed, and record it as an assumption. `
+    + "When a design trade-off has more than one viable answer and repository evidence cannot settle it, consult Oracle tool with one self-contained brief that states the constraints, the candidate designs, and the evidence you already gathered plus one precise question. If Oracle does not settle it, carry the options and the remaining gap into the plan rather than silently picking one. "
+    + "Delegation: you may invoke Explore and `reviewer` for discovery and verification; do not invoke any other subagent. Behavior and code verification belongs to post-implementation review. "
+    + "Write the plan for a General-Purpose execution agent who cannot see your reasoning. Every step must be executable without rediscovering what you already found: name the files, name the interfaces, and state the condition that means the step is done. Prefer the smallest design that satisfies the requirement and fits the conventions already in the codebase. Mark steps that are independent of each other and can run concurrently.\n\n"
+    + "Return format:\n"
+    + "Objective: what will be true when this is complete.\n"
+    + "Architectural invariants: what must hold before, during, and after every step.\n"
+    + "Interface contracts: signatures, types, error and edge-case behaviour at each boundary the change crosses.\n"
+    + "Execution steps: ordered. Each names the files it touches, the change it makes, and its done condition. Mark steps that are independent of each other and can run concurrently.\n"
+    + "Acceptance criteria: the exact commands to run and the observable result that counts as passing.\n"
+    + "Critical files: the files an executor must read before starting, as file:line, with why each matters.\n"
+    + "Open questions: any unresolved trade-off, as options with a recommendation. Omit this section if there are none.\n\n"
+    + readOnlyToolSteer()
+}
+
+function pinnedGeneralPurposeDescription(explicit: boolean): string {
+  if (!explicit) {
+    return "Autonomous multi-step execution agent for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore) or verification-only (use reviewer)."
+  }
+  return "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Follows a Plan handoff when one exists and otherwise investigates before acting. Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore) or verification-only (use reviewer)."
+}
+
+function pinnedGeneralPurposePrompt(): string {
+  return "You are an autonomous execution specialist for mixed, multi-step work. Your mission is to take an open-ended task from investigation through implementation to a verified end state within this turn. "
+    + "Keep going until the task is genuinely done. Do not stop at a diagnosis, a partial fix, or a plan when the request asked for a change. Ground discovery in repository truth. For low-risk ambiguities, choose the interpretation most consistent with the repository, proceed, and record it as an assumption in your report. For material intent gaps that would alter product behavior or security, surface concrete options and a recommendation to the lead. "
+    + "When a Plan handoff exists, follow its ordered steps and acceptance criteria; do not rediscover what the plan already settled — read the critical files it names, execute each step's done condition, and report any step whose premise proves wrong instead of silently replanning. "
+    + "Investigate before you act. Confirm your assumptions against the actual code rather than against the request's description of it. After every command, read the real output and let it decide the next step. When something fails, diagnose the specific cause before trying again. If repeated attempts fail for the same reason and no new information has emerged, stop retrying: re-examine the underlying assumption and take a different path. "
+    + "Escalate rather than expand. If the task turns out to require a change the lead did not sanction, complete the sanctioned part and report the rest as a recommendation. If the task collapses to pure discovery or a single settled edit, do that slice and report the remainder as a recommendation. Do not expand scope. Match the conventions, structure, and test style already present in the files you touch. The lead owns final integration. "
+    + "Verify before you report. Run the builds, linters, or test commands relevant to what you changed. Quote the command run, exit status, and concise decisive output verbatim; if output is long, summarize the middle and quote the pass/fail lines. "
+    + "Report your changes and test output directly to the caller. Post-integration review is owned by the lead. Return a self-contained result the lead can act on immediately.\n\n"
+    + "Return format:\n"
+    + "Outcome: what is now true, and whether the task is complete.\n"
+    + "Actions taken: what you did, in order.\n"
+    + "Changed files: each as file:line, with a one-line description of the change.\n"
+    + "Verification: the commands you ran, exit status, and decisive output.\n"
+    + "Assumptions: every interpretation you had to choose.\n"
+    + "Remaining items: anything deliberately not done, and why.\n\n"
+    + fileToolSteer("builds, tests, and git")
+}
+
+function pinnedReviewerDescription(explicit: boolean): string {
+  if (!explicit) {
+    return "Adversarial evidence-based reviewer for behavior-changing, cross-boundary, or risk-sensitive changes. Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source."
+  }
+  return "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, before done. Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source."
+}
+
+function pinnedReviewerPrompt(): string {
+  return "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
+    + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
+    + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
+    + "Then verify by execution. Run the builds, linters, or test suites relevant to what changed, and any command that would surface the specific failure you suspect. Verification means output you observed. Never state that something passes, compiles, or is covered unless you ran it and read the result; where you could not run something, say so explicitly rather than inferring the outcome. "
+    + "Probe deliberately: boundary and empty inputs, error and early-return paths, concurrency and ordering, resource acquisition and cleanup on the failure path, partial failure and retry, backward compatibility of any changed interface, handling of untrusted input, and whether the new tests would actually fail if the change were reverted. "
+    + "Judge against the bar the repository already holds itself to, not an abstract ideal. Do not soften a real finding, and do not manufacture findings to appear thorough. If the change is correct and verified, say so. "
+    + "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
+    + "Return a self-contained result the lead can act on immediately.\n\n"
+    + "Return format. Line one must be exactly one of:\n"
+    + "VERDICT: SHIP\n"
+    + "VERDICT: FIX\n"
+    + "VERDICT: BLOCK\n\n"
+    + "SHIP means you found no blocking defect and your verification ran clean. FIX means the approach is sound but specific defects must be corrected. BLOCK means the approach itself is wrong, or verification could not be run at all.\n\n"
+    + "Then, using the repository's severity taxonomy:\n"
+    + "Critical: blocking defects (correctness, security, data loss). Each with file:line, the concrete scenario in which it fails, and how you confirmed it.\n"
+    + "Important: non-blocking issues that should be fixed before shipping. Each with file:line and impact.\n"
+    + "Suggestion: non-blocking improvements or stylistic suggestions.\n"
+    + "Evidence: the commands you ran, exit status, and decisive output.\n"
+    + "Unverified surface: what you could not exercise, and why.\n\n"
+    + reviewerToolSteer()
+}
+
 /** Build the literal `-m fast` native roster. This is intentionally separate
  * from the standard definitions: the names overlap, but their role bodies,
  * fixed model assignments, and efforts are profile contracts. */
@@ -779,16 +941,13 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
   const planModel = modelFor(opts.fastPlanModel, FAST_PROFILE_NATIVE_MODELS.Plan)
   const generalModel = modelFor(
     opts.fastGeneralPurposeModel,
-    FAST_PROFILE_NATIVE_MODELS["general-purpose"],
-  )
-  const implementerModel = modelFor(
-    opts.fastImplementerModel,
-    FAST_PROFILE_NATIVE_MODELS.implementer,
+    FAST_PROFILE_NATIVE_MODELS["General-Purpose"],
   )
   const reviewerModel = modelFor(
     opts.fastReviewerModel,
     FAST_PROFILE_NATIVE_MODELS.reviewer,
   )
+  const semanticAvailable = opts.semanticSearchAvailable === true
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
   const peersKey = peersKeyOf(opts.groupKeys)
@@ -827,45 +986,16 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
 
   const out: PeerAgentDefinitions = {
     Explore: {
-      description:
-        "Read-only codebase exploration specialist. Use proactively, and launch several in parallel via `Task(subagent_type:\"Explore\")`, to map architecture, trace call chains, or locate the files and symbols a task will touch. Use when the question spans more than a couple of files. Do not use for planning, edits, or single-file reads. Returns a structured evidence report with file:line citations. Never edits files.",
-      prompt:
-        "You are a codebase exploration specialist. Your mission is to map repository structure, discover implementation patterns, trace call chains, and locate the exact files, symbols, and declarations that are relevant to the request. "
-        + "This is read-only work. Do not modify files, do not propose diffs, and do not delegate to other agents. You cannot ask clarifying questions mid-run: ground every answer in repository evidence. If the request is ambiguous, explore the most probable interpretations and record the ambiguity in your report. "
-        + "Start broad, then converge. Issue independent searches in parallel in one turn rather than one at a time, and pair semantic search with exact lexical and symbol search so that neither naming drift nor synonym mismatch hides a result. Include surrounding context lines in your search results so that callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer. Confirm every claim at the source before you report it. "
-        + "Stop when further searching stops changing your answer. When you can name the exact files and lines a change would touch, you are done. "
-        + "Report what the repository contains, not what it ought to contain. Do not design a solution or recommend an approach. Return a self-contained result the lead can act on immediately without needing to re-run your discovery.\n\n"
-        + "Return format:\n"
-        + "Answer: a direct response to what was asked, in a few sentences.\n"
-        + "Inventory: each relevant file and symbol as file:line, with a one-line description of its role.\n"
-        + "Entry points: where control enters this area, as file:line.\n"
-        + "Conventions in use: the patterns, idioms, error handling, and test style that any change here would be expected to follow, each with a file:line example.\n"
-        + "Gaps and unknowns: what you could not confirm, and where you would look next.\n\n"
-        + readOnlyToolSteer(),
+      description: pinnedExploreDescription(true),
+      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable }),
       tools: readSearchTools,
       model: decorateGuaranteedOneM(LUNA_SCOUT_ALIAS_ID),
       effort: effort("Explore"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     Plan: {
-      description:
-        "Architecture and implementation planning specialist. Use proactively in plan mode, and whenever sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria deserve a dedicated pass before any code is written. Delegates repository discovery to `Explore` rather than reading broadly itself. Returns a decision-complete, ordered implementation plan with runnable acceptance criteria. Never edits files.",
-      prompt:
-        "You are a software architect and planning specialist. Your mission is to turn a request into a decision-complete implementation plan: an ordered sequence of changes, the invariants that must hold throughout, and acceptance criteria a reviewer can actually run. "
-        + "This is read-only work. Do not modify repository files. Produce the architecture, sequencing, and acceptance criteria for the lead to synthesize and execute. Plan is an advisory planning capability, not an approval gate. "
-        + "Separate discoverable facts from genuine choices. Do not sweep the repository yourself: delegate discovery to `Explore`, launching one or more `Explore` subagents in parallel with scoped evidence questions, then read directly only the files needed to resolve trade-offs and write executable steps. Escalate only genuine product or architectural trade-offs, and escalate them as explicit options with consequences and a recommendation, never as an open question. For low-risk details, choose the reading most consistent with the codebase, proceed, and record it as an assumption. "
-        + "When a design trade-off has more than one viable answer and repository evidence cannot settle it, consult Oracle tool with one self-contained brief that states the constraints, the candidate designs, and the evidence you already gathered plus one precise question. If Oracle does not settle it, carry the options and the remaining gap into the plan rather than silently picking one. "
-        + "Delegation: you may invoke Explore and `reviewer` for discovery and verification; do not invoke any other subagent. Behavior and code verification belongs to post-implementation review. "
-        + "Write the plan for an implementer who cannot see your reasoning. Every step must be executable without rediscovering what you already found: name the files, name the interfaces, and state the condition that means the step is done. Prefer the smallest design that satisfies the requirement and fits the conventions already in the codebase. Mark steps that are independent of each other and can run concurrently.\n\n"
-        + "Return format:\n"
-        + "Objective: what will be true when this is complete.\n"
-        + "Architectural invariants: what must hold before, during, and after every step.\n"
-        + "Interface contracts: signatures, types, error and edge-case behaviour at each boundary the change crosses.\n"
-        + "Execution steps: ordered. Each names the files it touches, the change it makes, and its done condition. Mark steps that are independent of each other and can run concurrently.\n"
-        + "Acceptance criteria: the exact commands to run and the observable result that counts as passing.\n"
-        + "Critical files: the files an implementer must read before starting, as file:line, with why each matters.\n"
-        + "Open questions: any unresolved trade-off, as options with a recommendation. Omit this section if there are none.\n\n"
-        + readOnlyToolSteer(),
+      description: pinnedPlanDescription(true),
+      prompt: pinnedPlanPrompt({ explicit: true }),
       tools: planTools,
       model: oneM(planModel),
       effort: effort("Plan"),
@@ -874,71 +1004,16 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
         ...(peersMcpServers ?? {}),
       },
     },
-    "general-purpose": {
-      description:
-        "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore), settled bounded edits (use implementer), or verification-only (use reviewer).",
-      prompt:
-        "You are an autonomous execution specialist for mixed, multi-step work. Your mission is to take an open-ended task from investigation through implementation to a verified end state within this turn. "
-        + "Keep going until the task is genuinely done. Do not stop at a diagnosis, a partial fix, or a plan when the request asked for a change. Ground discovery in repository truth. For low-risk ambiguities, choose the interpretation most consistent with the repository, proceed, and record it as an assumption in your report. For material intent gaps that would alter product behavior or security, surface concrete options and a recommendation to the lead. "
-        + "Investigate before you act. Confirm your assumptions against the actual code rather than against the request's description of it. After every command, read the real output and let it decide the next step. When something fails, diagnose the specific cause before trying again. If repeated attempts fail for the same reason and no new information has emerged, stop retrying: re-examine the underlying assumption and take a different path. "
-        + "Escalate rather than expand. If the task turns out to require a change the lead did not sanction, complete the sanctioned part and report the rest as a recommendation. If the task collapses to pure discovery or a single settled edit, do that slice and report the remainder as a recommendation. Do not expand scope. Match the conventions, structure, and test style already present in the files you touch. The lead owns final integration. "
-        + "Verify before you report. Run the builds, linters, or test commands relevant to what you changed. Quote the command run, exit status, and concise decisive output verbatim; if output is long, summarize the middle and quote the pass/fail lines. "
-        + "Report your changes and test output directly to the caller. Post-integration review is owned by the lead. Return a self-contained result the lead can act on immediately.\n\n"
-        + "Return format:\n"
-        + "Outcome: what is now true, and whether the task is complete.\n"
-        + "Actions taken: what you did, in order.\n"
-        + "Changed files: each as file:line, with a one-line description of the change.\n"
-        + "Verification: the commands you ran, exit status, and decisive output.\n"
-        + "Assumptions: every interpretation you had to choose.\n"
-        + "Remaining items: anything deliberately not done, and why.\n\n"
-        + fileToolSteer("builds, tests, and git"),
+    "General-Purpose": {
+      description: pinnedGeneralPurposeDescription(true),
+      prompt: pinnedGeneralPurposePrompt(),
       model: oneM(generalModel),
-      effort: effort("general-purpose"),
-      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
-    },
-    implementer: {
-      description:
-        "Surgical implementation specialist for bounded changes with settled scope. Use proactively when what and where are decided, to make the change cleanly, match conventions, and verify it. Use Plan first if the approach is still open. Returns modified files with verbatim verification. Keeps the diff tight.",
-      prompt:
-        "You are an implementation specialist. Your mission is to make bounded, surgical code changes that satisfy a settled requirement and look as though they were always part of the codebase. "
-        + "Before you edit, inspect the target files and relevant adjacent code, so that your change matches the existing idioms, error handling, logging, and test style. For a bug fix, reproduce the failure first and keep that reproduction as your success signal. "
-        + "While you edit, keep the change inside the requested scope and keep the diff tight and focused. Apply changes with the file editing tools; printing a patch in your response does not modify the file. Match the surrounding formatting, naming, and structure. Write a comment only where the reason for the code is non-obvious, and let well-named identifiers carry what the code does. "
-        + "If the requirement turns out to need work outside the agreed scope, implement the agreed change and report the additional work as a recommendation. For low-risk ambiguities, choose the interpretation most consistent with the surrounding code, proceed, and state the assumption in your report. For material intent gaps, surface concrete options and a recommendation to the lead. "
-        + "After you edit, run the builds, linters, or tests relevant to what you changed. Report the command, exit code, and decisive output verbatim. If a check fails, diagnose the cause before retrying; do not retry the same failing action without new information. Never claim something passes, compiles, or is covered unless you ran it and read the result. "
-        + "Report your changes and test output directly to the caller. Post-integration review is owned by the lead. Return a self-contained result the lead can act on immediately.\n\n"
-        + "Return format:\n"
-        + "Modified files: each as file:line, with a one-line description of the change.\n"
-        + "Verification: each command you ran, exit status, and decisive output.\n"
-        + "Assumptions and deferred work: interpretations you chose, and anything you deliberately left undone.\n\n"
-        + fileToolSteer("builds, tests, and git"),
-      model: oneM(implementerModel),
-      effort: effort("implementer"),
+      effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description:
-        "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, and always after `implementer`, before done. Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source.",
-      prompt:
-        "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
-        + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
-        + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
-        + "Then verify by execution. Run the builds, linters, or test suites relevant to what changed, and any command that would surface the specific failure you suspect. Verification means output you observed. Never state that something passes, compiles, or is covered unless you ran it and read the result; where you could not run something, say so explicitly rather than inferring the outcome. "
-        + "Probe deliberately: boundary and empty inputs, error and early-return paths, concurrency and ordering, resource acquisition and cleanup on the failure path, partial failure and retry, backward compatibility of any changed interface, handling of untrusted input, and whether the new tests would actually fail if the change were reverted. "
-        + "Judge against the bar the repository already holds itself to, not an abstract ideal. Do not soften a real finding, and do not manufacture findings to appear thorough. If the change is correct and verified, say so. "
-        + "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
-        + "Return a self-contained result the lead can act on immediately.\n\n"
-        + "Return format. Line one must be exactly one of:\n"
-        + "VERDICT: SHIP\n"
-        + "VERDICT: FIX\n"
-        + "VERDICT: BLOCK\n\n"
-        + "SHIP means you found no blocking defect and your verification ran clean. FIX means the approach is sound but specific defects must be corrected. BLOCK means the approach itself is wrong, or verification could not be run at all.\n\n"
-        + "Then, using the repository's severity taxonomy:\n"
-        + "Critical: blocking defects (correctness, security, data loss). Each with file:line, the concrete scenario in which it fails, and how you confirmed it.\n"
-        + "Important: non-blocking issues that should be fixed before shipping. Each with file:line and impact.\n"
-        + "Suggestion: non-blocking improvements or stylistic suggestions.\n"
-        + "Evidence: the commands you ran, exit status, and decisive output.\n"
-        + "Unverified surface: what you could not exercise, and why.\n\n"
-        + reviewerToolSteer(),
+      description: pinnedReviewerDescription(true),
+      prompt: pinnedReviewerPrompt(),
       model: oneM(reviewerModel),
       effort: effort("reviewer"),
       tools: readSearchTools,
@@ -980,7 +1055,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
   return out
 }
 
-/** Build the literal `-m cheap` native roster. Identical fixed five-agent
+/** Build the literal `-m cheap` native roster. Identical fixed four-agent
  * surface and roles to `-m fast`, but every SUBAGENT model is a BARE
  * router-owned alias (`gh-router-cheap-*`, no `[1m]` bracket) rather than a
  * real catalog id. A bare real id is resolved by Claude Code against the live
@@ -994,8 +1069,8 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
   const exploreModel = CHEAP_EXPLORE_ALIAS_ID
   const planModel = CHEAP_PLAN_ALIAS_ID
   const generalModel = CHEAP_GENERAL_PURPOSE_ALIAS_ID
-  const implementerModel = CHEAP_IMPLEMENTER_ALIAS_ID
   const reviewerModel = CHEAP_REVIEWER_ALIAS_ID
+  const semanticAvailable = opts.semanticSearchAvailable === true
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
   const peersKey = peersKeyOf(opts.groupKeys)
@@ -1032,45 +1107,16 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
 
   const out: PeerAgentDefinitions = {
     Explore: {
-      description:
-        "Read-only codebase exploration specialist. Use proactively, and launch several in parallel via `Task(subagent_type:\"Explore\")`, to map architecture, trace call chains, or locate the files and symbols a task will touch. Use when the question spans more than a couple of files. Do not use for planning, edits, or single-file reads. Returns a structured evidence report with file:line citations. Never edits files.",
-      prompt:
-        "You are a codebase exploration specialist. Your mission is to map repository structure, discover implementation patterns, trace call chains, and locate the exact files, symbols, and declarations that are relevant to the request. "
-        + "This is read-only work. Do not modify files, do not propose diffs, and do not delegate to other agents. You cannot ask clarifying questions mid-run: ground every answer in repository evidence. If the request is ambiguous, explore the most probable interpretations and record the ambiguity in your report. "
-        + "Start broad, then converge. Issue independent searches in parallel in one turn rather than one at a time, and pair semantic search with exact lexical and symbol search so that neither naming drift nor synonym mismatch hides a result. Include surrounding context lines in your search results so that callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer. Confirm every claim at the source before you report it. "
-        + "Stop when further searching stops changing your answer. When you can name the exact files and lines a change would touch, you are done. "
-        + "Report what the repository contains, not what it ought to contain. Do not design a solution or recommend an approach. Return a self-contained result the lead can act on immediately without needing to re-run your discovery.\n\n"
-        + "Return format:\n"
-        + "Answer: a direct response to what was asked, in a few sentences.\n"
-        + "Inventory: each relevant file and symbol as file:line, with a one-line description of its role.\n"
-        + "Entry points: where control enters this area, as file:line.\n"
-        + "Conventions in use: the patterns, idioms, error handling, and test style that any change here would be expected to follow, each with a file:line example.\n"
-        + "Gaps and unknowns: what you could not confirm, and where you would look next.\n\n"
-        + readOnlyToolSteer(),
+      description: pinnedExploreDescription(true),
+      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable }),
       tools: readSearchTools,
       model: exploreModel,
       effort: effort("Explore"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     Plan: {
-      description:
-        "Architecture and implementation planning specialist. Use proactively in plan mode, and whenever sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria deserve a dedicated pass before any code is written. Delegates repository discovery to `Explore` rather than reading broadly itself. Returns a decision-complete, ordered implementation plan with runnable acceptance criteria. Never edits files.",
-      prompt:
-        "You are a software architect and planning specialist. Your mission is to turn a request into a decision-complete implementation plan: an ordered sequence of changes, the invariants that must hold throughout, and acceptance criteria a reviewer can actually run. "
-        + "This is read-only work. Do not modify repository files. Produce the architecture, sequencing, and acceptance criteria for the lead to synthesize and execute. Plan is an advisory planning capability, not an approval gate. "
-        + "Separate discoverable facts from genuine choices. Do not sweep the repository yourself: delegate discovery to `Explore`, launching one or more `Explore` subagents in parallel with scoped evidence questions, then read directly only the files needed to resolve trade-offs and write executable steps. Escalate only genuine product or architectural trade-offs, and escalate them as explicit options with consequences and a recommendation, never as an open question. For low-risk details, choose the reading most consistent with the codebase, proceed, and record it as an assumption. "
-        + "When a design trade-off has more than one viable answer and repository evidence cannot settle it, consult Oracle tool with one self-contained brief that states the constraints, the candidate designs, and the evidence you already gathered plus one precise question. If Oracle does not settle it, carry the options and the remaining gap into the plan rather than silently picking one. "
-        + "Delegation: you may invoke Explore and `reviewer` for discovery and verification; do not invoke any other subagent. Behavior and code verification belongs to post-implementation review. "
-        + "Write the plan for an implementer who cannot see your reasoning. Every step must be executable without rediscovering what you already found: name the files, name the interfaces, and state the condition that means the step is done. Prefer the smallest design that satisfies the requirement and fits the conventions already in the codebase. Mark steps that are independent of each other and can run concurrently.\n\n"
-        + "Return format:\n"
-        + "Objective: what will be true when this is complete.\n"
-        + "Architectural invariants: what must hold before, during, and after every step.\n"
-        + "Interface contracts: signatures, types, error and edge-case behaviour at each boundary the change crosses.\n"
-        + "Execution steps: ordered. Each names the files it touches, the change it makes, and its done condition. Mark steps that are independent of each other and can run concurrently.\n"
-        + "Acceptance criteria: the exact commands to run and the observable result that counts as passing.\n"
-        + "Critical files: the files an implementer must read before starting, as file:line, with why each matters.\n"
-        + "Open questions: any unresolved trade-off, as options with a recommendation. Omit this section if there are none.\n\n"
-        + readOnlyToolSteer(),
+      description: pinnedPlanDescription(true),
+      prompt: pinnedPlanPrompt({ explicit: true }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1079,71 +1125,16 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
         ...(peersMcpServers ?? {}),
       },
     },
-    "general-purpose": {
-      description:
-        "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore), settled bounded edits (use implementer), or verification-only (use reviewer).",
-      prompt:
-        "You are an autonomous execution specialist for mixed, multi-step work. Your mission is to take an open-ended task from investigation through implementation to a verified end state within this turn. "
-        + "Keep going until the task is genuinely done. Do not stop at a diagnosis, a partial fix, or a plan when the request asked for a change. Ground discovery in repository truth. For low-risk ambiguities, choose the interpretation most consistent with the repository, proceed, and record it as an assumption in your report. For material intent gaps that would alter product behavior or security, surface concrete options and a recommendation to the lead. "
-        + "Investigate before you act. Confirm your assumptions against the actual code rather than against the request's description of it. After every command, read the real output and let it decide the next step. When something fails, diagnose the specific cause before trying again. If repeated attempts fail for the same reason and no new information has emerged, stop retrying: re-examine the underlying assumption and take a different path. "
-        + "Escalate rather than expand. If the task turns out to require a change the lead did not sanction, complete the sanctioned part and report the rest as a recommendation. If the task collapses to pure discovery or a single settled edit, do that slice and report the remainder as a recommendation. Do not expand scope. Match the conventions, structure, and test style already present in the files you touch. The lead owns final integration. "
-        + "Verify before you report. Run the builds, linters, or test commands relevant to what you changed. Quote the command run, exit status, and concise decisive output verbatim; if output is long, summarize the middle and quote the pass/fail lines. "
-        + "Report your changes and test output directly to the caller. Post-integration review is owned by the lead. Return a self-contained result the lead can act on immediately.\n\n"
-        + "Return format:\n"
-        + "Outcome: what is now true, and whether the task is complete.\n"
-        + "Actions taken: what you did, in order.\n"
-        + "Changed files: each as file:line, with a one-line description of the change.\n"
-        + "Verification: the commands you ran, exit status, and decisive output.\n"
-        + "Assumptions: every interpretation you had to choose.\n"
-        + "Remaining items: anything deliberately not done, and why.\n\n"
-        + fileToolSteer("builds, tests, and git"),
+    "General-Purpose": {
+      description: pinnedGeneralPurposeDescription(true),
+      prompt: pinnedGeneralPurposePrompt(),
       model: generalModel,
-      effort: effort("general-purpose"),
-      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
-    },
-    implementer: {
-      description:
-        "Surgical implementation specialist for bounded changes with settled scope. Use proactively when what and where are decided, to make the change cleanly, match conventions, and verify it. Use Plan first if the approach is still open. Returns modified files with verbatim verification. Keeps the diff tight.",
-      prompt:
-        "You are an implementation specialist. Your mission is to make bounded, surgical code changes that satisfy a settled requirement and look as though they were always part of the codebase. "
-        + "Before you edit, inspect the target files and relevant adjacent code, so that your change matches the existing idioms, error handling, logging, and test style. For a bug fix, reproduce the failure first and keep that reproduction as your success signal. "
-        + "While you edit, keep the change inside the requested scope and keep the diff tight and focused. Apply changes with the file editing tools; printing a patch in your response does not modify the file. Match the surrounding formatting, naming, and structure. Write a comment only where the reason for the code is non-obvious, and let well-named identifiers carry what the code does. "
-        + "If the requirement turns out to need work outside the agreed scope, implement the agreed change and report the additional work as a recommendation. For low-risk ambiguities, choose the interpretation most consistent with the surrounding code, proceed, and state the assumption in your report. For material intent gaps, surface concrete options and a recommendation to the lead. "
-        + "After you edit, run the builds, linters, or tests relevant to what you changed. Report the command, exit code, and decisive output verbatim. If a check fails, diagnose the cause before retrying; do not retry the same failing action without new information. Never claim something passes, compiles, or is covered unless you ran it and read the result. "
-        + "Report your changes and test output directly to the caller. Post-integration review is owned by the lead. Return a self-contained result the lead can act on immediately.\n\n"
-        + "Return format:\n"
-        + "Modified files: each as file:line, with a one-line description of the change.\n"
-        + "Verification: each command you ran, exit status, and decisive output.\n"
-        + "Assumptions and deferred work: interpretations you chose, and anything you deliberately left undone.\n\n"
-        + fileToolSteer("builds, tests, and git"),
-      model: implementerModel,
-      effort: effort("implementer"),
+      effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description:
-        "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, and always after `implementer`, before done. Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source.",
-      prompt:
-        "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
-        + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
-        + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
-        + "Then verify by execution. Run the builds, linters, or test suites relevant to what changed, and any command that would surface the specific failure you suspect. Verification means output you observed. Never state that something passes, compiles, or is covered unless you ran it and read the result; where you could not run something, say so explicitly rather than inferring the outcome. "
-        + "Probe deliberately: boundary and empty inputs, error and early-return paths, concurrency and ordering, resource acquisition and cleanup on the failure path, partial failure and retry, backward compatibility of any changed interface, handling of untrusted input, and whether the new tests would actually fail if the change were reverted. "
-        + "Judge against the bar the repository already holds itself to, not an abstract ideal. Do not soften a real finding, and do not manufacture findings to appear thorough. If the change is correct and verified, say so. "
-        + "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
-        + "Return a self-contained result the lead can act on immediately.\n\n"
-        + "Return format. Line one must be exactly one of:\n"
-        + "VERDICT: SHIP\n"
-        + "VERDICT: FIX\n"
-        + "VERDICT: BLOCK\n\n"
-        + "SHIP means you found no blocking defect and your verification ran clean. FIX means the approach is sound but specific defects must be corrected. BLOCK means the approach itself is wrong, or verification could not be run at all.\n\n"
-        + "Then, using the repository's severity taxonomy:\n"
-        + "Critical: blocking defects (correctness, security, data loss). Each with file:line, the concrete scenario in which it fails, and how you confirmed it.\n"
-        + "Important: non-blocking issues that should be fixed before shipping. Each with file:line and impact.\n"
-        + "Suggestion: non-blocking improvements or stylistic suggestions.\n"
-        + "Evidence: the commands you ran, exit status, and decisive output.\n"
-        + "Unverified surface: what you could not exercise, and why.\n\n"
-        + reviewerToolSteer(),
+      description: pinnedReviewerDescription(true),
+      prompt: pinnedReviewerPrompt(),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,
@@ -1185,22 +1176,22 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
   return out
 }
 
-/** Build the literal `-m cheapest` native roster. Same fixed five-agent
+/** Build the literal `-m cheapest` native roster. Same fixed four-agent
  * surface and roles as `-m cheap`, but Luna-led with a Gemini reviewer —
  * every SUBAGENT model is a BARE router-owned alias
  * (`gh-router-cheapest-*`, no `[1m]`) rather than a real catalog id, for the
- * same client catalog-resolution reason as the cheap builder below: a bare
+ * same client catalog-resolution reason as the cheap builder above: a bare
  * real id is upgraded to `[1m]` accounting by Claude Code whenever the entry
  * advertises >=1M. Caller-supplied `opts.cheapest*Model` values are
- * deliberately ignored. The Plan prompt additionally directs the planner to
- * do the minimal synthesis itself and delegate discovery/execution heavily to
- * `Explore` and `general-purpose`. */
+ * deliberately ignored. Cheapest is tuned for straightforward tasks: role
+ * descriptions carry no proactive fan-out push, so the lead handles simple
+ * work inline instead of paying handoff overhead. */
 function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
   const exploreModel = CHEAPEST_EXPLORE_ALIAS_ID
   const planModel = CHEAPEST_PLAN_ALIAS_ID
   const generalModel = CHEAPEST_GENERAL_PURPOSE_ALIAS_ID
-  const implementerModel = CHEAPEST_IMPLEMENTER_ALIAS_ID
   const reviewerModel = CHEAPEST_REVIEWER_ALIAS_ID
+  const semanticAvailable = opts.semanticSearchAvailable === true
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
   const peersKey = peersKeyOf(opts.groupKeys)
@@ -1237,45 +1228,16 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
 
   const out: PeerAgentDefinitions = {
     Explore: {
-      description:
-        "Read-only codebase exploration specialist. Use proactively, and launch several in parallel via `Task(subagent_type:\"Explore\")`, to map architecture, trace call chains, or locate the files and symbols a task will touch. Use when the question spans more than a couple of files. Do not use for planning, edits, or single-file reads. Returns a structured evidence report with file:line citations. Never edits files.",
-      prompt:
-        "You are a codebase exploration specialist. Your mission is to map repository structure, discover implementation patterns, trace call chains, and locate the exact files, symbols, and declarations that are relevant to the request. "
-        + "This is read-only work. Do not modify files, do not propose diffs, and do not delegate to other agents. You cannot ask clarifying questions mid-run: ground every answer in repository evidence. If the request is ambiguous, explore the most probable interpretations and record the ambiguity in your report. "
-        + "Start broad, then converge. Issue independent searches in parallel in one turn rather than one at a time, and pair semantic search with exact lexical and symbol search so that neither naming drift nor synonym mismatch hides a result. Include surrounding context lines in your search results so that callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer. Confirm every claim at the source before you report it. "
-        + "Stop when further searching stops changing your answer. When you can name the exact files and lines a change would touch, you are done. "
-        + "Report what the repository contains, not what it ought to contain. Do not design a solution or recommend an approach. Return a self-contained result the lead can act on immediately without needing to re-run your discovery.\n\n"
-        + "Return format:\n"
-        + "Answer: a direct response to what was asked, in a few sentences.\n"
-        + "Inventory: each relevant file and symbol as file:line, with a one-line description of its role.\n"
-        + "Entry points: where control enters this area, as file:line.\n"
-        + "Conventions in use: the patterns, idioms, error handling, and test style that any change here would be expected to follow, each with a file:line example.\n"
-        + "Gaps and unknowns: what you could not confirm, and where you would look next.\n\n"
-        + readOnlyToolSteer(),
+      description: pinnedExploreDescription(false),
+      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable }),
       tools: readSearchTools,
       model: exploreModel,
       effort: effort("Explore"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     Plan: {
-      description:
-        "Architecture and implementation planning specialist. Use proactively in plan mode, and whenever sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria deserve a dedicated pass before any code is written. Delegates repository discovery to `Explore` and mixed execution to `general-purpose` rather than doing that work itself; does the minimal synthesis to produce the plan. Returns a decision-complete, ordered implementation plan with runnable acceptance criteria. Never edits files.",
-      prompt:
-        "You are a software architect and planning specialist. Your mission is to turn a request into a decision-complete implementation plan: an ordered sequence of changes, the invariants that must hold throughout, and acceptance criteria a reviewer can actually run. "
-        + "This is read-only work. Do not modify repository files. Produce the architecture, sequencing, and acceptance criteria for the lead to synthesize and execute. Plan is an advisory planning capability, not an approval gate. "
-        + "Do the minimal planning work yourself and delegate heavily: launch one or more `Explore` subagents in parallel with scoped evidence questions for repository discovery, and lean on `general-purpose` for any mixed investigation/execution needed to settle a choice — then read directly only the files needed to resolve trade-offs and write executable steps. Do not sweep the repository yourself. Escalate only genuine product or architectural trade-offs, and escalate them as explicit options with consequences and a recommendation, never as an open question. For low-risk details, choose the reading most consistent with the codebase, proceed, and record it as an assumption. "
-        + "When a design trade-off has more than one viable answer and repository evidence cannot settle it, consult Oracle tool with one self-contained brief that states the constraints, the candidate designs, and the evidence you already gathered plus one precise question. If Oracle does not settle it, carry the options and the remaining gap into the plan rather than silently picking one. "
-        + "Delegation: you may invoke Explore and `reviewer` for discovery and verification; do not invoke any other subagent. Behavior and code verification belongs to post-implementation review. "
-        + "Write the plan for an implementer who cannot see your reasoning. Every step must be executable without rediscovering what you already found: name the files, name the interfaces, and state the condition that means the step is done. Prefer the smallest design that satisfies the requirement and fits the conventions already in the codebase. Mark steps that are independent of each other and can run concurrently.\n\n"
-        + "Return format:\n"
-        + "Objective: what will be true when this is complete.\n"
-        + "Architectural invariants: what must hold before, during, and after every step.\n"
-        + "Interface contracts: signatures, types, error and edge-case behaviour at each boundary the change crosses.\n"
-        + "Execution steps: ordered. Each names the files it touches, the change it makes, and its done condition. Mark steps that are independent of each other and can run concurrently.\n"
-        + "Acceptance criteria: the exact commands to run and the observable result that counts as passing.\n"
-        + "Critical files: the files an implementer must read before starting, as file:line, with why each matters.\n"
-        + "Open questions: any unresolved trade-off, as options with a recommendation. Omit this section if there are none.\n\n"
-        + readOnlyToolSteer(),
+      description: pinnedPlanDescription(false),
+      prompt: pinnedPlanPrompt({ explicit: false }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1284,71 +1246,16 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
         ...(peersMcpServers ?? {}),
       },
     },
-    "general-purpose": {
-      description:
-        "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore), settled bounded edits (use implementer), or verification-only (use reviewer).",
-      prompt:
-        "You are an autonomous execution specialist for mixed, multi-step work. Your mission is to take an open-ended task from investigation through implementation to a verified end state within this turn. "
-        + "Keep going until the task is genuinely done. Do not stop at a diagnosis, a partial fix, or a plan when the request asked for a change. Ground discovery in repository truth. For low-risk ambiguities, choose the interpretation most consistent with the repository, proceed, and record it as an assumption in your report. For material intent gaps that would alter product behavior or security, surface concrete options and a recommendation to the lead. "
-        + "Investigate before you act. Confirm your assumptions against the actual code rather than against the request's description of it. After every command, read the real output and let it decide the next step. When something fails, diagnose the specific cause before trying again. If repeated attempts fail for the same reason and no new information has emerged, stop retrying: re-examine the underlying assumption and take a different path. "
-        + "Escalate rather than expand. If the task turns out to require a change the lead did not sanction, complete the sanctioned part and report the rest as a recommendation. If the task collapses to pure discovery or a single settled edit, do that slice and report the remainder as a recommendation. Do not expand scope. Match the conventions, structure, and test style already present in the files you touch. The lead owns final integration. "
-        + "Verify before you report. Run the builds, linters, or test commands relevant to what you changed. Quote the command run, exit status, and concise decisive output verbatim; if output is long, summarize the middle and quote the pass/fail lines. "
-        + "Report your changes and test output directly to the caller. Post-integration review is owned by the lead. Return a self-contained result the lead can act on immediately.\n\n"
-        + "Return format:\n"
-        + "Outcome: what is now true, and whether the task is complete.\n"
-        + "Actions taken: what you did, in order.\n"
-        + "Changed files: each as file:line, with a one-line description of the change.\n"
-        + "Verification: the commands you ran, exit status, and decisive output.\n"
-        + "Assumptions: every interpretation you had to choose.\n"
-        + "Remaining items: anything deliberately not done, and why.\n\n"
-        + fileToolSteer("builds, tests, and git"),
+    "General-Purpose": {
+      description: pinnedGeneralPurposeDescription(false),
+      prompt: pinnedGeneralPurposePrompt(),
       model: generalModel,
-      effort: effort("general-purpose"),
-      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
-    },
-    implementer: {
-      description:
-        "Surgical implementation specialist for bounded changes with settled scope. Use proactively when what and where are decided, to make the change cleanly, match conventions, and verify it. Use Plan first if the approach is still open. Returns modified files with verbatim verification. Keeps the diff tight.",
-      prompt:
-        "You are an implementation specialist. Your mission is to make bounded, surgical code changes that satisfy a settled requirement and look as though they were always part of the codebase. "
-        + "Before you edit, inspect the target files and relevant adjacent code, so that your change matches the existing idioms, error handling, logging, and test style. For a bug fix, reproduce the failure first and keep that reproduction as your success signal. "
-        + "While you edit, keep the change inside the requested scope and keep the diff tight and focused. Apply changes with the file editing tools; printing a patch in your response does not modify the file. Match the surrounding formatting, naming, and structure. Write a comment only where the reason for the code is non-obvious, and let well-named identifiers carry what the code does. "
-        + "If the requirement turns out to need work outside the agreed scope, implement the agreed change and report the additional work as a recommendation. For low-risk ambiguities, choose the interpretation most consistent with the surrounding code, proceed, and state the assumption in your report. For material intent gaps, surface concrete options and a recommendation to the lead. "
-        + "After you edit, run the builds, linters, or tests relevant to what you changed. Report the command, exit code, and decisive output verbatim. If a check fails, diagnose the cause before retrying; do not retry the same failing action without new information. Never claim something passes, compiles, or is covered unless you ran it and read the result. "
-        + "Report your changes and test output directly to the caller. Post-integration review is owned by the lead. Return a self-contained result the lead can act on immediately.\n\n"
-        + "Return format:\n"
-        + "Modified files: each as file:line, with a one-line description of the change.\n"
-        + "Verification: each command you ran, exit status, and decisive output.\n"
-        + "Assumptions and deferred work: interpretations you chose, and anything you deliberately left undone.\n\n"
-        + fileToolSteer("builds, tests, and git"),
-      model: implementerModel,
-      effort: effort("implementer"),
+      effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description:
-        "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, and always after `implementer`, before done. Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source.",
-      prompt:
-        "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
-        + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
-        + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
-        + "Then verify by execution. Run the builds, linters, or test suites relevant to what changed, and any command that would surface the specific failure you suspect. Verification means output you observed. Never state that something passes, compiles, or is covered unless you ran it and read the result; where you could not run something, say so explicitly rather than inferring the outcome. "
-        + "Probe deliberately: boundary and empty inputs, error and early-return paths, concurrency and ordering, resource acquisition and cleanup on the failure path, partial failure and retry, backward compatibility of any changed interface, handling of untrusted input, and whether the new tests would actually fail if the change were reverted. "
-        + "Judge against the bar the repository already holds itself to, not an abstract ideal. Do not soften a real finding, and do not manufacture findings to appear thorough. If the change is correct and verified, say so. "
-        + "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
-        + "Return a self-contained result the lead can act on immediately.\n\n"
-        + "Return format. Line one must be exactly one of:\n"
-        + "VERDICT: SHIP\n"
-        + "VERDICT: FIX\n"
-        + "VERDICT: BLOCK\n\n"
-        + "SHIP means you found no blocking defect and your verification ran clean. FIX means the approach is sound but specific defects must be corrected. BLOCK means the approach itself is wrong, or verification could not be run at all.\n\n"
-        + "Then, using the repository's severity taxonomy:\n"
-        + "Critical: blocking defects (correctness, security, data loss). Each with file:line, the concrete scenario in which it fails, and how you confirmed it.\n"
-        + "Important: non-blocking issues that should be fixed before shipping. Each with file:line and impact.\n"
-        + "Suggestion: non-blocking improvements or stylistic suggestions.\n"
-        + "Evidence: the commands you ran, exit status, and decisive output.\n"
-        + "Unverified surface: what you could not exercise, and why.\n\n"
-        + reviewerToolSteer(),
+      description: pinnedReviewerDescription(false),
+      prompt: pinnedReviewerPrompt(),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,
@@ -1390,6 +1297,126 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
   return out
 }
 
+/** Build the literal `-m balanced` native roster. Same fixed four-agent
+ * surface and roles as `-m cheap`, but Sol-led at the 200K default window
+ * for the most complex tasks — every SUBAGENT model is a BARE router-owned
+ * alias (`gh-router-balanced-*`, no `[1m]`) rather than a real catalog id,
+ * for the same client catalog-resolution reason as the cheap builder above.
+ * Caller-supplied `opts.balanced*Model` values are deliberately ignored.
+ * Explicit delegation tuning matches cheap: proactive parallel `Explore`
+ * fan-out, `Plan`-first architecture, `General-Purpose` mixed execution, and
+ * post-integration `reviewer` verification. */
+function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
+  const exploreModel = BALANCED_EXPLORE_ALIAS_ID
+  const planModel = BALANCED_PLAN_ALIAS_ID
+  const generalModel = BALANCED_GENERAL_PURPOSE_ALIAS_ID
+  const reviewerModel = BALANCED_REVIEWER_ALIAS_ID
+  const semanticAvailable = opts.semanticSearchAvailable === true
+
+  const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
+  const peersKey = peersKeyOf(opts.groupKeys)
+  const searchMcpServers = opts.serverUrl
+    ? {
+        [searchKey]: httpEntryFor(
+          opts.serverUrl,
+          "search",
+          opts.nonce,
+          opts.workspaceHeaderCmd,
+        ),
+      }
+    : undefined
+  const peersMcpServers = opts.serverUrl && opts.groupKeys.peers
+    ? {
+        [peersKey]: httpEntryFor(
+          opts.serverUrl,
+          "peers",
+          opts.nonce,
+          opts.workspaceHeaderCmd,
+        ),
+      }
+    : undefined
+
+  const oracleTool = opts.groupKeys.peers ? `mcp__${peersKey}__oracle` : undefined
+  const readSearchTools = ["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", `mcp__${searchKey}__*`]
+  const planTools = [
+    ...readSearchTools,
+    ...(oracleTool ? [oracleTool] : []),
+    "Agent",
+  ]
+  const effort = (name: keyof typeof BALANCED_PROFILE_NATIVE_EFFORTS): SubagentEffort =>
+    BALANCED_PROFILE_NATIVE_EFFORTS[name]
+
+  const out: PeerAgentDefinitions = {
+    Explore: {
+      description: pinnedExploreDescription(true),
+      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable }),
+      tools: readSearchTools,
+      model: exploreModel,
+      effort: effort("Explore"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    Plan: {
+      description: pinnedPlanDescription(true),
+      prompt: pinnedPlanPrompt({ explicit: true }),
+      tools: planTools,
+      model: planModel,
+      effort: effort("Plan"),
+      mcpServers: {
+        ...(searchMcpServers ?? {}),
+        ...(peersMcpServers ?? {}),
+      },
+    },
+    "General-Purpose": {
+      description: pinnedGeneralPurposeDescription(true),
+      prompt: pinnedGeneralPurposePrompt(),
+      model: generalModel,
+      effort: effort("General-Purpose"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    reviewer: {
+      description: pinnedReviewerDescription(true),
+      prompt: pinnedReviewerPrompt(),
+      model: reviewerModel,
+      effort: effort("reviewer"),
+      tools: readSearchTools,
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+  }
+
+  if (opts.browseAvailable && opts.groupKeys.workers) {
+    const workersKey = workersKeyOf(opts.groupKeys)
+    out["worker-browse"] = {
+      description: dispatcherDescription("browse"),
+      prompt: dispatcherPrompt("browse", workersKey),
+      model: exploreModel,
+      effort: "high",
+      tools: dispatcherTools("browse", workersKey),
+      ...(opts.serverUrl
+        ? {
+            mcpServers: {
+              [workersKey]: httpEntryFor(
+                opts.serverUrl,
+                "workers",
+                opts.nonce,
+                opts.workspaceHeaderCmd,
+              ),
+            },
+          }
+        : {}),
+    }
+  }
+
+  const roster = opts.nativeRoster == null
+    ? new Set<string>(BALANCED_PROFILE_NATIVE_AGENT_NAMES)
+    : opts.nativeRoster instanceof Set
+      ? opts.nativeRoster
+      : new Set(opts.nativeRoster)
+  for (const name of Object.keys(out)) {
+    if (name !== "worker-browse" && !roster.has(name)) delete out[name]
+  }
+  return out
+}
+
 /**
  * Build the JSON payload for `claude --agents <path>`.
  *
@@ -1406,6 +1433,7 @@ export function buildPeerAgentDefinitions(
   if (opts.fastProfile) return buildFastProfileAgentDefinitions(opts)
   if (opts.cheapProfile) return buildCheapProfileAgentDefinitions(opts)
   if (opts.cheapestProfile) return buildCheapestProfileAgentDefinitions(opts)
+  if (opts.balancedProfile) return buildBalancedProfileAgentDefinitions(opts)
 
   const out: PeerAgentDefinitions = {}
   const personas = personasFor({
@@ -1755,6 +1783,15 @@ interface WriteOpts {
   cheapestGeneralPurposeModel?: string
   cheapestImplementerModel?: string
   cheapestReviewerModel?: string
+  /** Balanced-profile role assignments, mirrored from `BuildOpts`. */
+  balancedProfile?: boolean
+  balancedExploreModel?: string
+  balancedPlanModel?: string
+  balancedGeneralPurposeModel?: string
+  balancedReviewerModel?: string
+  /** Whether ColBERT semantic code search is enabled for this launch.
+   *  Pinned-profile Explore prompts mention semantic search only when true. */
+  semanticSearchAvailable?: boolean
   implementerEffort?: SubagentEffort
   reviewerEffort?: SubagentEffort
   /** Max-profile role assignments. */
@@ -2329,6 +2366,11 @@ export async function writePeerMcpRuntimeFiles(
     cheapestGeneralPurposeModel: opts.cheapestGeneralPurposeModel,
     cheapestImplementerModel: opts.cheapestImplementerModel,
     cheapestReviewerModel: opts.cheapestReviewerModel,
+    balancedExploreModel: opts.balancedExploreModel,
+    balancedPlanModel: opts.balancedPlanModel,
+    balancedGeneralPurposeModel: opts.balancedGeneralPurposeModel,
+    balancedReviewerModel: opts.balancedReviewerModel,
+    semanticSearchAvailable: opts.semanticSearchAvailable,
     nativeRoster: opts.nativeRoster,
     personaAllowlist: opts.personaAllowlist,
     includeCoordinator: opts.includeCoordinator,
@@ -2338,6 +2380,7 @@ export async function writePeerMcpRuntimeFiles(
     fastProfile: opts.fastProfile,
     cheapProfile: opts.cheapProfile,
     cheapestProfile: opts.cheapestProfile,
+    balancedProfile: opts.balancedProfile,
     implementerEffort: opts.implementerEffort,
     reviewerEffort: opts.reviewerEffort,
     maxProfile: opts.maxProfile,

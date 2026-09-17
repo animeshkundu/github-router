@@ -446,29 +446,35 @@ export async function handleCompletion(c: Context) {
   const cheapProfileRequest =
     identity.launch?.profileId === "cheap" || identity.launch?.profileId === "cheap1m"
   const cheapestProfileRequest = identity.launch?.profileId === "cheapest"
+  const balancedProfileRequest = identity.launch?.profileId === "balanced"
   const subagentRequest = Boolean(c.req.header("x-claude-code-agent-id"))
   const fastSubagentRequest = fastProfileRequest && subagentRequest
   const maxSubagentRequest = maxProfileRequest && subagentRequest
   const cheapSubagentRequest = cheapProfileRequest && subagentRequest
   const cheapestSubagentRequest = cheapestProfileRequest && subagentRequest
+  const balancedSubagentRequest = balancedProfileRequest && subagentRequest
   const fastLeadAdvisor = fastProfileRequest && !fastSubagentRequest
   const maxLeadAdvisor = maxProfileRequest && !maxSubagentRequest
   const cheapLeadAdvisor = cheapProfileRequest && !cheapSubagentRequest
   const cheapestLeadAdvisor = cheapestProfileRequest && !cheapestSubagentRequest
-  const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest && !cheapSubagentRequest && !cheapestSubagentRequest
+  const balancedLeadAdvisor = balancedProfileRequest && !balancedSubagentRequest
+  const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest && !cheapSubagentRequest && !cheapestSubagentRequest && !balancedSubagentRequest
   const fastAdvisorEnabled = fastLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const maxAdvisorEnabled = maxLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const cheapAdvisorEnabled = cheapLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const cheapestAdvisorEnabled = cheapestLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
+  const balancedAdvisorEnabled = balancedLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const advisorBehaviorEnabled = fastLeadAdvisor
     ? fastAdvisorEnabled
     : cheapLeadAdvisor
       ? cheapAdvisorEnabled
       : cheapestLeadAdvisor
         ? cheapestAdvisorEnabled
-        : maxLeadAdvisor
-          ? maxAdvisorEnabled
-          : advisorEnabled
+        : balancedLeadAdvisor
+          ? balancedAdvisorEnabled
+          : maxLeadAdvisor
+            ? maxAdvisorEnabled
+            : advisorEnabled
   let fastAdvisorChoice: ReturnType<typeof resolveAdvisorModel> | undefined
   let maxAdvisorChoice: { model: string; effort: string } | undefined
   if (maxAdvisorEnabled) {
@@ -522,12 +528,13 @@ export async function handleCompletion(c: Context) {
       )
     }
   }
-  if (cheapAdvisorEnabled) {
-    // Same fixed Sol advisor model as fast; the cheap family differs only in
-    // the client-side BARE pin (no `[1m]`) and the 200K transcript cap applied
-    // at dispatch. fastAdvisorMetadataMismatch accepts either bracket spelling.
+  if (cheapAdvisorEnabled || balancedAdvisorEnabled) {
+    // Same fixed Sol advisor model as fast; the cheap family (and balanced)
+    // differs only in the client-side BARE pin (no `[1m]`) and the 200K
+    // transcript cap applied at dispatch. fastAdvisorMetadataMismatch accepts
+    // either bracket spelling.
     const mismatch = fastAdvisorMetadataMismatch(rawBody)
-    const relaunchProfile = identity.launch?.profileId === "cheap1m" ? "cheap1m" : "cheap"
+    const relaunchProfile = identity.launch?.profileId === "cheap1m" ? "cheap1m" : identity.launch?.profileId === "balanced" ? "balanced" : "cheap"
 
     if (mismatch) {
       return c.json(
@@ -765,7 +772,7 @@ export async function handleCompletion(c: Context) {
     const wantsStream = parsedBase?.stream === true
 
     if (
-      (fastAdvisorEnabled || cheapAdvisorEnabled || cheapestAdvisorEnabled || maxAdvisorEnabled)
+      (fastAdvisorEnabled || cheapAdvisorEnabled || cheapestAdvisorEnabled || balancedAdvisorEnabled || maxAdvisorEnabled)
       && wantsStream
     ) {
       const initialConversation = Array.isArray(parsedBase!.messages)
@@ -805,12 +812,13 @@ export async function handleCompletion(c: Context) {
             escalated: false,
             fastProfile: false,
           }
-        : cheapAdvisorEnabled || cheapestAdvisorEnabled
+        : cheapAdvisorEnabled || cheapestAdvisorEnabled || balancedAdvisorEnabled
           ? {
               // Cheap shares fast's fixed Sol identity/effort and cheapest its
-              // fixed Gemini identity/effort; the distinctions (bare client
-              // pin, 200K transcript cap) are carried by `advisorCheapProfile`
-              // below and the client's own pinned tool.
+              // fixed Gemini identity/effort (balanced shares cheap's Sol
+              // identity); the distinctions (bare client pin, 200K transcript
+              // cap) are carried by `advisorCheapProfile` below and the
+              // client's own pinned tool.
               model: fastAdvisorChoice!.model,
               effort: resolveAdvisorEffort(rawBody, fastAdvisorChoice!.model, true),
               escalated: fastAdvisorChoice!.escalated,
@@ -837,7 +845,7 @@ export async function handleCompletion(c: Context) {
           // retaining their independent model, effort, and transport policies.
           advisorFastProfile: advisorChoice.fastProfile,
           advisorMaxProfile: maxAdvisorEnabled,
-          advisorCheapProfile: cheapAdvisorEnabled || cheapestAdvisorEnabled,
+          advisorCheapProfile: cheapAdvisorEnabled || cheapestAdvisorEnabled || balancedAdvisorEnabled,
           advisorEffort: advisorChoice.effort,
           externalAborter: translatedAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {
@@ -1107,15 +1115,15 @@ export async function handleCompletion(c: Context) {
           requestHeaders,
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          advisorFastProfile: fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor,
+          advisorFastProfile: fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor || balancedLeadAdvisor,
           advisorMaxProfile: maxAdvisorEnabled,
-          advisorCheapProfile: cheapLeadAdvisor || cheapestLeadAdvisor,
+          advisorCheapProfile: cheapLeadAdvisor || cheapestLeadAdvisor || balancedLeadAdvisor,
           advisorEffort: maxAdvisorChoice
             ? maxAdvisorChoice.effort
             : resolveAdvisorEffort(
                 rawBody,
                 advisorChoice.model,
-                fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor,
+                fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor || balancedLeadAdvisor,
               ),
           externalAborter: advisorAborter,
         }),

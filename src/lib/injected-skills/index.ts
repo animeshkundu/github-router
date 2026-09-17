@@ -30,7 +30,7 @@ export interface InjectedSkill {
 }
 
 export interface InjectedSkillSelection {
-  profileId: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "max"
+  profileId: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
   workerSkillsActive: boolean
   firstMateEnabled: boolean
 }
@@ -50,7 +50,7 @@ export const INJECTED_SKILLS: ReadonlyArray<InjectedSkill> = [
 export function injectedSkillsForLaunch(
   selection: InjectedSkillSelection,
 ): ReadonlyArray<InjectedSkill> {
-  if (selection.profileId === "fast" || selection.profileId === "cheap" || selection.profileId === "cheap1m" || selection.profileId === "cheapest") return []
+  if (selection.profileId === "fast" || selection.profileId === "cheap" || selection.profileId === "cheap1m" || selection.profileId === "cheapest" || selection.profileId === "balanced") return []
   if (selection.profileId === "max") {
     return selection.firstMateEnabled
       ? INJECTED_SKILLS.filter((skill) => skill.name.startsWith("gh-first-mate"))

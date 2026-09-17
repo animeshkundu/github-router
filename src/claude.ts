@@ -124,7 +124,7 @@ import {
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, buildOperatingDefaultsDigest, buildOperatingDefaultsDirective, type NativeAgentAvailability, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
-import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
+import { colbertDegradedWarning, provisionAndIndexColbert, semanticSearchOptedIn } from "./lib/colbert"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
@@ -156,7 +156,6 @@ import {
   fastScoutModel,
   fastPlanModel,
   fastGeneralPurposeModel,
-  fastImplementerModel,
   fastReviewerModel,
   fastAdvisorModel,
   fastOracleModel,
@@ -167,6 +166,9 @@ import {
   cheapestAdvisorModel,
   cheapestOracleModel,
   cheapestReviewerModel,
+  balancedAdvisorModel,
+  balancedOracleModel,
+  balancedReviewerModel,
 } from "./lib/mcp-capabilities"
 import {
   getClaudeCodeEnvVars,
@@ -175,6 +177,7 @@ import {
   sharedServerArgs,
 } from "./lib/server-setup"
 import {
+  formatBalancedPrerequisiteFailure,
   formatFastPrerequisiteFailure,
   formatMaxPrerequisiteFailure,
   formatCheap1mPrerequisiteFailure,
@@ -182,6 +185,7 @@ import {
   formatCheapestPrerequisiteFailure,
   profileDescriptor,
   resolveLaunchProfile,
+  validateBalancedProfilePrerequisites,
   validateFastProfilePrerequisites,
   validateMaxProfileLaunch,
   validateCheap1mProfilePrerequisites,
@@ -207,6 +211,7 @@ import {
 } from "./lib/cheapest-advisor-client"
 import { CHEAP_PROFILE_NATIVE_MODELS } from "./lib/cheap-profile-contract"
 import { CHEAPEST_PROFILE_NATIVE_MODELS } from "./lib/cheapest-profile-contract"
+import { BALANCED_PROFILE_NATIVE_MODELS } from "./lib/balanced-profile-contract"
 
 export const claudeArgs = {
   ...sharedServerArgs,
@@ -214,7 +219,7 @@ export const claudeArgs = {
     alias: "m",
     type: "string",
     description:
-      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, cheapest, max), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
+      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, cheapest, balanced, max), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
   },
   "codex-mcp": {
     type: "boolean" as const,
@@ -397,7 +402,8 @@ export const claude = defineCommand({
         || requestedLaunchProfileId === "max"
         || requestedLaunchProfileId === "cheap"
         || requestedLaunchProfileId === "cheap1m"
-        || requestedLaunchProfileId === "cheapest")
+        || requestedLaunchProfileId === "cheapest"
+        || requestedLaunchProfileId === "balanced")
       && !codexMcpEnabled
     ) {
       const profileName =
@@ -409,7 +415,9 @@ export const claude = defineCommand({
               ? "cheap1m"
               : requestedLaunchProfileId === "cheapest"
                 ? "cheapest"
-                : "max"
+                : requestedLaunchProfileId === "balanced"
+                  ? "balanced"
+                  : "max"
       const message =
         `github-router claude -m ${profileName} requires codex MCP wiring for its native roster and dispatch ACL; remove --no-codex-mcp or choose a standard model.`
       process.stderr.write(`${message}\n`)
@@ -663,6 +671,14 @@ export const claude = defineCommand({
       if (!prereqCheck.ok) {
         await fastFatal(formatCheapestPrerequisiteFailure(prereqCheck.missing))
       }
+    } else if (launchProfileId === "balanced") {
+      // The balanced tier runs the Sol lead and every subagent at the 200K
+      // default window with fixed efforts/endpoints (see
+      // `validateBalancedProfilePrerequisites`).
+      const prereqCheck = validateBalancedProfilePrerequisites(state.models)
+      if (!prereqCheck.ok) {
+        await fastFatal(formatBalancedPrerequisiteFailure(prereqCheck.missing))
+      }
     } else {
       // Standard profile behavior is unchanged. This branch intentionally keeps
       // all ordinary launches on the existing catalog/model flow.
@@ -725,7 +741,7 @@ export const claude = defineCommand({
     // row ids still feed the launch-global compaction minimum. Failures are
     // visible but non-fatal: explicit `-m` remains available and env setup
     // falls back to the router-declared profile rows.
-    // Pinned profiles (fast/cheap/cheap1m/cheapest) run router-provided
+    // Pinned profiles (fast/cheap/cheap1m/cheapest/balanced) run router-provided
     // surfaces only. The mirror is a disposable per-launch snapshot, so
     // purging user-supplied agents and guarded hooks here never touches
     // the operator's real `~/.claude/` — it just keeps a stale custom
@@ -791,12 +807,12 @@ export const claude = defineCommand({
       pickerModels,
     )
 
-    // Pinned-profile guarantee check: cheap/cheapest must never carry a
+    // Pinned-profile guarantee check: cheap/cheapest/balanced must never carry a
     // `[1m]` accounting bracket on any selectable id (lead, tier rows, or
     // picker rows) — warn loud if one slipped through so it gets fixed at
     // the seeding layer rather than silently relying on the request-time
     // backstop. `fast`/`cheap1m` leads intentionally keep 1M.
-    if (launchProfileId === "cheap" || launchProfileId === "cheapest") {
+    if (launchProfileId === "cheap" || launchProfileId === "cheapest" || launchProfileId === "balanced") {
       const suspectKeys = [
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -817,6 +833,7 @@ export const claude = defineCommand({
       || launchProfileId === "cheap"
       || launchProfileId === "cheap1m"
       || launchProfileId === "cheapest"
+      || launchProfileId === "balanced"
     ) {
       consola.info(
         `Pinned launch: profile=${launchProfileId} lead=${chosenSlug} pickerRows=${pickerModels?.length ?? 0}.`,
@@ -839,9 +856,10 @@ export const claude = defineCommand({
         extraArgs,
         fastAdvisorClientEnabled(process.env),
       )
-    } else if (launchProfileId === "cheap" || launchProfileId === "cheap1m") {
+    } else if (launchProfileId === "cheap" || launchProfileId === "cheap1m" || launchProfileId === "balanced") {
       // Same pinning discipline as fast, but to the BARE 200K Advisor slug
-      // (see `CHEAP_PROFILE_ADVISOR_CLIENT_MODEL`).
+      // (see `CHEAP_PROFILE_ADVISOR_CLIENT_MODEL`). Balanced shares cheap's
+      // Sol Advisor identity, so it reuses the same pin.
       extraArgs = withFixedCheapAdvisorArg(
         extraArgs,
         cheapAdvisorClientEnabled(process.env),
@@ -958,6 +976,7 @@ export const claude = defineCommand({
       launchProfileId === "cheap"
       || launchProfileId === "cheap1m"
       || launchProfileId === "cheapest"
+      || launchProfileId === "balanced"
     let fastWiringComplete = launchProfileId !== "fast" && !isCheapLaunch
     const astraAvailable = (launchProfileId === "fast" || launchProfileId === "cheap1m")
       && Boolean(fastAstraModel())
@@ -981,25 +1000,29 @@ export const claude = defineCommand({
         ? {
             Explore: fastScoutModel(),
             Plan: fastPlanModel(),
-            "general-purpose": fastGeneralPurposeModel(),
-            implementer: fastImplementerModel(),
+            "General-Purpose": fastGeneralPurposeModel(),
             reviewer: fastReviewerModel(),
           }
         : launchProfileId === "cheap" || launchProfileId === "cheap1m"
           ? {
               Explore: CHEAP_PROFILE_NATIVE_MODELS.Explore,
               Plan: CHEAP_PROFILE_NATIVE_MODELS.Plan,
-              "general-purpose": CHEAP_PROFILE_NATIVE_MODELS["general-purpose"],
-              implementer: CHEAP_PROFILE_NATIVE_MODELS.implementer,
+              "General-Purpose": CHEAP_PROFILE_NATIVE_MODELS["General-Purpose"],
               reviewer: cheapReviewerModel(),
             }
         : launchProfileId === "cheapest"
           ? {
               Explore: CHEAPEST_PROFILE_NATIVE_MODELS.Explore,
               Plan: CHEAPEST_PROFILE_NATIVE_MODELS.Plan,
-              "general-purpose": CHEAPEST_PROFILE_NATIVE_MODELS["general-purpose"],
-              implementer: CHEAPEST_PROFILE_NATIVE_MODELS.implementer,
+              "General-Purpose": CHEAPEST_PROFILE_NATIVE_MODELS["General-Purpose"],
               reviewer: cheapestReviewerModel(),
+            }
+        : launchProfileId === "balanced"
+          ? {
+              Explore: BALANCED_PROFILE_NATIVE_MODELS.Explore,
+              Plan: BALANCED_PROFILE_NATIVE_MODELS.Plan,
+              "General-Purpose": BALANCED_PROFILE_NATIVE_MODELS["General-Purpose"],
+              reviewer: balancedReviewerModel(),
             }
         : launchProfileId === "max"
           ? {
@@ -1026,6 +1049,7 @@ export const claude = defineCommand({
           || launchProfileId === "cheap"
           || launchProfileId === "cheap1m"
           || launchProfileId === "cheapest"
+          || launchProfileId === "balanced"
           ? nativeAgentModels.Explore
           : nativeAgentModels.scout)
         != null,
@@ -1063,6 +1087,7 @@ export const claude = defineCommand({
           launchProfileId === "cheap"
           || launchProfileId === "cheap1m"
           || launchProfileId === "cheapest"
+          || launchProfileId === "balanced"
         // Fast and the cheap family share the exact fixed HTTP surface; max has its own.
         const isPinnedProfile = isFastProfile || isMaxProfile || isCheapProfile
         if ((isFastProfile || isCheapProfile) && requestedCli) {
@@ -1148,29 +1173,38 @@ export const claude = defineCommand({
           isPinnedProfile
           && ((launchProfileId === "cheapest"
             ? cheapestOracleModel()
-            : isCheapProfile
-              ? cheapOracleModel()
-              : fastOracleModel()) == null
+            : launchProfileId === "balanced"
+              ? balancedOracleModel()
+              : isCheapProfile
+                ? cheapOracleModel()
+                : fastOracleModel()) == null
             || (launchProfileId === "cheapest"
               ? cheapestAdvisorModel()
-              : isCheapProfile
-                ? cheapAdvisorModel()
-                : fastAdvisorModel()) == null
-            || nativeAgentModels.implementer == null)
+              : launchProfileId === "balanced"
+                ? balancedAdvisorModel()
+                : isCheapProfile
+                  ? cheapAdvisorModel()
+                  : fastAdvisorModel()) == null
+            || nativeAgentModels.reviewer == null)
         ) {
           if (launchProfileId === "cheapest") {
             throw new Error(
-              "cheapest profile prerequisite drift: exact implementer, oracle (gpt-5.6-sol), or advisor (gemini-3.8-flash) model no longer resolves",
+              "cheapest profile prerequisite drift: exact reviewer, oracle (gpt-5.6-sol), or advisor (gemini-3.8-flash) model no longer resolves",
+            )
+          }
+          if (launchProfileId === "balanced") {
+            throw new Error(
+              "balanced profile prerequisite drift: exact reviewer, oracle (grok-4.6), or advisor (gpt-5.6-sol) model no longer resolves",
             )
           }
           if (isCheapProfile) {
             // Cheap oracle (grok-4.6) and advisor (gpt-5.6-sol) are fixed
-            // constants; the cheap drift surface is implementer + oracle.
+            // constants; the cheap drift surface is reviewer + oracle.
             throw new Error(
-              "cheap profile prerequisite drift: exact implementer or oracle (grok-4.6) model no longer resolves",
+              "cheap profile prerequisite drift: exact reviewer or oracle (grok-4.6) model no longer resolves",
             )
           }
-          throw new Error("fast profile prerequisite drift: exact Oracle, Advisor, or implementer model no longer resolves")
+          throw new Error("fast profile prerequisite drift: exact Oracle, Advisor, or reviewer model no longer resolves")
         }
         const leadPeersNonce = (isFastProfile || launchProfileId === "cheap1m") && astraAvailable
           ? randomBytes(32).toString("hex")
@@ -1202,13 +1236,13 @@ export const claude = defineCommand({
               ? agentNamesForToolAllowlist(fastDescriptor.personaAllowlist)
               : undefined,
           includeCoordinator: fastDescriptor.hasCoordinator,
+          semanticSearchAvailable: semanticSearchOptedIn(),
           ...(isFastProfile
             ? {
                 fastProfile: true,
                 fastExploreModel: nativeAgentModels.Explore,
                 fastPlanModel: nativeAgentModels.Plan,
-                fastGeneralPurposeModel: nativeAgentModels["general-purpose"],
-                fastImplementerModel: nativeAgentModels.implementer,
+                fastGeneralPurposeModel: nativeAgentModels["General-Purpose"],
                 fastReviewerModel: nativeAgentModels.reviewer,
               }
             : launchProfileId === "cheapest"
@@ -1216,17 +1250,23 @@ export const claude = defineCommand({
                   cheapestProfile: true,
                   cheapestExploreModel: nativeAgentModels.Explore,
                   cheapestPlanModel: nativeAgentModels.Plan,
-                  cheapestGeneralPurposeModel: nativeAgentModels["general-purpose"],
-                  cheapestImplementerModel: nativeAgentModels.implementer,
+                  cheapestGeneralPurposeModel: nativeAgentModels["General-Purpose"],
                   cheapestReviewerModel: nativeAgentModels.reviewer,
+                }
+            : launchProfileId === "balanced"
+              ? {
+                  balancedProfile: true,
+                  balancedExploreModel: nativeAgentModels.Explore,
+                  balancedPlanModel: nativeAgentModels.Plan,
+                  balancedGeneralPurposeModel: nativeAgentModels["General-Purpose"],
+                  balancedReviewerModel: nativeAgentModels.reviewer,
                 }
             : isCheapProfile
               ? {
                   cheapProfile: true,
                   cheapExploreModel: nativeAgentModels.Explore,
                   cheapPlanModel: nativeAgentModels.Plan,
-                  cheapGeneralPurposeModel: nativeAgentModels["general-purpose"],
-                  cheapImplementerModel: nativeAgentModels.implementer,
+                  cheapGeneralPurposeModel: nativeAgentModels["General-Purpose"],
                   cheapReviewerModel: nativeAgentModels.reviewer,
                 }
             : isMaxProfile
@@ -1892,6 +1932,7 @@ export const claude = defineCommand({
           agentToolsAvailable: agentToolsEnabled(),
           artifactToolsAvailable: artifactAvailable,
           astraAvailable,
+          semanticSearchAvailable: semanticSearchOptedIn(),
           ...nativeAvailability,
           profile: launchProfileId,
           groupKeys,
@@ -1950,7 +1991,7 @@ export const claude = defineCommand({
           )
         }
       } catch (err) {
-        if (launchProfileId === "fast" || launchProfileId === "max" || launchProfileId === "cheap" || launchProfileId === "cheap1m" || launchProfileId === "cheapest") {
+        if (launchProfileId === "fast" || launchProfileId === "max" || launchProfileId === "cheap" || launchProfileId === "cheap1m" || launchProfileId === "cheapest" || launchProfileId === "balanced") {
           if (fastLaunchId) unregisterLaunch(fastLaunchId)
           await disposeFastRuntime().catch(() => {})
           await server.close(true).catch(() => {})
@@ -1961,6 +2002,7 @@ export const claude = defineCommand({
             : launchProfileId === "cheap" ? "Cheap"
             : launchProfileId === "cheap1m" ? "Cheap1m"
             : launchProfileId === "cheapest" ? "Cheapest"
+            : launchProfileId === "balanced" ? "Balanced"
             : "Max"
           const message = `${profileLabel} profile wiring failed; refusing to launch an unguarded session: ${err instanceof Error ? err.message : String(err)}`
           consola.error(message)
@@ -2013,6 +2055,7 @@ export const claude = defineCommand({
           browserToolsAvailable: directBrowserAvailable,
           artifactAvailable,
           astraAvailable,
+          semanticSearchAvailable: semanticSearchOptedIn(),
           groupKeys: operatingGroupKeys,
           peersKey: operatingGroupKeys.peers,
         }),
@@ -2061,6 +2104,7 @@ export const claude = defineCommand({
           || launchProfileId === "cheap"
           || launchProfileId === "cheap1m"
           || launchProfileId === "cheapest"
+          || launchProfileId === "balanced"
         const injected = await injectAicStatusLineIntoSettingsFile(
           settingsPath,
           statusCommand,
