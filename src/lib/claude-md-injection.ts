@@ -152,9 +152,9 @@ const STYLE_DIRECTIVE =
 export const PIPELINE_SKILLS_AWARENESS =
   "Pipeline skills (all 200K default context). "
   + "For non-trivial changes, run in order: "
-  + "(1) `/gh-gather-context` BEFORE planning when grounded context is needed — it decomposes the ask, runs lexical search, fans out to bounded Luna-high explore workers, and writes context.md plus context.compact.md; "
-  + "(2) `/gh-plan` AFTER context and BEFORE implementation — it ingests the context brief with Sol-medium, produces a scoped modular ordered plan.md with explicit tasks for Luna workers, surfaces open questions, and waits for user approval; "
-  + "(3) `/gh-implement` AFTER plan approval — it runs bounded parallel Luna-max task workers in isolated worktrees (each self-tests and self-reviews), aggregates a unified diff, and runs staged review (Luna max, then Sol medium for major issues only). "
+  + "(1) `/gh-gather-context` BEFORE planning when grounded context is needed: it decomposes the ask, runs lexical search, fans out to bounded Luna-high explore workers, and writes context.md plus context.compact.md; "
+  + "(2) `/gh-plan` AFTER context and BEFORE implementation: it ingests the context brief with Sol-medium, produces a scoped modular ordered plan.md with explicit tasks for Luna workers, surfaces open questions, and waits for user approval; "
+  + "(3) `/gh-implement` AFTER plan approval: it runs bounded parallel Luna-max task workers in isolated worktrees (each self-tests and self-reviews), aggregates a unified diff, and runs staged review (Luna max, then Sol medium for major issues only). "
   + "Skip the pipeline for trivial surgical work. Never implement without an approved plan."
 
 /** Which of the conditionally-emitted natives this launch actually wrote.
