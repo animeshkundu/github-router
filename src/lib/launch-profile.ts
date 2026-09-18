@@ -318,9 +318,27 @@ export const LUNA_HAIKU_ALIAS_ID = "gh-router-luna-haiku-high"
 export const MAX_LUNA_HIGH_ALIAS_ID = "gh-router-max-luna-high"
 export const MAX_LUNA_MAX_ALIAS_ID = "gh-router-max-luna-max"
 
+/**
+ * Pipeline skill aliases (`/gh-gather-context`, `/gh-plan`, `/gh-implement`).
+ * Router-owned, non-catalog identities shared by every pinned profile: all
+ * skill models run at the 200K DEFAULT window with bare slugs, so the alias
+ * only carries the fixed effort until the authenticated request boundary.
+ * Emitted BARE (no `[1m]`) wherever skill worker briefs name a model.
+ */
+export const SKILL_GATHER_CONTEXT_LEAD_ALIAS_ID = "gh-router-skill-gather-context-lead-high"
+export const SKILL_GATHER_CONTEXT_EXPLORE_ALIAS_ID = "gh-router-skill-gather-context-explore-high"
+export const SKILL_PLAN_LEAD_ALIAS_ID = "gh-router-skill-plan-lead-medium"
+export const SKILL_IMPLEMENT_LEAD_ALIAS_ID = "gh-router-skill-implement-lead-max"
+export const SKILL_IMPLEMENT_TASK_ALIAS_ID = "gh-router-skill-implement-task-max"
+export const SKILL_REVIEW_PASS1_ALIAS_ID = "gh-router-skill-review-pass1-max"
+export const SKILL_REVIEW_PASS2_ALIAS_ID = "gh-router-skill-review-pass2-medium"
+
 /** The real Copilot catalog id every Luna alias (including the driver
  *  itself) canonicalizes to. */
 export const LUNA_REAL_MODEL_ID = FAST_PROFILE_MODELS.luna
+
+/** The real Copilot catalog id every Sol skill alias canonicalizes to. */
+export const SKILL_SOL_REAL_MODEL_ID = FAST_PROFILE_MODELS.plan
 
 const MAX_ALIAS_IDS = new Set([
   MAX_LUNA_HIGH_ALIAS_ID,
@@ -455,6 +473,34 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   [
     BALANCED_REVIEWER_ALIAS_ID,
     { aliasId: BALANCED_REVIEWER_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS.reviewer, absentEffortDefault: "max" },
+  ],
+  [
+    SKILL_GATHER_CONTEXT_LEAD_ALIAS_ID,
+    { aliasId: SKILL_GATHER_CONTEXT_LEAD_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "high" },
+  ],
+  [
+    SKILL_GATHER_CONTEXT_EXPLORE_ALIAS_ID,
+    { aliasId: SKILL_GATHER_CONTEXT_EXPLORE_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "high" },
+  ],
+  [
+    SKILL_PLAN_LEAD_ALIAS_ID,
+    { aliasId: SKILL_PLAN_LEAD_ALIAS_ID, realModel: SKILL_SOL_REAL_MODEL_ID, absentEffortDefault: "medium" },
+  ],
+  [
+    SKILL_IMPLEMENT_LEAD_ALIAS_ID,
+    { aliasId: SKILL_IMPLEMENT_LEAD_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "max" },
+  ],
+  [
+    SKILL_IMPLEMENT_TASK_ALIAS_ID,
+    { aliasId: SKILL_IMPLEMENT_TASK_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "max" },
+  ],
+  [
+    SKILL_REVIEW_PASS1_ALIAS_ID,
+    { aliasId: SKILL_REVIEW_PASS1_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "max" },
+  ],
+  [
+    SKILL_REVIEW_PASS2_ALIAS_ID,
+    { aliasId: SKILL_REVIEW_PASS2_ALIAS_ID, realModel: SKILL_SOL_REAL_MODEL_ID, absentEffortDefault: "medium" },
   ],
 ])
 
