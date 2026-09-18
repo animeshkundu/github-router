@@ -12,8 +12,9 @@ Use this skill when a non-trivial ask needs grounded context before planning.
 All reasoning runs at the 200K default window: the lead and every Explore
 subagent use the Luna model at high effort with bare slugs (no 1M accounting).
 Output is a durable full brief plus a compact downstream version. This skill
-dispatches ONLY native subagents present on the profile roster (Explore,
-reviewer) via the Agent tool, never worker-* MCP dispatchers.
+dispatches ONLY native subagents present on the profile roster (Explore) via
+the Agent tool, never worker-* MCP dispatchers. No reviewer dispatch in this
+stage: Explore evidence plus targeted follow-up reads is the verification path.
 
 ## Hard bounds
 
@@ -33,7 +34,6 @@ Use these exact tags on every finding and claim:
 
 - verified-executable: reproduced the symptom, ran the failing test, or ran a check that directly proves the claim. This is the only deterministic confidence tag.
 - verified-source: read the actual source, config, logs, docs, or primary artifact and cited the relevant locations. This is model-mediated and can still be wrong.
-- cross-lab-agreed: a different-lab reviewer independently agreed with the claim. This reduces correlated blind spots but is advisory.
 - unverified: plausible but not confirmed; treat as residual risk.
 
 ## Procedure
@@ -60,8 +60,8 @@ Use these exact tags on every finding and claim:
 
 5. Stitch and verify.
    - Collect all Explore results and deduplicate file references.
-   - Run at most 5 targeted follow-up reads for gaps, in parallel.
-   - Dispatch the reviewer subagent (via the Agent tool, subagent_type reviewer) to confirm source-reading for load-bearing claims. Advisory: keep the review under ~5 minutes.
+   - Run at most 5 targeted follow-up reads for gaps, in parallel, using Read, Grep, and Glob directly; dispatch one more narrow Explore round only for gaps direct reads cannot close.
+   - Do NOT dispatch a reviewer in this stage. Verification here is Explore evidence plus your own follow-up reads: re-open the primary source for every load-bearing claim and confirm the citation is real before tagging it verified-source.
    - Form a root-cause hypothesis or integration map, and state what would falsify it.
 
 6. Run a completeness pass.
@@ -95,16 +95,17 @@ Return a compact brief, not the whole dump:
 - Freshness: HEAD commit, diff hash, timestamp.
 - Termination: saturated or cap-hit; if cap-hit, name the cap.
 - Summary: 3-8 bullets with confidence tags.
-- Evidence table: claim, tag, primary source or command, reviewer status.
+- Evidence table: claim, tag, primary source or command, verification status.
 - Residual unknowns: explicit list, or none.
 - Downstream guidance: recommended next action and what must be rechecked if the tree changes.
 
 ## Non-goals
 
-- Do not present verified-source or cross-lab-agreed as deterministic.
+- Do not present verified-source as deterministic.
 - Do not hide open unknowns because the answer looks useful.
 - Do not keep searching after the cap.
 - Do not paste the entire persisted brief into later turns unless the user asks.
+- Do not dispatch a reviewer from this stage; Explore evidence plus targeted follow-up reads is the verification path.
 - Do not finish without the .complete marker: a marker-less brief is not a completed stage.
 `,
 } as const

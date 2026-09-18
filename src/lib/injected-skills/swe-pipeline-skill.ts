@@ -2,7 +2,7 @@ export const SWE_PIPELINE_SKILL = {
   name: "gh-swe-pipeline",
   md: `---
 name: gh-swe-pipeline
-description: Strict sequential SWE pipeline for non-trivial code changes: runs gather-context to completion, then plan with user approval, then implement with staged review. Each stage waits for the previous to finish fully, superseding leftover subagents before advancing. Use when the user wants the full structured engineering workflow in one command.
+description: Strict sequential SWE pipeline for non-trivial code changes: runs gather-context to completion, then plan with user approval, then implement with conditional review. Each stage waits for the previous to finish fully, superseding leftover subagents before advancing. Use when the user wants the full structured engineering workflow in one command.
 user-invocable: true
 ---
 
@@ -81,7 +81,7 @@ exists to prevent.
    spots and re-seek approval. NEVER advance to implementation without
    approval recorded in run.md.
 
-## Stage 3: implement (to reviewed diff)
+## Stage 3: implement (to validated diff, reviewed only when warranted)
 
 1. Precondition check BEFORE invoking gh-implement: plan.md exists, its
    .complete marker exists, and run.md records explicit user approval. If
@@ -89,7 +89,11 @@ exists to prevent.
 2. Record any lingering Plan dispatches (Explore follow-ups) as superseded
    before the first implement dispatch.
 3. Invoke the gh-implement skill and WAIT for its full return: unified diff,
-   implementation report, test/typecheck/lint results, and review summary.
+   implementation report, test/typecheck/lint results, and review summary
+   (or recorded skip when self-validation plus green checks sufficed).
+   gh-implement dispatches a reviewer only on low-confidence validation or
+   complex and risky changes; do not demand a review that the stage skipped
+   with recorded reasons.
 4. If retries or review cycles exhaust with open failures, checkpoint with
    the failure as residual risk instead of pretending it is solved.
 
@@ -103,7 +107,7 @@ Return:
 - Plan file: path to plan.md, task count, parallel groups, open questions
   and user answers, cost estimate, approval record.
 - Implement output: unified diff path, report path, per-task status, test
-  results, review summary.
+  results, review summary or recorded skip.
 - Residual risks and next action.
 
 ## Non-goals

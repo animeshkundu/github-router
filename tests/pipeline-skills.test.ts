@@ -69,9 +69,11 @@ describe("pipeline skills registry", () => {
       // Each stage carries the explicit natives-only guard clause.
       expect(skill.md).toMatch(/never worker-\* MCP dispatchers|ONLY native subagents/i)
     }
-    // Gather fans out to Explore and verifies with reviewer.
+    // Gather fans out to Explore only: no reviewer dispatch in this stage.
+    // Verification is Explore evidence plus targeted follow-up reads.
     expect(GATHER_CONTEXT_SKILL.md).toContain('subagent_type Explore')
-    expect(GATHER_CONTEXT_SKILL.md).toContain('subagent_type reviewer')
+    expect(GATHER_CONTEXT_SKILL.md).not.toContain('subagent_type reviewer')
+    expect(GATHER_CONTEXT_SKILL.md).toMatch(/do not dispatch a reviewer/i)
     // Plan dispatches the native Plan subagent for non-trivial work (which
     // self-serves Explore per its delegation graph); trivial asks exit planless.
     expect(PLAN_SKILL.md).toContain('subagent_type Plan')
@@ -79,10 +81,15 @@ describe("pipeline skills registry", () => {
     expect(PLAN_SKILL.md).toMatch(/do not dispatch plan for a trivial ask/i)
     expect(PLAN_SKILL.md).toMatch(/implementation-ready brief/i)
     expect(PLAN_SKILL.md).toMatch(/file:line/i)
-    // Implement runs General-Purpose (implementer first on max) and reviews with reviewer.
+    // Implement runs General-Purpose (implementer first on max); reviewer is
+    // conditional on low-confidence validation or complex and risky changes.
     expect(IMPLEMENT_SKILL.md).toContain('General-Purpose')
     expect(IMPLEMENT_SKILL.md).toContain('subagent_type reviewer')
     expect(IMPLEMENT_SKILL.md).toContain('implementer')
+    expect(IMPLEMENT_SKILL.md).toMatch(/reviewer.*ONLY when/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/record the skip/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/do not dispatch a reviewer by default/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/confidence verdict/i)
   })
 
   test("covers every pinned profile and excludes standard", () => {
@@ -208,5 +215,6 @@ describe("CLAUDE.md pipeline awareness", () => {
     expect(PIPELINE_SKILLS_AWARENESS).toContain("/gh-swe-pipeline")
     expect(PIPELINE_SKILLS_AWARENESS).toMatch(/strict sequence/i)
     expect(PIPELINE_SKILLS_AWARENESS).toMatch(/never overlap/i)
+    expect(PIPELINE_SKILLS_AWARENESS).toMatch(/reviewer only on low-confidence/i)
   })
 })

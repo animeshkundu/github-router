@@ -151,15 +151,16 @@ const STYLE_DIRECTIVE =
  * gather ~3 min per round (3 rounds max, 6 Explore per round); plan ~5 min
  * via the profile-pinned Plan subagent (trivial asks exit planless);
  * implement ~10 min per task (8 concurrent max, worktree:true only when
- * parallel tasks need isolation); reviewer pass plus a General-Purpose fix
- * pass for major issues only.
+ * parallel tasks need isolation); reviewer only on low-confidence or complex
+ * and risky changes, plus a General-Purpose fix pass for major reviewer
+ * findings.
  */
 export const PIPELINE_SKILLS_AWARENESS =
   "Pipeline skills (all 200K default context, native subagents only, never worker-*). "
   + "Prefer `/gh-swe-pipeline`: strict sequence, each stage completing before the next starts, user approval before implementation. Stages in order: "
   + "(1) `/gh-gather-context` BEFORE planning when grounded context is needed: lexical search plus bounded Explore subagents (~3 min each, 3 rounds max), writes context.md plus context.compact.md; "
   + "(2) `/gh-plan` AFTER context and BEFORE implementation: native Plan subagent plans non-trivial asks (trivial exits planless), ordered plan.md (~5 min), open questions, waits for user approval; "
-  + "(3) `/gh-implement` AFTER plan approval: bounded parallel General-Purpose subagents (implementer first on max; worktree:true if parallel tasks need isolation), staged reviewer review plus fix pass for major issues. "
+  + "(3) `/gh-implement` AFTER plan approval: bounded parallel General-Purpose subagents (implementer first on max; worktree:true if parallel tasks need isolation), reviewer only on low-confidence or risky changes, plus fix pass for major findings. "
   + "Skip for trivial work. Never implement without an approved plan. Never overlap stages."
 
 /** Which of the conditionally-emitted natives this launch actually wrote.
