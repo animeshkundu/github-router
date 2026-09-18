@@ -146,9 +146,10 @@ const STYLE_DIRECTIVE =
  * excluded. Without `--swe` the skill files are not written and this text is
  * not referenced. Stages dispatch ONLY native subagents present on the
  * profile roster (Explore, Plan, General-Purpose, reviewer, implementer
- * where provided) — never worker-* MCP dispatchers. All roles run at the
+ * where provided), never worker-* MCP dispatchers. All roles run at the
  * 200K default window (bare slugs, no 1M accounting) with advisory budgets:
- * gather ~3 min per round (3 rounds max, 6 Explore per round); plan ~5 min;
+ * gather ~3 min per round (3 rounds max, 6 Explore per round); plan ~5 min
+ * via the profile-pinned Plan subagent (trivial asks exit planless);
  * implement ~10 min per task (8 concurrent max, worktree:true only when
  * parallel tasks need isolation); reviewer pass plus a General-Purpose fix
  * pass for major issues only.
@@ -157,7 +158,7 @@ export const PIPELINE_SKILLS_AWARENESS =
   "Pipeline skills (all 200K default context, native subagents only, never worker-*). "
   + "Prefer `/gh-swe-pipeline`: strict sequence, each stage completing before the next starts, user approval before implementation. Stages in order: "
   + "(1) `/gh-gather-context` BEFORE planning when grounded context is needed: lexical search plus bounded Explore subagents (~3 min each, 3 rounds max), writes context.md plus context.compact.md; "
-  + "(2) `/gh-plan` AFTER context and BEFORE implementation: scoped modular ordered plan.md (~5 min), open questions, waits for user approval; "
+  + "(2) `/gh-plan` AFTER context and BEFORE implementation: native Plan subagent plans non-trivial asks (trivial exits planless), ordered plan.md (~5 min), open questions, waits for user approval; "
   + "(3) `/gh-implement` AFTER plan approval: bounded parallel General-Purpose subagents (implementer first on max; worktree:true if parallel tasks need isolation), staged reviewer review plus fix pass for major issues. "
   + "Skip for trivial work. Never implement without an approved plan. Never overlap stages."
 

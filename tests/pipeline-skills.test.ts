@@ -72,8 +72,13 @@ describe("pipeline skills registry", () => {
     // Gather fans out to Explore and verifies with reviewer.
     expect(GATHER_CONTEXT_SKILL.md).toContain('subagent_type Explore')
     expect(GATHER_CONTEXT_SKILL.md).toContain('subagent_type reviewer')
-    // Plan follows up with Explore; the skill itself is the planner.
-    expect(PLAN_SKILL.md).toContain('subagent_type Explore')
+    // Plan dispatches the native Plan subagent for non-trivial work (which
+    // self-serves Explore per its delegation graph); trivial asks exit planless.
+    expect(PLAN_SKILL.md).toContain('subagent_type Plan')
+    expect(PLAN_SKILL.md).toMatch(/trivial/i)
+    expect(PLAN_SKILL.md).toMatch(/do not dispatch plan for a trivial ask/i)
+    expect(PLAN_SKILL.md).toMatch(/implementation-ready brief/i)
+    expect(PLAN_SKILL.md).toMatch(/file:line/i)
     // Implement runs General-Purpose (implementer first on max) and reviews with reviewer.
     expect(IMPLEMENT_SKILL.md).toContain('General-Purpose')
     expect(IMPLEMENT_SKILL.md).toContain('subagent_type reviewer')
@@ -179,9 +184,10 @@ describe("skill bodies carry advisory budgets (Task tool has no maxWallClockMs)"
       expect(skill.md).not.toMatch(/maxWallClockMs \d+/)
       expect(skill.md).not.toMatch(/pass maxWallClockMs/i)
     }
-    // Advisory budgets survive as prose: ~3 min gather rounds, ~5 min plan/review, ~10 min tasks.
+    // Advisory budgets survive as prose: ~3 min gather rounds, ~5 min Plan
+    // dispatch and reviews, ~10 min implement tasks.
     expect(GATHER_CONTEXT_SKILL.md).toMatch(/~3 minutes/i)
-    expect(PLAN_SKILL.md).toMatch(/~3 minutes/i)
+    expect(PLAN_SKILL.md).toMatch(/~5 minutes/i)
     expect(IMPLEMENT_SKILL.md).toMatch(/~10 minutes/i)
     expect(IMPLEMENT_SKILL.md).toMatch(/~5 minutes/i)
     expect(SWE_PIPELINE_SKILL.md).toMatch(/advisory budgets/i)

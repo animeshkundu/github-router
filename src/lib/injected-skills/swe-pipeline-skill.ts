@@ -58,19 +58,24 @@ exists to prevent.
    the gap or to spend one more bounded round. Do not silently treat a
    cap-hit brief as complete.
 
-## Stage 2: plan (to user approval)
+## Stage 2: plan (to user approval, or trivial exit)
 
 1. Precondition check BEFORE invoking gh-plan: the context .complete marker
    exists AND every gather-context Explore dispatch has returned or been
    recorded as superseded. If either is false, do not invoke planning. Fix
    stage 1 first.
-2. Invoke the gh-plan skill and WAIT for its full return. Do not dispatch
-   implementation subagents, sketch diffs, or edit implementation files while
-   it runs. Plan mode means plan and acceptance criteria only.
-3. Its completion artifact is .github-router/plans/<slug>/plan.md with a
+2. Invoke the gh-plan skill and WAIT for its full return. For non-trivial
+   work gh-plan dispatches the native Plan subagent with an
+   implementation-ready brief; do not dispatch implementation subagents,
+   sketch diffs, or edit implementation files while it runs. Plan mode means
+   plan and acceptance criteria only.
+3. Trivial exit: if gh-plan returns a trivial verdict (no plan.md, no
+   .complete), STOP the pipeline here. Record the verdict and the recommended
+   direct action in run.md and do NOT advance to implementation.
+4. Its completion artifact is .github-router/plans/<slug>/plan.md with a
    user-approval record (.complete marker written only after explicit
    approval). A plan without explicit user approval is NOT complete.
-4. Present the goal, acceptance criteria, task-to-group map, residual risks,
+5. Present the goal, acceptance criteria, task-to-group map, residual risks,
    and cost estimate. Wait for explicit approval. If the user rejects scope
    or cost, downshift to the smallest plan that kills the important blind
    spots and re-seek approval. NEVER advance to implementation without
