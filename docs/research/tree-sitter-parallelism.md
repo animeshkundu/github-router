@@ -187,7 +187,7 @@ and needs no Windows special-casing. (Those helpers remain relevant only if Leve
 
 **Sizing.** `Math.max(1, Math.min(4, os.cpus().length - 1))`. Cap at 4: the
 realized parse work per call is small and bounded (see cost/benefit), each worker
-holds its own full WASM heap + 9 grammars (memory cost), and the MCP surface is
+holds its own full WASM heap + 10 grammars (memory cost), and the MCP surface is
 already capped at 8 concurrent `tools/call`s — a per-call pool of 4 across up to 8
 concurrent `code` calls would oversubscribe cores. One worker on a single-core
 box (still better than nothing: it offloads parse CPU off the main event loop).
@@ -202,7 +202,7 @@ box (still better than nothing: it offloads parse CPU off the main event loop).
 **Warm lifecycle.** Spawn **lazily on first structural pass**, not at module
 import — module-import spawn would pay the pool cost even for a proxy run that
 never calls `code` (e.g. a pure `claude` passthrough session). Each worker, on
-spawn, runs `Parser.init()` + loads all 9 grammars once (the same
+spawn, runs `Parser.init()` + loads all 10 grammars once (the same
 `getGrammarBundle` logic, re-implemented worker-side) and signals ready. Keep the
 pool alive for the process lifetime (warm — the per-call spawn cost is the whole
 reason the prior `cs-perf` doc rejected a throwaway-per-call worker: cold spawn +

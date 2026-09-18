@@ -1,0 +1,104 @@
+# Prebuilt `next-plaid-api` server binaries for the semantic-search service.
+#
+# Upstream (lightonai/next-plaid) ships the API server Docker-only; the
+# `github-router` sidecar needs standalone binaries (users may not have
+# Docker), so we build them here from a PINNED upstream tag and SHA-pin the
+# outputs into `src/lib/colbert/manifest.ts` (same supply-chain posture as
+# the colgrep binary: hardcoded digests, verified before use).
+#
+# Trigger: manual dispatch (default: the pinned tag below) or monthly
+# schedule (picks up upstream fixes; a human still promotes the SHAs into
+# the manifest — never auto-merged). Artifacts are per-platform binaries
+# retained 90 days; promoting = download, sha256sum, paste into manifest.
+#
+# Feature set per platform (from upstream README: `model` enables the
+# `*_with_encoding` endpoints we need; `accelerate` is macOS-framework
+# only; Linux stays default/pure-Rust to avoid a libopenblas system dep;
+# Windows stays CPU-default):
+#   macOS (arm64 + x64 cross): --features "accelerate,model"
+#   Linux x64:                 --features "model"
+#   Windows x64:               --features "model"
+
+name: next-plaid-server
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "lightonai/next-plaid tag to build"
+        required: false
+        default: "v1.7.0"
+  schedule:
+    # 06:42 UTC on the 1st of each month. Off-hour, monthly cadence: fresh
+    # enough to track upstream, rare enough to review each promotion.
+    - cron: "42 6 1 * *"
+
+env:
+  UPSTREAM_TAG: ${{ inputs.upstream_tag || 'v1.7.0' }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: next-plaid-api-x86_64-unknown-linux-gnu
+            features: "model"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: next-plaid-api-x86_64-pc-windows-msvc.exe
+            features: "model"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: next-plaid-api-aarch64-apple-darwin
+            features: "accelerate,model"
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: next-plaid-api-x86_64-apple-darwin
+            features: "accelerate,model"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out upstream at the pinned tag
+        uses: actions/checkout@v4
+        with:
+          repository: lightonai/next-plaid
+          ref: ${{ env.UPSTREAM_TAG }}
+          path: next-plaid-src
+
+      - name: Install Rust (stable + cross target if needed)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Build next-plaid-api (release)
+        working-directory: next-plaid-src
+        run: cargo build --release --locked -p next-plaid-api --features "${{ matrix.features }}" --target ${{ matrix.target }}
+
+      - name: Smoke test (help exits 0, no model needed)
+        shell: bash
+        run: |
+          bin="next-plaid-src/target/${{ matrix.target }}/release/next-plaid-api"
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then bin="${bin}.exe"; fi
+          "$bin" --help > /dev/null
+          echo "smoke ok: $bin"
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist-server
+          bin="next-plaid-src/target/${{ matrix.target }}/release/next-plaid-api"
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then bin="${bin}.exe"; fi
+          cp "$bin" "dist-server/${{ matrix.asset }}"
+          (cd dist-server && sha256sum "${{ matrix.asset }}" | tee "${{ matrix.asset }}.sha256")
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist-server/${{ matrix.asset }}
+            dist-server/${{ matrix.asset }}.sha256
+          retention-days: 90

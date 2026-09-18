@@ -19,6 +19,11 @@ A `code_search` call can only reduce the candidate match set through these point
 `literal`/`regex` modes never rank, so they apply **only** `limit`. Ranked mode adds the
 two precision reducers **by default** - and `complete: true` disables both.
 
+Ranked mode may additionally apply a JIT cross-encoder rerank
+(`BM25F+FlashRank`) on multi-word natural-language queries. Rerank is a
+pure REORDER of the already-reduced set — it never drops a match — and
+`complete: true` skips it, so the floor theorem below is unaffected.
+
 ## The constructed ripgrep invocation
 
 `code_search` never invents matches and never drops them by heuristic in `complete` mode -

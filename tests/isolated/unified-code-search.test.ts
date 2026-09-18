@@ -77,6 +77,30 @@ describe("forced lexical family (never touches colgrep)", () => {
     expect(r.results.length).toBeGreaterThan(0)
   })
 
+  test("mode:'lexical' honors summary:false (outlines omitted end-to-end)", async () => {
+    // Regression pin for the summary-forwarding chain: MCP `code` tool
+    // advertises `summary` ("set false to omit"), and the unified router
+    // must thread it into searchCode so no outline parses run. The
+    // semantic path has its own pin ("status 'ready' honors
+    // summary:false"); this covers runLexical → searchCode.
+    const withOutlines = await runUnifiedCodeSearch({
+      query: "refreshAuthToken",
+      workspace: root,
+      mode: "lexical",
+    })
+    expect(withOutlines.outlines).toBeDefined()
+    expect(withOutlines.outlines!.length).toBeGreaterThan(0)
+
+    const withoutOutlines = await runUnifiedCodeSearch({
+      query: "refreshAuthToken",
+      workspace: root,
+      mode: "lexical",
+      summary: false,
+    })
+    expect(withoutOutlines.outlines).toBeUndefined()
+    expect(withoutOutlines.results.length).toBeGreaterThan(0)
+  })
+
   test("zero-hit multi-word lexical query returns a recovery notice, not a bare empty", async () => {
     // The behaviour this pins was found by a blind capability audit: a
     // natural-language lookup returned `results: []` with no notice while a plain
@@ -218,6 +242,59 @@ describe("semantic / default mode", () => {
     })
     expect(r.results).toHaveLength(1)
     expect(r.outlines).toEqual([])
+  })
+
+  test("status 'ready' with stale labels forwards freshness + stale_files", async () => {
+    // Serve-while-stale contract (Phase 2c): the runner labels served
+    // results; the unified tool forwards the labels untouched so the
+    // model knows the rows predate recent edits.
+    semanticEnabled = true
+    semanticResult = {
+      status: "ready",
+      source: "semantic",
+      results: [
+        {
+          file: "src/auth.ts",
+          line: 1,
+          score: 0.91,
+          snippet: "export function refreshAuthToken()",
+        },
+      ],
+      freshness: "stale",
+      stale_files: 3,
+    }
+    const r = await runUnifiedCodeSearch({
+      query: "where do we refresh auth tokens",
+      workspace: root,
+    })
+    expect(r.source).toBe("semantic")
+    expect(r.freshness).toBe("stale")
+    expect(r.stale_files).toBe(3)
+    expect(r.results.length).toBeGreaterThan(0)
+  })
+
+  test("status 'ready' fresh omits stale labels", async () => {
+    semanticEnabled = true
+    semanticResult = {
+      status: "ready",
+      source: "semantic",
+      freshness: "fresh",
+      results: [
+        {
+          file: "src/auth.ts",
+          line: 1,
+          score: 0.91,
+          snippet: "export function refreshAuthToken()",
+        },
+      ],
+    }
+    const r = await runUnifiedCodeSearch({
+      query: "where do we refresh auth tokens",
+      workspace: root,
+    })
+    expect(r.source).toBe("semantic")
+    expect(r.freshness).toBe("fresh")
+    expect(r.stale_files).toBeUndefined()
   })
 
   test("status 'ready' honors summary:false", async () => {

@@ -84,6 +84,7 @@ import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { resolveRipgrep } from "~/lib/code-search"
 import { resolveExecutable, runManagedExeCapture } from "~/lib/exec"
 import { applyResponsesCachePolicy } from "~/lib/prompt-cache"
+import { recommendedRgThreads } from "~/lib/search-concurrency"
 import { runUnifiedCodeSearch } from "~/lib/unified-code-search"
 import {
   MAX_INFLIGHT_TOOLS_CALL,
@@ -306,10 +307,14 @@ async function runRipgrep(
   // upstream subprocess output by the same rule.
   const RG_STDOUT_CAP = 10 * 1024 * 1024
   const { rgPath } = resolveRipgrep()
+  // Thread budget shared with code_search (Phase 1, A5): size this spawn
+  // from live search concurrency so parallel worker grep/glob calls don't
+  // each fan out to full cores. Prepended ahead of any caller `--`.
+  const threadedArgs = ["-j", String(recommendedRgThreads()), ...args]
   return new Promise((resolve, reject) => {
     let child: ChildProcess
     try {
-      child = spawn(rgPath, args, {
+      child = spawn(rgPath, threadedArgs, {
         cwd,
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
@@ -1070,6 +1075,7 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
       // MCP `code` tool, plus the top-level `source` so the worker knows
       // which engine ran (a `lexical-fallback` on a concept query means the
       // index wasn't ready — retry mode:"semantic" or use exact keywords).
+      // `freshness`/`stale_files` ride along when semantic served stale.
       // No 256 KB byte cap here — the per-call tool-bytes budget bounds it.
       const minimal = {
         source: r.source,
@@ -1080,6 +1086,8 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
         })),
         truncated: r.truncated ?? false,
         notice: r.notice ?? undefined,
+        ...(r.freshness ? { freshness: r.freshness } : {}),
+        ...(r.stale_files !== undefined ? { stale_files: r.stale_files } : {}),
       }
       return textResult(JSON.stringify(minimal))
     },

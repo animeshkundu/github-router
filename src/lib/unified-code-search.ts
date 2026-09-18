@@ -86,6 +86,15 @@ export interface UnifiedCodeSearchResult {
   /** Navigable declarations for up to the first 10 distinct result files. */
   outlines?: CodeSearchResponse["outlines"]
   truncated?: boolean
+  /**
+   * Freshness of `source:"semantic"` results. `"stale"` = served from an
+   * index predating a small content delta (see `stale_files`); the model
+   * should re-query shortly or drop to lexical for exactness. Absent on
+   * lexical rows (ripgrep always reads the live tree) and on fresh rows.
+   */
+  freshness?: "fresh" | "stale"
+  /** Files changed since the index (present iff freshness is "stale"). */
+  stale_files?: number
 }
 
 /** Map the unified mode onto `searchCode`'s internal `mode` enum. */
@@ -325,6 +334,9 @@ export async function runUnifiedCodeSearch(
   // The runner returns honest statuses, but a transport/internal error
   // could still throw; the merged tool's "transparent fallback" promise
   // must hold even then, so guard the call and fall back to lexical.
+  // serveStale: an LLM editing session dirties the tree constantly; a
+  // refuse-when-stale policy would make semantic permanently unavailable
+  // during exactly those sessions. Small content deltas serve labeled.
   let sem: SemanticSearchResult
   try {
     sem = await runSemanticSearch({
@@ -333,6 +345,7 @@ export async function runUnifiedCodeSearch(
       limit: input.limit,
       pattern: input.pattern,
       signal,
+      serveStale: true,
     })
   } catch {
     const r = await runLexical(input, "lexical", "lexical-fallback", signal)
@@ -359,6 +372,10 @@ export async function runUnifiedCodeSearch(
       results,
       outlines: await outlinesForSemanticResults(input, results, signal),
       ...(sem.notice ? { notice: sem.notice } : {}),
+      // Serve-while-stale labels: the model must know when results predate
+      // recent edits (it can re-query or drop to lexical for exactness).
+      ...(sem.freshness ? { freshness: sem.freshness } : {}),
+      ...(sem.stale_files !== undefined ? { stale_files: sem.stale_files } : {}),
     }
   }
 

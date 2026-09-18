@@ -1,9 +1,12 @@
 import { test, expect } from "bun:test"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import os from "node:os"
 import path from "node:path"
 
 import {
   GRAMMAR_FILES,
   getGrammarBundle,
+  getLanguageKeyForPath,
   outlineFile,
 } from "~/lib/tree-sitter-grammars"
 
@@ -73,4 +76,45 @@ test("outlineFile finds real symbols in a real source file", async () => {
   expect(outlined.outline.map((entry) => entry.name)).toContain(
     "pickClaudeDefault",
   )
+})
+
+test(".cs resolves to the csharp grammar key", () => {
+  expect(getLanguageKeyForPath("Service.cs")).toBe("csharp")
+  expect(getLanguageKeyForPath("src/Billing/Invoice.CS")).toBe("csharp")
+  // Neighbors unaffected.
+  expect(getLanguageKeyForPath("main.c")).toBe("c")
+  expect(getLanguageKeyForPath("lib.cpp")).toBe("cpp")
+  expect(getLanguageKeyForPath("notes.md")).toBeNull()
+})
+
+test("csharp grammar loads and outlines namespace > class > members", async () => {
+  // Guards the csharp grammar entry end-to-end (load + outline with nesting
+  // depths), mirroring the TypeScript outline assertion above.
+  const dir = mkdtempSync(path.join(os.tmpdir(), "gh-router-cs-outline-"))
+  try {
+    const file = path.join(dir, "Invoice.cs")
+    writeFileSync(
+      file,
+      [
+        "namespace Acme.Billing;",
+        "public class Invoice {",
+        "  private readonly string _id;",
+        "  public decimal Amount { get; private set; }",
+        "  public void Charge() { }",
+        "}",
+        "",
+      ].join("\n"),
+    )
+    const outlined = await outlineFile(file)
+    expect(outlined.language).toBe("csharp")
+    const byName = new Map(outlined.outline.map((e) => [e.name, e]))
+    expect(byName.get("Acme.Billing")?.depth).toBe(0)
+    expect(byName.get("Invoice")?.depth).toBe(1)
+    expect(byName.get("Charge")?.depth).toBe(2)
+    // Members (field, property, method) all surface with names.
+    expect(byName.has("_id")).toBe(true)
+    expect(byName.has("Amount")).toBe(true)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

@@ -1229,6 +1229,174 @@ describe("searchCode — floor guarantee (ranked ⊇ grep)", () => {
       fx.cleanup()
     }
   })
+
+  test("C#: class/method/property definitions confirm; call sites untagged", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(
+        path.join(root, "Invoice.cs"),
+        [
+          "namespace Acme.Billing;",
+          "public class Invoice {",
+          "  public decimal Amount { get; private set; }",
+          "  public void Charge() { }",
+          "}",
+          "",
+        ].join("\n"),
+      )
+      writeFileSync(
+        path.join(root, "Usage.cs"),
+        [
+          "using Acme.Billing;",
+          "class Program {",
+          "  static void Main() {",
+          "    var inv = new Invoice();",
+          "    inv.Charge();",
+          "  }",
+          "}",
+          "",
+        ].join("\n"),
+      )
+    })
+    try {
+      const r = await searchCode({
+        query: "Charge",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      const defHit = r.results.find(
+        (h) => h.file.endsWith("Invoice.cs") && h.line === 4,
+      )
+      expect(defHit?.role).toBe("definition")
+      const usageHit = r.results.find((h) => h.file.endsWith("Usage.cs"))
+      expect(usageHit?.role).toBeUndefined()
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("C#: field and event-field definitions confirm via declarator position", async () => {
+    // field_declaration / event_field_declaration carry no `name` field in
+    // the bundled grammar, so confirmation uses the positional first-leaf
+    // rule (FIRST_LEAF_DEFINITION_TYPES): the match must BE the declarator
+    // identifier. Initializer references on the same line must NOT confirm.
+    const fx = makeFixture((root) => {
+      writeFileSync(
+        path.join(root, "State.cs"),
+        [
+          "public class State {",
+          "  private readonly string _id;",
+          "  public const int Max = 5;",
+          "  public event System.EventHandler Changed;",
+          "  private int _n = Max;",
+          '  [System.Obsolete("use NewId")]',
+          "  private readonly string _oldId;",
+          "}",
+          "",
+        ].join("\n"),
+      )
+    })
+    try {
+      const field = await searchCode({
+        query: "_id",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      expect(
+        field.results.find((h) => h.line === 2)?.role,
+      ).toBe("definition")
+
+      const event = await searchCode({
+        query: "Changed",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      expect(
+        event.results.find((h) => h.line === 4)?.role,
+      ).toBe("definition")
+
+      // `Max` on line 5 is an initializer reference, not a definition —
+      // the declarator rule must not confirm it.
+      const initRef = await searchCode({
+        query: "Max",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      expect(
+        initRef.results.find((h) => h.line === 5)?.role,
+      ).toBeUndefined()
+      // ...while the actual declaration on line 3 confirms.
+      expect(
+        initRef.results.find((h) => h.line === 3)?.role,
+      ).toBe("definition")
+
+      // Attributed field: the attribute's identifiers (`Obsolete`, `NewId`
+      // in the message string is not an identifier match) must not win —
+      // the declarator `_oldId` on line 7 confirms.
+      const attributed = await searchCode({
+        query: "_oldId",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      expect(
+        attributed.results.find((h) => h.line === 7)?.role,
+      ).toBe("definition")
+    } finally {
+      fx.cleanup()
+    }
+  })
+
+  test("C#: enum members and records confirm as definitions", async () => {
+    const fx = makeFixture((root) => {
+      writeFileSync(
+        path.join(root, "Model.cs"),
+        [
+          "namespace Acme;",
+          "public enum Status { Pending, Paid = 2 }",
+          "public record Receipt(string Id, decimal Total);",
+          "public record struct Point(int X, int Y);",
+          "",
+        ].join("\n"),
+      )
+    })
+    try {
+      const member = await searchCode({
+        query: "Paid",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      expect(
+        member.results.find((h) => h.line === 2)?.role,
+      ).toBe("definition")
+
+      const record = await searchCode({
+        query: "Receipt",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      expect(
+        record.results.find((h) => h.line === 3)?.role,
+      ).toBe("definition")
+
+      const recordStruct = await searchCode({
+        query: "Point",
+        workspace: fx.root,
+        mode: "ranked",
+        summary: false,
+      })
+      expect(
+        recordStruct.results.find((h) => h.line === 4)?.role,
+      ).toBe("definition")
+    } finally {
+      fx.cleanup()
+    }
+  })
 })
 
 // ============================================================
