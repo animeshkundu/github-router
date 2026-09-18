@@ -24,7 +24,7 @@ implementation.
 
 - Maximum tasks: 20.
 - Maximum parallel groups: 5.
-- Planner input budget: at most 150K context tokens, leaving headroom in the 200K window.
+- Keep planner input well under the 200K window (target at most around 150K tokens of context) so there is headroom for reasoning and output. This is self-discipline, not an enforced cap: prefer the compact brief and read full sections only on demand.
 
 ## Procedure
 
@@ -48,7 +48,7 @@ implementation.
    - Each task states input artifacts, output artifact, acceptance criteria, verification commands, and rollback concern.
    - Order tasks by dependency (topological sort); tasks with no data dependency share a parallel group.
    - Keep each task small enough for one Luna worker at the 200K window (target at most 50K context tokens of relevant files per task).
-   - If the ask needs discovery follow-ups, delegate them to worker-explore background subagents (via the Agent tool) rather than bloating the plan.
+   - If the ask needs discovery follow-ups, delegate them to worker-explore background subagents (via the Agent tool, maxWallClockMs 180000) rather than bloating the plan.
 
 4. Surface open questions before finalizing.
    - Ask about ambiguous acceptance criteria, design decisions with multiple valid approaches, risk tolerance, and test strategy.

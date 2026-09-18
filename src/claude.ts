@@ -1495,8 +1495,12 @@ export const claude = defineCommand({
         // agent_type, so subagents/teammates are untouched.
         const sessionCwd = process.cwd()
         // Worker/orchestration skills and their prompt-submit steering belong
-        // only to the standard profile. Fast and max intentionally omit the
-        // slash commands even when the worker catalog gate is otherwise open.
+        // only to the standard profile. Pinned profiles (fast, max, cheap
+        // family, balanced) intentionally omit THOSE slash commands even when
+        // the worker catalog gate is otherwise open, but they get the
+        // pipeline slash commands (/gh-gather-context, /gh-plan,
+        // /gh-implement) via injectedSkillsForLaunch regardless of
+        // workerSkillsActive.
         const workerSkillsActive = workerToolsEnabled() && launchProfileId === "standard"
         const skillsToWrite = injectedSkillsForLaunch({
           profileId: launchProfileId,

@@ -318,8 +318,15 @@ export function parseModesCsv(csv: string | undefined): Array<WorkerDispatchMode
  * `/gh-implement` pipeline skills. These reuse the existing
  * `worker-explore` / `worker-implement` / `worker-review` / `worker-plan`
  * dispatchers (so the PreToolUse guard above is untouched); the configs only
- * pin the 200K-default model alias, timeout, output cap, and worktree policy
- * each skill brief must use. All models are bare slugs (no `[1m]`).
+ * pin the 200K-default model alias, the wall-clock budget, and the worktree
+ * policy each skill brief must use. All models are bare slugs (no `[1m]`).
+ *
+ * No output-token cap is listed: worker tools accept `{prompt, model,
+ * thinking, workspace, maxWallClockMs, worktree}` and have no output-token
+ * parameter, so such a cap would be unenforced. `timeoutMs` IS enforceable:
+ * the skill bodies instruct the lead to pass it as the real `maxWallClockMs`
+ * worker arg (honored by `worker-agent/budget.ts`, clamped to the per-call
+ * ceiling in `peer-mcp-personas.ts`).
  */
 export type SkillWorkerRole =
   | "gather-context-explore"
@@ -332,10 +339,11 @@ export interface SkillWorkerConfig {
   dispatcher: WorkerDispatchMode
   /** Router-owned model alias (200K default, effort pinned). */
   modelAlias: string
-  /** Wall-clock budget per worker call. */
+  /**
+   * Wall-clock budget per worker call, passed by the lead as the real
+   * `maxWallClockMs` worker arg (well under the 6h per-call ceiling).
+   */
   timeoutMs: number
-  /** Output cap per worker call. */
-  maxOutputTokens: number
   /** Whether the worker runs in an isolated git worktree. */
   worktree: boolean
 }
@@ -345,28 +353,24 @@ export const SKILL_WORKER_CONFIGS: Readonly<Record<SkillWorkerRole, SkillWorkerC
     dispatcher: "explore",
     modelAlias: "gh-router-skill-gather-context-explore-high",
     timeoutMs: 180_000,
-    maxOutputTokens: 50_000,
     worktree: false,
   }),
   "implement-task": Object.freeze({
     dispatcher: "implement",
     modelAlias: "gh-router-skill-implement-task-max",
     timeoutMs: 600_000,
-    maxOutputTokens: 80_000,
     worktree: true,
   }),
   "review-pass1": Object.freeze({
     dispatcher: "review",
     modelAlias: "gh-router-skill-review-pass1-max",
     timeoutMs: 300_000,
-    maxOutputTokens: 30_000,
     worktree: false,
   }),
   "review-pass2": Object.freeze({
     dispatcher: "review",
     modelAlias: "gh-router-skill-review-pass2-medium",
     timeoutMs: 300_000,
-    maxOutputTokens: 30_000,
     worktree: false,
   }),
 })

@@ -188,10 +188,12 @@ export interface NativeAgentAvailability {
    *  `buildNativeReachClauses` and
    *  `buildOperatingDefaultsDirective` return a short, self-contained
    *  rendering naming only `Explore`/`Plan`/`General-Purpose`/`reviewer`,
-   *  Advisor, and Oracle — it must never name the standard-only `*-fast`/
-   *  `brainstorm`/`scribe`/`general-purpose-fast`, `peer-review-coordinator`,
-   *  `worker-*`/`orchestrate` tools or skills, or `stand_in`, since none of
-   *  those are registered in this profile regardless of catalog state.
+   *  Advisor, Oracle, and the pipeline skills (`/gh-gather-context`,
+   *  `/gh-plan`, `/gh-implement`) — it must never name the standard-only
+   *  `*-fast`/`brainstorm`/`scribe`/`general-purpose-fast`,
+   *  `peer-review-coordinator`, `worker-*`/`orchestrate` tools or skills,
+   *  or `stand_in`, since none of those are registered in this profile
+   *  regardless of catalog state.
    *  Absent/`"standard"` is today's catalog-driven full roster. */
   profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
   /** False when a fast launch disabled or failed its MCP/native runtime wiring.

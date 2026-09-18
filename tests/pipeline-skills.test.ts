@@ -70,13 +70,19 @@ describe("skill model contract (all 200K default)", () => {
     }
   })
 
-  test("bounds gather workers and implement workers", () => {
+  test("bounds gather workers and implement workers with counts only", () => {
     expect(SKILL_BOUNDS.gatherContext.maxRounds).toBe(3)
     expect(SKILL_BOUNDS.gatherContext.maxExploreAgentsPerRound).toBe(6)
     expect(SKILL_BOUNDS.implement.maxConcurrentAgents).toBe(8)
     expect(SKILL_BOUNDS.implement.maxRetriesPerTask).toBe(2)
     expect(SKILL_BOUNDS.implement.maxReviewFixCycles).toBe(2)
     expect(SKILL_BOUNDS.plan.maxTasks).toBe(20)
+    // No output-token caps anywhere: worker tools have no output-token
+    // parameter, so such caps would be unenforced. Wall-clock budgets live
+    // in SKILL_WORKER_CONFIGS and are passed as the real maxWallClockMs arg.
+    expect("exploreAgentMaxOutputTokens" in SKILL_BOUNDS.gatherContext).toBe(false)
+    expect("taskAgentMaxOutputTokens" in SKILL_BOUNDS.implement).toBe(false)
+    expect("maxContextTokens" in SKILL_BOUNDS.plan).toBe(false)
   })
 })
 
@@ -110,11 +116,26 @@ describe("skill worker configs (reuse existing dispatchers)", () => {
     expect(SKILL_WORKER_CONFIGS["implement-task"].worktree).toBe(true)
     expect(SKILL_WORKER_CONFIGS["review-pass1"].dispatcher).toBe("review")
     expect(SKILL_WORKER_CONFIGS["review-pass2"].dispatcher).toBe("review")
+    expect(SKILL_WORKER_CONFIGS["gather-context-explore"].timeoutMs).toBe(180_000)
+    expect(SKILL_WORKER_CONFIGS["implement-task"].timeoutMs).toBe(600_000)
+    expect(SKILL_WORKER_CONFIGS["review-pass1"].timeoutMs).toBe(300_000)
+    expect(SKILL_WORKER_CONFIGS["review-pass2"].timeoutMs).toBe(300_000)
     for (const config of Object.values(SKILL_WORKER_CONFIGS)) {
       expect(config.modelAlias.startsWith("gh-router-skill-")).toBe(true)
       expect(config.timeoutMs).toBeGreaterThan(0)
-      expect(config.maxOutputTokens).toBeGreaterThan(0)
+      // No maxOutputTokens field: unenforceable (no such worker arg).
+      expect("maxOutputTokens" in config).toBe(false)
     }
+  })
+})
+
+describe("skill bodies wire timeouts via the real maxWallClockMs arg", () => {
+  test("every worker dispatch names maxWallClockMs with the config value", () => {
+    expect(GATHER_CONTEXT_SKILL.md).toContain("maxWallClockMs 180000")
+    expect(GATHER_CONTEXT_SKILL.md).toContain("maxWallClockMs 300000")
+    expect(PLAN_SKILL.md).toContain("maxWallClockMs 180000")
+    expect(IMPLEMENT_SKILL.md).toContain("maxWallClockMs 600000")
+    expect(IMPLEMENT_SKILL.md).toContain("maxWallClockMs 300000")
   })
 })
 

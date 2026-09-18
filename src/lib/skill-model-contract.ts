@@ -52,8 +52,17 @@ export type SkillModelRole =
   | "review-pass2"
 
 /**
- * Hard execution bounds for the pipeline skills. The skill bodies enforce
- * these; the worker dispatcher mirrors them for timeout/budget wiring.
+ * Hard execution bounds for the pipeline skills, enforced by the skill
+ * bodies (the lead model counts its own dispatches, rounds, and retries).
+ *
+ * Deliberately count-based only. Output-token caps are NOT listed here:
+ * worker tools accept `{prompt, model, thinking, workspace, maxWallClockMs,
+ * worktree}` and have no output-token parameter, so such a cap would be
+ * unenforced fiction. Wall-clock budgets ARE enforceable via the real
+ * `maxWallClockMs` worker arg (honored by `worker-agent/budget.ts`, clamped
+ * to the per-call ceiling); the skill bodies instruct the lead to pass them,
+ * and `SKILL_WORKER_CONFIGS` in `worker-dispatch.ts` is the single source
+ * for those values.
  */
 export const SKILL_BOUNDS = Object.freeze({
   gatherContext: Object.freeze({
@@ -61,20 +70,15 @@ export const SKILL_BOUNDS = Object.freeze({
     maxExploreAgentsPerRound: 6,
     maxLexicalSearchesPerRound: 10,
     maxFollowUpReadsPerRound: 5,
-    exploreAgentTimeoutMs: 180_000,
-    exploreAgentMaxOutputTokens: 50_000,
   }),
   plan: Object.freeze({
     maxTasks: 20,
     maxParallelGroups: 5,
-    maxContextTokens: 150_000,
   }),
   implement: Object.freeze({
     maxConcurrentAgents: 8,
     maxRetriesPerTask: 2,
     maxReviewFixCycles: 2,
-    taskAgentTimeoutMs: 600_000,
-    taskAgentMaxOutputTokens: 80_000,
   }),
 } as const)
 

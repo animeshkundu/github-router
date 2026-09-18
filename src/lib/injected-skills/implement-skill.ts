@@ -28,7 +28,7 @@ staged: a Luna max pass first, then a Sol medium pass only for major issues.
    - For each group, prepare an isolated git worktree per task plus a narrow task brief (task spec, relevant context excerpt, acceptance criteria, verification commands).
 
 2. Dispatch bounded implement workers, one parallel batch per group.
-   - Dispatch ALL tasks in the group in a single turn via the Agent tool (subagent_type worker-implement, with worktree isolation).
+   - Dispatch ALL tasks in the group in a single turn via the Agent tool (subagent_type worker-implement, with worktree isolation, maxWallClockMs 600000 per task so a hung worker is reaped after 10 minutes instead of blocking its slot).
    - Each worker runs at the 200K default window and must self-contain its work:
      a. Implement the change.
      b. Run the task verification commands (tests, typecheck, lint).
@@ -44,9 +44,9 @@ staged: a Luna max pass first, then a Sol medium pass only for major issues.
    - If any task fails validation, route it back to an implement worker (at most 2 retries per task). If it still fails, checkpoint with the failure as residual risk instead of pretending it is solved.
 
 4. Run staged review.
-   - Pass 1 (always): dispatch the worker-review subagent (via the Agent tool) over the unified diff for correctness against acceptance criteria, code quality and consistency, security and performance regressions, and test coverage. Categorize findings as minor (style, nits) or major (logic, architecture).
+   - Pass 1 (always): dispatch the worker-review subagent (via the Agent tool, maxWallClockMs 300000) over the unified diff for correctness against acceptance criteria, code quality and consistency, security and performance regressions, and test coverage. Categorize findings as minor (style, nits) or major (logic, architecture).
    - If pass 1 finds no major issues, finish here.
-   - Pass 2 (major issues only): dispatch a fix worker at the 200K default window using the Sol model at medium effort with the flagged areas, the failing checks, and the pass-1 findings. It returns fixed patches or an explicit escalate-to-user with reasons.
+   - Pass 2 (major issues only): dispatch a fix worker (via the Agent tool, maxWallClockMs 300000) at the 200K default window using the Sol model at medium effort with the flagged areas, the failing checks, and the pass-1 findings. It returns fixed patches or an explicit escalate-to-user with reasons.
 
 5. Finalize.
    - Apply any review fixes and re-run full validation.

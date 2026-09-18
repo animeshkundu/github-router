@@ -123,7 +123,8 @@ export function resolveServeNativeAgentOptions() {
  *     SDK-spawned claude reads them from the mirror's `.claude.json`,
  *   - the peer-critic / worker / implementer subagents (`.md` files written into
  *     the mirror's `agents/`),
- *   - the gh-* skills (research / orchestrate / floor-keeper / worker).
+ *   - the gh-* skills (research / gather-context / plan / implement /
+ *     orchestrate / floor-keeper / worker).
  *
  * Best-effort: on any failure Claude still works, just without the extras.
  * Must run AFTER `ensureClaudeConfigMirror()` and BEFORE CloudCLI is spawned.

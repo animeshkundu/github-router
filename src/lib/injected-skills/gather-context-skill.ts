@@ -50,13 +50,13 @@ Use these exact tags on every finding and claim:
 4. Decompose into bounded explore workers.
    - Cluster search results into at most 6 coherent investigation areas.
    - For each area, write a narrow brief: the specific question, the expected artifact, and the files to focus on.
-   - Dispatch ALL explore workers in a single turn via the Agent tool (subagent_type worker-explore). Each runs read-only at the 200K default window and returns a summary with an evidence table and file:line citations.
+   - Dispatch ALL explore workers in a single turn via the Agent tool (subagent_type worker-explore). Each runs read-only at the 200K default window and returns a summary with an evidence table and file:line citations. Pass maxWallClockMs 180000 on every worker call so a hung worker is reaped after 3 minutes instead of blocking its slot.
    - Keep worker results summarized; do not paste every detail into the main context.
 
 5. Stitch and verify.
    - Collect all explore results and deduplicate file references.
    - Run at most 5 targeted follow-up reads for gaps, in parallel.
-   - Dispatch the worker-review subagent (via the Agent tool) to confirm source-reading for load-bearing claims.
+   - Dispatch the worker-review subagent (via the Agent tool, maxWallClockMs 300000) to confirm source-reading for load-bearing claims.
    - Form a root-cause hypothesis or integration map, and state what would falsify it.
 
 6. Run a completeness pass.
