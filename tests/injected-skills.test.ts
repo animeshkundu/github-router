@@ -20,8 +20,11 @@ function descriptionFor(md: string): string {
 
 describe("INJECTED_SKILLS", () => {
   test("contains the injected skills with non-empty names and markdown", () => {
-    expect(INJECTED_SKILLS.length).toBe(8)
+    expect(INJECTED_SKILLS.length).toBe(11)
     expect(INJECTED_SKILLS.some((s) => s.name === "gh-worker")).toBe(true)
+    expect(INJECTED_SKILLS.some((s) => s.name === "gh-gather-context")).toBe(true)
+    expect(INJECTED_SKILLS.some((s) => s.name === "gh-plan")).toBe(true)
+    expect(INJECTED_SKILLS.some((s) => s.name === "gh-implement")).toBe(true)
     expect(INJECTED_SKILLS.some((s) => s.name === "gh-first-mate-scaffold")).toBe(true)
     expect(INJECTED_SKILLS.some((s) => s.name === "gh-first-mate-operate")).toBe(true)
     expect(INJECTED_SKILLS.some((s) => s.name === "gh-first-mate-conduct")).toBe(true)
@@ -57,6 +60,9 @@ describe("INJECTED_SKILLS", () => {
     })
     expect(standard.map((skill) => skill.name)).toEqual([
       "gh-research",
+      "gh-gather-context",
+      "gh-plan",
+      "gh-implement",
       "gh-orchestrate",
       "gh-floor-keeper",
       "gh-worker",
@@ -69,11 +75,28 @@ describe("INJECTED_SKILLS", () => {
     })
     expect(standardWithFirstMate).toEqual(INJECTED_SKILLS)
 
+    // Pinned profiles get the pipeline skills only (all 200K default).
     expect(injectedSkillsForLaunch({
       profileId: "fast",
       workerSkillsActive: true,
       firstMateEnabled: true,
-    })).toEqual([])
+    }).map((skill) => skill.name)).toEqual([
+      "gh-gather-context",
+      "gh-plan",
+      "gh-implement",
+    ])
+
+    for (const profileId of ["cheap", "cheap1m", "cheapest", "balanced"] as const) {
+      expect(injectedSkillsForLaunch({
+        profileId,
+        workerSkillsActive: false,
+        firstMateEnabled: false,
+      }).map((skill) => skill.name)).toEqual([
+        "gh-gather-context",
+        "gh-plan",
+        "gh-implement",
+      ])
+    }
 
     const max = injectedSkillsForLaunch({
       profileId: "max",
@@ -81,6 +104,9 @@ describe("INJECTED_SKILLS", () => {
       firstMateEnabled: true,
     })
     expect(max.map((skill) => skill.name)).toEqual([
+      "gh-gather-context",
+      "gh-plan",
+      "gh-implement",
       "gh-first-mate",
       "gh-first-mate-scaffold",
       "gh-first-mate-operate",
@@ -96,7 +122,11 @@ describe("INJECTED_SKILLS", () => {
       profileId: "max",
       workerSkillsActive: true,
       firstMateEnabled: false,
-    })).toEqual([])
+    }).map((skill) => skill.name)).toEqual([
+      "gh-gather-context",
+      "gh-plan",
+      "gh-implement",
+    ])
 
     expect(injectedSkillsForLaunch({
       profileId: "standard",

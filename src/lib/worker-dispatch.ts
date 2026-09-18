@@ -310,3 +310,67 @@ export function parseModesCsv(csv: string | undefined): Array<WorkerDispatchMode
     .filter((s) => known.has(s)) as Array<WorkerDispatchMode>
   return out.length > 0 ? out : [...CORE_WORKER_MODES]
 }
+
+// ─── Pipeline skill worker configs (additive, non-guard) ─────────────────────
+
+/**
+ * Bounded worker configs for the `/gh-gather-context`, `/gh-plan`, and
+ * `/gh-implement` pipeline skills. These reuse the existing
+ * `worker-explore` / `worker-implement` / `worker-review` / `worker-plan`
+ * dispatchers (so the PreToolUse guard above is untouched); the configs only
+ * pin the 200K-default model alias, timeout, output cap, and worktree policy
+ * each skill brief must use. All models are bare slugs (no `[1m]`).
+ */
+export type SkillWorkerRole =
+  | "gather-context-explore"
+  | "implement-task"
+  | "review-pass1"
+  | "review-pass2"
+
+export interface SkillWorkerConfig {
+  /** Existing dispatcher to reuse (guard-compatible, no new modes). */
+  dispatcher: WorkerDispatchMode
+  /** Router-owned model alias (200K default, effort pinned). */
+  modelAlias: string
+  /** Wall-clock budget per worker call. */
+  timeoutMs: number
+  /** Output cap per worker call. */
+  maxOutputTokens: number
+  /** Whether the worker runs in an isolated git worktree. */
+  worktree: boolean
+}
+
+export const SKILL_WORKER_CONFIGS: Readonly<Record<SkillWorkerRole, SkillWorkerConfig>> = Object.freeze({
+  "gather-context-explore": Object.freeze({
+    dispatcher: "explore",
+    modelAlias: "gh-router-skill-gather-context-explore-high",
+    timeoutMs: 180_000,
+    maxOutputTokens: 50_000,
+    worktree: false,
+  }),
+  "implement-task": Object.freeze({
+    dispatcher: "implement",
+    modelAlias: "gh-router-skill-implement-task-max",
+    timeoutMs: 600_000,
+    maxOutputTokens: 80_000,
+    worktree: true,
+  }),
+  "review-pass1": Object.freeze({
+    dispatcher: "review",
+    modelAlias: "gh-router-skill-review-pass1-max",
+    timeoutMs: 300_000,
+    maxOutputTokens: 30_000,
+    worktree: false,
+  }),
+  "review-pass2": Object.freeze({
+    dispatcher: "review",
+    modelAlias: "gh-router-skill-review-pass2-medium",
+    timeoutMs: 300_000,
+    maxOutputTokens: 30_000,
+    worktree: false,
+  }),
+})
+
+export function skillWorkerConfig(role: SkillWorkerRole): SkillWorkerConfig {
+  return SKILL_WORKER_CONFIGS[role]
+}

@@ -139,6 +139,24 @@ const STYLE_DIRECTIVE =
  * catalog.
  */
 
+/**
+ * Pipeline skills (`/gh-gather-context`, `/gh-plan`, `/gh-implement`) injected
+ * for every pinned profile (fast, max, cheap, cheap1m, cheapest, balanced).
+ * Standard is intentionally excluded. All skill models run at the 200K default
+ * window (bare slugs, no 1M accounting): gatherContext uses Luna high for the
+ * lead and every explore worker (bounded: 3 rounds, 6 workers per round);
+ * plan uses Sol medium; implement uses Luna max for the lead and every task
+ * worker (bounded: 8 concurrent, 2 retries per task, isolated worktrees);
+ * review is staged Luna max then Sol medium for major issues only.
+ */
+export const PIPELINE_SKILLS_AWARENESS =
+  "Pipeline skills (all 200K default context). "
+  + "For non-trivial changes, run in order: "
+  + "(1) `/gh-gather-context` BEFORE planning when grounded context is needed — it decomposes the ask, runs lexical search, fans out to bounded Luna-high explore workers, and writes context.md plus context.compact.md; "
+  + "(2) `/gh-plan` AFTER context and BEFORE implementation — it ingests the context brief with Sol-medium, produces a scoped modular ordered plan.md with explicit tasks for Luna workers, surfaces open questions, and waits for user approval; "
+  + "(3) `/gh-implement` AFTER plan approval — it runs bounded parallel Luna-max task workers in isolated worktrees (each self-tests and self-reviews), aggregates a unified diff, and runs staged review (Luna max, then Sol medium for major issues only). "
+  + "Skip the pipeline for trivial surgical work. Never implement without an approved plan."
+
 /** Which of the conditionally-emitted natives this launch actually wrote.
  *  `undefined` means available, matching `buildPeerAwarenessSnippet`'s
  *  `scoutAvailable` convention, so an existing caller that passes nothing keeps
@@ -372,6 +390,8 @@ export function buildOperatingDefaultsDirective(
       + MAX_PARALLELISM_RULE
       + " Brief each role with the desired outcome, relevant context, constraints, expected evidence, and verification. Use the roster as complementary capabilities, never as a required Explore → Plan → implement → review sequence. Avoid overlapping assignments and do not ask several models the same generic question. Synthesize results against the repository and executable checks: model agreement is not verification. Use one fresh-context peer only when a consequential judgment remains after direct checks; use the coordinator only when several distinct lenses could change the decision. Advisor is optional, non-binding counsel for one focused consequential uncertainty that evidence and the appropriate roles cannot settle; it has no approval or workflow authority, and a further consultation requires materially new or conflicting evidence."
       + artifactClause
+      + "\n\n"
+      + PIPELINE_SKILLS_AWARENESS
     )
   }
   if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
@@ -441,6 +461,8 @@ export function buildOperatingDefaultsDirective(
       + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, an expert consultant available to the lead and \`Plan\`, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. \`Plan\` may consult Oracle on unresolved trade-offs, and reports any remaining tie-breaking gap to the lead.${astraClause} `
       + searchGuidance
       + `\`mcp__${searchKey}__web\` provides citable sources.${browserClause}${workerBrowseClause}${artifactClause}\n\n`
+      + PIPELINE_SKILLS_AWARENESS
+      + "\n\n"
       + "Verify claims with concrete repository evidence and tests before declaring work done. User instructions outrank delegation triggers. Stop named teammates when finished."
     )
   }
@@ -496,6 +518,7 @@ export function buildOperatingDefaultsDigest(
       + "Max launch profile. The lead owns the outcome. Start with direct repository or runtime evidence. Do narrow, obvious, surgical, and single-command work directly; delegate bounded work that is broad, slow, context-heavy, or independently valuable. "
       + MAX_PARALLELISM_RULE
       + " Give delegated workstreams non-overlapping scopes and state the outcome, constraints, evidence, and verification expected.\n\n"
+      + "Pipeline skills (all 200K default): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (waits for user approval), `/gh-implement` after approval with bounded parallel workers and staged review. Skip for trivial work.\n\n"
       + "Synthesize and verify: run the code, inspect outputs, and check tests. Agent count and agreement are not evidence. Use a fresh-context peer only for consequential judgment that remains after direct checks, and use the coordinator only when several distinct lenses could change the decision. Advisor is optional, non-binding, primary-lead-only counsel for one focused consequential uncertainty; it is not an approval or completion gate."
     )
   }
@@ -520,6 +543,7 @@ export function buildOperatingDefaultsDigest(
     return (
       "## Operating defaults (these layer with the user's direction and the domain's standards as addons: follow all three; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + delegation
+      + "Pipeline skills (all 200K default): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (waits for user approval), `/gh-implement` after approval with bounded parallel workers and staged review. Skip for trivial work.\n\n"
       + "Verify claims against real evidence: run relevant commands and tests. Follow a disciplined consultation ladder for unresolved decisions: (1) direct code inspection, search, builds, and tests settle factual questions; (2) `advisor` "
       + advisorDescriptor
       + " for transcript-aware framing checks or trajectory guidance; (3) `oracle` "
@@ -1191,6 +1215,7 @@ export const __testExports = {
   ARTIFACT_MARKER_OPEN,
   ARTIFACT_MARKER_CLOSE,
   ARTIFACT_PANEL_DIRECTIVE,
+  PIPELINE_SKILLS_AWARENESS,
   MAX_CLAUDE_MD_BYTES,
   ERROR_CODE,
   RENAME_RETRY_DELAYS_MS,
