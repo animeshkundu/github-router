@@ -543,7 +543,7 @@ export function buildOperatingDefaultsDigest(
   // for callers without a flag concept.
   const digestPipelineSentence = opts.sweEnabled === false
     ? ""
-    : "Pipeline skills (all 200K default): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (waits for user approval), `/gh-implement` after approval with bounded parallel workers and staged review. Skip for trivial work.\n\n"
+    : "Pipeline skills (all 200K default, native subagents only): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (trivial exits planless, waits for user approval), `/gh-implement` after approval with parallel subagents and conditional reviewer. Skip for trivial work.\n\n"
   if (opts.profile === "max") {
     return (
       "## Operating defaults (these layer with the user's direction and the domain's standards as addons: follow all three; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"

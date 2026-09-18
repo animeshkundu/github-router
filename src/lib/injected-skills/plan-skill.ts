@@ -2,8 +2,12 @@ export const PLAN_SKILL = {
   name: "gh-plan",
   md: `---
 name: gh-plan
-description: Holistic planning from gathered context: reassesses triviality, dispatches the profile-pinned Plan subagent for non-trivial work with an implementation-ready brief, validates file:line tasks and runnable acceptance criteria, surfaces open questions for user approval, and persists plan.md. Use when a non-trivial change needs a reviewed plan before implementation.
+description: Create an implementation plan from gathered context. Use when a non-trivial change needs a reviewed, ordered task list with acceptance criteria before implementing. Requires user approval. Not for trivial changes or missing context.
 user-invocable: true
+requires: [fresh context.md with .complete marker]
+produces: [plan.md, .complete]
+consumes: [context.md, context.compact.md]
+excludes: [trivial changes, implementation, missing context]
 ---
 
 # gh-plan: native Plan-subagent planning
@@ -81,6 +85,11 @@ Explore directly.
    - Plan-mode rule: plan and acceptance criteria only, no implementation
      file edits.
    - Permission to use Explore and reviewer per the delegation graph.
+   - Write the brief as plain directives, never reflective first-person prose:
+     Gemini-run subagents may suppress tool calls when the prompt contains
+     reflective text.
+   - Demand compact output: file:line plus one-line purposes, never pasted
+     source blocks. Output tokens cost several times input on every profile.
    - Advisory ~5 minute budget.
 
 3. Dispatch ONE Plan subagent via the Agent tool (subagent_type Plan) with

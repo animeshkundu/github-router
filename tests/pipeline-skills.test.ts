@@ -79,7 +79,7 @@ describe("pipeline skills registry", () => {
     expect(PLAN_SKILL.md).toContain('subagent_type Plan')
     expect(PLAN_SKILL.md).toMatch(/trivial/i)
     expect(PLAN_SKILL.md).toMatch(/do not dispatch plan for a trivial ask/i)
-    expect(PLAN_SKILL.md).toMatch(/implementation-ready brief/i)
+    expect(PLAN_SKILL.md).toMatch(/plan dispatch brief/i)
     expect(PLAN_SKILL.md).toMatch(/file:line/i)
     // Implement runs General-Purpose (implementer first on max); reviewer is
     // conditional on low-confidence validation or complex and risky changes.
@@ -90,6 +90,38 @@ describe("pipeline skills registry", () => {
     expect(IMPLEMENT_SKILL.md).toMatch(/record the skip/i)
     expect(IMPLEMENT_SKILL.md).toMatch(/do not dispatch a reviewer by default/i)
     expect(IMPLEMENT_SKILL.md).toMatch(/confidence verdict/i)
+  })
+
+  test("frontmatter carries trigger-oriented descriptions plus structured routing fields", () => {
+    for (const skill of [GATHER_CONTEXT_SKILL, PLAN_SKILL, IMPLEMENT_SKILL]) {
+      const lines = skill.md.split("\n")
+      const fm = lines.slice(1, lines.findIndex((l, i) => i > 0 && l === "---")).join("\n")
+      // Single-line description (multi-line block scalars break descriptionFor).
+      const desc = fm.match(/^description:\s*(.+)$/m)?.[1] ?? ""
+      expect(desc.length).toBeGreaterThan(0)
+      expect(desc.length).toBeLessThanOrEqual(300)
+      expect(desc).toMatch(/use when/i)
+      expect(desc).toMatch(/not for/i)
+      // Structured routing fields the lead can read without parsing prose.
+      for (const field of ["requires:", "produces:", "consumes:", "excludes:"]) {
+        expect(fm).toContain(field)
+      }
+    }
+    // Stage-appropriate contracts.
+    expect(GATHER_CONTEXT_SKILL.md).toContain("produces: [context.md, context.compact.md, .complete]")
+    expect(PLAN_SKILL.md).toContain("requires: [fresh context.md with .complete marker]")
+    expect(IMPLEMENT_SKILL.md).toContain("requires: [approved plan.md with .complete marker]")
+  })
+
+  test("bodies carry cheaper-model guidance: output cost, plain-directive briefs", () => {
+    // Luna output costs 6x input: every stage must demand compact returns.
+    expect(GATHER_CONTEXT_SKILL.md).toMatch(/6x input/i)
+    expect(GATHER_CONTEXT_SKILL.md).toMatch(/never full file contents/i)
+    // Gemini-run subagents suppress tool calls on reflective first-person
+    // prompts: dispatch briefs must be plain directives.
+    expect(PLAN_SKILL.md).toMatch(/never reflective first-person prose/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/never reflective first-person prose/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/no full-file echoes/i)
   })
 
   test("covers every pinned profile and excludes standard", () => {

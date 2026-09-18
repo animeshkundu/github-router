@@ -2,8 +2,12 @@ export const GATHER_CONTEXT_SKILL = {
   name: "gh-gather-context",
   md: `---
 name: gh-gather-context
-description: Bounded context gathering for non-trivial asks: decomposes the ask, runs lexical code searches to identify relevant files, dispatches bounded parallel Explore subagents to gather evidence, stitches results into a freshness-stamped context brief plus a compact version. Use when grounded context is needed before planning or changing code.
+description: Gather grounded codebase context before planning. Use when unfamiliar code must be understood, files located, or claims verified against source. Returns a freshness-stamped brief with file:line citations. Not for trivial reads or already-known code.
 user-invocable: true
+requires: []
+produces: [context.md, context.compact.md, .complete]
+consumes: []
+excludes: [trivial tasks, already-known code, implementation]
 ---
 
 # gh-gather-context: bounded context gathering
@@ -89,7 +93,9 @@ more than an idle subagent costs.
 
 ## Return format
 
-Return a compact brief, not the whole dump:
+Return a compact brief, not the whole dump. Output cost dominates: Luna output
+tokens cost 6x input, so return only file:line citations with one-line
+summaries, never full file contents or pasted source blocks.
 
 - Context files: paths to context.md and context.compact.md.
 - Freshness: HEAD commit, diff hash, timestamp.
@@ -106,6 +112,7 @@ Return a compact brief, not the whole dump:
 - Do not keep searching after the cap.
 - Do not paste the entire persisted brief into later turns unless the user asks.
 - Do not dispatch a reviewer from this stage; Explore evidence plus targeted follow-up reads is the verification path.
+- Do not return full file contents in briefs, summaries, or evidence tables; cite file:line plus one line of purpose.
 - Do not finish without the .complete marker: a marker-less brief is not a completed stage.
 `,
 } as const

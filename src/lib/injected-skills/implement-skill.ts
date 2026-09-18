@@ -2,8 +2,12 @@ export const IMPLEMENT_SKILL = {
   name: "gh-implement",
   md: `---
 name: gh-implement
-description: Parallel implementation of an approved plan using native General-Purpose subagents (implementer first where the profile provides one): each subagent implements its task, self-tests, self-reviews with an explicit confidence verdict, and returns a patch; the lead aggregates into a unified diff, runs a reviewer only on low-confidence or complex and risky changes, and returns the final diff with a report. Use when a user-approved plan is ready for execution.
+description: Execute an approved plan with parallel subagents and self-validation. Use when a user-approved plan.md is ready for execution. Reviewer only on low-confidence or risky changes. Not for unapproved plans or exploration.
 user-invocable: true
+requires: [approved plan.md with .complete marker]
+produces: [unified diff, implementation-report.md]
+consumes: [plan.md]
+excludes: [unapproved plans, exploration, trivial changes]
 ---
 
 # gh-implement: bounded parallel implementation with staged review
@@ -54,7 +58,7 @@ tool, never worker-* MCP dispatchers.
 1. Parse the approved plan.
    - Read plan.md fully.
    - Group tasks by parallelGroup; order groups by dependency.
-   - For each group, prepare a narrow task brief (task spec, relevant context excerpt, acceptance criteria, verification commands). If parallel tasks in the group require isolation, prepare one git worktree per task and pass worktree:true; otherwise tasks run in-place and must be sequentialized within shared files.
+   - For each group, prepare a narrow task brief (task spec, relevant context excerpt, acceptance criteria, verification commands). Write every brief as plain directives, never reflective first-person prose: Gemini-run subagents may suppress tool calls when the prompt contains reflective text. If parallel tasks in the group require isolation, prepare one git worktree per task and pass worktree:true; otherwise tasks run in-place and must be sequentialized within shared files.
 
 2. Dispatch bounded implementation subagents, one parallel batch per group.
    - Dispatch ALL tasks in the group in a single turn via the Agent tool. Use subagent_type implementer first where the profile provides one (max), otherwise subagent_type General-Purpose for every task. Advisory: keep each task under ~10 minutes; the Task tool enforces no wall-clock.
@@ -63,7 +67,7 @@ tool, never worker-* MCP dispatchers.
      b. Run the task verification commands (tests, typecheck, lint).
      c. Self-review against the acceptance criteria.
      d. Fix any self-found issues (at most 2 internal fix cycles).
-     e. Return the patch plus test results, self-review notes, and an explicit confidence verdict (high or low) with reasons. Low confidence means the subagent itself doubts the result: flaky or incomplete verification, untested edge cases, or behavior it could not directly observe.
+     e. Return the patch plus test results, self-review notes, and an explicit confidence verdict (high or low) with reasons. Low confidence means the subagent itself doubts the result: flaky or incomplete verification, untested edge cases, or behavior it could not directly observe. Keep the return compact: patch plus results, no full-file echoes; output tokens cost several times input on every profile.
    - Do NOT dispatch the same task twice (no dedup exists); a retry is a new dispatch only after a recorded failure.
    - For a big artifact, have the subagent write it to a file and return the path.
 
