@@ -2,7 +2,7 @@ export const PLAN_SKILL = {
   name: "gh-plan",
   md: `---
 name: gh-plan
-description: Holistic planning from gathered context: ingests the context brief, creates a scoped modular ordered implementation plan with explicit tasks for cheap implementation workers, surfaces open questions for user approval, and persists plan.md. Use when a non-trivial change needs a reviewed plan before implementation.
+description: Holistic planning from gathered context: ingests the context brief, creates a scoped modular ordered implementation plan with explicit tasks for native implementation subagents, surfaces open questions for user approval, and persists plan.md. Use when a non-trivial change needs a reviewed plan before implementation.
 user-invocable: true
 ---
 
@@ -11,9 +11,12 @@ user-invocable: true
 Use this skill after /gh-gather-context (or when equivalent context is already
 available) and before any implementation. The planner runs at the 200K default
 window using the Sol model at medium effort. The plan must be scoped, modular,
-non-overlapping, and ordered, with enough detail for Luna implementation
-workers to execute each task in isolation. User approval is mandatory before
-implementation.
+non-overlapping, and ordered, with enough detail for a native General-Purpose
+(or implementer, where the profile provides one) subagent to execute each task
+in isolation. User approval is mandatory before implementation. This skill
+dispatches ONLY native subagents present on the profile roster (Explore) via
+the Agent tool, never worker-* MCP dispatchers; this skill itself IS the
+planner and does not dispatch a Plan subagent.
 
 ## Prerequisites
 
@@ -27,11 +30,12 @@ implementation.
    Finish or re-invoke gathering first.
 2. Check freshness: if HEAD or the working-tree diff hash moved since the
    brief's stamp, re-verify stale load-bearing claims before using them.
-3. Stop the previous stage: send no further follow-ups to any lingering
-   gather-context explore workers and record them as stopped with the reason.
-   Planning while explore workers still run builds on shifting evidence and
-   wastes both stages. Only advance once every gather worker has returned or
-   is recorded as stopped.
+3. Close the previous stage: send no further follow-ups to any lingering
+   gather-context Explore dispatches and record them as superseded with the
+   reason. Native subagents cannot be killed mid-run: let them finish but do
+   not wait on or use their output. Planning while Explore subagents still run
+   builds on shifting evidence and wastes both stages. Only advance once every
+   Explore dispatch has returned or is recorded as superseded.
 
 ## Hard bounds
 
@@ -60,8 +64,8 @@ implementation.
    - Each task touches a single file or a tightly coupled file group.
    - Each task states input artifacts, output artifact, acceptance criteria, verification commands, and rollback concern.
    - Order tasks by dependency (topological sort); tasks with no data dependency share a parallel group.
-   - Keep each task small enough for one Luna worker at the 200K window (target at most 50K context tokens of relevant files per task).
-   - If the ask needs discovery follow-ups, delegate them to worker-explore background subagents (via the Agent tool, maxWallClockMs 180000) rather than bloating the plan.
+   - Keep each task small enough for one native subagent at the 200K window (target at most 50K context tokens of relevant files per task).
+   - If the ask needs discovery follow-ups, delegate them to Explore subagents (via the Agent tool, subagent_type Explore) rather than bloating the plan. Advisory: keep each follow-up under ~3 minutes; the Task tool enforces no wall-clock.
 
 4. Surface open questions before finalizing.
    - Ask about ambiguous acceptance criteria, design decisions with multiple valid approaches, risk tolerance, and test strategy.
@@ -96,7 +100,7 @@ Return:
 - Do not edit implementation files while planning; in plan mode, produce the plan and acceptance criteria only.
 - Do not present judgment-only conclusions as executable guarantees.
 - Do not hide open unknowns because the plan looks complete.
-- Do not start planning while gather-context workers still run; stop them first.
-- Do not dispatch implement workers from planning: stages never overlap.
+- Do not start planning while gather-context Explore subagents still run; record them superseded first.
+- Do not dispatch implementation subagents from planning: stages never overlap.
 `,
 } as const

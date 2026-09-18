@@ -47,15 +47,37 @@ describe("pipeline skills registry", () => {
     // Gather closes its stage with a marker no downstream stage may start without.
     expect(GATHER_CONTEXT_SKILL.md).toContain(".complete")
     expect(GATHER_CONTEXT_SKILL.md).toMatch(/no downstream stage.*may start until/i)
-    // Plan refuses a marker-less brief and stops lingering gather workers first.
+    // Plan refuses a marker-less brief and supersedes lingering gather dispatches first.
     expect(PLAN_SKILL.md).toContain("Stage gate 0")
     expect(PLAN_SKILL.md).toContain(".complete")
-    expect(PLAN_SKILL.md).toMatch(/stop.*gather-context explore workers|lingering/i)
+    expect(PLAN_SKILL.md).toMatch(/lingering/i)
+    expect(PLAN_SKILL.md).toMatch(/superseded/i)
     expect(PLAN_SKILL.md).toMatch(/explicit user approval/i)
-    // Implement refuses a plan without an approval record and stops plan workers first.
+    // Implement refuses a plan without an approval record and supersedes plan dispatches first.
     expect(IMPLEMENT_SKILL.md).toContain("Stage gate 0")
     expect(IMPLEMENT_SKILL.md).toContain(".complete")
     expect(IMPLEMENT_SKILL.md).toMatch(/approval record/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/superseded/i)
+  })
+
+  test("stages dispatch only native subagents, never worker-* MCP dispatchers", () => {
+    const forbidden = ["worker-explore", "worker-implement", "worker-review", "worker-plan", "worker-test"]
+    for (const skill of [GATHER_CONTEXT_SKILL, PLAN_SKILL, IMPLEMENT_SKILL, SWE_PIPELINE_SKILL]) {
+      for (const name of forbidden) {
+        expect(skill.md).not.toContain(name)
+      }
+      // Each stage carries the explicit natives-only guard clause.
+      expect(skill.md).toMatch(/never worker-\* MCP dispatchers|ONLY native subagents/i)
+    }
+    // Gather fans out to Explore and verifies with reviewer.
+    expect(GATHER_CONTEXT_SKILL.md).toContain('subagent_type Explore')
+    expect(GATHER_CONTEXT_SKILL.md).toContain('subagent_type reviewer')
+    // Plan follows up with Explore; the skill itself is the planner.
+    expect(PLAN_SKILL.md).toContain('subagent_type Explore')
+    // Implement runs General-Purpose (implementer first on max) and reviews with reviewer.
+    expect(IMPLEMENT_SKILL.md).toContain('General-Purpose')
+    expect(IMPLEMENT_SKILL.md).toContain('subagent_type reviewer')
+    expect(IMPLEMENT_SKILL.md).toContain('implementer')
   })
 
   test("covers every pinned profile and excludes standard", () => {
@@ -148,13 +170,21 @@ describe("skill worker configs (reuse existing dispatchers)", () => {
   })
 })
 
-describe("skill bodies wire timeouts via the real maxWallClockMs arg", () => {
-  test("every worker dispatch names maxWallClockMs with the config value", () => {
-    expect(GATHER_CONTEXT_SKILL.md).toContain("maxWallClockMs 180000")
-    expect(GATHER_CONTEXT_SKILL.md).toContain("maxWallClockMs 300000")
-    expect(PLAN_SKILL.md).toContain("maxWallClockMs 180000")
-    expect(IMPLEMENT_SKILL.md).toContain("maxWallClockMs 600000")
-    expect(IMPLEMENT_SKILL.md).toContain("maxWallClockMs 300000")
+describe("skill bodies carry advisory budgets (Task tool has no maxWallClockMs)", () => {
+  test("each stage states minute-scale budgets as self-discipline, not enforced args", () => {
+    // Natives run under the Task tool, which accepts no wall-clock parameter:
+    // no skill body may instruct passing maxWallClockMs with a value. Mentions
+    // that explain the parameter's absence are fine.
+    for (const skill of [GATHER_CONTEXT_SKILL, PLAN_SKILL, IMPLEMENT_SKILL, SWE_PIPELINE_SKILL]) {
+      expect(skill.md).not.toMatch(/maxWallClockMs \d+/)
+      expect(skill.md).not.toMatch(/pass maxWallClockMs/i)
+    }
+    // Advisory budgets survive as prose: ~3 min gather rounds, ~5 min plan/review, ~10 min tasks.
+    expect(GATHER_CONTEXT_SKILL.md).toMatch(/~3 minutes/i)
+    expect(PLAN_SKILL.md).toMatch(/~3 minutes/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/~10 minutes/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/~5 minutes/i)
+    expect(SWE_PIPELINE_SKILL.md).toMatch(/advisory budgets/i)
   })
 })
 

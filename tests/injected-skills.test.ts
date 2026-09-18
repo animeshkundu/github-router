@@ -187,11 +187,12 @@ describe("gh-swe-pipeline orchestrator (--swe only, separate command)", () => {
     expect(description).toMatch(/use when|use whenever|when the user|before/i)
   })
 
-  test("enforces the strict waterfall: no overlapping stages, stop-then-advance", () => {
+  test("enforces the strict waterfall: no overlapping stages, supersede-then-advance", () => {
     expect(SWE_PIPELINE_SKILL.md).toContain("WATERFALL ONLY")
     expect(SWE_PIPELINE_SKILL.md).toContain(".complete")
     expect(SWE_PIPELINE_SKILL.md).toMatch(/explicit approval/i)
-    expect(SWE_PIPELINE_SKILL.md).toMatch(/stop.*previous stage|stop every still-running worker/i)
+    expect(SWE_PIPELINE_SKILL.md).toMatch(/superseded/i)
+    expect(SWE_PIPELINE_SKILL.md).toMatch(/never worker-\* MCP dispatchers/i)
   })
 })
 
