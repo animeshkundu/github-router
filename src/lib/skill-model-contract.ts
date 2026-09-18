@@ -82,11 +82,16 @@ export const SKILL_BOUNDS = Object.freeze({
   }),
 } as const)
 
-/** Skill names for the pipeline, shared by the registry and tests. */
+/**
+ * Skill names for the pipeline, shared by the registry and tests. The first
+ * three are the waterfall stages; `gh-swe-pipeline` is the opt-in
+ * orchestrator that runs them in strict sequence as a separate command.
+ */
 export const PIPELINE_SKILL_NAMES = [
   "gh-gather-context",
   "gh-plan",
   "gh-implement",
+  "gh-swe-pipeline",
 ] as const
 
 export type PipelineSkillName = (typeof PIPELINE_SKILL_NAMES)[number]

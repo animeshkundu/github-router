@@ -65,10 +65,20 @@ Use these exact tags on every finding and claim:
    - Ask: have we checked primary sources for every load-bearing claim?
    - If no material unknowns remain and the root cause is at least verified-source, stop for saturation.
 
-7. Persist two outputs under .github-router/context/<slug>/.
+7. Persist outputs under .github-router/context/<slug>/ and close the stage.
    - context.md: full brief with the ask decomposition, searches run, worker reports, evidence table, hypothesis, freshness metadata (HEAD commit, working-tree diff hash, timestamp, repo path), residuals, and full citations.
    - context.compact.md: downstream consumable with a one-paragraph ask summary, key files with one-line purposes, critical constraints (APIs, types, patterns, forbidden changes), integration seams, and residual risks.
+   - .complete: stage-completion marker written ONLY after every dispatched explore worker has returned or been recorded as stopped, and both briefs are on disk. No downstream stage (/gh-plan, /gh-implement, /gh-swe-pipeline stage 2+) may start until this marker exists.
    - Downstream phases read by pointer and check freshness instead of re-injecting the whole brief.
+
+## Waterfall rule
+
+This stage owns all explore workers until it completes. Do NOT return while
+any explore worker is still running unless you explicitly record it as
+stopped (saturation reached or its area superseded) with the reason. If the
+brief already saturates the ask, stop remaining workers first (no further
+follow-ups; treat partial output as superseded), then write the marker. A
+plan built on shifting evidence wastes more than a stopped worker costs.
 
 ## Return format
 
@@ -88,5 +98,6 @@ Return a compact brief, not the whole dump:
 - Do not hide open unknowns because the answer looks useful.
 - Do not keep searching after the cap.
 - Do not paste the entire persisted brief into later turns unless the user asks.
+- Do not finish without the .complete marker: a marker-less brief is not a completed stage.
 `,
 } as const

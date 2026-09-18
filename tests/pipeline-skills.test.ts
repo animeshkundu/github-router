@@ -5,9 +5,11 @@ import {
   IMPLEMENT_SKILL,
   PIPELINE_SKILLS,
   PLAN_SKILL,
+  SWE_PIPELINE_SKILL,
 } from "../src/lib/injected-skills"
 import {
   isPipelineSkillProfile,
+  PIPELINE_SKILL_NAMES,
   PIPELINE_SKILL_PROFILES,
   SKILL_BOUNDS,
   SKILL_LUNA_MODEL_ID,
@@ -28,15 +30,32 @@ import { PIPELINE_SKILLS_AWARENESS } from "../src/lib/claude-md-injection"
 import { SKILL_WORKER_CONFIGS } from "../src/lib/worker-dispatch"
 
 describe("pipeline skills registry", () => {
-  test("exports three pipeline skills with matching frontmatter names", () => {
+  test("exports the three stages plus the swe-pipeline orchestrator with matching frontmatter names", () => {
     expect(PIPELINE_SKILLS.map((s) => s.name)).toEqual([
       "gh-gather-context",
       "gh-plan",
       "gh-implement",
+      "gh-swe-pipeline",
     ])
-    for (const skill of [GATHER_CONTEXT_SKILL, PLAN_SKILL, IMPLEMENT_SKILL]) {
+    expect([...PIPELINE_SKILL_NAMES] as Array<string>).toEqual(PIPELINE_SKILLS.map((s) => s.name))
+    for (const skill of [GATHER_CONTEXT_SKILL, PLAN_SKILL, IMPLEMENT_SKILL, SWE_PIPELINE_SKILL]) {
       expect(skill.md.startsWith(`---\nname: ${skill.name}\n`)).toBe(true)
     }
+  })
+
+  test("stages enforce the strict waterfall with completion markers and entry gates", () => {
+    // Gather closes its stage with a marker no downstream stage may start without.
+    expect(GATHER_CONTEXT_SKILL.md).toContain(".complete")
+    expect(GATHER_CONTEXT_SKILL.md).toMatch(/no downstream stage.*may start until/i)
+    // Plan refuses a marker-less brief and stops lingering gather workers first.
+    expect(PLAN_SKILL.md).toContain("Stage gate 0")
+    expect(PLAN_SKILL.md).toContain(".complete")
+    expect(PLAN_SKILL.md).toMatch(/stop.*gather-context explore workers|lingering/i)
+    expect(PLAN_SKILL.md).toMatch(/explicit user approval/i)
+    // Implement refuses a plan without an approval record and stops plan workers first.
+    expect(IMPLEMENT_SKILL.md).toContain("Stage gate 0")
+    expect(IMPLEMENT_SKILL.md).toContain(".complete")
+    expect(IMPLEMENT_SKILL.md).toMatch(/approval record/i)
   })
 
   test("covers every pinned profile and excludes standard", () => {
@@ -147,5 +166,11 @@ describe("CLAUDE.md pipeline awareness", () => {
     expect(PIPELINE_SKILLS_AWARENESS).toContain("200K")
     expect(PIPELINE_SKILLS_AWARENESS).toMatch(/before planning/i)
     expect(PIPELINE_SKILLS_AWARENESS).toMatch(/approval/i)
+  })
+
+  test("names the swe-pipeline orchestrator and forbids overlapping stages", () => {
+    expect(PIPELINE_SKILLS_AWARENESS).toContain("/gh-swe-pipeline")
+    expect(PIPELINE_SKILLS_AWARENESS).toMatch(/strict sequence/i)
+    expect(PIPELINE_SKILLS_AWARENESS).toMatch(/never overlap/i)
   })
 })

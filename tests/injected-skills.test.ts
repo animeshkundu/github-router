@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { ARTIFACT_REVIEW_SKILL, buildArtifactReviewSkill, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, INJECTED_SKILLS, injectedSkillsForLaunch, writeInjectedSkill } from "../src/lib/injected-skills"
+import { ARTIFACT_REVIEW_SKILL, buildArtifactReviewSkill, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, INJECTED_SKILLS, injectedSkillsForLaunch, SWE_PIPELINE_SKILL, writeInjectedSkill } from "../src/lib/injected-skills"
 import { CONDENSED_OPERATING_SEQUENCE, DEFINITION_OF_GREATNESS } from "../src/lib/first-mate/operating-protocol"
 
 function frontmatterFor(md: string): string {
@@ -75,15 +75,19 @@ describe("INJECTED_SKILLS", () => {
     })
     expect(standardWithFirstMate).toEqual(INJECTED_SKILLS)
 
-    // Pinned profiles get the pipeline skills only (all 200K default).
+    // Pinned profiles get the pipeline skills only with --swe (all 200K
+    // default), including the /gh-swe-pipeline orchestrator. Without --swe
+    // they get nothing (first-mate only on max when enabled).
     expect(injectedSkillsForLaunch({
       profileId: "fast",
       workerSkillsActive: true,
       firstMateEnabled: true,
+      sweEnabled: true,
     }).map((skill) => skill.name)).toEqual([
       "gh-gather-context",
       "gh-plan",
       "gh-implement",
+      "gh-swe-pipeline",
     ])
 
     for (const profileId of ["cheap", "cheap1m", "cheapest", "balanced"] as const) {
@@ -91,22 +95,41 @@ describe("INJECTED_SKILLS", () => {
         profileId,
         workerSkillsActive: false,
         firstMateEnabled: false,
+        sweEnabled: true,
       }).map((skill) => skill.name)).toEqual([
         "gh-gather-context",
         "gh-plan",
         "gh-implement",
+        "gh-swe-pipeline",
       ])
+    }
+
+    // --swe absent (or explicitly false): no pipeline slash commands.
+    for (const profileId of ["fast", "cheap", "cheap1m", "cheapest", "balanced"] as const) {
+      expect(injectedSkillsForLaunch({
+        profileId,
+        workerSkillsActive: false,
+        firstMateEnabled: false,
+      })).toEqual([])
+      expect(injectedSkillsForLaunch({
+        profileId,
+        workerSkillsActive: false,
+        firstMateEnabled: false,
+        sweEnabled: false,
+      })).toEqual([])
     }
 
     const max = injectedSkillsForLaunch({
       profileId: "max",
       workerSkillsActive: true,
       firstMateEnabled: true,
+      sweEnabled: true,
     })
     expect(max.map((skill) => skill.name)).toEqual([
       "gh-gather-context",
       "gh-plan",
       "gh-implement",
+      "gh-swe-pipeline",
       "gh-first-mate",
       "gh-first-mate-scaffold",
       "gh-first-mate-operate",
@@ -122,17 +145,53 @@ describe("INJECTED_SKILLS", () => {
       profileId: "max",
       workerSkillsActive: true,
       firstMateEnabled: false,
+      sweEnabled: true,
     }).map((skill) => skill.name)).toEqual([
       "gh-gather-context",
       "gh-plan",
       "gh-implement",
+      "gh-swe-pipeline",
     ])
+    // Max without --swe keeps first-mate skills but drops the pipeline.
+    expect(injectedSkillsForLaunch({
+      profileId: "max",
+      workerSkillsActive: true,
+      firstMateEnabled: true,
+    }).map((skill) => skill.name)).toEqual([
+      "gh-first-mate",
+      "gh-first-mate-scaffold",
+      "gh-first-mate-operate",
+      "gh-first-mate-conduct",
+    ])
+    expect(injectedSkillsForLaunch({
+      profileId: "max",
+      workerSkillsActive: true,
+      firstMateEnabled: false,
+    })).toEqual([])
 
     expect(injectedSkillsForLaunch({
       profileId: "standard",
       workerSkillsActive: false,
       firstMateEnabled: true,
     })).toEqual([])
+  })
+})
+
+describe("gh-swe-pipeline orchestrator (--swe only, separate command)", () => {
+  test("frontmatter name matches the registry name and the description is triggerable", () => {
+    expect(SWE_PIPELINE_SKILL.name).toBe("gh-swe-pipeline")
+    expect(SWE_PIPELINE_SKILL.md.startsWith(`---\nname: ${SWE_PIPELINE_SKILL.name}\n`)).toBe(true)
+    const description = descriptionFor(SWE_PIPELINE_SKILL.md)
+    expect(description.length).toBeLessThanOrEqual(1024)
+    expect(description).not.toMatch(/^(?:I|You)\s/)
+    expect(description).toMatch(/use when|use whenever|when the user|before/i)
+  })
+
+  test("enforces the strict waterfall: no overlapping stages, stop-then-advance", () => {
+    expect(SWE_PIPELINE_SKILL.md).toContain("WATERFALL ONLY")
+    expect(SWE_PIPELINE_SKILL.md).toContain(".complete")
+    expect(SWE_PIPELINE_SKILL.md).toMatch(/explicit approval/i)
+    expect(SWE_PIPELINE_SKILL.md).toMatch(/stop.*previous stage|stop every still-running worker/i)
   })
 })
 

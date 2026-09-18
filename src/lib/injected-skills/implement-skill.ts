@@ -20,6 +20,21 @@ staged: a Luna max pass first, then a Sol medium pass only for major issues.
 - Maximum review-fix cycles: 2.
 - Worktrees are auto-removed on success and retained on failure for debugging.
 
+## Stage gate 0 (do this BEFORE any implementation)
+
+1. Verify the plan stage is finished: .github-router/plans/<slug>/plan.md AND
+   its .complete marker both exist, with an explicit user-approval record. If
+   any is missing, STOP: do not implement an unapproved plan. Finish or
+   re-invoke planning first.
+2. Check freshness: if HEAD or the working-tree diff hash moved since the
+   plan was approved, re-verify stale load-bearing assumptions before
+   dispatching workers.
+3. Stop the previous stage: send no further follow-ups to any lingering plan
+   workers (worker-plan follow-ups) and record them as stopped with the
+   reason. Implementing while planning still runs builds on a moving target
+   and wastes both stages. Only advance once every plan worker has returned
+   or is recorded as stopped.
+
 ## Procedure
 
 1. Parse the approved plan.
@@ -66,9 +81,10 @@ Return:
 
 ## Non-goals
 
-- Do not start without a user-approved plan.md.
+- Do not start without a user-approved plan.md plus its .complete approval record.
+- Do not start while plan workers still run; stop them first.
 - Do not serialize work that has no data dependency; independent tasks in a group run concurrently.
-- Do not nest workflow invocations: workers are internal sessions and must not re-invoke /gh-implement.
+- Do not nest workflow invocations: workers are internal sessions and must not re-invoke /gh-implement (or any /gh-* pipeline skill).
 - Do not claim completeness when retries or review cycles are exhausted with open failures.
 `,
 } as const

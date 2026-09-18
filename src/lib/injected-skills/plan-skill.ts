@@ -20,6 +20,19 @@ implementation.
 - A freshness-stamped context brief from /gh-gather-context, or equivalent context.
 - Read context.compact.md first; read context.md sections on demand (residual unknowns, evidence table).
 
+## Stage gate 0 (do this BEFORE any planning)
+
+1. Verify the context stage is finished: .github-router/context/<slug>/.complete
+   exists. If the marker is missing, STOP: do not plan on a partial brief.
+   Finish or re-invoke gathering first.
+2. Check freshness: if HEAD or the working-tree diff hash moved since the
+   brief's stamp, re-verify stale load-bearing claims before using them.
+3. Stop the previous stage: send no further follow-ups to any lingering
+   gather-context explore workers and record them as stopped with the reason.
+   Planning while explore workers still run builds on shifting evidence and
+   wastes both stages. Only advance once every gather worker has returned or
+   is recorded as stopped.
+
 ## Hard bounds
 
 - Maximum tasks: 20.
@@ -66,6 +79,7 @@ implementation.
    - Present the goal, acceptance criteria, task-to-group map, per-task blind spot killed, residual risks, and cost estimate.
    - If the user rejects scope or cost, downshift to the smallest plan that kills the important blind spots.
    - Do not proceed to implementation without approval.
+   - Write .github-router/plans/<slug>/.complete ONLY after explicit user approval, recording the approval in the marker. A plan without an approval record is NOT complete, and no downstream stage (/gh-implement, /gh-swe-pipeline stage 3) may start without it.
 
 ## Return format
 
@@ -82,5 +96,7 @@ Return:
 - Do not edit implementation files while planning; in plan mode, produce the plan and acceptance criteria only.
 - Do not present judgment-only conclusions as executable guarantees.
 - Do not hide open unknowns because the plan looks complete.
+- Do not start planning while gather-context workers still run; stop them first.
+- Do not dispatch implement workers from planning: stages never overlap.
 `,
 } as const

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { INJECTED_SKILLS } from "../src/lib/injected-skills"
+import { INJECTED_SKILLS, PIPELINE_SKILLS } from "../src/lib/injected-skills"
 
 const REAL_MCP_TOOLS = new Set([
   "mcp__search__code",
@@ -54,7 +54,9 @@ describe("injected skills MCP tool drift guard", () => {
   test("every referenced mcp__<group>__<tool> token is a real allowlisted tool", () => {
     const offenders: string[] = []
 
-    for (const skill of INJECTED_SKILLS) {
+    // PIPELINE_SKILLS covers the --swe-only gh-swe-pipeline orchestrator,
+    // which is intentionally not part of the standard INJECTED_SKILLS set.
+    for (const skill of [...INJECTED_SKILLS, ...PIPELINE_SKILLS]) {
       const tokens = skill.md.match(/mcp__[a-z-]+__[a-z_]+/g) ?? []
       for (const token of tokens) {
         if (!REAL_MCP_TOOLS.has(token)) offenders.push(`${skill.name}: ${token}`)

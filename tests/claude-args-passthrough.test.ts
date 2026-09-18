@@ -28,6 +28,11 @@ describe("collectChildPassthroughArgs", () => {
     expect(collect(["-m", "gpt-5.5", "--no-auto-update", "--stealth"])).toEqual([])
   })
 
+  test("--swe is consumed by github-router and never forwarded to the child", () => {
+    expect(collect(["-m", "cheapest", "--swe", "--print", "hi"])).toEqual(["--print", "hi"])
+    expect(collect(["--swe"])).toEqual([])
+  })
+
   test("--output-format and other unknown claude flags flow through", () => {
     expect(
       collect(["--output-format", "stream-json", "--print", "hi"]),

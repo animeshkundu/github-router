@@ -269,6 +269,12 @@ export const claudeArgs = {
     description:
       "Check the npm registry for a newer Claude Code version on launch and warn if stale (non-blocking ~500ms cost). Set to false (--no-update-check) to skip the check entirely (useful for offline/CI). Independent from --auto-update: --no-update-check implies no auto-install (nothing to install since we never check).",
   },
+  swe: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Enable the SWE pipeline skills (gh-gather-context, gh-plan, gh-implement, gh-swe-pipeline) for a structured software-engineering workflow: bounded context gathering, then a reviewed plan, then parallel implementation. Pinned profiles only; without this flag the pipeline skills and their CLAUDE.md guidance are not injected.",
+  },
 } satisfies ArgsDef
 
 /**
@@ -387,6 +393,11 @@ export const claude = defineCommand({
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
     const requestedLaunchProfileId = resolveLaunchProfile(args.model)
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
+    // Opt-in SWE pipeline: the gather-context / plan / implement /
+    // swe-pipeline skills, their slash commands, and their CLAUDE.md +
+    // system-prompt mentions are injected ONLY when `--swe` is supplied.
+    // Without it, pinned profiles launch with zero pipeline surface.
+    const sweEnabled = (args as Record<string, unknown>)["swe"] === true
 
     // Fast and max native agents depend on the generated MCP runtime and their mandatory
     // Task/Agent ACL hook. Refuse this combination before setup or any runtime
@@ -1497,15 +1508,16 @@ export const claude = defineCommand({
         // Worker/orchestration skills and their prompt-submit steering belong
         // only to the standard profile. Pinned profiles (fast, max, cheap
         // family, balanced) intentionally omit THOSE slash commands even when
-        // the worker catalog gate is otherwise open, but they get the
+        // the worker catalog gate is otherwise open; they get the SWE
         // pipeline slash commands (/gh-gather-context, /gh-plan,
-        // /gh-implement) via injectedSkillsForLaunch regardless of
-        // workerSkillsActive.
+        // /gh-implement, /gh-swe-pipeline) via injectedSkillsForLaunch ONLY
+        // when `--swe` was supplied, regardless of workerSkillsActive.
         const workerSkillsActive = workerToolsEnabled() && launchProfileId === "standard"
         const skillsToWrite = injectedSkillsForLaunch({
           profileId: launchProfileId,
           workerSkillsActive,
           firstMateEnabled: agentToolsEnabled(),
+          sweEnabled,
         })
         let skillsWritten = 0
         for (const s of skillsToWrite) {
@@ -2043,6 +2055,7 @@ export const claude = defineCommand({
     const operatingDefaultsDigest = buildOperatingDefaultsDigest({
       profile: launchProfileId,
       astraAvailable,
+      sweEnabled,
     })
     extraArgs.push(
       "--append-system-prompt",
@@ -2062,6 +2075,7 @@ export const claude = defineCommand({
           semanticSearchAvailable: semanticSearchOptedIn(),
           groupKeys: operatingGroupKeys,
           peersKey: operatingGroupKeys.peers,
+          sweEnabled,
         }),
       )
     } catch (err) {

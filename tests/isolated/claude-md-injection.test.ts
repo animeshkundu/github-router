@@ -1272,3 +1272,42 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
     expect(maxDigest).not.toContain(inventoryDetail)
   }
 })
+
+test("sweEnabled:false omits every pipeline-skill reference from directive and digest", () => {
+  const skillRefs = [
+    "/gh-gather-context",
+    "/gh-plan",
+    "/gh-implement",
+    "/gh-swe-pipeline",
+    "Pipeline skills",
+  ]
+  for (const profile of ["fast", "cheap", "cheap1m", "cheapest", "balanced", "max"] as const) {
+    const directive = buildOperatingDefaultsDirective({ profile, sweEnabled: false })
+    const digest = buildOperatingDefaultsDigest({ profile, sweEnabled: false })
+    for (const ref of skillRefs) {
+      expect(directive).not.toContain(ref)
+      expect(digest).not.toContain(ref)
+    }
+    // The rest of the prose survives: only the pipeline block is gated.
+    expect(directive).toContain("Operating defaults")
+    expect(digest).toContain("Operating defaults")
+  }
+})
+
+test("sweEnabled:true (and legacy absent) keeps the pipeline awareness text", () => {
+  const skillRefs = ["/gh-gather-context", "/gh-plan", "/gh-implement"]
+  for (const profile of ["fast", "cheapest", "max"] as const) {
+    for (const opts of [{ profile, sweEnabled: true }, { profile }] as const) {
+      const directive = buildOperatingDefaultsDirective(opts)
+      const digest = buildOperatingDefaultsDigest(opts)
+      for (const ref of skillRefs) {
+        expect(directive).toContain(ref)
+        expect(digest).toContain(ref)
+      }
+    }
+  }
+  // The orchestrator is named in the full directive's gated block.
+  expect(
+    buildOperatingDefaultsDirective({ profile: "fast", sweEnabled: true }),
+  ).toContain("/gh-swe-pipeline")
+})
