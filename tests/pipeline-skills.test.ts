@@ -47,15 +47,81 @@ describe("pipeline skills registry", () => {
     // Gather closes its stage with a marker no downstream stage may start without.
     expect(GATHER_CONTEXT_SKILL.md).toContain(".complete")
     expect(GATHER_CONTEXT_SKILL.md).toMatch(/no downstream stage.*may start until/i)
-    // Plan refuses a marker-less brief and stops lingering gather workers first.
+    // Plan refuses a marker-less brief and supersedes lingering gather dispatches first.
     expect(PLAN_SKILL.md).toContain("Stage gate 0")
     expect(PLAN_SKILL.md).toContain(".complete")
-    expect(PLAN_SKILL.md).toMatch(/stop.*gather-context explore workers|lingering/i)
+    expect(PLAN_SKILL.md).toMatch(/lingering/i)
+    expect(PLAN_SKILL.md).toMatch(/superseded/i)
     expect(PLAN_SKILL.md).toMatch(/explicit user approval/i)
-    // Implement refuses a plan without an approval record and stops plan workers first.
+    // Implement refuses a plan without an approval record and supersedes plan dispatches first.
     expect(IMPLEMENT_SKILL.md).toContain("Stage gate 0")
     expect(IMPLEMENT_SKILL.md).toContain(".complete")
     expect(IMPLEMENT_SKILL.md).toMatch(/approval record/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/superseded/i)
+  })
+
+  test("stages dispatch only native subagents, never worker-* MCP dispatchers", () => {
+    const forbidden = ["worker-explore", "worker-implement", "worker-review", "worker-plan", "worker-test"]
+    for (const skill of [GATHER_CONTEXT_SKILL, PLAN_SKILL, IMPLEMENT_SKILL, SWE_PIPELINE_SKILL]) {
+      for (const name of forbidden) {
+        expect(skill.md).not.toContain(name)
+      }
+      // Each stage carries the explicit natives-only guard clause.
+      expect(skill.md).toMatch(/never worker-\* MCP dispatchers|ONLY native subagents/i)
+    }
+    // Gather fans out to Explore only: no reviewer dispatch in this stage.
+    // Verification is Explore evidence plus targeted follow-up reads.
+    expect(GATHER_CONTEXT_SKILL.md).toContain('subagent_type Explore')
+    expect(GATHER_CONTEXT_SKILL.md).not.toContain('subagent_type reviewer')
+    expect(GATHER_CONTEXT_SKILL.md).toMatch(/do not dispatch a reviewer/i)
+    // Plan dispatches the native Plan subagent for non-trivial work (which
+    // self-serves Explore per its delegation graph); trivial asks exit planless.
+    expect(PLAN_SKILL.md).toContain('subagent_type Plan')
+    expect(PLAN_SKILL.md).toMatch(/trivial/i)
+    expect(PLAN_SKILL.md).toMatch(/do not dispatch plan for a trivial ask/i)
+    expect(PLAN_SKILL.md).toMatch(/plan dispatch brief/i)
+    expect(PLAN_SKILL.md).toMatch(/file:line/i)
+    // Implement runs General-Purpose (implementer first on max); reviewer is
+    // conditional on low-confidence validation or complex and risky changes.
+    expect(IMPLEMENT_SKILL.md).toContain('General-Purpose')
+    expect(IMPLEMENT_SKILL.md).toContain('subagent_type reviewer')
+    expect(IMPLEMENT_SKILL.md).toContain('implementer')
+    expect(IMPLEMENT_SKILL.md).toMatch(/reviewer.*ONLY when/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/record the skip/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/do not dispatch a reviewer by default/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/confidence verdict/i)
+  })
+
+  test("frontmatter carries trigger-oriented descriptions plus structured routing fields", () => {
+    for (const skill of [GATHER_CONTEXT_SKILL, PLAN_SKILL, IMPLEMENT_SKILL]) {
+      const lines = skill.md.split("\n")
+      const fm = lines.slice(1, lines.findIndex((l, i) => i > 0 && l === "---")).join("\n")
+      // Single-line description (multi-line block scalars break descriptionFor).
+      const desc = fm.match(/^description:\s*(.+)$/m)?.[1] ?? ""
+      expect(desc.length).toBeGreaterThan(0)
+      expect(desc.length).toBeLessThanOrEqual(300)
+      expect(desc).toMatch(/use when/i)
+      expect(desc).toMatch(/not for/i)
+      // Structured routing fields the lead can read without parsing prose.
+      for (const field of ["requires:", "produces:", "consumes:", "excludes:"]) {
+        expect(fm).toContain(field)
+      }
+    }
+    // Stage-appropriate contracts.
+    expect(GATHER_CONTEXT_SKILL.md).toContain("produces: [context.md, context.compact.md, .complete]")
+    expect(PLAN_SKILL.md).toContain("requires: [fresh context.md with .complete marker]")
+    expect(IMPLEMENT_SKILL.md).toContain("requires: [approved plan.md with .complete marker]")
+  })
+
+  test("bodies carry cheaper-model guidance: output cost, plain-directive briefs", () => {
+    // Luna output costs 6x input: every stage must demand compact returns.
+    expect(GATHER_CONTEXT_SKILL.md).toMatch(/6x input/i)
+    expect(GATHER_CONTEXT_SKILL.md).toMatch(/never full file contents/i)
+    // Gemini-run subagents suppress tool calls on reflective first-person
+    // prompts: dispatch briefs must be plain directives.
+    expect(PLAN_SKILL.md).toMatch(/never reflective first-person prose/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/never reflective first-person prose/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/no full-file echoes/i)
   })
 
   test("covers every pinned profile and excludes standard", () => {
@@ -148,13 +214,22 @@ describe("skill worker configs (reuse existing dispatchers)", () => {
   })
 })
 
-describe("skill bodies wire timeouts via the real maxWallClockMs arg", () => {
-  test("every worker dispatch names maxWallClockMs with the config value", () => {
-    expect(GATHER_CONTEXT_SKILL.md).toContain("maxWallClockMs 180000")
-    expect(GATHER_CONTEXT_SKILL.md).toContain("maxWallClockMs 300000")
-    expect(PLAN_SKILL.md).toContain("maxWallClockMs 180000")
-    expect(IMPLEMENT_SKILL.md).toContain("maxWallClockMs 600000")
-    expect(IMPLEMENT_SKILL.md).toContain("maxWallClockMs 300000")
+describe("skill bodies carry advisory budgets (Task tool has no maxWallClockMs)", () => {
+  test("each stage states minute-scale budgets as self-discipline, not enforced args", () => {
+    // Natives run under the Task tool, which accepts no wall-clock parameter:
+    // no skill body may instruct passing maxWallClockMs with a value. Mentions
+    // that explain the parameter's absence are fine.
+    for (const skill of [GATHER_CONTEXT_SKILL, PLAN_SKILL, IMPLEMENT_SKILL, SWE_PIPELINE_SKILL]) {
+      expect(skill.md).not.toMatch(/maxWallClockMs \d+/)
+      expect(skill.md).not.toMatch(/pass maxWallClockMs/i)
+    }
+    // Advisory budgets survive as prose: ~3 min gather rounds, ~5 min Plan
+    // dispatch and reviews, ~10 min implement tasks.
+    expect(GATHER_CONTEXT_SKILL.md).toMatch(/~3 minutes/i)
+    expect(PLAN_SKILL.md).toMatch(/~5 minutes/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/~10 minutes/i)
+    expect(IMPLEMENT_SKILL.md).toMatch(/~5 minutes/i)
+    expect(SWE_PIPELINE_SKILL.md).toMatch(/advisory budgets/i)
   })
 })
 
@@ -172,5 +247,6 @@ describe("CLAUDE.md pipeline awareness", () => {
     expect(PIPELINE_SKILLS_AWARENESS).toContain("/gh-swe-pipeline")
     expect(PIPELINE_SKILLS_AWARENESS).toMatch(/strict sequence/i)
     expect(PIPELINE_SKILLS_AWARENESS).toMatch(/never overlap/i)
+    expect(PIPELINE_SKILLS_AWARENESS).toMatch(/reviewer only on low-confidence/i)
   })
 })

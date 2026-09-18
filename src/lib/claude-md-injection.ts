@@ -144,19 +144,23 @@ const STYLE_DIRECTIVE =
  * `/gh-swe-pipeline`) injected ONLY for `--swe` launches on pinned profiles
  * (fast, max, cheap, cheap1m, cheapest, balanced). Standard is intentionally
  * excluded. Without `--swe` the skill files are not written and this text is
- * not referenced. All skill models run at the 200K default window (bare
- * slugs, no 1M accounting): gatherContext uses Luna high for the lead and
- * every explore worker (bounded: 3 rounds, 6 workers per round); plan uses
- * Sol medium; implement uses Luna max for the lead and every task worker
- * (bounded: 8 concurrent, 2 retries per task, isolated worktrees); review is
- * staged Luna max then Sol medium for major issues only.
+ * not referenced. Stages dispatch ONLY native subagents present on the
+ * profile roster (Explore, Plan, General-Purpose, reviewer, implementer
+ * where provided), never worker-* MCP dispatchers. All roles run at the
+ * 200K default window (bare slugs, no 1M accounting) with advisory budgets:
+ * gather ~3 min per round (3 rounds max, 6 Explore per round); plan ~5 min
+ * via the profile-pinned Plan subagent (trivial asks exit planless);
+ * implement ~10 min per task (8 concurrent max, worktree:true only when
+ * parallel tasks need isolation); reviewer only on low-confidence or complex
+ * and risky changes, plus a General-Purpose fix pass for major reviewer
+ * findings.
  */
 export const PIPELINE_SKILLS_AWARENESS =
-  "Pipeline skills (all 200K default context). "
-  + "Prefer `/gh-swe-pipeline`: it runs the stages below in strict sequence, each completing before the next starts, with user approval before implementation. Stages in order: "
-  + "(1) `/gh-gather-context` BEFORE planning when grounded context is needed: decomposes the ask, runs lexical search, fans out to bounded Luna-high explore workers, writes context.md plus context.compact.md; "
-  + "(2) `/gh-plan` AFTER context and BEFORE implementation: ingests the brief with Sol-medium, produces a scoped modular ordered plan.md, surfaces open questions, waits for user approval; "
-  + "(3) `/gh-implement` AFTER plan approval: bounded parallel Luna-max task workers in isolated worktrees (each self-tests and self-reviews), aggregates a unified diff, runs staged review (Luna max, then Sol medium for major issues only). "
+  "Pipeline skills (all 200K default context, native subagents only, never worker-*). "
+  + "Prefer `/gh-swe-pipeline`: strict sequence, each stage completing before the next starts, user approval before implementation. Stages in order: "
+  + "(1) `/gh-gather-context` BEFORE planning when grounded context is needed: lexical search plus bounded Explore subagents (~3 min each, 3 rounds max), writes context.md plus context.compact.md; "
+  + "(2) `/gh-plan` AFTER context and BEFORE implementation: native Plan subagent plans non-trivial asks (trivial exits planless), ordered plan.md (~5 min), open questions, waits for user approval; "
+  + "(3) `/gh-implement` AFTER plan approval: bounded parallel General-Purpose subagents (implementer first on max; worktree:true if parallel tasks need isolation), reviewer only on low-confidence or risky changes, plus fix pass for major findings. "
   + "Skip for trivial work. Never implement without an approved plan. Never overlap stages."
 
 /** Which of the conditionally-emitted natives this launch actually wrote.
@@ -539,7 +543,7 @@ export function buildOperatingDefaultsDigest(
   // for callers without a flag concept.
   const digestPipelineSentence = opts.sweEnabled === false
     ? ""
-    : "Pipeline skills (all 200K default): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (waits for user approval), `/gh-implement` after approval with bounded parallel workers and staged review. Skip for trivial work.\n\n"
+    : "Pipeline skills (all 200K default, native subagents only): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (trivial exits planless, waits for user approval), `/gh-implement` after approval with parallel subagents and conditional reviewer. Skip for trivial work.\n\n"
   if (opts.profile === "max") {
     return (
       "## Operating defaults (these layer with the user's direction and the domain's standards as addons: follow all three; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
