@@ -2,12 +2,14 @@
  * `github-router index` — build the semantic code-search index in the
  * foreground, without starting the proxy (`start`/`claude`/`codex`).
  *
- * Phase 4a: drives the CURRENT colgrep backend (foreground `init` with
+ * Phase 4a: drives the CURRENT colbert backend (foreground `init` with
  * progress). The explicit invocation IS the opt-in — `--search` is not
  * required — but `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1` still hard-disables
- * (building an index that can never be served is pointless). Phase 2 will
- * repoint this command at the next-plaid service backend; the CLI surface
- * (workspace/status/timeout/exit codes) stays stable across that switch.
+ * (building an index that can never be served is pointless). With
+ * `GH_ROUTER_SEMANTIC_BACKEND=service`, the command additionally
+ * pre-pulls the server binary for the auto-detected variant (GPU→cuda,
+ * else cpu); the CLI surface (workspace/status/timeout/exit codes) stays
+ * stable across backends.
  *
  * Exit codes: 0 = fresh or successfully built; 1 = provision/build
  * failure; 2 = usage error (bad workspace, hard-disabled).
@@ -28,8 +30,12 @@ import {
   validateIndexIntegrity,
 } from "~/lib/colbert/index-store";
 import { registerColbertExitHandlers } from "~/lib/colbert/lifecycle";
-import { provisionColbert } from "~/lib/colbert/provision";
+import { provisionColbert, provisionNextPlaidServer } from "~/lib/colbert/provision";
 import { kickBackgroundInit, waitForInit } from "~/lib/colbert/runner";
+import {
+  selectServerVariant,
+  semanticBackend,
+} from "~/lib/colbert/service-backend";
 import { PATHS } from "~/lib/paths";
 import { parseBoolEnv } from "~/lib/exec";
 
@@ -195,6 +201,26 @@ export const indexCmd = defineCommand({
       consola.error("index: provision threw:", err);
       process.exitCode = 1;
       return;
+    }
+
+    // Service backend selected: pre-pull the server binary for the
+    // auto-detected variant now, so the first query doesn't pay the
+    // download + cold start. Best-effort — a miss just defers to the
+    // lazy provision on first query (or the colgrep/lexical fallback).
+    if (semanticBackend() === "service") {
+      try {
+        const variant = await selectServerVariant();
+        const server = await provisionNextPlaidServer(variant);
+        if (server.path) {
+          consola.info(`index: service backend ready (${variant}: ${server.path})`);
+        } else {
+          consola.warn(
+            `index: service binary unavailable (${server.reason ?? "unknown"}) — first query provisions on demand`,
+          );
+        }
+      } catch (err) {
+        consola.warn("index: service provision skipped:", err);
+      }
     }
 
     const first = await freshnessVerdict(workspace);

@@ -15,6 +15,8 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
+import * as realProvision from "~/lib/colbert/provision"
+
 const provisionColbertMock = mock(async () => ({ status: "ready" as const }))
 const kickBackgroundInitMock = mock((_workspace: string) => {})
 const waitForInitMock = mock(async (_workspace: string) => {})
@@ -33,6 +35,10 @@ const consolaSuccessMock = mock((..._args: Array<unknown>) => {})
 const consolaDebugMock = mock((..._args: Array<unknown>) => {})
 
 mock.module("~/lib/colbert/provision", () => ({
+  // Spread-real: service-backend (imported for service-variant pre-pull)
+  // reads model/ORT/server-path helpers from this module — stubbing only
+  // provisionColbert breaks its named imports.
+  ...realProvision,
   provisionColbert: provisionColbertMock,
 }))
 
@@ -43,6 +49,10 @@ mock.module("~/lib/colbert/runner", () => ({
 
 mock.module("~/lib/colbert/lifecycle", () => ({
   registerColbertExitHandlers: registerExitHandlersMock,
+  // service-backend (imported for service-variant pre-pull) reaches the
+  // lifecycle module through service.ts — keep the mock complete.
+  trackChild: () => {},
+  untrackChild: () => {},
 }))
 
 mock.module("~/lib/colbert/index-store", () => ({
@@ -52,6 +62,12 @@ mock.module("~/lib/colbert/index-store", () => ({
   indexDirSignature: () => ({ kind: "not-created" as const }),
   readColbertMeta: async () => null,
   validateIndexIntegrity: () => ({ verdict: "not-built" as const }),
+  // service-backend (imported for service-variant pre-pull) reads these —
+  // keep the mock complete (index-cmd tests never hit service paths).
+  canonicalWorkspace: (ws: string) => ws,
+  gitDeltaFiles: async () => ({ files: [], truncated: false }),
+  gitState: async () => ({ isRepo: false as const }),
+  serveStaleMaxFiles: () => 200,
 }))
 
 mock.module("consola", () => ({
