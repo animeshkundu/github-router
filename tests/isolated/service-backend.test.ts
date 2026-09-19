@@ -32,6 +32,8 @@ interface FakeDoc {
 const fakeIndices = new Map<string, Array<FakeDoc>>()
 let startCalls = 0
 let failStart = false
+let updateCalls = 0
+const deletedFiles: Array<string> = []
 
 mock.module("../../src/lib/colbert/service", () => ({
   indexNameForWorkspace: (ws: string) => `ws-mock-${ws.length}`,
@@ -43,7 +45,15 @@ mock.module("../../src/lib/colbert/service", () => ({
     return {
       url: "http://127.0.0.1:9",
       client: {
-        health: async () => ({ ok: true, indices: [] }),
+        health: async () => ({
+          ok: true,
+          indices: [...fakeIndices.entries()].map(([name, docs]) => ({
+            name,
+            num_documents: docs.length,
+            num_embeddings: docs.length,
+            dimension: 48,
+          })),
+        }),
         ensureIndex: async (name: string) => {
           if (!fakeIndices.has(name)) fakeIndices.set(name, [])
         },
@@ -52,6 +62,7 @@ mock.module("../../src/lib/colbert/service", () => ({
           documents: Array<string>,
           metadata: Array<Record<string, unknown>>,
         ) => {
+          updateCalls += documents.length
           const docs = fakeIndices.get(name) ?? []
           documents.forEach((text, i) => docs.push({ text, metadata: metadata[i] ?? {} }))
           fakeIndices.set(name, docs)
@@ -61,6 +72,7 @@ mock.module("../../src/lib/colbert/service", () => ({
           const docs = fakeIndices.get(name) ?? []
           // Supports only the file-equality predicate the backend uses.
           const file = String(parameters[0] ?? "")
+          deletedFiles.push(file)
           fakeIndices.set(name, docs.filter((d) => d.metadata.file !== file))
         },
         search: async (name: string, query: string, opts: { topK?: number } = {}) => {
@@ -137,6 +149,8 @@ beforeEach(async () => {
   fakeIndices.clear()
   startCalls = 0
   failStart = false
+  updateCalls = 0
+  deletedFiles.length = 0
   delete process.env.GH_ROUTER_SEMANTIC_BACKEND
   delete process.env.GH_ROUTER_NEXTPLAID_BIN
   await mkModelDir()
@@ -144,6 +158,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   const b = await import("../../src/lib/colbert/service-backend")
+  await b.__waitForServicePopulateForTests()
   b.__resetServiceSingletonForTests()
   b.__resetServicePopulateForTests()
   delete process.env.GH_ROUTER_SEMANTIC_BACKEND
@@ -282,5 +297,118 @@ describe("server variant selection (cuda with cpu fallback)", () => {
       expect(fsSync.existsSync(r.binary)).toBe(true)
       expect(r.cuda).toBe(false)
     }
+  })
+})
+
+describe("delta populate", () => {
+  beforeEach(() => {
+    process.env.GH_ROUTER_NEXTPLAID_BIN = process.execPath
+  })
+
+  async function mkRepo3(name: string): Promise<string> {
+    const ws = fsSync.realpathSync(await fs.mkdtemp(path.join(TEST_HOME, `${name}-`)))
+    await fs.mkdir(path.join(ws, "src"), { recursive: true })
+    await fs.writeFile(path.join(ws, "src", "auth.ts"), "export function alphaOne() { return 1 }\n")
+    await fs.writeFile(path.join(ws, "src", "util.ts"), "export function betaTwo() { return 2 }\n")
+    await fs.writeFile(path.join(ws, "src", "stale.ts"), "export function gammaThree() { return 3 }\n")
+    git(ws, ["init", "-q"])
+    git(ws, ["config", "user.email", "t@example.invalid"])
+    git(ws, ["config", "user.name", "t"])
+    git(ws, ["add", "-A"])
+    git(ws, ["commit", "-qm", "a"])
+    return ws
+  }
+
+  function docsFor(file: string): Array<{ text: string }> {
+    return [...fakeIndices.values()].flat().filter((d) => d.metadata.file === file)
+  }
+
+  test("second populate with no changes → unchanged, zero re-embeds", async () => {
+    const ws = await mkRepo3("svcdelta")
+    const first = await backend.populateWorkspace(ws, {})
+    expect(first.status).toBe("ready")
+    expect(first.updatedFiles).toBe(3)
+    const updatesAfterFirst = updateCalls
+    expect(updatesAfterFirst).toBeGreaterThan(0)
+
+    const meta = await backend.readServiceMeta(ws)
+    expect(Object.keys(meta?.fileHashes ?? {})).toHaveLength(3)
+    // First populate deletes-then-updates each file (no-ops on an empty
+    // index); the point is the second run adds none.
+    const deletesAfterFirst = deletedFiles.length
+
+    const second = await backend.populateWorkspace(ws, {})
+    expect(second.status).toBe("unchanged")
+    expect(second.unchanged).toBe(3)
+    expect(updateCalls).toBe(updatesAfterFirst)
+    expect(deletedFiles).toHaveLength(deletesAfterFirst)
+  })
+
+  test("changed file re-indexed once; unchanged files never duplicated", async () => {
+    const ws = await mkRepo3("svcdelta2")
+    await backend.populateWorkspace(ws, {})
+    const keptBefore = docsFor("src/util.ts").length
+    expect(keptBefore).toBeGreaterThan(0)
+
+    await fs.writeFile(
+      path.join(ws, "src", "auth.ts"),
+      "export function alphaOneRenamed() { return 100 }\nexport function alphaExtra() { return 101 }\n",
+    )
+    const r = await backend.populateWorkspace(ws, {})
+    expect(r.status).toBe("ready")
+    expect(r.updatedFiles).toBe(1)
+    expect(r.removedFiles).toBe(0)
+    // Unchanged file's documents are byte-identical in count (no duplicates).
+    expect(docsFor("src/util.ts")).toHaveLength(keptBefore)
+    // Changed file serves the new symbol.
+    expect(docsFor("src/auth.ts").some((d) => d.text.includes("alphaOneRenamed"))).toBe(true)
+  })
+
+  test("removed file documents deleted; added file indexed", async () => {
+    const ws = await mkRepo3("svcdelta3")
+    await backend.populateWorkspace(ws, {})
+    expect(docsFor("src/stale.ts").length).toBeGreaterThan(0)
+
+    await fs.rm(path.join(ws, "src", "stale.ts"))
+    await fs.writeFile(path.join(ws, "src", "fresh.ts"), "export function deltaFour() { return 4 }\n")
+    const r = await backend.populateWorkspace(ws, {})
+    expect(r.status).toBe("ready")
+    expect(r.removedFiles).toBe(1)
+    expect(docsFor("src/stale.ts")).toHaveLength(0)
+    expect(docsFor("src/fresh.ts").length).toBeGreaterThan(0)
+    expect(deletedFiles).toContain("src/stale.ts")
+  })
+
+  test("dry-run classifies without touching the server or sidecar", async () => {
+    const ws = await mkRepo3("svcdry")
+    await backend.populateWorkspace(ws, {})
+    const docsBefore = [...fakeIndices.values()].flat().length
+    const metaBefore = await backend.readServiceMeta(ws)
+
+    await fs.writeFile(path.join(ws, "src", "auth.ts"), "export function alphaChanged() { return 9 }\n")
+    const r = await backend.populateWorkspace(ws, { dryRun: true })
+    expect(r.status).toBe("dry-run")
+    expect(r.updatedFiles).toBe(1)
+    expect(r.unchanged).toBe(2)
+    expect([...fakeIndices.values()].flat()).toHaveLength(docsBefore)
+    expect(await backend.readServiceMeta(ws)).toEqual(metaBefore)
+  })
+
+  test("full:true re-embeds everything even with no changes", async () => {
+    const ws = await mkRepo3("svcfull")
+    await backend.populateWorkspace(ws, {})
+    const updatesAfterFirst = updateCalls
+    const r = await backend.populateWorkspace(ws, { full: true })
+    expect(r.status).toBe("ready")
+    expect(updateCalls).toBeGreaterThan(updatesAfterFirst)
+  })
+
+  test("serviceFreshness: absent → fresh → stale on dirty", async () => {
+    const ws = await mkRepo3("svcfresh")
+    expect((await backend.serviceFreshness(ws)).verdict).toBe("absent")
+    await backend.populateWorkspace(ws, {})
+    expect((await backend.serviceFreshness(ws)).verdict).toBe("fresh")
+    await fs.writeFile(path.join(ws, "src", "auth.ts"), "export function alphaChanged() { return 9 }\n")
+    expect((await backend.serviceFreshness(ws)).verdict).toBe("stale")
   })
 })

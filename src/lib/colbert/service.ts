@@ -542,7 +542,7 @@ async function stopServer(child: ChildProcess): Promise<void> {
 }
 
 /** CPU-aware default parallelism for the managed server. */
-export function serverParallelSessions(): number {
+export function serverParallelSessions(foreground = false): number {
   const raw = Number(process.env.GH_ROUTER_NP_PARALLEL)
   if (Number.isSafeInteger(raw) && raw > 0) return raw
   let cpus = 4
@@ -551,6 +551,7 @@ export function serverParallelSessions(): number {
   } catch {
     // keep default
   }
+  if (foreground) return Math.max(1, cpus)
   // Encode sessions duplicate model state; 25% keeps a background server
   // from saturating an interactive box (mirrors colbertParallelSessions).
   return Math.max(1, Math.floor(cpus * 0.25))

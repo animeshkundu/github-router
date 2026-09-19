@@ -183,8 +183,15 @@ describe("naming + sizing helpers", () => {
   test("serverParallelSessions honors env, defaults to 25%", () => {
     process.env.GH_ROUTER_NP_PARALLEL = "3"
     expect(serverParallelSessions()).toBe(3)
+    expect(serverParallelSessions(true)).toBe(3)
     delete process.env.GH_ROUTER_NP_PARALLEL
     expect(serverParallelSessions()).toBeGreaterThanOrEqual(1)
+  })
+
+  test("serverParallelSessions foreground uses all cores", async () => {
+    const os = await import("node:os")
+    expect(serverParallelSessions(true)).toBe(os.cpus().length)
+    expect(serverParallelSessions(false)).toBeLessThanOrEqual(os.cpus().length)
   })
 })
 

@@ -24,8 +24,10 @@
  */
 
 import { spawn } from "node:child_process"
+import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import fs from "node:fs/promises"
+import os from "node:os"
 import path from "node:path"
 
 import consola from "consola"
@@ -41,7 +43,7 @@ import {
   nextPlaidServerBinaryPath,
   provisionNextPlaidServer,
 } from "./provision"
-import { nextPlaidServerPromoted, type NextPlaidServerVariant } from "./manifest"
+import { nextPlaidServerPromoted, MODEL_REVISION, type NextPlaidServerVariant } from "./manifest"
 import {
   indexNameForWorkspace,
   serverParallelSessions,
@@ -159,7 +161,7 @@ export function __resetServiceSingletonForTests(): void {
 }
 
 /** Start (once) and health-check the server; null when unavailable. */
-export async function ensureServer(): Promise<ManagedServer | null> {
+export async function ensureServer(opts: { foreground?: boolean } = {}): Promise<ManagedServer | null> {
   if (_server) {
     try {
       const h = await _server.client.health()
@@ -183,7 +185,7 @@ export async function ensureServer(): Promise<ManagedServer | null> {
       binaryPath: resolved.binary,
       modelDir: canonicalColbertModelDir(),
       indexDir: PATHS.COLBERT_INDICES_DIR,
-      parallel: serverParallelSessions(),
+      parallel: serverParallelSessions(opts.foreground === true),
       cuda: resolved.cuda,
       env: {
         ORT_DYLIB_PATH: colbertOrtDylibPath(),
@@ -215,6 +217,17 @@ export interface ServiceIndexMeta {
   dirty?: boolean
   indexedAt?: string
   docCount?: number
+  /**
+   * Per-file content hashes (`relPath` → sha256 hex) from the last
+   * successful populate. Drives delta indexing: files whose hash matches
+   * are skipped (no re-embed), changed/new files are re-extracted, and
+   * keys missing from the current enumeration are deleted. Absent on
+   * sidecars written before delta indexing (treated as "hash unknown" —
+   * the next populate records hashes and embeds everything once).
+   */
+  fileHashes?: Record<string, string>
+  /** Model revision at index time: a change forces a full rebuild. */
+  modelRev?: string
 }
 
 function serviceMetaPath(workspace: string): string {
@@ -259,10 +272,101 @@ async function writeServiceMeta(meta: ServiceIndexMeta): Promise<void> {
 // ---------------------------------------------------------------------
 
 const _populateInFlight = new Set<string>()
+/** Background populate promises, drained by tests. */
+const _populatePromises = new Set<Promise<unknown>>
 
 /** Test-only: clear populate single-flight. */
 export function __resetServicePopulateForTests(): void {
   _populateInFlight.clear()
+}
+
+/** Test-only: await all in-flight background populates. */
+export async function __waitForServicePopulateForTests(): Promise<void> {
+  await Promise.all([..._populatePromises])
+}
+
+/** Start the server with foreground (all-core) parallelism for `index`. */
+export async function ensureServerForeground(): Promise<ManagedServer | null> {
+  return ensureServer({ foreground: true })
+}
+
+export type ServiceFreshnessVerdict = "fresh" | "stale" | "absent"
+
+export interface ServiceFreshness {
+  verdict: ServiceFreshnessVerdict
+  meta: ServiceIndexMeta | null
+  head?: string
+  dirty?: boolean
+}
+
+/**
+ * Freshness of the SERVICE index for a workspace (own sidecar — never the
+ * colgrep verdict, which describes a different index). `stale` covers both
+ * content drift (HEAD moved / newly dirty) and engine drift (model
+ * revision changed). Callers rebuild (delta or full); `fresh` needs nothing.
+ */
+export async function serviceFreshness(workspace: string): Promise<ServiceFreshness> {
+  const canonical = canonicalWorkspace(workspace)
+  const meta = await readServiceMeta(canonical)
+  if (!meta) return { verdict: "absent", meta }
+  if (!existsSync(canonicalColbertModelDir())) return { verdict: "absent", meta }
+  if (meta.modelRev !== undefined && meta.modelRev !== MODEL_REVISION) {
+    return { verdict: "stale", meta }
+  }
+  const g = await gitState(canonical).catch(() => ({ isRepo: false as const }))
+  if (g.isRepo) {
+    const headMoved = meta.head !== undefined && g.head !== meta.head
+    const newlyDirty = g.dirty === true && meta.dirty !== true
+    if (headMoved || newlyDirty) {
+      return { verdict: "stale", meta, head: g.head, dirty: g.dirty ?? false }
+    }
+    return { verdict: "fresh", meta, head: g.head, dirty: g.dirty ?? false }
+  }
+  return { verdict: "fresh", meta }
+}
+
+/** sha256 hex of a file's bytes; undefined when unreadable. */
+async function hashFile(absPath: string): Promise<string | undefined> {
+  try {
+    const bytes = await fs.readFile(absPath)
+    return createHash("sha256").update(bytes).digest("hex")
+  } catch {
+    return undefined
+  }
+}
+
+/** Hash many files with a bounded worker pool (IO-bound, cheap per file). */
+async function hashFilesParallel(
+  relPaths: Array<string>,
+  workspace: string,
+  signal: AbortSignal | undefined,
+  onProgress?: (scanned: number, total: number) => void,
+): Promise<Record<string, string>> {
+  let cpus = 4
+  try {
+    cpus = os.cpus().length
+  } catch {
+    // keep default
+  }
+  const concurrency = Math.max(1, Math.min(16, cpus, relPaths.length))
+  const out: Record<string, string> = {}
+  let next = 0
+  let scanned = 0
+  const workers = Array.from({ length: concurrency }, async () => {
+    for (;;) {
+      if (signal?.aborted) break
+      const i = next
+      next += 1
+      if (i >= relPaths.length) break
+      const rel = relPaths[i]
+      const hash = await hashFile(path.join(workspace, rel))
+      if (hash !== undefined) out[rel] = hash
+      scanned += 1
+      onProgress?.(scanned, relPaths.length)
+    }
+  })
+  await Promise.all(workers)
+  return out
 }
 
 /** Fire-and-forget per-workspace populate (single-flight). Never throws. */
@@ -270,13 +374,15 @@ export function kickServiceIndex(workspace: string): void {
   const key = path.resolve(workspace)
   if (_populateInFlight.has(key)) return
   _populateInFlight.add(key)
-  void populateWorkspace(workspace)
+  const p = populateWorkspace(workspace)
     .catch((err) => {
       consola.debug(`service-backend: populate failed for ${workspace}: ${(err as Error).message}`)
     })
     .finally(() => {
       _populateInFlight.delete(key)
+      _populatePromises.delete(p)
     })
+  _populatePromises.add(p)
 }
 
 /** Max files enumerated per populate (whole-repo cap for v1). */
@@ -340,20 +446,178 @@ function resolveRipgrepBin(): string {
   }
 }
 
-async function populateWorkspace(workspace: string): Promise<void> {
-  const svc = await ensureServer()
-  if (!svc) return
+export interface ServicePopulateProgress {
+  phase: "enumerate" | "hash" | "extract" | "encode" | "done"
+  scanned: number
+  total: number
+  unchanged: number
+  updatedFiles: number
+  removedFiles: number
+  units: number
+}
+
+export interface ServicePopulateResult {
+  status: "ready" | "unchanged" | "dry-run"
+  scanned: number
+  unchanged: number
+  updatedFiles: number
+  removedFiles: number
+  units: number
+  docCount?: number
+}
+
+export interface ServicePopulateOptions {
+  /** Ignore hashes and re-index everything. */
+  full?: boolean
+  /** Classify only: no server, no writes. */
+  dryRun?: boolean
+  /** Foreground `index`: all-core parse concurrency. */
+  foreground?: boolean
+  signal?: AbortSignal
+  onProgress?: (p: ServicePopulateProgress) => void
+}
+
+/**
+ * Populate (or refresh) a workspace's service index with TRUE DELTA
+ * semantics: only files whose content hash changed since the last
+ * successful populate are re-extracted and re-encoded; unchanged files are
+ * never re-embedded; removed files have their documents deleted.
+ *
+ * The sidecar is written ONLY on success, so a failed/interrupted run
+ * retries cleanly (stale hashes ⇒ same classification next time).
+ */
+export async function populateWorkspace(
+  workspace: string,
+  opts: ServicePopulateOptions = {},
+): Promise<ServicePopulateResult> {
   const canonical = canonicalWorkspace(workspace)
   const index = indexNameForWorkspace(canonical)
-  await svc.client.ensureIndex(index, { nbits: 4 })
+  const prev = await readServiceMeta(canonical)
+  const prevHashes = prev?.fileHashes ?? {}
+  const hasBaseline = prev !== null && prev.fileHashes !== undefined && !opts.full
+
   const rgPath = resolveRipgrepBin()
   const ac = new AbortController()
   // Bounded whole operation: populate must not run forever on giant trees.
   const timeout = setTimeout(() => ac.abort(), 30 * 60 * 1000)
   timeout.unref?.()
+  const signal = opts.signal ? anySignal([opts.signal, ac.signal]) : ac.signal
   try {
-    const files = await enumerateSourceFiles(rgPath, canonical, ac.signal)
+    const files = await enumerateSourceFiles(rgPath, canonical, signal)
     const parseable = files.filter((f) => getLanguageKeyForPath(f) !== null)
+    opts.onProgress?.({
+      phase: "enumerate",
+      scanned: 0,
+      total: parseable.length,
+      unchanged: 0,
+      updatedFiles: 0,
+      removedFiles: 0,
+      units: 0,
+    })
+
+    const currentHashes = await hashFilesParallel(parseable, canonical, signal, (scanned, total) => {
+      opts.onProgress?.({
+        phase: "hash",
+        scanned,
+        total,
+        unchanged: 0,
+        updatedFiles: 0,
+        removedFiles: 0,
+        units: 0,
+      })
+    })
+    if (signal.aborted) throw new Error("populate aborted")
+
+    // Classify: changed/new vs unchanged vs removed.
+    const changed: Array<string> = []
+    let unchanged = 0
+    for (const rel of parseable) {
+      const current = currentHashes[rel]
+      if (current === undefined) continue // unreadable: skip (retry next run)
+      if (hasBaseline && prevHashes[rel] === current) {
+        unchanged += 1
+      } else {
+        changed.push(rel)
+      }
+    }
+    const currentSet = new Set(parseable)
+    const removed = hasBaseline
+      ? Object.keys(prevHashes).filter((rel) => !currentSet.has(rel))
+      : []
+
+    if (opts.dryRun) {
+      return {
+        status: "dry-run",
+        scanned: parseable.length,
+        unchanged,
+        updatedFiles: changed.length,
+        removedFiles: removed.length,
+        units: 0,
+      }
+    }
+
+    const svc = await ensureServer(opts.foreground === true ? { foreground: true } : undefined)
+    if (!svc) throw new Error("service server unavailable")
+    await svc.client.ensureIndex(index, { nbits: 4 })
+
+    // Anchor: a hashes-match verdict is only trustworthy when the server
+    // actually holds this index. A wiped server data dir with a surviving
+    // sidecar must NOT read as "nothing to do" — force full instead.
+    if (hasBaseline && changed.length === 0 && removed.length === 0) {
+      const known = await svc.client
+        .health()
+        .then((h) => h.indices.find((i) => i.name === index))
+        .catch(() => undefined)
+      if (known && known.num_documents > 0) {
+        const g = await gitState(canonical).catch(() => ({ isRepo: false as const }))
+        await writeServiceMeta({
+          workspace: canonical,
+          index,
+          ...(g.isRepo ? { head: g.head, dirty: g.dirty ?? false } : {}),
+          indexedAt: new Date().toISOString(),
+          docCount: known.num_documents,
+          fileHashes: currentHashes,
+          modelRev: MODEL_REVISION,
+        })
+        opts.onProgress?.({
+          phase: "done",
+          scanned: parseable.length,
+          total: parseable.length,
+          unchanged,
+          updatedFiles: 0,
+          removedFiles: 0,
+          units: 0,
+        })
+        return {
+          status: "unchanged",
+          scanned: parseable.length,
+          unchanged,
+          updatedFiles: 0,
+          removedFiles: 0,
+          units: 0,
+          docCount: known.num_documents,
+        }
+      }
+      // Index missing server-side: re-index everything below.
+      changed.push(...parseable.filter((rel) => currentHashes[rel] !== undefined))
+      unchanged = 0
+    }
+
+    // Delete stale documents (changed files' old units + removed files).
+    for (const rel of [...changed, ...removed]) {
+      if (signal.aborted) throw new Error("populate aborted")
+      await svc.client.deleteDocuments(index, "file = ?", [rel])
+    }
+
+    // Extract + encode only the changed files.
+    let cpus = 4
+    try {
+      cpus = os.cpus().length
+    } catch {
+      // keep default
+    }
+    const parseConcurrency =
+      opts.foreground === true ? Math.max(4, Math.min(16, cpus)) : POPULATE_PARSE_CONCURRENCY
     let units: Array<{ text: string; metadata: Record<string, unknown> }> = []
     let unitTotal = 0
     const flush = async (): Promise<void> => {
@@ -366,19 +630,27 @@ async function populateWorkspace(workspace: string): Promise<void> {
         batch.map((u) => u.metadata),
       )
       unitTotal += batch.length
+      opts.onProgress?.({
+        phase: "encode",
+        scanned: parseable.length,
+        total: parseable.length,
+        unchanged,
+        updatedFiles: changed.length,
+        removedFiles: removed.length,
+        units: unitTotal,
+      })
     }
-    // Bounded concurrent parses over the file list.
     let next = 0
     const workers = Array.from(
-      { length: Math.min(POPULATE_PARSE_CONCURRENCY, parseable.length) },
+      { length: Math.min(parseConcurrency, Math.max(changed.length, 1)) },
       async () => {
-        while (!ac.signal.aborted) {
+        while (!signal.aborted) {
           const i = next
           next += 1
-          if (i >= parseable.length) break
-          const rel = parseable[i]
+          if (i >= changed.length) break
+          const rel = changed[i]
           try {
-            const r = await extractUnits(path.join(canonical, rel), rel, ac.signal)
+            const r = await extractUnits(path.join(canonical, rel), rel, signal)
             for (const u of r.units) {
               units.push({
                 text: buildUnitText(u, rel),
@@ -402,18 +674,58 @@ async function populateWorkspace(workspace: string): Promise<void> {
     )
     await Promise.all(workers)
     await flush()
+    if (signal.aborted) throw new Error("populate aborted")
+
+    const docCount = await svc.client
+      .health()
+      .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
+      .catch(() => undefined)
     const g = await gitState(canonical).catch(() => ({ isRepo: false as const }))
     await writeServiceMeta({
       workspace: canonical,
       index,
       ...(g.isRepo ? { head: g.head, dirty: g.dirty ?? false } : {}),
       indexedAt: new Date().toISOString(),
-      docCount: unitTotal,
+      docCount,
+      fileHashes: currentHashes,
+      modelRev: MODEL_REVISION,
     })
     consola.debug(`service-backend: indexed ${unitTotal} units in ${canonical}`)
+    opts.onProgress?.({
+      phase: "done",
+      scanned: parseable.length,
+      total: parseable.length,
+      unchanged,
+      updatedFiles: changed.length,
+      removedFiles: removed.length,
+      units: unitTotal,
+    })
+    return {
+      status: "ready",
+      scanned: parseable.length,
+      unchanged,
+      updatedFiles: changed.length,
+      removedFiles: removed.length,
+      units: unitTotal,
+      docCount,
+    }
   } finally {
     clearTimeout(timeout)
   }
+}
+
+/** Combine abort signals (cleanup listeners once settled). */
+function anySignal(signals: Array<AbortSignal>): AbortSignal {
+  const ac = new AbortController()
+  const onAbort = (): void => ac.abort()
+  for (const s of signals) {
+    if (s.aborted) {
+      ac.abort()
+      break
+    }
+    s.addEventListener("abort", onAbort, { once: true })
+  }
+  return ac.signal
 }
 
 // ---------------------------------------------------------------------
