@@ -121,7 +121,7 @@ miss falls through to colgrep, never straight to lexical.
 | `GH_ROUTER_NEXTPLAID_CUDA=1` | Pass `--cuda` to an explicit binary (provisioned cuda binaries get it automatically; never passed without `--model`) |
 | `GH_ROUTER_NP_PARALLEL=<n>` | ONNX sessions (default: 25% of CPUs) |
 
-Compute: Linux/Win x64 ship cpu (static OpenBLAS) + cuda (CUDA 12.x, driver ≥550)
+Compute: Linux/Win x64 ship cpu (static OpenBLAS) + cuda (CUDA 12.8, driver ≥570)
 variants; macOS is cpu-only (Accelerate). GPU auto-detect is `nvidia-smi -L`
 (bounded, never throws; absent ⇒ cpu). Server binaries are SHA-pinned in
 `src/lib/colbert/manifest.ts` (`NEXTPLAID_SERVER`; empty digest = unpromoted =

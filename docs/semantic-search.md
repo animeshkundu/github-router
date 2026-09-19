@@ -343,7 +343,7 @@ cpu fallback → router-owned dir → PATH (cpu only). Detection is
 | `GH_ROUTER_NEXTPLAID_CUDA=1` | Pass `--cuda` to an explicit binary (provisioned cuda binaries get it automatically; never passed without `--model`). |
 | `GH_ROUTER_NP_PARALLEL=<n>` | ONNX sessions (default: 25% of CPUs; encode sessions duplicate model state). |
 
-Minimum NVIDIA driver for the cuda variant: 550+ (CUDA 12.4).
+Minimum NVIDIA driver for the cuda variant: 570+ (CUDA 12.8).
 
 ### Promotion (supply-chain)
 

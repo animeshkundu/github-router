@@ -43,9 +43,16 @@ on:
 
 env:
   UPSTREAM_TAG: ${{ inputs.upstream_tag || 'v1.7.0' }}
-  # CUDA major pinned to 12.x (matches upstream `cuda` feature =
+  # vcpkg binary caching via the GitHub Actions cache: the ~15 min
+  # openblas source build on Windows becomes a ~1 min download on
+  # subsequent runs (keyed by triplet + port version automatically).
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # CUDA minor pinned to a live 12.x (matches upstream `cuda` feature =
   # cudarc cuda-11080; do NOT mix with `cuda-13` in one binary).
-  CUDA_VERSION: "12.4.0"
+  # NVIDIA prunes EOL minors from the ubuntu2404 repo (12.4 packages are
+  # already gone: "no installation candidate") — when this 404s/expires,
+  # bump to the newest live 12.x, never 13.x (needs the `cuda-13` feature).
+  CUDA_VERSION: "12.8.1"
 
 jobs:
   build:
@@ -132,6 +139,8 @@ jobs:
           # otherwise). Install the static-MD triplet: static lib + dynamic
           # CRT, matching Rust MSVC linkage. Newer runner images renamed
           # VCPKG_ROOT to VCPKG_INSTALLATION_ROOT — export both.
+          # vcpkg binary caching (VCPKG_BINARY_SOURCES, set at job env)
+          # makes this ~1 min on cache hit instead of ~15 min source build.
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
           echo "VCPKG_ROOT=$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           vcpkg install openblas:x64-windows-static-md
@@ -151,6 +160,17 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      # Cache cargo registry + compiled deps across runs (monthly schedule
+      # + manual dispatches would otherwise rebuild everything, including
+      # the ~7 min LTO release link, from scratch every time). Keyed per
+      # leg by the matrix (target + features differ per binary).
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: next-plaid-src
+          key: ${{ matrix.target }}-${{ matrix.variant }}
+          cache-targets: true
 
       - name: Build next-plaid-api (release)
         working-directory: next-plaid-src

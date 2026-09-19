@@ -255,7 +255,7 @@ export const NEXTPLAID_SERVER: Record<string, NextPlaidServerAsset> = {
     sha256: "",
     archive: "raw",
     variant: "cuda",
-    cudaVersion: "12.4",
+    cudaVersion: "12.8",
   },
   "win32-x64-cpu": {
     url: nextPlaidServerUrl("next-plaid-api-x86_64-pc-windows-msvc.exe"),
@@ -268,7 +268,7 @@ export const NEXTPLAID_SERVER: Record<string, NextPlaidServerAsset> = {
     sha256: "",
     archive: "raw",
     variant: "cuda",
-    cudaVersion: "12.4",
+    cudaVersion: "12.8",
   },
   "darwin-arm64-cpu": {
     url: nextPlaidServerUrl("next-plaid-api-aarch64-apple-darwin"),

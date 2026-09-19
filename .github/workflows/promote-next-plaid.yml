@@ -32,6 +32,10 @@ on:
         description: "Print the manifest patch without opening a PR"
         type: boolean
         default: true
+      allow_missing:
+        description: "Comma-separated asset names allowed to be absent (e.g. a leg that hasn't built yet); their SHAs stay empty (fail-closed)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -109,6 +113,8 @@ jobs:
 
       - name: Apply SHAs to manifest
         shell: bash
+        env:
+          ALLOW_MISSING: ${{ inputs.allow_missing }}
         run: |
           set -euo pipefail
           python3 - <<'EOF'
@@ -129,16 +135,29 @@ jobs:
               "next-plaid-api-x86_64-apple-darwin": "next-plaid-api-x86_64-apple-darwin",
           }
 
+          import os
+          allowed = {
+              a.strip()
+              for a in os.environ.get("ALLOW_MISSING", "").split(",")
+              if a.strip()
+          }
+
           p = Path("src/lib/colbert/manifest.ts")
           s = p.read_text()
           # Pair url(...) blocks with their preceding sha256 by scanning entries.
           # Fails closed when any entry lacks a downloaded artifact (e.g. a
           # matrix leg failed): better to promote nothing than half the matrix.
+          # Explicitly allowed assets (ALLOW_MISSING) keep their empty digest
+          # (fail-closed per variant) and are reported, not asserted.
           entries = re.findall(
               r'url: nextPlaidServerUrl\("([^"]+)"\),\n    sha256: ""', s
           )
           missing = [a for a in entries if asset_to_url.get(a) not in shas]
-          assert not missing, f"no SHA for promoted entries: {missing}"
+          unexpected = [a for a in missing if asset_to_url.get(a) not in allowed]
+          assert not unexpected, f"no SHA for promoted entries: {unexpected}"
+          if missing:
+              print(f"skipping allowed-missing: {sorted(missing)}")
+              entries = [a for a in entries if a not in missing]
           for asset in entries:
               name = asset_to_url[asset]
               digest = shas[name]
