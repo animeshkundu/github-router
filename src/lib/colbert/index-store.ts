@@ -164,8 +164,15 @@ function metaPath(workspace: string): string {
  * `failed` straight off `meta.status`, before it looks at the disk, so a
  * zeroed counter still short-circuited every query. The reset now drops the
  * status as well.
+ *
+ * Epoch 4: the shard-tiling validator false-positived on every
+ * incrementally-updated index (`embedding_offset` is a write-cursor
+ * artifact, never a read invariant — verified against next-plaid v1.7.0
+ * source), manufacturing `corrupt` verdicts that quarantine+delete looped
+ * deterministically into capped `failed`. Any stored `corrupt` streak may
+ * be this bug, so it clears once like the rest.
  */
-const WATCHDOG_EPOCH = 3
+const WATCHDOG_EPOCH = 4
 
 /**
  * Failure classes the router-side bugs could have manufactured.
@@ -330,7 +337,26 @@ export type IndexIntegrity =
   | { verdict: "suspect"; reason: string }
   | { verdict: "corrupt"; reason: string }
 
-/** Validate the contiguous embedding interval encoded by PLAID shard metadata. */
+/**
+ * Validate PLAID shard metadata readability — NOT tiling.
+ *
+ * Deliberately NOT a contiguity check: `embedding_offset` is a write-cursor
+ * artifact for incremental appends, never a read invariant. Verified against
+ * next-plaid v1.7.0 source: the sole read of `embedding_offset` anywhere
+ * (next-plaid `update.rs`, append-to-last cursor) is on the WRITE path;
+ * search reads the merged concatenation + SQLite doc mapping, neither of
+ * which consults offsets. Incremental updates (and worktree-seed +
+ * reconcile) legitimately leave non-tiling layouts — overlapping and
+ * gapped intervals on a colgrep-healthy index (observed live: 23 shards,
+ * search serving correctly, zero SQLite doc duplicates).
+ *
+ * The previous tiling check therefore false-positived on every
+ * incrementally-updated index, and the quarantine+delete+rebuild response
+ * re-seeded into the identical layout deterministically — a self-
+ * perpetuating failure loop ending in capped `failed`. Corrupt is now
+ * reserved for genuinely unreadable stores (which colgrep itself cannot
+ * load either).
+ */
 export function validateIndexIntegrity(projectIndexDir: string): IndexIntegrity {
   let names: Array<string>
   try {
@@ -342,7 +368,7 @@ export function validateIndexIntegrity(projectIndexDir: string): IndexIntegrity 
   }
   if (names.length === 0) return { verdict: "not-built" }
 
-  const intervals: Array<{ start: number; count: number }> = []
+  let sum = 0
   for (const name of names) {
     try {
       const parsed = JSON.parse(readFileSync(path.join(projectIndexDir, name), "utf8")) as {
@@ -361,38 +387,13 @@ export function validateIndexIntegrity(projectIndexDir: string): IndexIntegrity 
       ) {
         return { verdict: "corrupt", reason: `invalid shard metadata: ${name}` }
       }
-      intervals.push({ start, count })
+      sum += count
     } catch {
       return { verdict: "corrupt", reason: `unreadable shard metadata: ${name}` }
     }
   }
 
-  // Tie-break by count so a legal zero-count shard sharing a start offset
-  // with a populated one is visited FIRST. Visited second, its `start` would
-  // sit behind the advanced cursor and read as an overlap, condemning a
-  // healthy index.
-  intervals.sort((a, b) => a.start - b.start || a.count - b.count)
-  // Overlap is unambiguous corruption: two shards claiming the same embedding
-  // address cannot both be right. A GAP is only SUSPECT. We never established
-  // that a valid colgrep generation must tile [0, N) — a deleted range could
-  // legally be retained as a hole, and the one corrupt sample we have shows
-  // overlaps too, so it is no evidence that gap-only is corrupt. Condemning a
-  // gap would DELETE the index, so a wrong guess destroys good user data.
-  // Suspect therefore stops us serving semantic results without touching the
-  // bytes. (Note a `coveredEnd !== sum` test would not be an independent
-  // safeguard: with no overlaps, coveredEnd === firstOffset + sum + gapTotal,
-  // so it is just another spelling of the gap check.)
-  let cursorEnd = 0
-  let sum = 0
-  let gapped = false
-  for (const interval of intervals) {
-    if (interval.start < cursorEnd) return { verdict: "corrupt", reason: "overlapping shard intervals" }
-    if (interval.start > cursorEnd) gapped = true
-    cursorEnd = interval.start + interval.count
-    sum += interval.count
-  }
-  if (gapped) return { verdict: "suspect", reason: "gap between shard intervals" }
-  return { verdict: "coherent", shardCount: intervals.length, embeddingCount: sum }
+  return { verdict: "coherent", shardCount: names.length, embeddingCount: sum }
 }
 
 export async function completedIndexOnDisk(workspace: string): Promise<boolean> {
