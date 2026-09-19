@@ -298,6 +298,63 @@ tracking + cancellation + boot/exit sweep, not keep-alive:
   self-heal treats it as transient); it never kills a PID from a prior boot -
   a recycled PID could belong to an unrelated process.
 
+## Service backend (persistent server, opt-in)
+
+The default semantic path shells out to `colgrep` per query (every call
+re-loads ORT + model + index). `GH_ROUTER_SEMANTIC_BACKEND=service` opts
+into a persistent `next-plaid-api` server instead (model warm, PLAID
+mmap'd, lock-free reads, batched async writes). The fallback chain is
+**service → colgrep → lexical**: any service miss falls THROUGH to the
+colgrep path below, never straight to lexical, so a half-provisioned
+service degrades gracefully instead of hiding a working colgrep index.
+Served rows carry the same `freshness` / `stale_files` labels, computed
+against the service sidecar (`indices/.gh-router-meta/svc-<hash>.json` —
+never the colgrep sidecar, so flipping the flag back and forth loses
+nothing).
+
+### Compute variants (per-platform binaries)
+
+The model files are platform-agnostic (same INT8 bytes everywhere); the
+compute is not. Server binaries are built by
+`.github/workflows/next-plaid-server.yml` from a pinned upstream tag:
+
+| Platform | cpu variant | cuda variant |
+|---|---|---|
+| Linux x64 | `openblas,model` (static OpenBLAS, zero runtime dep) | `cuda,openblas,model` (CUDA 12.x EP) |
+| Windows x64 | `openblas,model` (vcpkg static-MD) | `cuda,openblas,model` |
+| macOS arm64 / x64 | `accelerate,model` (Apple Accelerate CPU BLAS) | — (no NVIDIA target) |
+
+`accelerate` is Apple-framework-only and cannot be used on Linux/Windows;
+there OpenBLAS is the CPU-BLAS equivalent. The colgrep CLI path stays
+`--force-cpu` everywhere; only the service has a GPU path.
+
+### GPU auto-detect with CPU fallback
+
+At startup the backend picks a variant, then resolves in order: explicit
+`GH_ROUTER_NEXTPLAID_BIN` → provisioned preferred variant → provisioned
+cpu fallback → router-owned dir → PATH (cpu only). Detection is
+`nvidia-smi -L` (bounded ~8s, never throws; absent tool/driver ⇒ cpu).
+
+| Env | Effect |
+|---|---|
+| `GH_ROUTER_SEMANTIC_BACKEND=service` | Opt into the service path (default: `colgrep`). |
+| `GH_ROUTER_NEXTPLAID_BIN=<path>` | Use this server binary as-is (skips provisioning). |
+| `GH_ROUTER_NEXTPLAID_VARIANT=cpu\|cuda` | Force a variant (skips GPU probing; test/operator seam). |
+| `GH_ROUTER_NEXTPLAID_CUDA=1` | Pass `--cuda` to an explicit binary (provisioned cuda binaries get it automatically; never passed without `--model`). |
+| `GH_ROUTER_NP_PARALLEL=<n>` | ONNX sessions (default: 25% of CPUs; encode sessions duplicate model state). |
+
+Minimum NVIDIA driver for the cuda variant: 550+ (CUDA 12.4).
+
+### Promotion (supply-chain)
+
+Server binaries get the same SHA-pinned treatment as the colgrep trio:
+`NEXTPLAID_SERVER` in `src/lib/colbert/manifest.ts` carries per-variant
+URLs + digests. Empty digest = not yet promoted = unavailable
+(fail-closed; provisioning never downloads an unverified binary).
+Flow: dispatch `next-plaid-server` → on green, dispatch
+`promote-next-plaid` (`build_run_id`, dry-run by default) → review the
+SHA PR → merge. Re-pin the digests the same way.
+
 ## When semantic beats lexical (drives the tool description)
 
 | Query | Prefer |
@@ -311,11 +368,13 @@ tracking + cancellation + boot/exit sweep, not keep-alive:
 ```
 ~/.local/share/github-router/colbert/
   bin/colgrep[.exe]
+  bin/next-plaid-api[-cuda][.exe]       # service backend (per-variant)
   models/LateOn-Code-edge/<rev>/        # 5 INT8 model files
   onnxruntime/1.23.0/cpu/<libname>      # ORT_DYLIB_PATH
   indices/                              # COLGREP_DATA_DIR (never in the repo)
     <project>-<hash>/                   # colgrep-owned PLAID index
     .gh-router-meta/<hash>.json         # router-owned freshness sidecar
+    .gh-router-meta/svc-<hash>.json     # service-backend sidecar (separate)
   .smoke-ok                             # written once the smoke test passes
 ```
 

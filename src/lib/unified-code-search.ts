@@ -55,6 +55,7 @@ export interface UnifiedCodeSearchInput {
   limit?: number
   context_lines?: number
   structural?: "full" | "topN"
+  /** Opt-in outlines (default off). `true` attaches per-file outlines. */
   summary?: boolean
   complete?: boolean
   multiline?: boolean
@@ -132,23 +133,22 @@ function lexicalSearchCodeMode(mode: UnifiedMode): "ranked" | "literal" | "regex
 
 const FALLBACK_GUIDANCE_MARKER = 'retry mode:"semantic"'
 const FALLBACK_GUIDANCE =
-  `${FALLBACK_GUIDANCE_MARKER} in a few minutes (a build takes minutes on a large repo), `
-  + "or re-query now with specific symbol/keyword terms"
+  `${FALLBACK_GUIDANCE_MARKER} in minutes or use exact symbols`
 
 function fallbackNoticeFor(status: SemanticStatus): string {
   const tail = FALLBACK_GUIDANCE
   switch (status) {
     case "building":
-      return `semantic index is building; returned lexical keyword matches. ${tail}`
+      return `semantic index building — returned lexical matches; ${tail}`
     case "stale":
-      return `semantic index predates the current HEAD/tree (a background re-index was started); returned lexical keyword matches. ${tail}`
+      return `semantic index stale (HEAD moved) — re-index started, returned lexical matches; ${tail}`
     case "unavailable":
-      return `no semantic index for this workspace yet (a background build was started); returned lexical keyword matches. ${tail}`
+      return `no semantic index yet — build started, returned lexical matches; ${tail}`
     case "failed":
       // The recovery path most likely to be misread as a dead tool: this very
       // query is what schedules the rebuild, so it CANNOT return semantic
       // results itself. Say so, or the next fallback reads as no progress.
-      return `semantic index unavailable; this query started a background rebuild, so it returned lexical keyword matches. ${tail}`
+      return `semantic index failed — this query started a background rebuild, returned lexical matches; ${tail}`
     default:
       return "returned lexical results"
   }
@@ -181,7 +181,7 @@ async function outlinesForSemanticResults(
   results: Array<UnifiedResultRow>,
   signal?: AbortSignal,
 ): Promise<CodeSearchResponse["outlines"]> {
-  if (input.summary === false) return undefined
+  if (input.summary !== true) return undefined
   const seen = new Set<string>()
   const files: Array<string> = []
   for (const result of results) {

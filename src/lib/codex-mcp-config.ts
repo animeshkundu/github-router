@@ -587,7 +587,7 @@ function fileToolSteer(bashUses: string): string {
  *  would send the agent at a mode that just degrades to lexical. */
 function readOnlyToolSteer(semanticAvailable = true): string {
   const searchTools = semanticAvailable
-    ? "Grep/Glob plus the semantic code search tool"
+    ? "Grep/Glob plus the semantic code search tool (response `source` says which engine ran; semantic hits carry `score`)"
     : "Grep/Glob"
   return (
     `Use Read to read files and ${searchTools} to find them; `
@@ -598,7 +598,7 @@ function readOnlyToolSteer(semanticAvailable = true): string {
 
 function reviewerToolSteer(semanticAvailable = true): string {
   const searchTools = semanticAvailable
-    ? "Grep/Glob plus the semantic code search tool"
+    ? "Grep/Glob plus the semantic code search tool (response `source` says which engine ran; semantic hits carry `score`)"
     : "Grep/Glob"
   return (
     `Use Read to read files and ${searchTools} to find them. `

@@ -254,13 +254,12 @@ export interface CodeSearchInput {
    */
   structural?: "full" | "topN";
   /**
-   * Structural summary, ON BY DEFAULT. The response carries a
-   * tree-sitter STRUCTURAL OUTLINE (`outlines`) of the distinct files in
-   * the result set (top-level symbols + line numbers), capped at the
-   * first `CODE_SUMMARY_MAX_FILES` files in result order — a compact map
-   * of where the matches live that augments, never replaces, `snippet`.
-   * Set `summary: false` to omit it (e.g. when only the matching lines
-   * are needed).
+   * Structural summary, OPT-IN. Pass `summary: true` and the response
+   * carries a tree-sitter STRUCTURAL OUTLINE (`outlines`) of the distinct
+   * files in the result set (top-level symbols + line numbers), capped at
+   * the first `CODE_SUMMARY_MAX_FILES` files in result order — a compact
+   * map of where the matches live that augments, never replaces, `snippet`.
+   * Omitted by default (saves ~2-5KB tokens per call).
    */
   summary?: boolean;
   /**
@@ -2694,11 +2693,12 @@ export async function searchCode(
       return baseHit;
     });
 
-    // Structural summary is ON by default — outline the distinct files in
-    // the result set (capped, in result order) unless the caller opts out
-    // with `summary: false`. `scan: true` instead outlines the ENTIRE
-    // workspace (every non-ignored, non-sensitive source file), up to
-    // SCAN_MAX_FILES, so the model gets a whole-tree symbol map in one call.
+    // Structural summary is OPT-IN — outline the distinct files in the
+    // result set (capped, in result order) only when the caller passes
+    // `summary: true` (saves ~2-5KB tokens per call otherwise). `scan: true`
+    // instead outlines the ENTIRE workspace (every non-ignored,
+    // non-sensitive source file), up to SCAN_MAX_FILES, so the model gets
+    // a whole-tree symbol map in one call.
     // Reuses the shared tree-sitter outliner; each file is bounded by its
     // own 1 MiB parse cap and the outliner never throws. Computed BEFORE
     // `elapsed_ms` so telemetry reflects the real latency. `outline_ms`
@@ -2713,7 +2713,7 @@ export async function searchCode(
     // the heaviest path and runs AFTER the search-phase wallTimer is torn
     // down, so it self-bounds against this absolute deadline.
     const scanDeadline = Date.now() + WALL_TIME_MS;
-    if (rawInput.summary !== false || wantScan) {
+    if (rawInput.summary === true || wantScan) {
       let distinct: Array<string>;
       if (wantScan) {
         // Whole-workspace enumeration (respects ignore rules; sensitive

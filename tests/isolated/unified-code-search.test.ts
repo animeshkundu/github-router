@@ -95,28 +95,31 @@ describe("forced lexical family (never touches colgrep)", () => {
     expect(r.results.length).toBeGreaterThan(0)
   })
 
-  test("mode:'lexical' honors summary:false (outlines omitted end-to-end)", async () => {
+  test("mode:'lexical' summary is opt-in (omitted by default)", async () => {
     // Regression pin for the summary-forwarding chain: MCP `code` tool
-    // advertises `summary` ("set false to omit"), and the unified router
-    // must thread it into searchCode so no outline parses run. The
-    // semantic path has its own pin ("status 'ready' honors
-    // summary:false"); this covers runLexical → searchCode.
+    // advertises `summary` (opt-in outlines), and the unified router
+    // must thread it into searchCode so outline parses run only on
+    // request. The semantic path has its own pin ("status 'ready' honors
+    // summary:true"); this covers runLexical → searchCode.
     const withOutlines = await runUnifiedCodeSearch({
       query: "refreshAuthToken",
       workspace: root,
       mode: "lexical",
+      summary: true,
     })
     expect(withOutlines.outlines).toBeDefined()
     expect(withOutlines.outlines!.length).toBeGreaterThan(0)
 
-    const withoutOutlines = await runUnifiedCodeSearch({
-      query: "refreshAuthToken",
-      workspace: root,
-      mode: "lexical",
-      summary: false,
-    })
-    expect(withoutOutlines.outlines).toBeUndefined()
-    expect(withoutOutlines.results.length).toBeGreaterThan(0)
+    for (const summary of [undefined, false] as const) {
+      const withoutOutlines = await runUnifiedCodeSearch({
+        query: "refreshAuthToken",
+        workspace: root,
+        mode: "lexical",
+        ...(summary === undefined ? {} : { summary }),
+      })
+      expect(withoutOutlines.outlines).toBeUndefined()
+      expect(withoutOutlines.results.length).toBeGreaterThan(0)
+    }
   })
 
   test("zero-hit multi-word lexical query returns a recovery notice, not a bare empty", async () => {
@@ -227,6 +230,7 @@ describe("semantic / default mode", () => {
     const r = await runUnifiedCodeSearch({
       query: "where do we refresh auth tokens",
       workspace: root,
+      summary: true,
     })
     expect(r.source).toBe("semantic")
     expect(r.results.length).toBe(1)
@@ -257,6 +261,7 @@ describe("semantic / default mode", () => {
     const r = await runUnifiedCodeSearch({
       query: "outside",
       workspace: root,
+      summary: true,
     })
     expect(r.results).toHaveLength(1)
     expect(r.outlines).toEqual([])

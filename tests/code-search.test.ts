@@ -831,38 +831,35 @@ describe("MCP handler trims the response per the minimality principle", () => {
     }
   })
 
-  test("summary is forwarded through the handler: default → outlines present; summary:false → absent", async () => {
+  test("summary is forwarded through the handler: summary:true → outlines present; default/absent → omitted", async () => {
     const { NON_PERSONA_MCP_TOOLS } = await import(
       "../src/lib/peer-mcp-personas"
     )
     const tool = NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === "code")!
 
-    // Default (no summary arg) → outlines present (on by default).
-    const onByDefault = await tool.handler({
+    // Opt-in (summary:true) → outlines present.
+    const optedIn = await tool.handler({
       query: "findMe",
       workspace: fx.root,
       mode: "exact",
       limit: 5,
+      summary: true,
     })
-    const onBody = JSON.parse(firstText(onByDefault)) as Record<
+    const onBody = JSON.parse(firstText(optedIn)) as Record<
       string,
       unknown
     >
     expect("outlines" in onBody).toBe(true)
 
-    // summary:false MUST reach searchCode → outlines omitted.
-    const optedOut = await tool.handler({
-      query: "findMe",
-      workspace: fx.root,
-      mode: "exact",
-      limit: 5,
-      summary: false,
-    })
-    const offBody = JSON.parse(firstText(optedOut)) as Record<
-      string,
-      unknown
-    >
-    expect("outlines" in offBody).toBe(false)
+    // Default (no summary arg) and summary:false MUST omit outlines.
+    for (const args of [
+      { query: "findMe", workspace: fx.root, mode: "exact", limit: 5 },
+      { query: "findMe", workspace: fx.root, mode: "exact", limit: 5, summary: false },
+    ] as const) {
+      const res = await tool.handler(args)
+      const body = JSON.parse(firstText(res)) as Record<string, unknown>
+      expect("outlines" in body).toBe(false)
+    }
   })
 
   test("context_lines param is no longer accepted in the schema", async () => {
@@ -1049,7 +1046,7 @@ describe("binary file handling (NUL-byte defense)", () => {
 })
 
 describe("searchCode — structural summary (summary: true)", () => {
-  test("outlines matched files by default; omitted with summary:false", async () => {
+  test("outlines matched files with summary:true; omitted by default and with summary:false", async () => {
     const fx = makeFixture((root) => {
       writeFileSync(
         path.join(root, "svc.ts"),
@@ -1063,10 +1060,11 @@ describe("searchCode — structural summary (summary: true)", () => {
       )
     })
     try {
-      // Default (no summary arg) — outlines are attached.
+      // Opt-in (summary:true) — outlines are attached.
       const byDefault = await searchCode({
         query: "MARKER",
         workspace: fx.root,
+        summary: true,
       })
       expect(byDefault.results.length).toBeGreaterThan(0)
       const outlines = byDefault.outlines ?? []
@@ -1085,13 +1083,15 @@ describe("searchCode — structural summary (summary: true)", () => {
       const method = (svc?.outline ?? []).find((e) => e.name === "getUser")
       expect(method?.depth ?? 0).toBeGreaterThan(cls?.depth ?? 0)
 
-      // Opt out → outlines omitted entirely.
-      const optedOut = await searchCode({
-        query: "MARKER",
-        workspace: fx.root,
-        summary: false,
-      })
-      expect(optedOut.outlines).toBeUndefined()
+      // Omitted by default and with summary:false.
+      for (const summary of [undefined, false] as const) {
+        const r = await searchCode({
+          query: "MARKER",
+          workspace: fx.root,
+          ...(summary === undefined ? {} : { summary }),
+        })
+        expect(r.outlines).toBeUndefined()
+      }
     } finally {
       fx.cleanup()
     }

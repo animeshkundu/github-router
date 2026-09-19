@@ -1038,11 +1038,13 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
       "Semantic-first code search over the worker's workspace. Default " +
       "(`mode:\"semantic\"`) ranks by MEANING via ColBERT and transparently " +
       "falls back to lexical BM25F when the index isn't ready (the response " +
-      "`source` is \"semantic\" | \"lexical\" | \"lexical-fallback\"). Force " +
-      "lexical with mode `lexical` (exact symbols) / `exact` / `regex` / " +
-      "`ast`. Prefer over `grep` for \"where is X / which files reference " +
-      "Y\" discovery. Returns `{source, results:[{file,line,snippet}], ...}` " +
-      "in JSON.",
+      "`source` is \"semantic\" | \"lexical\" | \"lexical-fallback\"). " +
+      "Semantic hits carry `score` (0-1 relevance), `endLine`, `name`; " +
+      "stale semantic carries `freshness:\"stale\"` + `stale_files:N`. " +
+      "Force lexical with mode `lexical` (exact symbols) / `exact` / " +
+      "`regex` / `ast`. Prefer over `grep` for \"where is X / which files " +
+      "reference Y\" discovery. Returns `{source, " +
+      "results:[{file,line,snippet,score?,endLine?,name?}], ...}` in JSON.",
     parameters: CODE_SEARCH_PARAMS,
     async execute(
       _toolCallId,
@@ -1071,8 +1073,10 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
         },
         signal,
       )
-      // Minimal worker surface — same `{file,line,snippet}` per hit as the
-      // MCP `code` tool, plus the top-level `source` so the worker knows
+      // Worker surface mirrors the MCP `code` tool rows: `{file,line,snippet}`
+      // plus, on `source:"semantic"` hits only, the interpretable ColBERT
+      // fields (`score` relevance, `endLine` span, `name` symbol) so the
+      // worker can rank without needing outlines. Top-level `source` says
       // which engine ran (a `lexical-fallback` on a concept query means the
       // index wasn't ready — retry mode:"semantic" or use exact keywords).
       // `freshness`/`stale_files` ride along when semantic served stale.
@@ -1083,6 +1087,9 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
           file: h.file,
           line: h.line,
           snippet: h.snippet,
+          ...(h.score !== undefined ? { score: h.score } : {}),
+          ...(h.endLine !== undefined ? { endLine: h.endLine } : {}),
+          ...(h.name !== undefined ? { name: h.name } : {}),
         })),
         truncated: r.truncated ?? false,
         notice: r.notice ?? undefined,
