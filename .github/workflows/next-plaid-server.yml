@@ -29,6 +29,15 @@
 
 name: next-plaid-server
 
+# A newer dispatch on the same ref supersedes an older one (e.g. pushing a
+# workflow fix while a build is running): cancel the stale run instead of
+# burning two sets of runners (notably the ~20 min Windows vcpkg builds).
+# Scoped per-ref so the monthly schedule and branch builds never cancel
+# each other across refs.
+concurrency:
+  group: next-plaid-server-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
     inputs:
