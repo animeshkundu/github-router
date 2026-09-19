@@ -93,7 +93,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out upstream at the pinned tag
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: lightonai/next-plaid
           ref: ${{ env.UPSTREAM_TAG }}
@@ -222,7 +222,7 @@ jobs:
           (cd dist-server && sha256sum "${{ matrix.asset }}" | tee "${{ matrix.asset }}.sha256")
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.asset }}
           path: |
