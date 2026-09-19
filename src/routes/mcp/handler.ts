@@ -32,6 +32,8 @@ import {
   type McpScope,
   type WorkspaceSource,
   resolveGeminiPersona,
+  buildCodeToolDescription,
+  buildCodeModeDescription,
 } from "~/lib/peer-mcp-personas"
 import {
   createChatCompletions,
@@ -199,6 +201,39 @@ interface ToolEntry {
   name: string
   description: string
   inputSchema: Record<string, unknown>
+}
+
+/**
+ * Map a non-persona tool to its served `tools/list` entry, rewriting the
+ * `code` tool's description (and its `mode` field) when semantic search is
+ * not enabled for this launch. The static registry text is semantic-first;
+ * without `--search` the served text describes the lexical engine (the
+ * `mode:"semantic"` alias is documented as running lexical, since the enum
+ * still accepts it), so clients never see a meaning-ranked mode that is
+ * not present.
+ */
+function nonPersonaToolEntry(tool: NonPersonaMcpTool): ToolEntry {
+  if (tool.toolNameHttp !== "code" || state.searchEnabled === true) {
+    return {
+      name: tool.toolNameHttp,
+      description: tool.description,
+      inputSchema: tool.inputSchema as Record<string, unknown>,
+    }
+  }
+  const schema = structuredClone(tool.inputSchema) as {
+    properties?: Record<string, { description?: string } & Record<string, unknown>>
+  }
+  if (schema.properties?.mode) {
+    schema.properties.mode = {
+      ...schema.properties.mode,
+      description: buildCodeModeDescription(false),
+    }
+  }
+  return {
+    name: tool.toolNameHttp,
+    description: buildCodeToolDescription(false),
+    inputSchema: schema as Record<string, unknown>,
+  }
 }
 
 const RPC_PARSE_ERROR = -32700
@@ -538,13 +573,16 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       }))
     const nonPersonaEntries = NON_PERSONA_MCP_TOOLS
       .filter((tool) => maxAllowsTool(scope, launch, { group: tool.group, name: tool.toolNameHttp, tool }))
-      .map((tool) => ({
-        name: tool.toolNameHttp,
-        description: tool.toolNameHttp === "stand_in"
-          ? "Three-lab away-mode decision tiebreak for bounded choices while the user is unavailable. The max panel is Sol, Opus 5, and Grok 4.6 at high effort when available, otherwise Gemini 3.8 Flash 1M at high. It recommends but never executes; destructive actions still require the user."
-          : tool.description,
-        inputSchema: tool.inputSchema,
-      }))
+      .map((tool) => {
+        if (tool.toolNameHttp === "stand_in") {
+          return {
+            name: tool.toolNameHttp,
+            description: "Three-lab away-mode decision tiebreak for bounded choices while the user is unavailable. The max panel is Sol, Opus 5, and Grok 4.6 at high effort when available, otherwise Gemini 3.8 Flash 1M at high. It recommends but never executes; destructive actions still require the user.",
+            inputSchema: tool.inputSchema,
+          }
+        }
+        return nonPersonaToolEntry(tool)
+      })
     return [...personaEntries, ...nonPersonaEntries]
   }
   if (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "balanced") {
@@ -587,7 +625,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
     }
     for (const tool of NON_PERSONA_MCP_TOOLS) {
       if (!fastAllowsTool(scope, launch, { group: tool.group, name: tool.toolNameHttp, tool })) continue
-      entries.push({ name: tool.toolNameHttp, description: tool.description, inputSchema: tool.inputSchema })
+      entries.push(nonPersonaToolEntry(tool))
     }
     return entries
   }
@@ -680,11 +718,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       return true
     },
   ).map(
-    (t) => ({
-      name: t.toolNameHttp,
-      description: t.description,
-      inputSchema: t.inputSchema,
-    }),
+    (t) => nonPersonaToolEntry(t),
   )
   return [...personaEntries, ...nonPersonaEntries]
 }

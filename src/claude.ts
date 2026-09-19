@@ -1513,11 +1513,18 @@ export const claude = defineCommand({
         // /gh-implement, /gh-swe-pipeline) via injectedSkillsForLaunch ONLY
         // when `--swe` was supplied, regardless of workerSkillsActive.
         const workerSkillsActive = workerToolsEnabled() && launchProfileId === "standard"
+        // Export the resolved search capability for child processes (the
+        // spawned session and its UserPromptSubmit hook). The `--search` CLI
+        // flag lives only in-process as `state.searchEnabled`; without this
+        // export the short-lived `internal-prompt-submit` hook could not tell
+        // whether semantic search is present and would name it unconditionally.
+        process.env.GH_ROUTER_SEARCH_ENABLED = state.searchEnabled === true ? "1" : "0"
         const skillsToWrite = injectedSkillsForLaunch({
           profileId: launchProfileId,
           workerSkillsActive,
           firstMateEnabled: agentToolsEnabled(),
           sweEnabled,
+          searchEnabled: state.searchEnabled === true,
         })
         let skillsWritten = 0
         for (const s of skillsToWrite) {
@@ -1968,6 +1975,7 @@ export const claude = defineCommand({
           agentToolsAvailable: agentToolsEnabled(),
           artifactToolsAvailable: artifactAvailable,
           astraAvailable,
+          semanticSearchAvailable: semanticSearchOptedIn(),
           ...nativeAvailability,
           profile: launchProfileId,
           nativeAgentModels,

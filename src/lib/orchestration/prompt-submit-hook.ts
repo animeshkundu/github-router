@@ -78,26 +78,63 @@ export function decidePromptSubmit(input: { stdin: string; steerEnabled: boolean
  * Static encouragement injected only for a non-trivial prompt (no extra model
  * call, no latency tax): nudge parallel lexical+semantic search before
  * concluding. Mirrors the v1 advisory tone: additive, never blocking.
+ *
+ * @deprecated Prefer `getPromptSearchTip(searchEnabled)` so the tip matches
+ * the launch's search capability. Kept for callers without a flag concept;
+ * built with semantic search enabled.
  */
-export const PROMPT_SEARCH_TIP =
-  "TIP (advisory): when this task needs code context, search lexical + semantic in "
-  + "parallel — one `mcp__search__code` call with mode:\"lexical\" and one with "
-  + "mode:\"semantic\", issued in the same turn — before concluding."
+export const PROMPT_SEARCH_TIP = getPromptSearchTip(true)
+
+/**
+ * Build the search tip for the launch's search capability. When semantic
+ * search is available the tip nudges parallel lexical+semantic search;
+ * otherwise it nudges lexical-only search and never names semantic search.
+ */
+export function getPromptSearchTip(searchEnabled: boolean): string {
+  if (searchEnabled) {
+    return (
+      "TIP (advisory): when this task needs code context, search lexical + semantic in "
+      + "parallel — one `mcp__search__code` call with mode:\"lexical\" and one with "
+      + "mode:\"semantic\", issued in the same turn — before concluding."
+    )
+  }
+  return (
+    "TIP (advisory): when this task needs code context, search lexical "
+    + "(`mcp__search__code` with mode:\"lexical\"/\"exact\"/\"regex\" for exact "
+    + "symbols, filenames, errors, routes, flags, and config keys), issuing "
+    + "parallel calls in the same turn — before concluding."
+  )
+}
+
+/**
+ * Build the scope-inference system prompt for the launch's search capability.
+ * Mirrors `getPromptSearchTip`: the semantic variant grounds the inference
+ * in lexical + semantic results; the lexical variant in lexical results.
+ */
+export function getPromptScopeSystem(searchEnabled: boolean): string {
+  const searchNoun = searchEnabled ? "a lexical + semantic code search" : "a lexical code search"
+  return (
+    "You are a scoping assistant for a coding agent about to act on a user's request. "
+    + `You are given the user's request and the results of ${searchNoun} `
+    + "over the relevant repository. Produce a SHORT advisory note (<= 120 words), plain text only:\n"
+    + "1. SCOPE: one line — is this trivial, focused (one area), or large/cross-cutting — grounded in "
+    + "what the search surfaced (reference the most relevant file(s) by name).\n"
+    + "2. GOAL: restate the user's OWN ask as a single measurable objective, in THEIR terms. Do NOT "
+    + "invent new requirements or acceptance criteria beyond what they asked.\n"
+    + "3. Only if the task is large/cross-cutting, add a final line: \"Consider /gh-research first to "
+    + "saturate understanding, then /gh-orchestrate to compose a floor-raising workflow.\" Omit it for a "
+    + "focused or trivial task.\n"
+    + "This is advisory — the agent decides whether to follow it. Be concrete and concise; no preamble."
+  )
+}
 
 /** System prompt for the single gpt-5.6-sol scope/goal inference. Steers a SHORT,
- *  user-derived (not invented) advisory note grounded in the search results. */
-export const PROMPT_SCOPE_SYSTEM =
-  "You are a scoping assistant for a coding agent about to act on a user's request. "
-  + "You are given the user's request and the results of a lexical + semantic code search "
-  + "over the relevant repository. Produce a SHORT advisory note (<= 120 words), plain text only:\n"
-  + "1. SCOPE: one line — is this trivial, focused (one area), or large/cross-cutting — grounded in "
-  + "what the search surfaced (reference the most relevant file(s) by name).\n"
-  + "2. GOAL: restate the user's OWN ask as a single measurable objective, in THEIR terms. Do NOT "
-  + "invent new requirements or acceptance criteria beyond what they asked.\n"
-  + "3. Only if the task is large/cross-cutting, add a final line: \"Consider /gh-research first to "
-  + "saturate understanding, then /gh-orchestrate to compose a floor-raising workflow.\" Omit it for a "
-  + "focused or trivial task.\n"
-  + "This is advisory — the agent decides whether to follow it. Be concrete and concise; no preamble."
+ *  user-derived (not invented) advisory note grounded in the search results.
+ *
+ * @deprecated Prefer `getPromptScopeSystem(searchEnabled)` so the prompt
+ * matches the launch's search capability. Kept for callers without a flag
+ * concept; built with semantic search enabled. */
+export const PROMPT_SCOPE_SYSTEM = getPromptScopeSystem(true)
 
 /** Injected IO for V2, all best-effort. Each network call returns its text and
  *  never throws to the orchestrator (the orchestrator wraps the enrichment in a
@@ -156,7 +193,9 @@ function joinSections(sections: Array<string>): string {
  *   - subagent/teammate  -> empty (top-level only, like v1).
  *   - findings           -> always surfaced (+ cleared) regardless of triviality.
  *   - trivial prompt     -> findings only (no search tip, no model call).
- *   - substantive prompt -> static search tip + parallel lexical+semantic search -> ONE gpt-5.6-sol call
+ *   - substantive prompt -> search tip + grounded enrichment (parallel
+ *                           lexical+semantic when `searchEnabled`, else
+ *                           lexical-only) -> ONE gpt-5.6-sol call
  *                           -> grounded scope/goal note. Fail-open to PROMPT_STEER_GOAL.
  *   - steerEnabled=false -> findings only (no goal/tip).
  */
@@ -164,6 +203,9 @@ export async function decidePromptSubmitV2(input: {
   stdin: string
   steerEnabled: boolean
   io: PromptSubmitV2IO
+  /** Whether semantic search is enabled for this launch. When false/absent
+   *  only a lexical search runs and the tip never names semantic search. */
+  searchEnabled?: boolean
 }): Promise<PromptSubmitDecision> {
   let payload: { session_id?: unknown; prompt?: unknown; agent_type?: unknown; agent_id?: unknown } = {}
   try {
@@ -205,7 +247,10 @@ export async function decidePromptSubmitV2(input: {
     return decision
   }
 
-  // Substantive prompt -> static search tip + grounded enrichment, timeout-bounded + fail-open.
+  // Substantive prompt -> search tip + grounded enrichment, timeout-bounded + fail-open.
+  const searchEnabled = input.searchEnabled === true
+  const searchTip = getPromptSearchTip(searchEnabled)
+  const scopeSystem = getPromptScopeSystem(searchEnabled)
   const timeoutMs = input.io.timeoutMs ?? 22_000
   let goal = PROMPT_STEER_GOAL // fail-open default.
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -215,6 +260,16 @@ export async function decidePromptSubmitV2(input: {
   const controller = new AbortController()
   try {
     const enrich = (async (): Promise<string> => {
+      if (!searchEnabled) {
+        const lexical = await input.io.searchCode(prompt, "lexical", controller.signal).catch(() => "")
+        const searchContext = `Lexical search results:\n${lexical.slice(0, SEARCH_CONTEXT_CAP)}`
+        const note = await input.io.infer(
+          scopeSystem,
+          `USER REQUEST:\n${prompt}\n\n${searchContext}`,
+          controller.signal,
+        )
+        return note.trim()
+      }
       const [lexical, semantic] = await Promise.all([
         input.io.searchCode(prompt, "lexical", controller.signal).catch(() => ""),
         input.io.searchCode(prompt, "semantic", controller.signal).catch(() => ""),
@@ -223,7 +278,7 @@ export async function decidePromptSubmitV2(input: {
         `Lexical search results:\n${lexical.slice(0, SEARCH_CONTEXT_CAP)}\n\n`
         + `Semantic search results:\n${semantic.slice(0, SEARCH_CONTEXT_CAP)}`
       const note = await input.io.infer(
-        PROMPT_SCOPE_SYSTEM,
+        scopeSystem,
         `USER REQUEST:\n${prompt}\n\n${searchContext}`,
         controller.signal,
       )
@@ -248,7 +303,7 @@ export async function decidePromptSubmitV2(input: {
     controller.abort()
   }
 
-  decision.inject = joinSections([PROMPT_SEARCH_TIP, goal, findingsBlock])
+  decision.inject = joinSections([searchTip, goal, findingsBlock])
   return decision
 }
 

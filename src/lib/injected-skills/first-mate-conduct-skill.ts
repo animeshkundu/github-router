@@ -1,6 +1,8 @@
 import { DEFINITION_OF_GREATNESS } from "~/lib/first-mate/operating-protocol"
+import type { InjectedSkill } from "./index"
 
-export const FIRST_MATE_CONDUCT_SKILL = {
+export function buildFirstMateConductSkill(_searchEnabled?: boolean): InjectedSkill {
+  return {
   name: "gh-first-mate-conduct",
   md: `---
 name: gh-first-mate-conduct
@@ -49,4 +51,7 @@ The ledger is durable memory for unit state; the strategy store is durable memor
 
 ${DEFINITION_OF_GREATNESS}
 `,
-} as const
+  }
+}
+
+export const FIRST_MATE_CONDUCT_SKILL = buildFirstMateConductSkill(true)

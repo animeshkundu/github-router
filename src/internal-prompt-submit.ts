@@ -85,6 +85,16 @@ export const internalPromptSubmit = defineCommand({
     try {
       const stdin = readStdin()
       const steerEnabled = parseBoolEnv(process.env.GH_ROUTER_DISABLE_PROMPT_STEER) !== true
+      // Search capability for tip/enrichment text. The launcher exports
+      // GH_ROUTER_SEARCH_ENABLED ("1"/"0") from its resolved
+      // `state.searchEnabled` before spawning the session, so this
+      // short-lived hook process inherits the launch's capability even when
+      // the opt-in came from the `--search` CLI flag (which otherwise would
+      // not survive the process boundary). Falls back to the raw opt-in env
+      // for standalone invocations.
+      const searchEnabled = process.env.GH_ROUTER_SEARCH_ENABLED !== undefined
+        ? process.env.GH_ROUTER_SEARCH_ENABLED === "1"
+        : process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
       const runtime = hookMcpRuntimeFromEnv()
 
       let decision: PromptSubmitDecision
@@ -93,6 +103,7 @@ export const internalPromptSubmit = defineCommand({
         decision = await decidePromptSubmitV2({
           stdin,
           steerEnabled,
+          searchEnabled,
           io: {
             searchCode: async (query, mode, signal) => {
               const r = await callMcpTool({

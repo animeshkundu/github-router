@@ -386,7 +386,7 @@ mock.module("~/lib/colbert", () => ({
   // index is terminally failed. null = healthy, so the banner stays silent
   // and these launcher assertions see unchanged output.
   colbertDegradedWarning: mock(async () => null),
-  semanticSearchOptedIn: mock(() => false),
+  semanticSearchOptedIn: mock(() => semanticSearchOptedInImpl),
   colbertSearchEnabled: mock(() => false),
   runSemanticSearch: mock(async () => ({
     status: "unavailable",
@@ -400,6 +400,11 @@ mock.module("~/lib/colbert", () => ({
   runServiceSearch: mock(async () => ({ status: "unavailable" })),
   __resetColbertStartedForTests: mock(() => {}),
 }))
+
+// Rebindable semantic-search opt-in for the `~/lib/colbert` mock above.
+// Default false (matches the historical mock); tests that need the
+// semantic-first awareness text set it true and reset in beforeEach.
+let semanticSearchOptedInImpl = false
 
 // --- Import module under test AFTER mocks ---
 const { claude } = await import("../../src/claude")
@@ -435,6 +440,7 @@ beforeEach(() => {
   processOnMock.mockReset()
   stderrWriteMock.mockReset()
   isTTY = true
+  semanticSearchOptedInImpl = false
 
   setupAndServeMock.mockReset()
   setupAndServeMock.mockResolvedValue({
@@ -1889,17 +1895,32 @@ describe("claude command", () => {
 
       // The full peer-MCP awareness snippet is appended to CLAUDE.md (the single
       // full copy the main agent and descendants both read); it is NOT copied
-      // into the --append-system-prompt value.
+      // into the --append-system-prompt value. Default env has no --search,
+      // so the snippet is lexical-only and never names semantic search.
       expect(appendPeerAwarenessToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
       const [appendedSnippet] = appendPeerAwarenessToMirroredClaudeMdMock
         .mock.calls[0]
       expect(appendedSnippet).toContain("Peer review and advisor")
-      expect(appendedSnippet).toContain("ColBERT")
+      expect(appendedSnippet).toContain("mcp__search__code")
+      expect(appendedSnippet).not.toContain("ColBERT")
       expect(snippet).not.toContain(appendedSnippet as string)
 
       // The style-directive + operating-defaults prepends at the top of CLAUDE.md.
       expect(prependStyleDirectiveToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
       expect(prependOperatingDefaultsToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
+    })
+
+    test("--search → appended awareness snippet is semantic-first (ColBERT)", async () => {
+      delete mockProcessEnv.GH_ROUTER_PEER_AWARENESS
+      semanticSearchOptedInImpl = true
+      const run = getRunFn()
+      await run({ args: {} })
+
+      expect(appendPeerAwarenessToMirroredClaudeMdMock).toHaveBeenCalledTimes(1)
+      const [appendedSnippet] = appendPeerAwarenessToMirroredClaudeMdMock
+        .mock.calls[0]
+      expect(appendedSnippet).toContain("Peer review and advisor")
+      expect(appendedSnippet).toContain("ColBERT")
     })
 
     test("--append-system-prompt is pushed exactly once (no accidental double-injection)", async () => {

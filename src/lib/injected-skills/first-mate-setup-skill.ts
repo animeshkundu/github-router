@@ -1,4 +1,7 @@
-export const FIRST_MATE_SETUP_SKILL = {
+import type { InjectedSkill } from "./index"
+
+export function buildFirstMateSetupSkill(_searchEnabled?: boolean): InjectedSkill {
+  return {
   name: "gh-first-mate-scaffold",
   md: `---
 name: gh-first-mate-scaffold
@@ -43,4 +46,7 @@ Modes:
 
 Always inspect the returned per-file report and PR. A no-op result means the repo already has the foundation or has no missing enhanceable sections.
 `,
-} as const
+  }
+}
+
+export const FIRST_MATE_SETUP_SKILL = buildFirstMateSetupSkill(true)

@@ -43,17 +43,38 @@ const SECURITY_BOUNDARY = `You are operating inside a sandboxed coding worker. I
 // is implemented but intentionally NOT wired into `buildWorkerTools`
 // (peer critics aren't part of the worker surface). `codex_review`
 // (implement mode only) is the worker's code-review escalation.
-const READ_TOOL_NOTES = [
+//
+// `code_search` is search-flag dependent: when semantic search is
+// available (--search / GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1) the tool is
+// semantic-first with transparent lexical fallback; otherwise it is
+// lexical-only and the prompt never names semantic search.
+const CODE_SEARCH_NOTE_SEMANTIC =
+  "`code_search` — semantic-first code search: the default `semantic` mode ranks by MEANING (ColBERT), falling back to lexical BM25F-ranked hits when the index isn't ready (the `source` field says which ran); use `lexical`/`exact`/`regex`/`ast` for exact symbols. Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, `.csv`, `.env*`, config-only wiring) and when a search returns no hits, `grep`/`glob` apply."
+
+const CODE_SEARCH_NOTE_LEXICAL =
+  "`code_search` — lexical code search (BM25F + tree-sitter structural ranking). Modes: `lexical` (ranked, best for exact symbols), `exact` (fixed-string), `regex` (PCRE2), `ast` (ast-grep structural via `ast_pattern`+`ast_lang`). Multiple independent queries can run in a single turn. For unstructured files (logs, `.csv`, `.env*`, config-only wiring) and when a search returns no hits, `grep`/`glob` apply."
+
+const READ_TOOL_NOTES_BASE = [
   "`read` — return a file's content.",
   "`glob` — list files matching a glob pattern.",
   "`grep` — regex search across files.",
-  "`code_search` — semantic-first code search: the default `semantic` mode ranks by MEANING (ColBERT), falling back to lexical BM25F-ranked hits when the index isn't ready (the `source` field says which ran); use `lexical`/`exact`/`regex`/`ast` for exact symbols. Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, `.csv`, `.env*`, config-only wiring) and when a search returns no hits, `grep`/`glob` apply.",
+] as const
+
+const READ_TOOL_NOTES_TAIL = [
   "`web_search` — Copilot-backed web search; returns titles, URLs, and snippets.",
   "`fetch_url` — fetch a single URL and return body text.",
   "`toolbelt` — run a read-only analysis CLI (no shell): rg, fd, sg, jq, yq, gron, scc, tokei, difft, git (read-only subcommands).",
   "`advisor` — consult a stronger cross-lab reviewer model on a focused concern (your approach, a blocker, a decision); it sees the recent transcript automatically.",
   "`update_plan` — maintain a short ordered checklist of your steps (send the full list each call); it's re-surfaced to you each turn so it survives context compaction.",
 ] as const
+
+function readToolNotes(searchEnabled: boolean): ReadonlyArray<string> {
+  return [
+    ...READ_TOOL_NOTES_BASE,
+    searchEnabled ? CODE_SEARCH_NOTE_SEMANTIC : CODE_SEARCH_NOTE_LEXICAL,
+    ...READ_TOOL_NOTES_TAIL,
+  ]
+}
 
 const WRITE_TOOL_NOTES = [
   "`edit` — exact-string replacement in a file.",
@@ -66,9 +87,13 @@ function buildToolBlock(tools: ReadonlyArray<string>): string {
   return tools.map((t) => `- ${t}`).join("\n")
 }
 
-const EXPLORE_MODE_NOTE = `Read-only mode — tools:\n${buildToolBlock(READ_TOOL_NOTES)}`
+function exploreModeNote(searchEnabled: boolean): string {
+  return `Read-only mode — tools:\n${buildToolBlock(readToolNotes(searchEnabled))}`
+}
 
-const IMPLEMENT_MODE_NOTE = `Read+write mode — tools:\n${buildToolBlock([...READ_TOOL_NOTES, ...WRITE_TOOL_NOTES])}`
+function implementModeNote(searchEnabled: boolean): string {
+  return `Read+write mode — tools:\n${buildToolBlock([...readToolNotes(searchEnabled), ...WRITE_TOOL_NOTES])}`
+}
 
 // Review/plan modes share explore's read-only tool surface. Each adds a
 // one-line ROLE frame — what the worker is for — NOT prescriptive step-advice
@@ -84,16 +109,24 @@ const TEST_ROLE = `You are an INDEPENDENT test author; you did NOT write the cod
 // (always), plus edit/write (only with an isolated worktree). It must NOT list
 // `codex_review`, which is implement/test-only — a prompt that names a tool the
 // agent does not have wastes a turn on a call that cannot succeed.
-const REVIEW_TOOL_NOTES = [
-  ...READ_TOOL_NOTES,
-  ...WRITE_TOOL_NOTES.filter((n) => !n.startsWith("`codex_review`")),
-] as const
+function reviewToolNotes(searchEnabled: boolean): ReadonlyArray<string> {
+  return [
+    ...readToolNotes(searchEnabled),
+    ...WRITE_TOOL_NOTES.filter((n) => !n.startsWith("`codex_review`")),
+  ]
+}
 
-const REVIEW_MODE_NOTE = `${REVIEW_ROLE}\n\nTools (edit/write appear only when this run owns an isolated worktree):\n${buildToolBlock(REVIEW_TOOL_NOTES)}`
+function reviewModeNote(searchEnabled: boolean): string {
+  return `${REVIEW_ROLE}\n\nTools (edit/write appear only when this run owns an isolated worktree):\n${buildToolBlock(reviewToolNotes(searchEnabled))}`
+}
 
-const PLAN_MODE_NOTE = `${PLAN_ROLE}\n\nRead-only mode — tools:\n${buildToolBlock(READ_TOOL_NOTES)}`
+function planModeNote(searchEnabled: boolean): string {
+  return `${PLAN_ROLE}\n\nRead-only mode — tools:\n${buildToolBlock(readToolNotes(searchEnabled))}`
+}
 
-const TEST_MODE_NOTE = `${TEST_ROLE}\n\nRead+write mode — tools:\n${buildToolBlock([...READ_TOOL_NOTES, ...WRITE_TOOL_NOTES])}`
+function testModeNote(searchEnabled: boolean): string {
+  return `${TEST_ROLE}\n\nRead+write mode — tools:\n${buildToolBlock([...readToolNotes(searchEnabled), ...WRITE_TOOL_NOTES])}`
+}
 
 // ============================================================
 // Browse mode
@@ -138,9 +171,17 @@ const BROWSE_MODE_NOTE = `Browser-control mode. Finish by calling submit_answer 
  * prompt is the page-content security boundary plus a termination-hardened
  * behavioral contract (when to finish, never fabricate) rather than a
  * tool list.
+ *
+ * `searchEnabled` selects the `code_search` capability line. When true
+ * (operator launched with --search / GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1)
+ * the tool is described as semantic-first with transparent lexical
+ * fallback; when false it is described as lexical-only and semantic
+ * search is never named, so the prompt never advertises a tool mode
+ * that is not present.
  */
 export function systemPromptFor(
   mode: "explore" | "review" | "plan" | "implement" | "test" | "browse",
+  searchEnabled: boolean = false,
 ): string {
   if (mode === "browse") {
     return `${BROWSE_BOUNDARY}\n\n${BROWSE_MODE_NOTE}`
@@ -149,19 +190,19 @@ export function systemPromptFor(
   let note: string
   switch (mode) {
     case "explore":
-      note = EXPLORE_MODE_NOTE
+      note = exploreModeNote(searchEnabled)
       break
     case "review":
-      note = REVIEW_MODE_NOTE
+      note = reviewModeNote(searchEnabled)
       break
     case "plan":
-      note = PLAN_MODE_NOTE
+      note = planModeNote(searchEnabled)
       break
     case "implement":
-      note = IMPLEMENT_MODE_NOTE
+      note = implementModeNote(searchEnabled)
       break
     case "test":
-      note = TEST_MODE_NOTE
+      note = testModeNote(searchEnabled)
       break
   }
   return `${SECURITY_BOUNDARY}\n\n${note}`

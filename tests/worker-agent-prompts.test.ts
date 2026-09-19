@@ -167,4 +167,28 @@ describe("systemPromptFor", () => {
       expect(prompt).not.toMatch(/^Reach for /m)
     }
   })
+
+  test("search flag selects the code_search capability line (--search)", () => {
+    // Enabled: semantic-first with transparent lexical fallback.
+    const on = systemPromptFor("explore", true)
+    expect(on).toContain("semantic-first code search")
+    expect(on).toContain("ColBERT")
+    expect(on).not.toContain("lexical-fallback") // `source` values live in tool I/O, not the prompt
+    expect(on).toContain("`lexical`/`exact`/`regex`/`ast` for exact symbols")
+    // Disabled (and the default): lexical-only, never names semantic search.
+    for (const off of [systemPromptFor("explore", false), systemPromptFor("explore")]) {
+      expect(off).toContain("lexical code search (BM25F + tree-sitter structural ranking)")
+      expect(off).not.toContain("ColBERT")
+      expect(off).not.toMatch(/semantic-first/i)
+      expect(off).not.toMatch(/ranks by MEANING/i)
+      expect(off).not.toMatch(/mode:?"semantic"?/i)
+    }
+    // The flag threads through every filesystem mode, not just explore.
+    for (const mode of ["review", "plan", "implement", "test"] as const) {
+      expect(systemPromptFor(mode, true)).toContain("ColBERT")
+      expect(systemPromptFor(mode, false)).not.toContain("ColBERT")
+    }
+    // Browse mode is tool-surface independent of the search flag.
+    expect(systemPromptFor("browse", true)).toBe(systemPromptFor("browse", false))
+  })
 })

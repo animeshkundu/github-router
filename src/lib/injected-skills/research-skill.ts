@@ -1,6 +1,26 @@
-export const RESEARCH_SKILL = {
-  name: "gh-research",
-  md: `---
+import type { InjectedSkill } from "./index"
+
+export function buildResearchSkill(searchEnabled: boolean): InjectedSkill {
+  const searchStep = searchEnabled
+    ? `3. Fan out in parallel.
+   - Run independent code, web, history, and explore calls concurrently where possible; only the semantic-to-lexical code-search refinement is ordered. Issue the independent calls in a SINGLE turn (one message, multiple tool calls) so the harness actually runs them in parallel rather than serializing.
+   - Use mcp__search__code semantically first to find concepts and likely files.
+   - Then use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.
+   - Use git blame or history when authorship, regression timing, or intent matters.
+   - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.
+   - Launch parallel worker-explore background subagents (via the Agent tool, subagent_type worker-explore) for heavy gathering, each with a narrow question and expected artifact. They run non-blocking and report back on completion.
+   - Keep worker results summarized; do not paste every detail into the main context.`
+    : `3. Fan out in parallel.
+   - Run independent code, web, history, and explore calls concurrently where possible. Issue the independent calls in a SINGLE turn (one message, multiple tool calls) so the harness actually runs them in parallel rather than serializing.
+   - Use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.
+   - Use git blame or history when authorship, regression timing, or intent matters.
+   - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.
+   - Launch parallel worker-explore background subagents (via the Agent tool, subagent_type worker-explore) for heavy gathering, each with a narrow question and expected artifact. They run non-blocking and report back on completion.
+   - Keep worker results summarized; do not paste every detail into the main context.`
+
+  return {
+    name: "gh-research",
+    md: `---
 name: gh-research
 description: Bounded saturation research for non-trivial GitHub Router asks: enumerates unknowns, gathers in parallel through code search, web search, and explore workers, adversarially verifies load-bearing claims, persists a freshness-stamped brief, and returns a compact confidence-tagged root-cause summary. Use when grounded context is needed before planning or changing code.
 user-invocable: true
@@ -46,21 +66,14 @@ Default caps unless the user explicitly gives a smaller or larger budget:
    - Identify whether this is a bug, feature, refactor, incident, or design question.
    - Name the expected downstream consumer: implementer, orchestrator, floor-keeper, or user.
 
-2. Enumerate unknowns as an explicit worklist.
+ 2. Enumerate unknowns as an explicit worklist.
    - Include facts needed to decide the root cause or safe implementation path.
    - Mark each unknown as code, behavior, dependency, history, external, or acceptance-criteria related.
    - Add newly discovered unknowns as they appear.
 
-3. Fan out in parallel.
-   - Run independent code, web, history, and explore calls concurrently where possible; only the semantic-to-lexical code-search refinement is ordered. Issue the independent calls in a SINGLE turn (one message, multiple tool calls) so the harness actually runs them in parallel rather than serializing.
-   - Use mcp__search__code semantically first to find concepts and likely files.
-   - Then use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.
-   - Use git blame or history when authorship, regression timing, or intent matters.
-   - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.
-   - Launch parallel worker-explore background subagents (via the Agent tool, subagent_type worker-explore) for heavy gathering, each with a narrow question and expected artifact. They run non-blocking and report back on completion.
-   - Keep worker results summarized; do not paste every detail into the main context.
+${searchStep}
 
-4. Form a root-cause hypothesis.
+ 4. Form a root-cause hypothesis.
    - For bugs: describe the causal chain from trigger to observed symptom.
    - For features: identify integration points, constraints, and likely implementation seams.
    - For design questions: identify the decision, alternatives, and primary constraints.
@@ -106,4 +119,7 @@ Return a compact brief, not the whole research dump:
 - Do not keep searching after the cap.
 - Do not paste the entire persisted brief into later turns unless the user asks.
 `,
-} as const
+  }
+}
+
+export const RESEARCH_SKILL = buildResearchSkill(true)

@@ -176,6 +176,13 @@ export interface BuildWorkerToolsOpts {
    *  reach for capability — a net loss for the caller. */
   isolated?: boolean
   /**
+   * Whether ColBERT semantic code search is enabled for this launch
+   * (`--search` / `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`). When true the
+   * `code_search` tool is described as semantic-first; otherwise as
+   * lexical-only, never naming semantic search.
+   */
+  searchEnabled?: boolean
+  /**
    * Absolute path to the worker's workspace. MUST be pre-realpath-
    * canonicalized by the engine; `confineToWorkspace` re-asserts on
    * every call but assumes the workspace itself is canonical (per
@@ -948,93 +955,100 @@ function fetchUrlTool(): AgentTool<typeof FETCH_URL_PARAMS> {
   }
 }
 
-const CODE_SEARCH_PARAMS = Type.Object({
-  query: Type.String({
-    description:
-      "Search text. Natural-language intent in the default `semantic` " +
-      "mode; a literal string in `lexical`/`exact`; a PCRE2 regex in `regex`.",
-  }),
-  mode: Type.Optional(
-    Type.Union(
-      [
-        Type.Literal("semantic"),
-        Type.Literal("lexical"),
-        Type.Literal("exact"),
-        Type.Literal("regex"),
-        Type.Literal("ast"),
-      ],
-      {
-        description:
-          "Search mode. `semantic` (DEFAULT): ColBERT meaning-based ranking, " +
-          "falls back to lexical when the index isn't ready (response " +
-          "`source` says which engine ran). `lexical`: BM25F + tree-sitter " +
-          "(best for exact symbols). `exact`: fixed-string. `regex`: PCRE2. " +
-          "`ast`: ast-grep structural (needs `ast_pattern` + `ast_lang`).",
-      },
+function buildCodeSearchParams(searchEnabled: boolean) {
+  const queryDescription = searchEnabled
+    ? "Search text. Natural-language intent in the default `semantic` "
+      + "mode; a literal string in `lexical`/`exact`; a PCRE2 regex in `regex`."
+    : "Search text. A literal string in `lexical`/`exact`; a PCRE2 regex in `regex`."
+  const modeDescription = searchEnabled
+    ? "Search mode. `semantic` (DEFAULT): ColBERT meaning-based ranking, "
+      + "falls back to lexical when the index isn't ready (response "
+      + "`source` says which engine ran). `lexical`: BM25F + tree-sitter "
+      + "(best for exact symbols). `exact`: fixed-string. `regex`: PCRE2. "
+      + "`ast`: ast-grep structural (needs `ast_pattern` + `ast_lang`)."
+    : "Search mode. `lexical` (DEFAULT when semantic search is off): BM25F + "
+      + "tree-sitter (best for exact symbols). `semantic` is accepted and runs "
+      + "the lexical engine. `exact`: fixed-string. `regex`: PCRE2. "
+      + "`ast`: ast-grep structural (needs `ast_pattern` + `ast_lang`)."
+  return Type.Object({
+    query: Type.String({
+      description: queryDescription,
+    }),
+    mode: Type.Optional(
+      Type.Union(
+        [
+          Type.Literal("semantic"),
+          Type.Literal("lexical"),
+          Type.Literal("exact"),
+          Type.Literal("regex"),
+          Type.Literal("ast"),
+        ],
+        {
+          description: modeDescription,
+        },
+      ),
     ),
-  ),
-  pattern: Type.Optional(
-    Type.String({
-      description:
-        "Semantic mode only: regex pre-filter (colgrep -e) — grep first, " +
-        "then rank semantically. Ignored in lexical modes.",
-    }),
-  ),
-  file_glob: Type.Optional(
-    Type.String({ description: "ripgrep glob filter." }),
-  ),
-  limit: Type.Optional(
-    Type.Integer({ minimum: 1, description: "Max hits to return." }),
-  ),
-  structural: Type.Optional(
-    Type.Union([Type.Literal("full"), Type.Literal("topN")], {
-      description: "Structural-ranking depth (lexical mode only).",
-    }),
-  ),
-  complete: Type.Optional(
-    Type.Boolean({
-      description:
-        "Lexical mode: when true, return the COMPLETE match set (every line "
-        + "ripgrep would find, capped only by `limit`) — disables the "
-        + "default precision shoulder cut + per-file cap. Use it when you "
-        + "must not miss any occurrence (every caller of X, a rename, an "
-        + "audit). The default response `notice` says when matches were "
-        + "hidden.",
-    }),
-  ),
-  multiline: Type.Optional(
-    Type.Boolean({
-      description:
-        "Set true with mode:'regex' to let a pattern span newlines "
-        + "(ripgrep -U), e.g. 'foo[\\s\\S]*?bar' across lines. (literal/"
-        + "lexical queries can't contain a newline.)",
-    }),
-  ),
-  ast_pattern: Type.Optional(
-    Type.String({
-      description:
-        "mode:'ast' structural pattern (e.g. 'function $F($$$) { $$$ }'). "
-        + "Matches come from ast-grep instead of ripgrep — for "
-        + "multi-line AST shapes the regex modes can't express. Takes "
-        + "precedence over `query`. REQUIRES `ast_lang`. If ast-grep isn't "
-        + "installed you get a `notice`; it never falls back to regex.",
-    }),
-  ),
-  ast_lang: Type.Optional(
-    Type.String({
-      description:
-        "Language grammar for `ast_pattern` (REQUIRED with it): 'ts' | "
-        + "'tsx' | 'js' | 'py' | 'rust' | 'go' | … Without it ast-grep "
-        + "cross-matches every language and returns garbage.",
-    }),
-  ),
-})
+    pattern: Type.Optional(
+      Type.String({
+        description:
+          "Semantic mode only: regex pre-filter (colgrep -e) — grep first, " +
+          "then rank semantically. Ignored in lexical modes.",
+      }),
+    ),
+    file_glob: Type.Optional(
+      Type.String({ description: "ripgrep glob filter." }),
+    ),
+    limit: Type.Optional(
+      Type.Integer({ minimum: 1, description: "Max hits to return." }),
+    ),
+    structural: Type.Optional(
+      Type.Union([Type.Literal("full"), Type.Literal("topN")], {
+        description: "Structural-ranking depth (lexical mode only).",
+      }),
+    ),
+    complete: Type.Optional(
+      Type.Boolean({
+        description:
+          "Lexical mode: when true, return the COMPLETE match set (every line "
+          + "ripgrep would find, capped only by `limit`) — disables the "
+          + "default precision shoulder cut + per-file cap. Use it when you "
+          + "must not miss any occurrence (every caller of X, a rename, an "
+          + "audit). The default response `notice` says when matches were "
+          + "hidden.",
+      }),
+    ),
+    multiline: Type.Optional(
+      Type.Boolean({
+        description:
+          "Set true with mode:'regex' to let a pattern span newlines "
+          + "(ripgrep -U), e.g. 'foo[\\s\\S]*?bar' across lines. (literal/"
+          + "lexical queries can't contain a newline.)",
+      }),
+    ),
+    ast_pattern: Type.Optional(
+      Type.String({
+        description:
+          "mode:'ast' structural pattern (e.g. 'function $F($$$) { $$$ }'). "
+          + "Matches come from ast-grep instead of ripgrep — for "
+          + "multi-line AST shapes the regex modes can't express. Takes "
+          + "precedence over `query`. REQUIRES `ast_lang`. If ast-grep isn't "
+          + "installed you get a `notice`; it never falls back to regex.",
+      }),
+    ),
+    ast_lang: Type.Optional(
+      Type.String({
+        description:
+          "Language grammar for `ast_pattern` (REQUIRED with it): 'ts' | "
+          + "'tsx' | 'js' | 'py' | 'rust' | 'go' | … Without it ast-grep "
+          + "cross-matches every language and returns garbage.",
+      }),
+    ),
+  })
+}
 
-function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS> {
-  return {
-    name: "code_search",
-    label: "Code search (semantic-first)",
-    description:
+function codeSearchToolDescription(searchEnabled: boolean): string {
+  if (searchEnabled) {
+    return (
       "Semantic-first code search over the worker's workspace. Default " +
       "(`mode:\"semantic\"`) ranks by MEANING via ColBERT and transparently " +
       "falls back to lexical BM25F when the index isn't ready (the response " +
@@ -1044,8 +1058,28 @@ function codeSearchTool(workspace: string): AgentTool<typeof CODE_SEARCH_PARAMS>
       "Force lexical with mode `lexical` (exact symbols) / `exact` / " +
       "`regex` / `ast`. Prefer over `grep` for \"where is X / which files " +
       "reference Y\" discovery. Returns `{source, " +
-      "results:[{file,line,snippet,score?,endLine?,name?}], ...}` in JSON.",
-    parameters: CODE_SEARCH_PARAMS,
+      "results:[{file,line,snippet,score?,endLine?,name?}], ...}` in JSON."
+    )
+  }
+  return (
+    "Lexical code search over the worker's workspace (BM25F + tree-sitter "
+    + "structural ranking). Modes: `lexical` (ranked, best for exact symbols) / "
+    + "`exact` (fixed-string) / `regex` (PCRE2) / `ast` (ast-grep structural "
+    + "via `ast_pattern`+`ast_lang`); `mode:\"semantic\"` is accepted and runs "
+    + "the lexical engine (the response `source` says which engine ran). "
+    + "Prefer over `grep` for \"where is X / which files "
+    + "reference Y\" discovery. Returns `{source, " +
+    "results:[{file,line,snippet}], ...}` in JSON."
+  )
+}
+
+function codeSearchTool(workspace: string, searchEnabled: boolean = false): AgentTool<ReturnType<typeof buildCodeSearchParams>> {
+  const semantic = searchEnabled
+  return {
+    name: "code_search",
+    label: semantic ? "Code search (semantic-first)" : "Code search (lexical)",
+    description: codeSearchToolDescription(semantic),
+    parameters: buildCodeSearchParams(semantic),
     async execute(
       _toolCallId,
       params,
@@ -2028,11 +2062,12 @@ export function buildWorkerTools(
   opts: BuildWorkerToolsOpts,
 ): Array<AgentTool<TSchema, Record<string, never>>> {
   const { mode, workspace, getMessages, planState } = opts
+  const searchEnabled = opts.searchEnabled === true
   const explore: Array<AgentTool<TSchema, Record<string, never>>> = [
     readTool(workspace),
     globTool(workspace),
     grepTool(workspace),
-    codeSearchTool(workspace),
+    codeSearchTool(workspace, searchEnabled),
     webSearchTool(),
     fetchUrlTool(),
     toolbeltTool(workspace),
