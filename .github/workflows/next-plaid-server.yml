@@ -179,7 +179,20 @@ jobs:
           # GITHUB_PATH/GITHUB_ENV apply to SUBSEQUENT steps only — export
           # in-step so the smoke check below sees the just-installed nvcc.
           export PATH="${DIR}/bin:${PATH}"
+          export LD_LIBRARY_PATH="${DIR}/lib64:${LD_LIBRARY_PATH:-}"
+          # Verify EVERY non-standard piece the cudarc build needs — fail
+          # here with a clear message, not 10 min deep in the cargo build:
+          # nvcc (compiler), cudart + cublas shared libs, CUDA headers.
           nvcc --version
+          for lib in libcudart.so libcublas.so; do
+            if ! ldconfig -p | grep -q "$lib"; then
+              echo "::error::missing $lib after cuda-toolkit install"
+              exit 1
+            fi
+            echo "found $lib: $(ldconfig -p | grep "$lib" | head -1)"
+          done
+          test -f "${DIR}/include/cuda_runtime.h" || { echo "::error::missing cuda_runtime.h"; exit 1; }
+          echo "CUDA toolkit verified: ${DIR}"
 
       - name: Install CUDA Toolkit (Windows)
         if: matrix.variant == 'cuda' && matrix.os == 'windows-latest'
