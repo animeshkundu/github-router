@@ -139,15 +139,20 @@ describe("colbert manifest", () => {
     expect(m.nextPlaidServerAsset("cpu", "linux", "arm64")).toBeUndefined()
   })
 
-  test("unpromoted server entries carry empty sha (fail-closed until promotion)", async () => {
+  test("server entries carry either empty sha (fail-closed until promotion) or a pinned digest", async () => {
     const m = await import("../../src/lib/colbert/manifest")
     const hex = /^[0-9a-f]{64}$/
     for (const [key, asset] of Object.entries(m.NEXTPLAID_SERVER)) {
       expect(asset.sha256 === "" || hex.test(asset.sha256), `server ${key}`).toBe(true)
     }
-    // Nothing promoted yet: every variant reports unpromoted.
-    expect(m.nextPlaidServerPromoted("cpu")).toBe(false)
-    expect(m.nextPlaidServerPromoted("cuda")).toBe(false)
+    // Promotion state is per-variant and platform-dependent: an entry is
+    // usable iff its digest is pinned. Empty stays fail-closed.
+    for (const key of Object.keys(m.NEXTPLAID_SERVER)) {
+      const [platform, arch, variant] = key.split("-") as [NodeJS.Platform, string, "cpu" | "cuda"]
+      expect(m.nextPlaidServerPromoted(variant, platform, arch)).toBe(
+        m.nextPlaidServerAsset(variant, platform, arch)!.sha256.length > 0,
+      )
+    }
   })
 })
 
