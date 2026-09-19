@@ -161,13 +161,17 @@ describe("backend selection", () => {
     expect(backend.semanticBackend()).toBe("colgrep")
   })
 
-  test("serviceBackendEnabled needs binary + model", async () => {
+  test("serviceBackendEnabled needs model + (binary or promoted download)", async () => {
     process.env.GH_ROUTER_SEMANTIC_BACKEND = "service"
-    // No binary anywhere → disabled.
-    expect(backend.serviceBackendEnabled()).toBe(false)
-    // Explicit binary + provisioned model dir → enabled.
+    // Promoted SHAs (current manifest) make the backend actionable even
+    // with no binary on disk — ensureServer provisions on demand.
+    expect(backend.serviceBackendEnabled()).toBe(true)
+    // Explicit binary also enables (classic path).
     process.env.GH_ROUTER_NEXTPLAID_BIN = process.execPath
     expect(backend.serviceBackendEnabled()).toBe(true)
+    // ...but without the model dir it's still off either way.
+    await fs.rm(path.join(TEST_HOME, "colbert-models"), { recursive: true, force: true })
+    expect(backend.serviceBackendEnabled()).toBe(false)
   })
 })
 
