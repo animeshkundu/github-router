@@ -93,7 +93,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out upstream at the pinned tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: lightonai/next-plaid
           ref: ${{ env.UPSTREAM_TAG }}
@@ -146,8 +146,31 @@ jobs:
           vcpkg install openblas:x64-windows-static-md
           choco install cmake -y
 
-      - name: Install CUDA Toolkit
-        if: matrix.variant == 'cuda'
+      # Linux cuda: install the cuda-toolkit METAPACKAGE (upstream's own
+      # recipe — their release.yml does exactly this). The metapackage name
+      # is stable per minor (`cuda-toolkit-12-8`); per-subpackage names are
+      # NOT (Jimver's `cublas` maps to `cuda-cublas-12-8`, which no longer
+      # exists — the repo now ships `libcublas-12-8`). cudarc links
+      # dynamically, so the toolkit is a BUILD-time headers-only need with
+      # no runtime CUDA dependency in the binary.
+      - name: Install CUDA Toolkit (Linux)
+        if: matrix.variant == 'cuda' && matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MINOR="${CUDA_VERSION%.*}"       # 12.8.1 -> 12.8
+          DASH="${MINOR/./-}"              # 12.8 -> 12-8
+          DIR="/usr/local/cuda-${MINOR}"
+          wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y "cuda-toolkit-${DASH}"
+          echo "${DIR}/bin" >> "$GITHUB_PATH"
+          echo "CUDA_PATH=${DIR}" >> "$GITHUB_ENV"
+          nvcc --version
+
+      - name: Install CUDA Toolkit (Windows)
+        if: matrix.variant == 'cuda' && matrix.os == 'windows-latest'
         uses: Jimver/cuda-toolkit@v0.2.36
         id: cuda-toolkit
         with:
