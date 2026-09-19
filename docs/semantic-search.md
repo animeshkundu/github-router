@@ -66,12 +66,31 @@ freshness verdict on each query from `git rev-parse HEAD` +
 - **fresh** - `ready`, physical shard intervals are contiguous and non-overlapping,
   the recorded binary/ORT SHAs match the provisioned generation, HEAD matches
   the last index, and the tree is not newly dirty → serve semantic.
-- **stale** - HEAD moved or the tree is dirty since indexing → honest
-  `stale` notice, **no** possibly-deleted-content hits labeled `ready`.
+- **stale** - HEAD moved or the tree is dirty since indexing. Stale splits
+  three ways (`staleKind`): `content` (tree moved, bits unchanged),
+  `engine` (binary/runtime/model changed — the embedding space may differ),
+  `suspect` (shards look structurally odd). Content-stale carries the
+  enumerated delta (`staleFiles`, capped, with `staleTruncated` when more
+  changed than listed).
 - **corrupt** - numbered PLAID shard metadata is unreadable, malformed, gapped,
   overlapping, or belongs to an older binary/ORT generation → quarantine the
   project directory by atomic rename, remove it out of band, and start one
   bounded clean rebuild. A failed rename never falls back to in-place deletion.
+
+## Serve-while-stale (freshness labels, not refusal)
+
+An LLM editing session dirties the tree constantly; a refuse-when-stale
+policy would make semantic search permanently unavailable during exactly
+those sessions. So a **small content delta serves labeled results**:
+`staleKind:"content"` + fully-enumerated delta within
+`GH_ROUTER_SERVE_STALE_MAX_FILES` (default 200) → the runner serves
+semantic hits with `freshness:"stale"` + `stale_files:N`, kicks a
+background refresh, and the unified `code` tool (plus the worker
+`code_search` tool) forwards both fields so the model knows the rows
+predate recent edits. Engine/suspect stale, large deltas, and all other
+non-ready states still fall back to lexical — those cannot be labeled
+honestly. Direct `runSemanticSearch` callers keep the strict contract
+unless they pass `serveStale:true`.
 
 A non-git workspace falls back to colgrep's own mtime-based incremental
 signal, but still passes the physical-integrity and engine-generation gates.

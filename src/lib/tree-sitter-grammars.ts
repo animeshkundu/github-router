@@ -20,6 +20,16 @@
  * There is exactly ONE `Parser.init()` and ONE grammar cache across the
  * whole process: every caller (the structural pass, `outlineFile`)
  * awaits the same `getGrammarBundle().ready` promise.
+ *
+ * Version pin note (evaluated 2026-09): web-tree-sitter stays at 0.25.10
+ * with tree-sitter-wasms 0.1.13 prebuilts. Upgrading the runtime to 0.27.0
+ * was spike-tested — all 9 prebuilt grammars fail to load (WASM
+ * dynamic-linking format mismatch). The migration path is web-tree-sitter
+ * 0.27.0 + tree-sitter-wasm 1.1.3 (verified: all 9 load + parse), but that
+ * swaps grammar builds too, so DEFINITION_NODE_TYPES needs node-type
+ * parity validation per language before it ships. Deferred until the
+ * semantic-service work lands; the cost of staying is only the
+ * check-between-files (not mid-parse) structural budget.
  */
 
 import * as path from "node:path"
@@ -77,6 +87,7 @@ export const EXTENSION_TO_LANG: Readonly<Record<string, string>> = {
   ".cxx": "cpp",
   ".hpp": "cpp",
   ".hxx": "cpp",
+  ".cs": "csharp",
 }
 
 /**
@@ -192,6 +203,48 @@ export const DEFINITION_NODE_TYPES: Readonly<Record<string, ReadonlySet<string>>
     "namespace_definition",
     "template_declaration",
   ]),
+  csharp: new Set([
+    "namespace_declaration",
+    "file_scoped_namespace_declaration",
+    "class_declaration",
+    "interface_declaration",
+    "struct_declaration",
+    "record_declaration",
+    "record_struct_declaration",
+    "enum_declaration",
+    "enum_member_declaration",
+    "delegate_declaration",
+    "method_declaration",
+    "constructor_declaration",
+    "destructor_declaration",
+    "property_declaration",
+    "indexer_declaration",
+    "operator_declaration",
+    "field_declaration",
+    "event_field_declaration",
+  ]),
+}
+
+/**
+ * Per-language definition node types whose declared name carries NO
+ * dedicated `name`/`declarator`/`type` field the `isDefiningSite` walk can
+ * test positionally. For these shapes the name is recovered positionally:
+ * the first declarator's identifier (C# `field_declaration` /
+ * `event_field_declaration` are always `modifiers* type declarator
+ * (= value)? ;` — no body). The walk is scoped to the declarator itself
+ * because BOTH leading attributes AND the type annotation can contain
+ * identifiers that precede the name (`[Attr] System.EventHandler Changed;`
+ * must resolve to `Changed`).
+ *
+ * Soundness: the declarator's own name textually precedes any initializer,
+ * so initializer references can never match. Multi-declarator fields
+ * (`int a = 1, b = 2;`) confirm only the first — incomplete but never
+ * wrong, matching the `role` contract (absence is not a usage claim).
+ */
+export const FIRST_LEAF_DEFINITION_TYPES: Readonly<
+  Record<string, ReadonlySet<string>>
+> = {
+  csharp: new Set(["field_declaration", "event_field_declaration"]),
 }
 
 /**
@@ -380,12 +433,51 @@ function deriveDefinitionName(node: Node): string | null {
     if (leaf && leaf.text.length > 0) return leaf.text
   }
 
+  // Scoped positional fallback: the first declarator's identifier.
+  // Catches field-like shapes with no name field at all (C#
+  // `field_declaration` / `event_field_declaration`). Scoped to the
+  // declarator (not the whole subtree) for two reasons: leading attributes
+  // live outside it, and qualified TYPE annotations (`System.EventHandler`)
+  // precede the declarator and contain their own identifiers — a whole-
+  // subtree first-leaf would return the type's name instead of the field's.
+  // Nodes without a declarator fall through to the generic fallback below,
+  // so existing languages are unaffected (their name/declarator/type paths
+  // already returned above).
+  const scoped = firstDeclaratorLeaf(node)
+  if (scoped && scoped.text.length > 0) return scoped.text
+
   // Fall back to the first identifier-typed named child anywhere in the
   // subtree (handles grammars that don't expose a `name` field for a
   // given definition shape).
   const fallback = firstIdentifierLeaf(node)
   if (fallback && fallback.text.length > 0) return fallback.text
 
+  return null
+}
+
+/**
+ * First identifier leaf of the first `variable_declarator` under the first
+ * `variable_declaration` child, or null when the shape is absent. Used for
+ * field-like definition shapes with no `name` field (C# fields/events):
+ * restricting the walk to the declarator skips both leading attributes and
+ * the type annotation, either of which can contain identifiers that precede
+ * the declared name (`[Attr] System.EventHandler Changed;` must resolve to
+ * `Changed`, not `Attr` or `System`).
+ *
+ * Only the FIRST declarator is considered (`int a = 1, b = 2` confirms `a`
+ * alone) — incomplete but never wrong, matching the `role` contract.
+ */
+function firstDeclaratorLeaf(defNode: Node): Node | null {
+  for (const child of defNode.namedChildren) {
+    // web-tree-sitter 0.25 types `namedChildren` as `(Node | null)[]`.
+    if (child === null || child.type !== "variable_declaration") continue
+    for (const decl of child.namedChildren) {
+      if (decl === null || decl.type !== "variable_declarator") continue
+      // The declarator's own name textually precedes any initializer, so
+      // its first identifier leaf IS the declared name.
+      return firstIdentifierLeaf(decl)
+    }
+  }
   return null
 }
 
@@ -405,16 +497,40 @@ const OUTLINE_MEMBER_CONTAINERS = new Set([
   "impl_item",
   "trait_item",
   "struct_item",
+  "struct_declaration",
+  "record_declaration",
+  "record_struct_declaration",
   "namespace_definition",
+  "namespace_declaration",
+  "file_scoped_namespace_declaration",
   "module",
 ])
 
-function collectDefinitions(
+/**
+ * One navigable definition with its live AST node. The node is BORROWED —
+ * callers must not `.delete()` it and must use it before the owning tree
+ * is freed. Used by the outline builder (names + lines) and the semantic
+ * unit pipeline (full ranges + source text).
+ */
+export interface UnitNode {
+  node: Node
+  kind: string
+  name: string
+  depth: number
+}
+
+/**
+ * Walk collecting navigable definitions: top-level symbols plus members of
+ * class-like containers. Function-local variables and nested helpers are
+ * deliberately excluded (see OUTLINE_MEMBER_CONTAINERS). Pure walk — no
+ * read / parse / delete. Never throws (per-node failures skip the node).
+ */
+export function collectUnitNodes(
   root: Node,
   defTypes: ReadonlySet<string>,
   signal?: AbortSignal,
-): Array<FileOutlineEntry> {
-  const out: Array<FileOutlineEntry> = []
+): Array<UnitNode> {
+  const out: Array<UnitNode> = []
 
   const visit = (
     node: Node,
@@ -430,12 +546,7 @@ function collectDefinitions(
         if (includeDefinitions) {
           const name = deriveDefinitionName(child)
           if (name !== null) {
-            out.push({
-              kind: child.type,
-              name,
-              line: child.startPosition.row + 1,
-              depth,
-            })
+            out.push({ node: child, kind: child.type, name, depth })
           }
         }
         // Only class-like definitions expose navigable members. Do not walk a
@@ -451,6 +562,19 @@ function collectDefinitions(
 
   visit(root, 0, true)
   return out
+}
+
+function collectDefinitions(
+  root: Node,
+  defTypes: ReadonlySet<string>,
+  signal?: AbortSignal,
+): Array<FileOutlineEntry> {
+  return collectUnitNodes(root, defTypes, signal).map((u) => ({
+    kind: u.kind,
+    name: u.name,
+    line: u.node.startPosition.row + 1,
+    depth: u.depth,
+  }))
 }
 
 /**
@@ -568,6 +692,17 @@ function isDefiningSite(
       const typeField = cur.childForFieldName("type")
       if (typeField && containsByteRange(typeField, matchedNode)) {
         const first = firstIdentifierLeaf(typeField)
+        if (first && first.startIndex === matchedNode.startIndex) {
+          return true
+        }
+      }
+      // Positional fallback for field-like shapes with no name slot
+      // (see FIRST_LEAF_DEFINITION_TYPES): the match is a definition iff
+      // it IS the declarator identifier. The helper skips attributes and
+      // the type annotation, so neither can false-positive here.
+      const firstLeafTypes = FIRST_LEAF_DEFINITION_TYPES[langKey]
+      if (firstLeafTypes?.has(cur.type)) {
+        const first = firstDeclaratorLeaf(cur)
         if (first && first.startIndex === matchedNode.startIndex) {
           return true
         }

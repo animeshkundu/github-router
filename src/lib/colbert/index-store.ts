@@ -164,8 +164,15 @@ function metaPath(workspace: string): string {
  * `failed` straight off `meta.status`, before it looks at the disk, so a
  * zeroed counter still short-circuited every query. The reset now drops the
  * status as well.
+ *
+ * Epoch 4: the shard-tiling validator false-positived on every
+ * incrementally-updated index (`embedding_offset` is a write-cursor
+ * artifact, never a read invariant — verified against next-plaid v1.7.0
+ * source), manufacturing `corrupt` verdicts that quarantine+delete looped
+ * deterministically into capped `failed`. Any stored `corrupt` streak may
+ * be this bug, so it clears once like the rest.
  */
-const WATCHDOG_EPOCH = 3
+const WATCHDOG_EPOCH = 4
 
 /**
  * Failure classes the router-side bugs could have manufactured.
@@ -330,7 +337,26 @@ export type IndexIntegrity =
   | { verdict: "suspect"; reason: string }
   | { verdict: "corrupt"; reason: string }
 
-/** Validate the contiguous embedding interval encoded by PLAID shard metadata. */
+/**
+ * Validate PLAID shard metadata readability — NOT tiling.
+ *
+ * Deliberately NOT a contiguity check: `embedding_offset` is a write-cursor
+ * artifact for incremental appends, never a read invariant. Verified against
+ * next-plaid v1.7.0 source: the sole read of `embedding_offset` anywhere
+ * (next-plaid `update.rs`, append-to-last cursor) is on the WRITE path;
+ * search reads the merged concatenation + SQLite doc mapping, neither of
+ * which consults offsets. Incremental updates (and worktree-seed +
+ * reconcile) legitimately leave non-tiling layouts — overlapping and
+ * gapped intervals on a colgrep-healthy index (observed live: 23 shards,
+ * search serving correctly, zero SQLite doc duplicates).
+ *
+ * The previous tiling check therefore false-positived on every
+ * incrementally-updated index, and the quarantine+delete+rebuild response
+ * re-seeded into the identical layout deterministically — a self-
+ * perpetuating failure loop ending in capped `failed`. Corrupt is now
+ * reserved for genuinely unreadable stores (which colgrep itself cannot
+ * load either).
+ */
 export function validateIndexIntegrity(projectIndexDir: string): IndexIntegrity {
   let names: Array<string>
   try {
@@ -342,7 +368,7 @@ export function validateIndexIntegrity(projectIndexDir: string): IndexIntegrity 
   }
   if (names.length === 0) return { verdict: "not-built" }
 
-  const intervals: Array<{ start: number; count: number }> = []
+  let sum = 0
   for (const name of names) {
     try {
       const parsed = JSON.parse(readFileSync(path.join(projectIndexDir, name), "utf8")) as {
@@ -361,38 +387,13 @@ export function validateIndexIntegrity(projectIndexDir: string): IndexIntegrity 
       ) {
         return { verdict: "corrupt", reason: `invalid shard metadata: ${name}` }
       }
-      intervals.push({ start, count })
+      sum += count
     } catch {
       return { verdict: "corrupt", reason: `unreadable shard metadata: ${name}` }
     }
   }
 
-  // Tie-break by count so a legal zero-count shard sharing a start offset
-  // with a populated one is visited FIRST. Visited second, its `start` would
-  // sit behind the advanced cursor and read as an overlap, condemning a
-  // healthy index.
-  intervals.sort((a, b) => a.start - b.start || a.count - b.count)
-  // Overlap is unambiguous corruption: two shards claiming the same embedding
-  // address cannot both be right. A GAP is only SUSPECT. We never established
-  // that a valid colgrep generation must tile [0, N) — a deleted range could
-  // legally be retained as a hole, and the one corrupt sample we have shows
-  // overlaps too, so it is no evidence that gap-only is corrupt. Condemning a
-  // gap would DELETE the index, so a wrong guess destroys good user data.
-  // Suspect therefore stops us serving semantic results without touching the
-  // bytes. (Note a `coveredEnd !== sum` test would not be an independent
-  // safeguard: with no overlaps, coveredEnd === firstOffset + sum + gapTotal,
-  // so it is just another spelling of the gap check.)
-  let cursorEnd = 0
-  let sum = 0
-  let gapped = false
-  for (const interval of intervals) {
-    if (interval.start < cursorEnd) return { verdict: "corrupt", reason: "overlapping shard intervals" }
-    if (interval.start > cursorEnd) gapped = true
-    cursorEnd = interval.start + interval.count
-    sum += interval.count
-  }
-  if (gapped) return { verdict: "suspect", reason: "gap between shard intervals" }
-  return { verdict: "coherent", shardCount: intervals.length, embeddingCount: sum }
+  return { verdict: "coherent", shardCount: names.length, embeddingCount: sum }
 }
 
 export async function completedIndexOnDisk(workspace: string): Promise<boolean> {
@@ -678,12 +679,57 @@ async function realpathForCompare(p: string): Promise<string> {
  *   - `fresh`    — ready + completed index + HEAD matches + not newly
  *                  dirty → caller spawns colgrep search.
  */
-export async function freshnessVerdict(workspace: string): Promise<{
+/**
+ * Why a `stale` verdict lags the index. `content` = the tree moved
+ * (HEAD/dirty) while the embedding bits are unchanged — servable with a
+ * label when the delta is small. `engine` = the binary/runtime/model bits
+ * changed — the embedding space may differ, never servable without a
+ * rebuild. `suspect` = shards look structurally odd — never servable.
+ */
+export type StaleKind = "content" | "engine" | "suspect"
+
+export interface FreshnessResult {
   verdict: Freshness
   meta: ColbertMeta | null
   head?: string
   dirty?: boolean
-}> {
+  /** Present on verdict:"stale": why the index lags. */
+  staleKind?: StaleKind
+  /** Files changed since the index (content-stale only, capped). */
+  staleFiles?: Array<string>
+  /** True when more files changed than listed. */
+  staleTruncated?: boolean
+}
+
+/**
+ * Max stale files still servable with a label (serve-while-stale). An LLM
+ * editing session typically dirties a handful of files per turn; beyond
+ * this the index is too far behind to label honestly and the query falls
+ * back to lexical. Override with `GH_ROUTER_SERVE_STALE_MAX_FILES`.
+ */
+export function serveStaleMaxFiles(): number {
+  const raw = Number(process.env.GH_ROUTER_SERVE_STALE_MAX_FILES)
+  if (Number.isSafeInteger(raw) && raw > 0) return raw
+  return 200
+}
+
+/** Cap on delta enumeration (beyond → staleTruncated). */
+const DELTA_ENUM_CAP = 1000
+
+/**
+ * True when semantic results may be served for this verdict: fresh, or
+ * stale-by-content with a small, fully-enumerated delta. Engine/suspect
+ * stale, failed/crashed/corrupt/building/absent are never servable.
+ */
+export function isServableVerdict(v: FreshnessResult): boolean {
+  if (v.verdict === "fresh") return true
+  if (v.verdict !== "stale") return false
+  if (v.staleKind !== "content") return false
+  if (v.staleTruncated) return false
+  return (v.staleFiles?.length ?? Number.POSITIVE_INFINITY) <= serveStaleMaxFiles()
+}
+
+export async function freshnessVerdict(workspace: string): Promise<FreshnessResult> {
   const meta = await readColbertMeta(workspace)
   if (!meta || meta.status === "absent") {
     return { verdict: "absent", meta }
@@ -734,7 +780,9 @@ export async function freshnessVerdict(workspace: string): Promise<{
   // semantic results, but take the NON-destructive route — `stale` keeps the
   // bytes on disk and rebuilds in the background, so if the layout turns out
   // to be legal we have lost nothing but a rebuild.
-  if (integrity.verdict === "suspect") return { verdict: "stale", meta }
+  if (integrity.verdict === "suspect") {
+    return { verdict: "stale", meta, staleKind: "suspect" as const }
+  }
 
   // Engine changes require a clean rebuild; an index generated by different
   // binary/runtime bits is not safe to label semantic-ready. This is STALE,
@@ -750,7 +798,7 @@ export async function freshnessVerdict(workspace: string): Promise<{
     (binarySha && meta.binarySha !== binarySha) ||
     (ortSha && meta.ortSha !== ortSha)
   ) {
-    return { verdict: "stale", meta }
+    return { verdict: "stale", meta, staleKind: "engine" as const }
   }
   // Git freshness. Non-git workspace → no head; treat ready as fresh
   // (mtime is colgrep's own incremental signal).
@@ -767,9 +815,132 @@ export async function freshnessVerdict(workspace: string): Promise<{
   // delta), but a clean→dirty transition since indexing IS stale.
   const newlyDirty = git.dirty && meta.lastIndexedDirty !== true
   if (headMoved || newlyDirty) {
-    return { verdict: "stale", meta, head: git.head, dirty: git.dirty }
+    // Content-stale: the embedding bits are unchanged, only the tree moved.
+    // Enumerate the delta so callers can serve-while-stale when it is small
+    // (an LLM editing session typically dirties a handful of files).
+    const delta = await gitDeltaFiles(
+      workspace,
+      headMoved ? meta.lastIndexedHead : undefined,
+      headMoved ? git.head : undefined,
+    )
+    return {
+      verdict: "stale",
+      meta,
+      head: git.head,
+      dirty: git.dirty,
+      staleKind: "content" as const,
+      staleFiles: delta.files,
+      staleTruncated: delta.truncated,
+    }
   }
   return { verdict: "fresh", meta, head: git.head, dirty: git.dirty }
+}
+
+/**
+ * Files changed since the index: `git diff --name-only` between the indexed
+ * and current HEAD (when the head moved) UNION the working-tree porcelain
+ * set. Capped at DELTA_ENUM_CAP (beyond → truncated). Fail-closed: any git
+ * failure yields truncated (unprovably-small), so servability refuses.
+ */
+async function gitDeltaFiles(
+  workspace: string,
+  baseHead: string | undefined,
+  currentHead: string | undefined,
+): Promise<{ files: Array<string>; truncated: boolean }> {
+  const files = new Set<string>()
+  let truncated = false
+  if (baseHead && currentHead && baseHead !== currentHead) {
+    const diff = await gitNameOnly(workspace, baseHead, currentHead)
+    for (const f of diff.files) files.add(f)
+    truncated = truncated || diff.truncated
+    if (files.size >= DELTA_ENUM_CAP) {
+      return { files: [...files].slice(0, DELTA_ENUM_CAP), truncated: true }
+    }
+  }
+  const porcelain = await gitPorcelainFiles(workspace)
+  for (const f of porcelain.files) {
+    if (files.size >= DELTA_ENUM_CAP) {
+      truncated = true
+      break
+    }
+    files.add(f)
+  }
+  truncated = truncated || porcelain.truncated
+  return { files: [...files], truncated }
+}
+
+/** `git status --porcelain=v1` paths (rename target for `R  old -> new`). */
+async function gitPorcelainFiles(
+  workspace: string,
+): Promise<{ files: Array<string>; truncated: boolean }> {
+  const git = resolveExecutable("git")
+  if (!git) return { files: [], truncated: true }
+  try {
+    const res = await runManagedExeCapture(
+      git,
+      ["-C", workspace, "status", "--porcelain=v1", "--untracked-files=normal"],
+      { timeoutMs: GIT_TIMEOUT_MS, maxStdoutBytes: 1024 * 1024 },
+    )
+    if (res.code !== 0) return { files: [], truncated: true }
+    const files: Array<string> = []
+    let truncated = res.stdoutTruncated
+    for (const line of res.stdout.split("\n")) {
+      if (files.length >= DELTA_ENUM_CAP) {
+        truncated = true
+        break
+      }
+      if (line.length < 4) continue
+      const rest = line.slice(3)
+      // Rename/copy entries report `old -> new`; the index keys the new path.
+      const arrow = rest.indexOf(" -> ")
+      const rel = arrow >= 0 ? rest.slice(arrow + 4) : rest
+      // Quoted paths (spaces/specials) arrive `"..."`-wrapped; unquote the
+      // common case rather than mis-keying the file.
+      const unquoted =
+        rel.startsWith('"') && rel.endsWith('"') && rel.length >= 2
+          ? rel.slice(1, -1)
+          : rel
+      if (unquoted.length > 0) files.push(unquoted)
+    }
+    return { files, truncated }
+  } catch {
+    return { files: [], truncated: true }
+  }
+}
+
+/** `git diff --name-only <from> <to>`, capped. */
+async function gitNameOnly(
+  workspace: string,
+  fromHead: string,
+  toHead: string,
+): Promise<{ files: Array<string>; truncated: boolean }> {
+  const git = resolveExecutable("git")
+  if (!git) return { files: [], truncated: true }
+  try {
+    // --no-renames: renames report as delete+add, both keyed correctly for
+    // a content delta (the old path's units are stale, the new path's are
+    // missing — exactly what the label must convey).
+    const res = await runManagedExeCapture(
+      git,
+      ["-C", workspace, "diff", "--name-only", "--no-renames", fromHead, toHead],
+      { timeoutMs: GIT_TIMEOUT_MS, maxStdoutBytes: 1024 * 1024 },
+    )
+    if (res.code !== 0) return { files: [], truncated: true }
+    const files: Array<string> = []
+    let truncated = res.stdoutTruncated
+    for (const line of res.stdout.split("\n")) {
+      const rel = line.trim()
+      if (rel.length === 0) continue
+      if (files.length >= DELTA_ENUM_CAP) {
+        truncated = true
+        break
+      }
+      files.push(rel)
+    }
+    return { files, truncated }
+  } catch {
+    return { files: [], truncated: true }
+  }
 }
 
 /** Cheap, bounded git probe via the native-exe runner. */

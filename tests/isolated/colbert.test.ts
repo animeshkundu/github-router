@@ -337,7 +337,17 @@ describe("index-store: PLAID shard integrity", () => {
     expect(validateIndexIntegrity(dir)).toEqual({ verdict: "not-built" })
   })
 
-  test("condemns overlaps and malformed JSON, but only flags gaps as suspect", async () => {
+  test("non-tiling layouts are coherent; only malformed shards condemn", async () => {
+    // Root-caused 2026-09: `embedding_offset` is a write-cursor artifact
+    // for incremental appends, never a read invariant (the sole read in
+    // all of next-plaid + colgrep source is the append cursor in
+    // next-plaid update.rs). Incremental updates and worktree-seed +
+    // reconcile legitimately leave overlapping/gapped shard metadata on an
+    // index colgrep reads and serves correctly (observed live: 23 shards,
+    // working search, zero SQLite doc duplicates). The old tiling check
+    // false-positived on every such index, and quarantine+delete+rebuild
+    // re-seeded into the identical layout deterministically — a
+    // self-perpetuating failure loop ending in capped `failed`.
     const { validateIndexIntegrity } = await import("../../src/lib/colbert/index-store")
     const gap = await shardDir([
       { embedding_offset: 0, num_embeddings: 2 },
@@ -354,20 +364,41 @@ describe("index-store: PLAID shard integrity", () => {
       { embedding_offset: 0, num_embeddings: 1.5 },
     ])
     const malformed = await shardDir(["{"])
-    // A gap is NOT proven illegal, and condemning deletes the index — so it
-    // must never reach the destructive path.
-    expect(validateIndexIntegrity(gap).verdict).toBe("suspect")
-    expect(validateIndexIntegrity(offsetStart).verdict).toBe("suspect")
-    expect(validateIndexIntegrity(overlap).verdict).toBe("corrupt")
+    expect(validateIndexIntegrity(gap).verdict).toBe("coherent")
+    expect(validateIndexIntegrity(offsetStart).verdict).toBe("coherent")
+    expect(validateIndexIntegrity(overlap).verdict).toBe("coherent")
+    // Only genuinely unreadable stores condemn (colgrep cannot load these
+    // either, so quarantine+rebuild is a real recovery, not a loop).
     expect(validateIndexIntegrity(fractional).verdict).toBe("corrupt")
     expect(validateIndexIntegrity(malformed).verdict).toBe("corrupt")
+  })
+
+  test("incident layout (seed + incremental overlap) validates coherent", async () => {
+    // Faithful miniature of the observed 2026-09 incident: seeded base
+    // offsets retained with fresh counts, plus appended chunks overlapping
+    // earlier ranges. Must NOT condemn (previously: corrupt → quarantine →
+    // rebuild → identical overlap → capped failed).
+    const { validateIndexIntegrity } = await import("../../src/lib/colbert/index-store")
+    const dir = await shardDir([
+      { embedding_offset: 0, num_embeddings: 74469 },
+      { embedding_offset: 89890, num_embeddings: 115706 },
+      { embedding_offset: 235216, num_embeddings: 46349 },
+      { embedding_offset: 967667, num_embeddings: 141596 },
+      { embedding_offset: 1109263, num_embeddings: 130366 },
+    ])
+    const verdict = validateIndexIntegrity(dir)
+    expect(verdict.verdict).toBe("coherent")
+    if (verdict.verdict === "coherent") {
+      expect(verdict.shardCount).toBe(5)
+      expect(verdict.embeddingCount).toBe(74469 + 115706 + 46349 + 141596 + 130366)
+    }
   })
 
   test("a suspect layout falls back without deleting the index", async () => {
     const { freshnessVerdict } = await import("../../src/lib/colbert/index-store")
     expect(typeof freshnessVerdict).toBe("function")
-    // Gaps map to `stale`, which rebuilds in the background and leaves the
-    // bytes on disk — never `corrupt`, which quarantines and deletes.
+    // The `suspect` variant is retained defensively but no layout currently
+    // produces it; unreadable stores (not layouts) are what condemn.
     const gap = await shardDir([
       { embedding_offset: 0, num_embeddings: 2 },
       { embedding_offset: 5, num_embeddings: 1 },
@@ -438,16 +469,15 @@ describe("index-store: meta keying + freshness verdict", () => {
       path.join(projectDir, "project.json"),
       JSON.stringify({ project_path: ws, model: prov.canonicalColbertModelDir() }),
     )
-    // Overlapping intervals — unambiguous corruption. A gap would only be
-    // `suspect` and must NOT reach the destructive path.
+    // Unreadable shard metadata — genuinely unloadable (colgrep cannot
+    // read it either), so this legitimately reaches quarantine. Layout
+    // shapes (overlaps/gaps) are NOT corruption: offsets are a write
+    // cursor, never a read invariant (see validateIndexIntegrity).
     await fs.writeFile(
       path.join(projectDir, "index", "0.metadata.json"),
       JSON.stringify({ embedding_offset: 0, num_embeddings: 3 }),
     )
-    await fs.writeFile(
-      path.join(projectDir, "index", "1.metadata.json"),
-      JSON.stringify({ embedding_offset: 2, num_embeddings: 1 }),
-    )
+    await fs.writeFile(path.join(projectDir, "index", "1.metadata.json"), "{")
     await store.writeColbertMeta({
       workspace: ws,
       model: "LateOn-Code-edge",
@@ -737,16 +767,14 @@ describe("runSemanticSearch: no-fallback contract", () => {
       path.join(projectDir, "project.json"),
       JSON.stringify({ project_path: ws, model: prov.canonicalColbertModelDir() }),
     )
-    // Overlapping intervals — unambiguous corruption, so this legitimately
-    // reaches quarantine. A gap alone would only be `suspect`.
+    // Unreadable shard metadata — genuinely unloadable, so this
+    // legitimately reaches quarantine. Layout shapes (overlaps/gaps) are
+    // NOT corruption (offsets are a write cursor, never a read invariant).
     await fs.writeFile(
       path.join(projectDir, "index", "0.metadata.json"),
       JSON.stringify({ embedding_offset: 0, num_embeddings: 3 }),
     )
-    await fs.writeFile(
-      path.join(projectDir, "index", "1.metadata.json"),
-      JSON.stringify({ embedding_offset: 2, num_embeddings: 1 }),
-    )
+    await fs.writeFile(path.join(projectDir, "index", "1.metadata.json"), "{")
     await store.writeColbertMeta({
       workspace: ws,
       model: "LateOn-Code-edge",

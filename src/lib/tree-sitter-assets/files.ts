@@ -9,6 +9,7 @@ export const TREE_SITTER_GRAMMAR_FILES: Readonly<Record<string, string>> = {
   java: "tree-sitter-java.wasm",
   c: "tree-sitter-c.wasm",
   cpp: "tree-sitter-cpp.wasm",
+  csharp: "tree-sitter-c_sharp.wasm",
 }
 
 export const TREE_SITTER_RUNTIME_FILE = "tree-sitter.wasm"

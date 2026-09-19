@@ -46,6 +46,7 @@ import {
   startReverseProxy,
 } from "./lib/serve/reverse-proxy"
 import { runSelfUpdate } from "./lib/self-update"
+import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { state } from "./lib/state"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { resolveModel } from "./lib/utils"
@@ -297,6 +298,13 @@ export const serve = defineCommand({
     void provisionToolbelt().catch((err) =>
       consola.debug("Toolbelt provisioning failed:", err),
     )
+
+    // Ready one tree-sitter worker in the background so the first code
+    // search avoids WASM/grammar initialization (mirrors start/claude/codex;
+    // serve was the one launch path missing it). One worker keeps launch
+    // CPU bounded; demand grows the pool lazily. Opt out with
+    // GH_ROUTER_DISABLE_TS_POOL_WARMUP=1.
+    void warmTreeSitterPool()
 
     // Best-effort: keep the machine awake while the proxy/CloudCLI session runs.
     // Released via stopKeepAwake() in the shutdown chain below and by the module's

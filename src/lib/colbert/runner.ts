@@ -37,6 +37,7 @@ import {
   gitState,
   indexDirSignature,
   isInitInFlight,
+  isServableVerdict,
   readColbertMeta,
   releaseInit,
   tryClaimInit,
@@ -163,9 +164,20 @@ export function __setInitRunnerForTests(
   _runManagedExeCapture = runner ?? runManagedExeCapture
 }
 
+/**
+ * Await the currently tracked background init for a workspace, if any.
+ * Resolves immediately when this process tracks no init (e.g. another
+ * proxy owns the build) — callers poll `freshnessVerdict` for progress
+ * in that case. Used by the foreground `github-router index` command and
+ * by tests (via the alias below).
+ */
+export async function waitForInit(workspace: string): Promise<void> {
+  await _initPromises.get(path.resolve(workspace))
+}
+
 /** Test-only: await the currently tracked background init, if any. */
 export async function __waitForInitForTests(workspace: string): Promise<void> {
-  await _initPromises.get(path.resolve(workspace))
+  await waitForInit(workspace)
 }
 
 /** Test-only: drain all background init work before removing fixtures. */
@@ -197,6 +209,14 @@ export interface SemanticSearchResult {
   notice?: string
   /** Set when the outcome is an MCP error envelope (unavailable/failed). */
   isError?: boolean
+  /**
+   * Freshness of served results (serve-while-stale). `"fresh"` = index
+   * matches HEAD/tree; `"stale"` = served from an index predating a small
+   * content delta (see `stale_files`). Absent on non-ready outcomes.
+   */
+  freshness?: "fresh" | "stale"
+  /** Files changed since the index (present iff freshness is "stale"). */
+  stale_files?: number
 }
 
 /** colgrep `--json` element shape (only the fields we read). */
@@ -244,6 +264,14 @@ export async function runSemanticSearch(opts: {
   limit?: number
   pattern?: string
   signal?: AbortSignal
+  /**
+   * Serve-while-stale (Phase 2c): when true and the verdict is
+   * stale-by-content with a small, fully-enumerated delta, serve semantic
+   * results labeled `freshness:"stale"` instead of refusing. The unified
+   * `code` tool sets this; direct callers that need the strict
+   * refuse-when-stale contract leave it unset.
+   */
+  serveStale?: boolean
 }): Promise<SemanticSearchResult> {
   const { query, workspace } = opts
   const limit = clampLimit(opts.limit)
@@ -297,10 +325,23 @@ export async function runSemanticSearch(opts: {
       }
     }
     case "stale": {
-      // HEAD moved / tree newly dirty since the index. Per the dropped-
-      // fallback contract we do NOT silently re-search — we report the
-      // honest stale state and let the model decide. Kick a background
-      // refresh so a later retry can be fresh.
+      // HEAD moved / tree newly dirty since the index. With serveStale and
+      // a small content delta, SERVE the index labeled stale (the LLM-edit
+      // fast path: a dirty tree would otherwise make semantic permanently
+      // unavailable during active editing) while a background refresh
+      // closes the gap. Engine/suspect stale and large deltas still refuse
+      // — those can't be labeled honestly.
+      if (opts.serveStale && isServableVerdict(fresh)) {
+        kickBackgroundInit(workspace)
+        return spawnSearch({
+          query,
+          workspace,
+          limit,
+          pattern: opts.pattern,
+          freshness: "stale",
+          stale_files: fresh.staleFiles?.length ?? 0,
+        })
+      }
       kickBackgroundInit(workspace)
       return {
         status: "stale",
@@ -313,7 +354,13 @@ export async function runSemanticSearch(opts: {
   }
 
   // Fresh + completed index on disk → spawn colgrep search.
-  return spawnSearch({ query, workspace, limit, pattern: opts.pattern })
+  return spawnSearch({
+    query,
+    workspace,
+    limit,
+    pattern: opts.pattern,
+    freshness: "fresh",
+  })
 }
 
 /**
@@ -638,6 +685,8 @@ async function spawnSearch(opts: {
   workspace: string
   limit: number
   pattern?: string
+  freshness: "fresh" | "stale"
+  stale_files?: number
 }): Promise<SemanticSearchResult> {
   const binary = colgrepBinaryPath()
   if (!existsSync(binary)) {
@@ -806,7 +855,13 @@ async function spawnSearch(opts: {
       notice: "semantic search output was unparseable; use code_search",
     }
   }
-  return { status: "ready", source: "semantic", results: rows }
+  return {
+    status: "ready",
+    source: "semantic",
+    results: rows,
+    freshness: opts.freshness,
+    ...(opts.freshness === "stale" ? { stale_files: opts.stale_files ?? 0 } : {}),
+  }
 }
 
 /**

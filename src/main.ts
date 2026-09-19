@@ -84,6 +84,7 @@ const main = defineCommand({
     serve: () => import("./serve").then((m) => m.serve),
     models: () => import("./models").then((m) => m.models),
     "check-usage": () => import("./check-usage").then((m) => m.checkUsage),
+    index: () => import("./index-cmd").then((m) => m.indexCmd),
     debug: () => import("./debug").then((m) => m.debug),
     "internal-stop-hook": () =>
       import("./internal-stop-hook").then((m) => m.internalStopHook),

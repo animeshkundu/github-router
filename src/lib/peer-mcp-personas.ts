@@ -1806,10 +1806,18 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             truncated: boolean
             outlines?: typeof result.outlines
             notice?: string
+            freshness?: "fresh" | "stale"
+            stale_files?: number
           } = {
             source: result.source,
             results: trimmedHits,
             truncated: (result.truncated ?? false) || sizeCapped,
+          }
+          // Serve-while-stale labels ride alongside `source` so the model
+          // knows when semantic results predate recent edits.
+          if (result.freshness) minimal.freshness = result.freshness
+          if (result.stale_files !== undefined) {
+            minimal.stale_files = result.stale_files
           }
           // Outlines (lexical path only) are supplementary — fit them into
           // whatever response budget the (already-capped) results left, so

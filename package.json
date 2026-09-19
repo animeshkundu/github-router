@@ -55,7 +55,8 @@
     "pre-commit": "bunx lint-staged"
   },
   "trustedDependencies": [
-    "@vscode/ripgrep"
+    "@vscode/ripgrep",
+    "onnxruntime-node"
   ],
   "lint-staged": {
     "*": "bun run lint --fix"
@@ -67,6 +68,7 @@
     "consola": "^3.4.2",
     "diff": "9.0.0",
     "fetch-event-stream": "^0.1.6",
+    "flashrank-js": "^0.1.0",
     "gpt-tokenizer": "^3.4.0",
     "hono": "^4.12.33",
     "ignore": "7.0.6",

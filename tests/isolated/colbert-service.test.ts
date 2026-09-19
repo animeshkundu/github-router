@@ -1,0 +1,262 @@
+/**
+ * Tests for `src/lib/colbert/service.ts` (Phase 2e).
+ *
+ * Protocol tests run against an in-process mock HTTP server (Bun.serve);
+ * lifecycle tests spawn a fake server script via the `argv` test seam
+ * (no Rust binary needed). Isolated (own process): real sockets + spawns.
+ */
+
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
+
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
+import os from "node:os"
+import path from "node:path"
+
+import {
+  indexNameForWorkspace,
+  NextPlaidClient,
+  serverParallelSessions,
+  ServiceBusyError,
+  startManagedServer,
+  type ManagedServer,
+} from "../../src/lib/colbert/service"
+
+let root: string
+let mockBase = ""
+let mockServer: ReturnType<typeof Bun.serve> | null = null
+
+/** Last request seen per route (assertions on protocol shape). */
+const seen: Record<string, { method: string; body: unknown }> = {}
+/** Route → canned [status, body]. */
+const canned: Record<string, [number, unknown]> = {}
+
+beforeAll(() => {
+  root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "gh-router-np-svc-")))
+  mockServer = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(req) {
+      const u = new URL(req.url)
+      const key = `${req.method} ${u.pathname}`
+      let body: unknown
+      try {
+        body = req.method === "GET" ? null : await req.json()
+      } catch {
+        body = null
+      }
+      seen[key] = { method: req.method, body }
+      const [status, res] = canned[key] ?? [404, { code: "INDEX_NOT_FOUND", message: "nope" }]
+      return Response.json(res, { status })
+    },
+  })
+  mockBase = `http://127.0.0.1:${mockServer.port}`
+})
+
+afterAll(() => {
+  mockServer?.stop(true)
+  rmSync(root, { recursive: true, force: true })
+})
+
+afterEach(() => {
+  for (const k of Object.keys(canned)) delete canned[k]
+  for (const k of Object.keys(seen)) delete seen[k]
+  delete process.env.GH_ROUTER_NP_PARALLEL
+})
+
+describe("NextPlaidClient protocol", () => {
+  test("health parses indices + model", async () => {
+    canned["GET /health"] = [
+      200,
+      {
+        status: "healthy",
+        indices: [{ name: "ws-1", num_documents: 10, num_embeddings: 300, dimension: 48 }],
+        model: { name: "LateOn-Code-edge" },
+      },
+    ]
+    const c = new NextPlaidClient(mockBase)
+    const h = await c.health()
+    expect(h.ok).toBe(true)
+    expect(h.indices).toHaveLength(1)
+    expect(h.indices[0].num_documents).toBe(10)
+    expect(h.model).toBe("LateOn-Code-edge")
+  })
+
+  test("health degrades on non-200 / garbage", async () => {
+    canned["GET /health"] = [500, { code: "INTERNAL_ERROR", message: "x" }]
+    expect((await new NextPlaidClient(mockBase).health()).ok).toBe(false)
+  })
+
+  test("ensureIndex: 200/201/409 ok, 500 throws", async () => {
+    const c = new NextPlaidClient(mockBase)
+    for (const code of [200, 201, 409]) {
+      canned["POST /indices"] = [code, {}]
+      await c.ensureIndex("ws-1")
+    }
+    expect(seen["POST /indices"].body).toMatchObject({ name: "ws-1" })
+    canned["POST /indices"] = [500, { code: "INTERNAL_ERROR", message: "boom" }]
+    await expect(c.ensureIndex("ws-1")).rejects.toThrow(/HTTP 500/)
+  })
+
+  test("updateDocuments: 202 ok; 503 → ServiceBusyError; 500 throws", async () => {
+    const c = new NextPlaidClient(mockBase)
+    canned["POST /indices/ws-1/update_with_encoding"] = [202, {}]
+    await c.updateDocuments("ws-1", ["doc"], [{ file: "a.ts" }])
+    const sent = seen["POST /indices/ws-1/update_with_encoding"].body as Record<string, unknown>
+    expect(sent.documents).toEqual(["doc"])
+    expect(sent.pool_factor).toBe(2)
+    canned["POST /indices/ws-1/update_with_encoding"] = [503, {}]
+    await expect(c.updateDocuments("ws-1", ["d"], [{}])).rejects.toBeInstanceOf(ServiceBusyError)
+    canned["POST /indices/ws-1/update_with_encoding"] = [500, {}]
+    await expect(c.updateDocuments("ws-1", ["d"], [{}])).rejects.toThrow(/HTTP 500/)
+  })
+
+  test("deleteDocuments: 202 ok; 404 tolerated; 503 → busy", async () => {
+    const c = new NextPlaidClient(mockBase)
+    canned["DELETE /indices/ws-1/documents"] = [202, {}]
+    await c.deleteDocuments("ws-1", "file = ?", ["a.ts"])
+    expect(seen["DELETE /indices/ws-1/documents"].body).toMatchObject({
+      condition: "file = ?",
+      parameters: ["a.ts"],
+    })
+    canned["DELETE /indices/ws-1/documents"] = [404, {}]
+    await c.deleteDocuments("ws-1", "file = ?", ["gone"])
+    canned["DELETE /indices/ws-1/documents"] = [503, {}]
+    await expect(c.deleteDocuments("ws-1", "x = ?", [])).rejects.toBeInstanceOf(ServiceBusyError)
+  })
+
+  test("search maps hits, drops file-less rows, 404 → []", async () => {
+    const c = new NextPlaidClient(mockBase)
+    canned["POST /indices/ws-1/search_with_encoding"] = [
+      200,
+      {
+        results: [
+          {
+            query_id: 0,
+            document_ids: [7, 9, 11],
+            scores: [0.9, 0.5, 0.1],
+            metadata: [
+              { file: "src/a.ts", line: 3, end_line: 10, name: "f", signature: "s" },
+              { line: 1 },
+              { file: "src/b.ts", line: 1 },
+            ],
+          },
+        ],
+      },
+    ]
+    const hits = await c.search("ws-1", "query", { topK: 5 })
+    expect(hits).toHaveLength(2)
+    expect(hits[0]).toMatchObject({ file: "src/a.ts", line: 3, end_line: 10, name: "f", score: 0.9 })
+    expect(hits[1]).toMatchObject({ file: "src/b.ts", line: 1 })
+    canned["POST /indices/ws-1/search_with_encoding"] = [404, {}]
+    expect(await c.search("ws-1", "query")).toEqual([])
+  })
+
+  test("search sends hybrid + filter fields when provided", async () => {
+    const c = new NextPlaidClient(mockBase)
+    canned["POST /indices/ws-1/search_with_encoding"] = [200, { results: [] }]
+    await c.search("ws-1", "query", {
+      topK: 7,
+      textQuery: "literal",
+      alpha: 0.6,
+      fileGlob: "src/**",
+    })
+    expect(seen["POST /indices/ws-1/search_with_encoding"].body).toMatchObject({
+      queries: ["query"],
+      text_query: ["literal"],
+      alpha: 0.6,
+      fusion: "relative_score",
+      filter_condition: "file GLOB ?",
+      filter_parameters: ["src/**"],
+    })
+  })
+})
+
+describe("naming + sizing helpers", () => {
+  test("indexNameForWorkspace is stable, path-keyed, prefixed", () => {
+    const a = indexNameForWorkspace("/repo/a")
+    expect(a).toBe(indexNameForWorkspace("/repo/a"))
+    expect(a).not.toBe(indexNameForWorkspace("/repo/b"))
+    expect(a).toMatch(/^ws-[0-9a-f]{8}$/)
+  })
+
+  test("serverParallelSessions honors env, defaults to 25%", () => {
+    process.env.GH_ROUTER_NP_PARALLEL = "3"
+    expect(serverParallelSessions()).toBe(3)
+    delete process.env.GH_ROUTER_NP_PARALLEL
+    expect(serverParallelSessions()).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe("managed lifecycle (fake binary)", () => {
+  // Minimal fake: answers /health healthy, ignores everything else.
+  const fakeScript = `Bun.serve({ port: Number(process.env.FAKE_PORT), hostname: "127.0.0.1", fetch(req) {
+    const u = new URL(req.url);
+    if (u.pathname === "/health") return Response.json({ status: "healthy", indices: [] });
+    return Response.json({}, { status: 404 });
+  }}); setInterval(() => {}, 1000);`
+
+  test("start → healthy client → stop", async () => {
+    const scriptPath = path.join(root, "fake-server.ts")
+    writeFileSync(scriptPath, fakeScript)
+    // Free-port probe (same shape as the client default).
+    const net = await import("node:net")
+    const port: number = await new Promise((resolve, reject) => {
+      const s = net.createServer()
+      s.on("error", reject)
+      s.listen(0, "127.0.0.1", () => {
+        const addr = s.address()
+        const p = typeof addr === "object" && addr !== null ? addr.port : 0
+        s.close((err) => (err ? reject(err) : resolve(p)))
+      })
+    })
+    let svc: ManagedServer | null = null
+    try {
+      svc = await startManagedServer({
+        binaryPath: process.execPath,
+        argv: [scriptPath],
+        modelDir: root,
+        indexDir: root,
+        port,
+        env: { ...process.env, FAKE_PORT: String(port) },
+        startupTimeoutMs: 15_000,
+      })
+      expect(svc.url).toBe(`http://127.0.0.1:${port}`)
+      expect((await svc.client.health()).ok).toBe(true)
+    } finally {
+      await svc?.stop()
+    }
+    // After stop the socket is dead (health fails or refuses).
+    const dead = svc
+      ? await svc.client.health().catch(() => ({ ok: false, indices: [] }))
+      : { ok: false }
+    expect(dead.ok).toBe(false)
+  })
+
+  test("missing binary → throws (never hangs)", async () => {
+    await expect(
+      startManagedServer({
+        binaryPath: path.join(root, "no-such-binary"),
+        modelDir: root,
+        indexDir: root,
+        startupTimeoutMs: 5_000,
+      }),
+    ).rejects.toThrow()
+  })
+
+  test("early-exiting child → throws with stderr tail", async () => {
+    const scriptPath = path.join(root, "fake-crash.ts")
+    writeFileSync(
+      scriptPath,
+      `console.error("fake boom"); process.exit(3);`,
+    )
+    await expect(
+      startManagedServer({
+        binaryPath: process.execPath,
+        argv: [scriptPath],
+        modelDir: root,
+        indexDir: root,
+        startupTimeoutMs: 10_000,
+      }),
+    ).rejects.toThrow(/fake boom|exited/i)
+  })
+})

@@ -722,10 +722,24 @@ export async function warmTreeSitterPool(): Promise<void> {
 
 /** Test-only: tear down and reset the singleton. */
 export function __resetTreeSitterPoolForTests(): void {
-  _pool?.shutdown()
-  _pool = null
+  shutdownTreeSitterPool()
   _warmOverride = undefined
   __disarmWorkerCrashOnceForTest()
+}
+
+/**
+ * Shut down the pool and drop the singleton. Short-lived processes
+ * (`bun run` scripts, one-shot CLI commands) MUST call this when done:
+ * unref()-ed workers still hold Bun's event loop open, so without an
+ * explicit shutdown such a process hangs after completing its work
+ * instead of exiting. Long-lived proxy processes never call this —
+ * workers stay warm across queries and die with the process via the
+ * `exit` sweep. In-flight callers fail as misses, so only call when no
+ * search is running.
+ */
+export function shutdownTreeSitterPool(): void {
+  _pool?.shutdown()
+  _pool = null
 }
 
 export type { TreeSitterPool }
