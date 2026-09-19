@@ -42,12 +42,14 @@ import { extractTarGzMember, extractTarXzMember, extractZipMember } from "../too
 import {
   colgrepBinAsset,
   ortLibAsset,
+  nextPlaidServerAsset,
   MODEL_FILES,
   MODEL_REPO,
   MODEL_REVISION,
   modelDirName,
   ORT_VERSION,
   type ColbertAsset,
+  type NextPlaidServerVariant,
 } from "./manifest"
 
 /**
@@ -100,6 +102,42 @@ export function colbertModelDir(): string {
  */
 export function canonicalColbertModelDir(): string {
   return path.resolve(colbertModelDir())
+}
+
+/** Absolute path a provisioned next-plaid-api server binary lives at. */
+export function nextPlaidServerBinaryPath(variant: NextPlaidServerVariant): string {
+  const suffix = variant === "cuda" ? "-cuda" : ""
+  return path.join(PATHS.COLBERT_BIN_DIR, `next-plaid-api${suffix}${EXE_EXT}`)
+}
+
+/**
+ * Provision the next-plaid-api server binary for the requested variant.
+ * Lazy and separate from `provisionColbert()` (which owns the
+ * colgrep/ORT/model trio): only the service backend calls this, so the
+ * default colgrep path never pays for a server download.
+ *
+ * Fail-closed: unknown platform, unpromoted SHA (empty digest), or any
+ * download/verify failure all report `reason` instead of throwing — the
+ * caller falls back (cuda → cpu variant → colgrep → lexical).
+ */
+export async function provisionNextPlaidServer(
+  variant: NextPlaidServerVariant,
+): Promise<{ path?: string; reason?: string }> {
+  const asset = nextPlaidServerAsset(variant)
+  if (!asset) return { reason: "no server asset for this platform" }
+  if (asset.sha256.length === 0) {
+    return { reason: "server binary not yet promoted for this variant" }
+  }
+  const dest = nextPlaidServerBinaryPath(variant)
+  try {
+    await withInstallLock("colbert-provision.lock", async () => {
+      await provisionBinary(asset, dest)
+    })
+    return { path: dest }
+  } catch (err) {
+    consola.debug(`colbert: server provision failed (${variant}):`, err)
+    return { reason: "server download/verify failed" }
+  }
 }
 
 /** Absolute path the provisioned ORT dylib lives at. */

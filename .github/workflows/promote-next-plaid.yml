@@ -1,0 +1,168 @@
+# Promote `next-plaid-api` server binaries into the manifest.
+#
+# Flow: a `next-plaid-server.yml` run builds all variants (cpu + cuda per
+# platform) and uploads them as run artifacts (90-day retention). This
+# workflow downloads those artifacts, verifies their `.sha256` sidecars,
+# publishes the binaries to a stable GitHub release
+# (`next-plaid-server-v<upstream>`), and opens a PR that fills the SHAs +
+# URLs into `NEXTPLAID_SERVER` in `src/lib/colbert/manifest.ts`.
+#
+# The SHAs are NEVER auto-merged: a human reviews the PR (the supply-chain
+# posture requires hardcoded, reviewed digests). `dry_run` (default true)
+# prints the manifest patch without opening a PR.
+#
+# Usage:
+#   gh workflow run promote-next-plaid.yml \
+#     -f build_run_id=<next-plaid-server run id> \
+#     -f upstream_tag=v1.7.0 -f dry_run=false
+
+name: promote-next-plaid-server
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Run ID of the successful next-plaid-server build"
+        required: true
+      upstream_tag:
+        description: "Upstream lightonai/next-plaid tag that was built"
+        required: false
+        default: "v1.7.0"
+      dry_run:
+        description: "Print the manifest patch without opening a PR"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out this repo
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist-server
+          gh run download "${{ inputs.build_run_id }}" --dir dist-server
+          ls -la dist-server
+
+      - name: Verify artifact checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist-server
+          for f in next-plaid-api-*; do
+            case "$f" in
+              *.sha256) continue ;;
+            esac
+            sha256sum -c "$f.sha256"
+          done
+          echo "all artifact checksums verified"
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="next-plaid-server-${{ inputs.upstream_tag }}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "next-plaid-api ${{ inputs.upstream_tag }}" \
+              --notes "Prebuilt next-plaid-api server binaries (cpu + cuda variants). Promoted from next-plaid-server run ${{ inputs.build_run_id }}."
+          fi
+          cd dist-server
+          for f in next-plaid-api-*; do
+            case "$f" in
+              *.sha256) continue ;;
+            esac
+            gh release upload "$TAG" "$f" --clobber
+          done
+
+      - name: Generate manifest patch
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import hashlib
+          from pathlib import Path
+
+          assets = sorted(
+              p for p in Path("dist-server").iterdir()
+              if p.is_file() and p.name.startswith("next-plaid-api-") and not p.name.endswith(".sha256")
+          )
+          assert assets, "no server binaries downloaded"
+          lines = []
+          for p in assets:
+              digest = hashlib.sha256(p.read_bytes()).hexdigest()
+              lines.append(f"{p.name}  {digest}  {p.stat().st_size} bytes")
+          Path("/tmp/next-plaid-shas.txt").write_text("\n".join(lines) + "\n")
+          print("\n".join(lines))
+          EOF
+          echo "-----"
+          cat /tmp/next-plaid-shas.txt
+
+      - name: Apply SHAs to manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import re
+          from pathlib import Path
+
+          shas = {}
+          for line in Path("/tmp/next-plaid-shas.txt").read_text().splitlines():
+              name, digest, *_ = line.split()
+              shas[name] = digest
+
+          asset_to_url = {
+              "next-plaid-api-x86_64-unknown-linux-gnu": "next-plaid-api-x86_64-unknown-linux-gnu",
+              "next-plaid-api-x86_64-unknown-linux-gnu-cuda": "next-plaid-api-x86_64-unknown-linux-gnu-cuda",
+              "next-plaid-api-x86_64-pc-windows-msvc.exe": "next-plaid-api-x86_64-pc-windows-msvc.exe",
+              "next-plaid-api-x86_64-pc-windows-msvc-cuda.exe": "next-plaid-api-x86_64-pc-windows-msvc-cuda.exe",
+              "next-plaid-api-aarch64-apple-darwin": "next-plaid-api-aarch64-apple-darwin",
+              "next-plaid-api-x86_64-apple-darwin": "next-plaid-api-x86_64-apple-darwin",
+          }
+
+          p = Path("src/lib/colbert/manifest.ts")
+          s = p.read_text()
+          # Pair url(...) blocks with their preceding sha256 by scanning entries.
+          # Fails closed when any entry lacks a downloaded artifact (e.g. a
+          # matrix leg failed): better to promote nothing than half the matrix.
+          entries = re.findall(
+              r'url: nextPlaidServerUrl\("([^"]+)"\),\n    sha256: ""', s
+          )
+          missing = [a for a in entries if asset_to_url.get(a) not in shas]
+          assert not missing, f"no SHA for promoted entries: {missing}"
+          for asset in entries:
+              name = asset_to_url[asset]
+              digest = shas[name]
+              old = f'url: nextPlaidServerUrl("{asset}"),\n    sha256: ""'
+              new = f'url: nextPlaidServerUrl("{asset}"),\n    sha256: "{digest}"'
+              assert old in s, f"manifest entry not found for {asset}"
+              s = s.replace(old, new)
+          p.write_text(s)
+          print(f"filled {len(entries)} SHAs")
+          EOF
+          git diff --stat
+
+      - name: Open promotion PR
+        if: ${{ inputs.dry_run == false }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="promote/next-plaid-${{ inputs.upstream_tag }}"
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git checkout -b "$BRANCH"
+          git add src/lib/colbert/manifest.ts
+          git commit -m "chore: promote next-plaid-api ${{ inputs.upstream_tag }} (cpu+cuda SHAs)"
+          git push origin HEAD
+          gh pr create --title "Promote next-plaid-api ${{ inputs.upstream_tag }}" \
+            --body "Automated promotion from next-plaid-server run ${{ inputs.build_run_id }}. Review SHAs against the release assets before merging."

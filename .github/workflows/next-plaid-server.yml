@@ -12,12 +12,20 @@
 # retained 90 days; promoting = download, sha256sum, paste into manifest.
 #
 # Feature set per platform (from upstream README: `model` enables the
-# `*_with_encoding` endpoints we need; `accelerate` is macOS-framework
-# only; Linux stays default/pure-Rust to avoid a libopenblas system dep;
-# Windows stays CPU-default):
+# `*_with_encoding` endpoints we need):
 #   macOS (arm64 + x64 cross): --features "accelerate,model"
-#   Linux x64:                 --features "model"
-#   Windows x64:               --features "model"
+#     (`accelerate` = Apple Accelerate CPU BLAS; macOS-framework only)
+#   Linux x64 (cpu):           --features "openblas,model"
+#   Linux x64 (cuda):          --features "cuda,openblas,model"
+#   Windows x64 (cpu):         --features "openblas,model"
+#   Windows x64 (cuda):        --features "cuda,openblas,model"
+#
+# OpenBLAS is STATICALLY linked (see the "Patch openblas-src" step):
+# zero runtime dependency on libopenblas. CUDA binaries bundle the CUDA
+# execution provider but still ship the CPU provider — the router picks
+# the cuda variant only when a GPU is detected and falls back to the cpu
+# variant otherwise (see `selectServerVariant` in
+# src/lib/colbert/service-backend.ts).
 
 name: next-plaid-server
 
@@ -35,6 +43,9 @@ on:
 
 env:
   UPSTREAM_TAG: ${{ inputs.upstream_tag || 'v1.7.0' }}
+  # CUDA major pinned to 12.x (matches upstream `cuda` feature =
+  # cudarc cuda-11080; do NOT mix with `cuda-13` in one binary).
+  CUDA_VERSION: "12.4.0"
 
 jobs:
   build:
@@ -45,19 +56,33 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset: next-plaid-api-x86_64-unknown-linux-gnu
-            features: "model"
+            features: "openblas,model"
+            variant: "cpu"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: next-plaid-api-x86_64-unknown-linux-gnu-cuda
+            features: "cuda,openblas,model"
+            variant: "cuda"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: next-plaid-api-x86_64-pc-windows-msvc.exe
-            features: "model"
+            features: "openblas,model"
+            variant: "cpu"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: next-plaid-api-x86_64-pc-windows-msvc-cuda.exe
+            features: "cuda,openblas,model"
+            variant: "cuda"
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: next-plaid-api-aarch64-apple-darwin
             features: "accelerate,model"
+            variant: "cpu"
           - os: macos-latest
             target: x86_64-apple-darwin
             asset: next-plaid-api-x86_64-apple-darwin
             features: "accelerate,model"
+            variant: "cpu"
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out upstream at the pinned tag
@@ -67,6 +92,51 @@ jobs:
           ref: ${{ env.UPSTREAM_TAG }}
           path: next-plaid-src
 
+      - name: Patch openblas-src to static linking
+        # Upstream pins openblas-src with the `system` feature (links the
+        # distro libopenblas at runtime). We need zero-runtime-dep binaries,
+        # so flip it to `static` (builds OpenBLAS from source into the
+        # binary). macOS entries ignore this (they use `accelerate`, never
+        # enable the `openblas` feature, so the patched dep stays optional
+        # and unbuilt). Fails closed if upstream renames the block.
+        working-directory: next-plaid-src
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          from pathlib import Path
+          p = Path("next-plaid/Cargo.toml")
+          s = p.read_text()
+          old = 'openblas-src = { version = "0.10", features = [\n    "cblas",\n    "system",\n], optional = true }'
+          new = 'openblas-src = { version = "0.10", features = [\n    "cblas",\n    "static",\n], optional = true }'
+          assert old in s, "openblas-src block not found — upstream Cargo.toml changed, update the patch"
+          p.write_text(s.replace(old, new))
+          print("patched openblas-src: system -> static")
+          EOF
+
+      - name: Install build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          # gfortran + make: static OpenBLAS build; cmake: ort build script probes
+          sudo apt-get install -y gfortran make cmake
+
+      - name: Install build deps (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          # mingw (gcc/gfortran/make) for the static OpenBLAS build; cmake ships with the runner
+          choco install mingw cmake -y
+
+      - name: Install CUDA Toolkit
+        if: matrix.variant == 'cuda'
+        uses: Jimver/cuda-toolkit@v0.2.16
+        id: cuda-toolkit
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev"]'
+
       - name: Install Rust (stable + cross target if needed)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -75,6 +145,7 @@ jobs:
 
       - name: Build next-plaid-api (release)
         working-directory: next-plaid-src
+        shell: bash
         run: cargo build --release --locked -p next-plaid-api --features "${{ matrix.features }}" --target ${{ matrix.target }}
 
       - name: Smoke test (help exits 0, no model needed)
@@ -84,6 +155,10 @@ jobs:
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then bin="${bin}.exe"; fi
           "$bin" --help > /dev/null
           echo "smoke ok: $bin"
+          # Static-link check (informational): no dynamic openblas dep expected.
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            echo "dynamic openblas refs: $(ldd "$bin" | grep -ci openblas || true)"
+          fi
 
       - name: Stage artifact
         shell: bash

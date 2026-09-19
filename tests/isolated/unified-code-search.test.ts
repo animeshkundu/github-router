@@ -30,12 +30,30 @@ let semanticEnabled = false
 let semanticResult: SemanticSearchResult = { status: "unavailable" }
 let semanticThrows = false
 
+// Service-backend knobs (GH_ROUTER_SEMANTIC_BACKEND=service path).
+let serviceBackendOn = false
+type ServiceResult = {
+  status: "ready" | "unavailable" | "failed"
+  results?: Array<{ file: string; line: number; snippet: string; score?: number }>
+  freshness?: "fresh" | "stale"
+  stale_files?: number
+}
+let serviceResult: ServiceResult = { status: "unavailable" }
+let serviceThrows = false
+let serviceCalls = 0
+
 mock.module("../../src/lib/colbert", () => ({
   ...realColbert,
   colbertSearchEnabled: () => semanticEnabled,
   runSemanticSearch: async () => {
     if (semanticThrows) throw new Error("colgrep transport error")
     return semanticResult
+  },
+  serviceBackendEnabled: () => serviceBackendOn,
+  runServiceSearch: async () => {
+    serviceCalls += 1
+    if (serviceThrows) throw new Error("service transport error")
+    return serviceResult
   },
 }))
 
@@ -437,5 +455,114 @@ describe("semantic / default mode", () => {
       mode: "semantic",
     })
     expect(r.source).toBe("lexical-fallback")
+  })
+})
+
+describe("service backend (GH_ROUTER_SEMANTIC_BACKEND=service)", () => {
+  function resetServiceKnobs(): void {
+    serviceBackendOn = false
+    serviceResult = { status: "unavailable" }
+    serviceThrows = false
+    serviceCalls = 0
+  }
+
+  test("service ready short-circuits colgrep (source semantic + labels)", async () => {
+    resetServiceKnobs()
+    // Even with the colgrep runner primed ready, the service wins when on.
+    semanticEnabled = true
+    semanticResult = {
+      status: "ready",
+      source: "semantic",
+      results: [
+        { file: "src/colgrep.ts", line: 1, score: 0.5, snippet: "colgrep hit" },
+      ],
+    }
+    serviceBackendOn = true
+    serviceResult = {
+      status: "ready",
+      results: [
+        { file: "src/auth.ts", line: 1, snippet: "service hit", score: 0.95 },
+      ],
+      freshness: "stale",
+      stale_files: 2,
+    }
+    try {
+      const r = await runUnifiedCodeSearch({
+        query: "where do we refresh auth tokens",
+        workspace: root,
+      })
+      expect(r.source).toBe("semantic")
+      expect(r.results.map((h) => h.file)).toEqual(["src/auth.ts"])
+      expect(r.freshness).toBe("stale")
+      expect(r.stale_files).toBe(2)
+      expect(serviceCalls).toBe(1)
+    } finally {
+      resetServiceKnobs()
+      semanticEnabled = false
+    }
+  })
+
+  test("service unavailable falls through to colgrep (not straight to lexical)", async () => {
+    resetServiceKnobs()
+    semanticEnabled = true
+    semanticResult = {
+      status: "ready",
+      source: "semantic",
+      results: [
+        { file: "src/auth.ts", line: 1, score: 0.91, snippet: "colgrep hit" },
+      ],
+    }
+    serviceBackendOn = true
+    serviceResult = { status: "unavailable" }
+    try {
+      const r = await runUnifiedCodeSearch({
+        query: "where do we refresh auth tokens",
+        workspace: root,
+      })
+      // Colgrep path served (not lexical-fallback): fallback chain is
+      // service → colgrep → lexical.
+      expect(r.source).toBe("semantic")
+      expect(r.results.map((h) => h.file)).toEqual(["src/auth.ts"])
+    } finally {
+      resetServiceKnobs()
+      semanticEnabled = false
+    }
+  })
+
+  test("service throw falls through to colgrep", async () => {
+    resetServiceKnobs()
+    semanticEnabled = true
+    semanticResult = {
+      status: "ready",
+      source: "semantic",
+      results: [
+        { file: "src/auth.ts", line: 1, score: 0.91, snippet: "colgrep hit" },
+      ],
+    }
+    serviceBackendOn = true
+    serviceThrows = true
+    try {
+      const r = await runUnifiedCodeSearch({
+        query: "where do we refresh auth tokens",
+        workspace: root,
+      })
+      expect(r.source).toBe("semantic")
+    } finally {
+      resetServiceKnobs()
+      semanticEnabled = false
+    }
+  })
+
+  test("service off (default) never touches the service layer", async () => {
+    resetServiceKnobs()
+    semanticEnabled = false
+    const r = await runUnifiedCodeSearch({
+      query: "refreshAuthToken",
+      workspace: root,
+      mode: "lexical",
+    })
+    expect(r.source).toBe("lexical")
+    expect(serviceCalls).toBe(0)
+    resetServiceKnobs()
   })
 })

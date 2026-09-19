@@ -15,6 +15,7 @@ import path from "node:path"
 import {
   indexNameForWorkspace,
   NextPlaidClient,
+  serverArgv,
   serverParallelSessions,
   ServiceBusyError,
   startManagedServer,
@@ -241,6 +242,36 @@ describe("managed lifecycle (fake binary)", () => {
         startupTimeoutMs: 5_000,
       }),
     ).rejects.toThrow()
+  })
+
+  test("serverArgv: default is --model --int8, no --cuda", () => {
+    const args = serverArgv({ indexDir: "/idx", modelDir: "/models", parallel: 2 }, 8080)
+    expect(args).toContain("--model")
+    expect(args).toContain("--int8")
+    expect(args).not.toContain("--cuda")
+  })
+
+  test("serverArgv: cuda:true adds --cuda (gpu path)", () => {
+    const args = serverArgv({ indexDir: "/idx", modelDir: "/models", parallel: 2, cuda: true }, 8080)
+    expect(args).toContain("--model")
+    expect(args).toContain("--int8")
+    expect(args).toContain("--cuda")
+  })
+
+  test("serverArgv: --int8/--cuda never passed without --model", () => {
+    const args = serverArgv({ indexDir: "/idx", parallel: 1, cuda: true, int8: true }, 8080)
+    expect(args).not.toContain("--model")
+    expect(args).not.toContain("--int8")
+    expect(args).not.toContain("--cuda")
+  })
+
+  test("serverArgv: int8:false omits --int8 but keeps --cuda", () => {
+    const args = serverArgv(
+      { indexDir: "/idx", modelDir: "/models", parallel: 1, int8: false, cuda: true },
+      8080,
+    )
+    expect(args).not.toContain("--int8")
+    expect(args).toContain("--cuda")
   })
 
   test("early-exiting child → throws with stderr tail", async () => {

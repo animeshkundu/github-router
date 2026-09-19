@@ -208,3 +208,97 @@ export function modelDirName(): string {
 
 /** Short model id used in the sidecar metadata `model` field. */
 export const MODEL_ID = "LateOn-Code-edge"
+
+/** next-plaid-api release tag these server binaries are promoted from. */
+export const NEXTPLAID_SERVER_TAG = "next-plaid-server-v1.7.0"
+
+/** Compute flavour of a next-plaid-api server binary. */
+export type NextPlaidServerVariant = "cpu" | "cuda"
+
+export interface NextPlaidServerAsset {
+  url: string
+  /**
+   * SHA256 of the downloaded binary (hex). Verified before use.
+   * EMPTY means "not yet promoted" — the promotion workflow
+   * (.github/workflows/promote-next-plaid.yml) fills it from a real
+   * build; provisioning treats an empty digest as unavailable
+   * (fail closed, never downloads an unverified binary).
+   */
+  sha256: string
+  archive: "raw"
+  variant: NextPlaidServerVariant
+  /** Minimum NVIDIA driver major required (cuda variant only). */
+  cudaVersion?: string
+}
+
+function nextPlaidServerUrl(asset: string): string {
+  return `https://github.com/animeshkundu/github-router/releases/download/${NEXTPLAID_SERVER_TAG}/${asset}`
+}
+
+/**
+ * next-plaid-api server binaries, keyed `<platform>-<arch>-<variant>`.
+ * Built by .github/workflows/next-plaid-server.yml from the pinned
+ * upstream tag: cpu = OpenBLAS-static (Linux/Windows) / Accelerate
+ * (macOS); cuda = + CUDA execution provider (Linux/Windows x64 only).
+ * macOS has no cuda variant (no NVIDIA target); linux-arm64 and
+ * win-arm64 have no entries (unsupported → lexical fallback).
+ */
+export const NEXTPLAID_SERVER: Record<string, NextPlaidServerAsset> = {
+  "linux-x64-cpu": {
+    url: nextPlaidServerUrl("next-plaid-api-x86_64-unknown-linux-gnu"),
+    sha256: "",
+    archive: "raw",
+    variant: "cpu",
+  },
+  "linux-x64-cuda": {
+    url: nextPlaidServerUrl("next-plaid-api-x86_64-unknown-linux-gnu-cuda"),
+    sha256: "",
+    archive: "raw",
+    variant: "cuda",
+    cudaVersion: "12.4",
+  },
+  "win32-x64-cpu": {
+    url: nextPlaidServerUrl("next-plaid-api-x86_64-pc-windows-msvc.exe"),
+    sha256: "",
+    archive: "raw",
+    variant: "cpu",
+  },
+  "win32-x64-cuda": {
+    url: nextPlaidServerUrl("next-plaid-api-x86_64-pc-windows-msvc-cuda.exe"),
+    sha256: "",
+    archive: "raw",
+    variant: "cuda",
+    cudaVersion: "12.4",
+  },
+  "darwin-arm64-cpu": {
+    url: nextPlaidServerUrl("next-plaid-api-aarch64-apple-darwin"),
+    sha256: "",
+    archive: "raw",
+    variant: "cpu",
+  },
+  "darwin-x64-cpu": {
+    url: nextPlaidServerUrl("next-plaid-api-x86_64-apple-darwin"),
+    sha256: "",
+    archive: "raw",
+    variant: "cpu",
+  },
+}
+
+/** Server asset for this platform-arch-variant, or undefined if unsupported. */
+export function nextPlaidServerAsset(
+  variant: NextPlaidServerVariant,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): NextPlaidServerAsset | undefined {
+  return NEXTPLAID_SERVER[`${platformArchKey(platform, arch)}-${variant}`]
+}
+
+/** True iff a promoted (SHA-pinned) server binary exists for this variant. */
+export function nextPlaidServerPromoted(
+  variant: NextPlaidServerVariant,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): boolean {
+  const asset = nextPlaidServerAsset(variant, platform, arch)
+  return asset !== undefined && asset.sha256.length > 0
+}

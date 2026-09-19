@@ -194,3 +194,4 @@ export async function colbertDegradedWarning(
 }
 
 export { runSemanticSearch } from "./runner"
+export { runServiceSearch, serviceBackendEnabled } from "./service-backend"

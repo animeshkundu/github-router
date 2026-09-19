@@ -38,7 +38,7 @@ import {
   searchCode,
   type CodeSearchResponse,
 } from "./code-search"
-import { colbertSearchEnabled, runSemanticSearch } from "./colbert"
+import { colbertSearchEnabled, runSemanticSearch, runServiceSearch, serviceBackendEnabled } from "./colbert"
 import type { SemanticSearchResult, SemanticStatus } from "./colbert/runner"
 import { outlineFile } from "./tree-sitter-grammars"
 
@@ -331,12 +331,47 @@ export async function runUnifiedCodeSearch(
     }
   }
 
+  // Service backend first (opt-in via GH_ROUTER_SEMANTIC_BACKEND=service).
+  // Fallback chain: service → colgrep CLI → lexical. Any service miss
+  // falls THROUGH to the colgrep path below, never straight to lexical,
+  // so a half-provisioned service degrades gracefully instead of hiding
+  // a working colgrep index.
+  if (serviceBackendEnabled()) {
+    try {
+      const svc = await runServiceSearch({
+        query: input.query,
+        workspace: input.workspace,
+        limit: input.limit,
+        signal,
+      })
+      if (svc.status === "ready") {
+        const results = (svc.results ?? []).map((r) => ({
+          file: r.file,
+          line: r.line,
+          snippet: r.snippet,
+          ...(r.endLine !== undefined ? { endLine: r.endLine } : {}),
+          ...(r.name !== undefined ? { name: r.name } : {}),
+          ...(r.score !== undefined ? { score: r.score } : {}),
+        }))
+        return {
+          source: "semantic",
+          results,
+          outlines: await outlinesForSemanticResults(input, results, signal),
+          ...(svc.freshness ? { freshness: svc.freshness } : {}),
+          ...(svc.stale_files !== undefined ? { stale_files: svc.stale_files } : {}),
+        }
+      }
+    } catch {
+      // fall through to the colgrep path
+    }
+  }
+
   // The runner returns honest statuses, but a transport/internal error
   // could still throw; the merged tool's "transparent fallback" promise
   // must hold even then, so guard the call and fall back to lexical.
   // serveStale: an LLM editing session dirties the tree constantly; a
   // refuse-when-stale policy would make semantic permanently unavailable
-  // during exactly those sessions. Small content deltas serve labeled.
+  // during those sessions. Small content deltas serve labeled.
   let sem: SemanticSearchResult
   try {
     sem = await runSemanticSearch({
