@@ -118,19 +118,28 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          # gfortran + make: static OpenBLAS build; cmake: ort build script probes
-          sudo apt-get install -y gfortran make cmake
+          # libopenblas-dev: static lib (.a) that openblas-src links when the
+          # `system`+`static` features are on (cargo features unify across
+          # the graph, so `system` stays on via fastkmeans-rs — the .a must
+          # exist or the link fails). gfortran/make/cmake cover the rest.
+          sudo apt-get install -y gfortran make cmake libopenblas-dev
 
       - name: Install build deps (Windows)
         if: matrix.os == 'windows-latest'
         shell: powershell
         run: |
-          # mingw (gcc/gfortran/make) for the static OpenBLAS build; cmake ships with the runner
-          choco install mingw cmake -y
+          # openblas-src on MSVC links via vcpkg ONLY (its build.rs panics
+          # otherwise). Install the static-MD triplet: static lib + dynamic
+          # CRT, matching Rust MSVC linkage. Newer runner images renamed
+          # VCPKG_ROOT to VCPKG_INSTALLATION_ROOT — export both.
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          echo "VCPKG_ROOT=$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          vcpkg install openblas:x64-windows-static-md
+          choco install cmake -y
 
       - name: Install CUDA Toolkit
         if: matrix.variant == 'cuda'
-        uses: Jimver/cuda-toolkit@v0.2.16
+        uses: Jimver/cuda-toolkit@v0.2.36
         id: cuda-toolkit
         with:
           cuda: ${{ env.CUDA_VERSION }}
