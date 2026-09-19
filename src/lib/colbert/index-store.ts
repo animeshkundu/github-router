@@ -841,8 +841,12 @@ export async function freshnessVerdict(workspace: string): Promise<FreshnessResu
  * and current HEAD (when the head moved) UNION the working-tree porcelain
  * set. Capped at DELTA_ENUM_CAP (beyond → truncated). Fail-closed: any git
  * failure yields truncated (unprovably-small), so servability refuses.
+ *
+ * Exported for the service backend, which computes its own servability
+ * against its own sidecar (it must NOT reuse `freshnessVerdict` — that
+ * verdict describes the colgrep sidecar's state, not the service index's).
  */
-async function gitDeltaFiles(
+export async function gitDeltaFiles(
   workspace: string,
   baseHead: string | undefined,
   currentHead: string | undefined,

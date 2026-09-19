@@ -107,6 +107,28 @@ configuration plus `@types/chrome`; adding that coverage remains follow-up work.
 - `github-router index [--workspace <abs>] [--status] [--timeout <min>]` — build the semantic code-search index in the foreground without starting the proxy (explicit invocation is the opt-in; `--search` not required). `--status` prints freshness verbatim and exits. Uses full cores unless `GH_ROUTER_COLBERT_PARALLEL` caps it. Exit 0 = fresh/built, 1 = provision/build failure, 2 = usage error.
 - `github-router debug [...]` — internal diagnostics; not for user-facing flows.
 
+## Service backend (semantic search)
+
+Opt-in persistent alternative to the colgrep CLI path: `GH_ROUTER_SEMANTIC_BACKEND=service`
+(default: `colgrep`). Fallback chain is **service → colbert → lexical** — a service
+miss falls through to colgrep, never straight to lexical.
+
+| Env | Effect |
+|-----|--------|
+| `GH_ROUTER_SEMANTIC_BACKEND=service` | Opt into the persistent `next-plaid-api` server |
+| `GH_ROUTER_NEXTPLAID_BIN=<path>` | Explicit server binary (skips provisioning) |
+| `GH_ROUTER_NEXTPLAID_VARIANT=cpu\|cuda` | Force a compute variant (skips GPU probing; test/operator seam) |
+| `GH_ROUTER_NEXTPLAID_CUDA=1` | Pass `--cuda` to an explicit binary (provisioned cuda binaries get it automatically; never passed without `--model`) |
+| `GH_ROUTER_NP_PARALLEL=<n>` | ONNX sessions (default: 25% of CPUs) |
+
+Compute: Linux/Win x64 ship cpu (static OpenBLAS) + cuda (CUDA 12.8, driver ≥570)
+variants; macOS is cpu-only (Accelerate). GPU auto-detect is `nvidia-smi -L`
+(bounded, never throws; absent ⇒ cpu). Server binaries are SHA-pinned in
+`src/lib/colbert/manifest.ts` (`NEXTPLAID_SERVER`; empty digest = unpromoted =
+unavailable): dispatch `next-plaid-server` to build, then `promote-next-plaid`
+(`build_run_id`, dry-run default) and merge the SHA PR. Full matrix in
+[`docs/semantic-search.md`](docs/semantic-search.md) ("Service backend").
+
 ## Publishing & runtime ops
 
 See [`docs/publishing.md`](docs/publishing.md) for npm/Docker release flow, the upgrade procedure for a running proxy, and the `UPSTREAM_FETCH_TIMEOUT_MS` (default `0`, disabled) / `UPSTREAM_INACTIVITY_TIMEOUT_MS` (default 5 min) tunables — do NOT lower the inactivity timeout without re-reading the 134-163k mid-stream abort history.

@@ -288,7 +288,7 @@ export async function runSemanticSearch(opts: {
         status: "unavailable",
         isError: true,
         notice:
-          "no semantic index for this workspace yet — a background index was started; retry shortly or use code_search",
+          "no semantic index yet — build started; retry mode:\"semantic\" in minutes or use code_search",
       }
     }
     case "failed":
@@ -315,13 +315,13 @@ export async function runSemanticSearch(opts: {
         return {
           status: "building",
           notice:
-            "semantic index build was interrupted; a rebuild was started — retry shortly (or use code_search now)",
+            "semantic index build interrupted — rebuild started; retry mode:\"semantic\" in minutes",
         }
       }
       return {
         status: "building",
         notice:
-          "semantic index is being built for this workspace; retry shortly (or use code_search now)",
+          "semantic index building; retry mode:\"semantic\" in minutes or use code_search",
       }
     }
     case "stale": {
@@ -437,7 +437,7 @@ async function repairCorruptIndex(
   if (_searchIndexInFlight.has(wsKey) || isInitInFlight(workspace)) {
     return {
       status: "building",
-      notice: "semantic index was found corrupt but a writer is still active; returned results are disabled until it exits",
+      notice: "semantic index corrupt, writer active — results disabled until it exits",
     }
   }
 
@@ -454,7 +454,7 @@ async function repairCorruptIndex(
       status: "unavailable",
       isError: true,
       notice:
-        "no semantic index for this workspace yet — a background index was started; retry shortly or use code_search",
+        "no semantic index yet — build started; retry mode:\"semantic\" in minutes or use code_search",
     }
   }
   if (!(await quarantineProjectDir(projectDir))) {
@@ -462,7 +462,7 @@ async function repairCorruptIndex(
     return {
       status: "failed",
       isError: true,
-      notice: "semantic index is corrupt but could not be quarantined; returned lexical results — close active colgrep processes and retry",
+      notice: "semantic index corrupt, quarantine failed — close active colgrep processes and retry",
     }
   }
   await writeColbertMeta(failedMeta).catch(() => {})
@@ -473,8 +473,8 @@ async function repairCorruptIndex(
     isError: true,
     notice:
       attempts < 2
-        ? 'semantic index was found corrupt and quarantined; a clean rebuild was started — retry mode:"semantic" shortly'
-        : 'semantic index repeatedly failed integrity checks; automatic rebuild is capped — do NOT retry mode:"semantic", use lexical search with specific symbol/keyword terms and see proxy logs',
+        ? 'semantic index corrupt and quarantined — rebuild started; retry mode:"semantic" in minutes'
+        : 'semantic index repeatedly corrupt — rebuild capped, do NOT retry mode:"semantic"; use code_search',
   }
 }
 
@@ -601,8 +601,8 @@ async function handleFailure(
       isError: true,
       notice:
         backoffElapsed ?
-          'semantic index unavailable; inputs changed since the last failure so a rebuild was started — retry mode:"semantic" shortly, or use code_search with specific symbol/keyword terms now'
-        : 'semantic index unavailable (recent build failure); a rebuild is pending — retry mode:"semantic" shortly, or use code_search with specific symbol/keyword terms now',
+          'semantic index failed (inputs changed) — rebuild started; retry mode:"semantic" in minutes'
+        : 'semantic index failed — rebuild pending; retry mode:"semantic" in minutes',
     }
   }
 
@@ -650,7 +650,7 @@ async function handleFailure(
       status: "failed",
       isError: true,
       notice:
-        'semantic index unavailable; a background re-index was started — retry mode:"semantic" shortly, or use code_search with specific symbol/keyword terms now',
+        'semantic index failed — re-index started; retry mode:"semantic" in minutes',
     }
   }
 
@@ -660,7 +660,7 @@ async function handleFailure(
       status: "failed",
       isError: true,
       notice:
-        'semantic index unavailable (recent build failure); retry mode:"semantic" shortly, or use code_search with specific symbol/keyword terms now',
+        'semantic index unavailable (recent build failure) — retry mode:"semantic" in minutes',
     }
   }
 
@@ -805,7 +805,7 @@ async function spawnSearch(opts: {
     return {
       status: "building",
       notice:
-        'semantic index is updating in the background; retry mode:"semantic" shortly',
+        'semantic index updating in background; retry mode:"semantic" in minutes',
     }
   }
 

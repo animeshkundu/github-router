@@ -12,14 +12,31 @@
 # retained 90 days; promoting = download, sha256sum, paste into manifest.
 #
 # Feature set per platform (from upstream README: `model` enables the
-# `*_with_encoding` endpoints we need; `accelerate` is macOS-framework
-# only; Linux stays default/pure-Rust to avoid a libopenblas system dep;
-# Windows stays CPU-default):
+# `*_with_encoding` endpoints we need):
 #   macOS (arm64 + x64 cross): --features "accelerate,model"
-#   Linux x64:                 --features "model"
-#   Windows x64:               --features "model"
+#     (`accelerate` = Apple Accelerate CPU BLAS; macOS-framework only)
+#   Linux x64 (cpu):           --features "openblas,model"
+#   Linux x64 (cuda):          --features "cuda,openblas,model"
+#   Windows x64 (cpu):         --features "openblas,model"
+#   Windows x64 (cuda):        --features "cuda,openblas,model"
+#
+# OpenBLAS is STATICALLY linked (see the "Patch openblas-src" step):
+# zero runtime dependency on libopenblas. CUDA binaries bundle the CUDA
+# execution provider but still ship the CPU provider — the router picks
+# the cuda variant only when a GPU is detected and falls back to the cpu
+# variant otherwise (see `selectServerVariant` in
+# src/lib/colbert/service-backend.ts).
 
 name: next-plaid-server
+
+# A newer dispatch on the same ref supersedes an older one (e.g. pushing a
+# workflow fix while a build is running): cancel the stale run instead of
+# burning two sets of runners (notably the ~20 min Windows vcpkg builds).
+# Scoped per-ref so the monthly schedule and branch builds never cancel
+# each other across refs.
+concurrency:
+  group: next-plaid-server-${{ github.ref }}
+  cancel-in-progress: true
 
 on:
   workflow_dispatch:
@@ -35,6 +52,16 @@ on:
 
 env:
   UPSTREAM_TAG: ${{ inputs.upstream_tag || 'v1.7.0' }}
+  # vcpkg binary caching via the GitHub Actions cache: the ~15 min
+  # openblas source build on Windows becomes a ~1 min download on
+  # subsequent runs (keyed by triplet + port version automatically).
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  # CUDA minor pinned to a live 12.x (matches upstream `cuda` feature =
+  # cudarc cuda-11080; do NOT mix with `cuda-13` in one binary).
+  # NVIDIA prunes EOL minors from the ubuntu2404 repo (12.4 packages are
+  # already gone: "no installation candidate") — when this 404s/expires,
+  # bump to the newest live 12.x, never 13.x (needs the `cuda-13` feature).
+  CUDA_VERSION: "12.8.1"
 
 jobs:
   build:
@@ -45,27 +72,136 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset: next-plaid-api-x86_64-unknown-linux-gnu
-            features: "model"
+            features: "openblas,model"
+            variant: "cpu"
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: next-plaid-api-x86_64-unknown-linux-gnu-cuda
+            features: "cuda,openblas,model"
+            variant: "cuda"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: next-plaid-api-x86_64-pc-windows-msvc.exe
-            features: "model"
+            features: "openblas,model"
+            variant: "cpu"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: next-plaid-api-x86_64-pc-windows-msvc-cuda.exe
+            features: "cuda,openblas,model"
+            variant: "cuda"
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: next-plaid-api-aarch64-apple-darwin
             features: "accelerate,model"
+            variant: "cpu"
           - os: macos-latest
             target: x86_64-apple-darwin
             asset: next-plaid-api-x86_64-apple-darwin
             features: "accelerate,model"
+            variant: "cpu"
     runs-on: ${{ matrix.os }}
     steps:
       - name: Check out upstream at the pinned tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: lightonai/next-plaid
           ref: ${{ env.UPSTREAM_TAG }}
           path: next-plaid-src
+
+      - name: Patch openblas-src to static linking
+        # Upstream pins openblas-src with the `system` feature (links the
+        # distro libopenblas at runtime). We need zero-runtime-dep binaries,
+        # so flip it to `static` (builds OpenBLAS from source into the
+        # binary). macOS entries ignore this (they use `accelerate`, never
+        # enable the `openblas` feature, so the patched dep stays optional
+        # and unbuilt). Fails closed if upstream renames the block.
+        working-directory: next-plaid-src
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          from pathlib import Path
+          p = Path("next-plaid/Cargo.toml")
+          s = p.read_text()
+          old = 'openblas-src = { version = "0.10", features = [\n    "cblas",\n    "system",\n], optional = true }'
+          new = 'openblas-src = { version = "0.10", features = [\n    "cblas",\n    "static",\n], optional = true }'
+          assert old in s, "openblas-src block not found — upstream Cargo.toml changed, update the patch"
+          p.write_text(s.replace(old, new))
+          print("patched openblas-src: system -> static")
+          EOF
+
+      - name: Install build deps (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          sudo apt-get update
+          # libopenblas-dev: static lib (.a) that openblas-src links when the
+          # `system`+`static` features are on (cargo features unify across
+          # the graph, so `system` stays on via fastkmeans-rs — the .a must
+          # exist or the link fails). gfortran/make/cmake cover the rest.
+          sudo apt-get install -y gfortran make cmake libopenblas-dev
+
+      - name: Install build deps (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          # openblas-src on MSVC links via vcpkg ONLY (its build.rs panics
+          # otherwise). Install the static-MD triplet: static lib + dynamic
+          # CRT, matching Rust MSVC linkage. Newer runner images renamed
+          # VCPKG_ROOT to VCPKG_INSTALLATION_ROOT — export both.
+          # vcpkg binary caching (VCPKG_BINARY_SOURCES, set at job env)
+          # makes this ~1 min on cache hit instead of ~15 min source build.
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          echo "VCPKG_ROOT=$env:VCPKG_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          vcpkg install openblas:x64-windows-static-md
+          choco install cmake -y
+
+      # Linux cuda: install the cuda-toolkit METAPACKAGE (upstream's own
+      # recipe — their release.yml does exactly this). The metapackage name
+      # is stable per minor (`cuda-toolkit-12-8`); per-subpackage names are
+      # NOT (Jimver's `cublas` maps to `cuda-cublas-12-8`, which no longer
+      # exists — the repo now ships `libcublas-12-8`). cudarc links
+      # dynamically, so the toolkit is a BUILD-time headers-only need with
+      # no runtime CUDA dependency in the binary.
+      - name: Install CUDA Toolkit (Linux)
+        if: matrix.variant == 'cuda' && matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MINOR="${CUDA_VERSION%.*}"       # 12.8.1 -> 12.8
+          DASH="${MINOR/./-}"              # 12.8 -> 12-8
+          DIR="/usr/local/cuda-${MINOR}"
+          wget -q "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y "cuda-toolkit-${DASH}"
+          echo "${DIR}/bin" >> "$GITHUB_PATH"
+          echo "CUDA_PATH=${DIR}" >> "$GITHUB_ENV"
+          # GITHUB_PATH/GITHUB_ENV apply to SUBSEQUENT steps only — export
+          # in-step so the smoke check below sees the just-installed nvcc.
+          export PATH="${DIR}/bin:${PATH}"
+          export LD_LIBRARY_PATH="${DIR}/lib64:${LD_LIBRARY_PATH:-}"
+          # Verify EVERY non-standard piece the cudarc build needs — fail
+          # here with a clear message, not 10 min deep in the cargo build:
+          # nvcc (compiler), cudart + cublas shared libs, CUDA headers.
+          nvcc --version
+          for lib in libcudart.so libcublas.so; do
+            if ! ldconfig -p | grep -q "$lib"; then
+              echo "::error::missing $lib after cuda-toolkit install"
+              exit 1
+            fi
+            echo "found $lib: $(ldconfig -p | grep "$lib" | head -1)"
+          done
+          test -f "${DIR}/include/cuda_runtime.h" || { echo "::error::missing cuda_runtime.h"; exit 1; }
+          echo "CUDA toolkit verified: ${DIR}"
+
+      - name: Install CUDA Toolkit (Windows)
+        if: matrix.variant == 'cuda' && matrix.os == 'windows-latest'
+        uses: Jimver/cuda-toolkit@v0.2.36
+        id: cuda-toolkit
+        with:
+          cuda: ${{ env.CUDA_VERSION }}
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "cublas_dev"]'
 
       - name: Install Rust (stable + cross target if needed)
         uses: dtolnay/rust-toolchain@stable
@@ -73,8 +209,20 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # Cache cargo registry + compiled deps across runs (monthly schedule
+      # + manual dispatches would otherwise rebuild everything, including
+      # the ~7 min LTO release link, from scratch every time). Keyed per
+      # leg by the matrix (target + features differ per binary).
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: next-plaid-src
+          key: ${{ matrix.target }}-${{ matrix.variant }}
+          cache-targets: true
+
       - name: Build next-plaid-api (release)
         working-directory: next-plaid-src
+        shell: bash
         run: cargo build --release --locked -p next-plaid-api --features "${{ matrix.features }}" --target ${{ matrix.target }}
 
       - name: Smoke test (help exits 0, no model needed)
@@ -84,6 +232,10 @@ jobs:
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then bin="${bin}.exe"; fi
           "$bin" --help > /dev/null
           echo "smoke ok: $bin"
+          # Static-link check (informational): no dynamic openblas dep expected.
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            echo "dynamic openblas refs: $(ldd "$bin" | grep -ci openblas || true)"
+          fi
 
       - name: Stage artifact
         shell: bash
@@ -95,7 +247,7 @@ jobs:
           (cd dist-server && sha256sum "${{ matrix.asset }}" | tee "${{ matrix.asset }}.sha256")
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.asset }}
           path: |

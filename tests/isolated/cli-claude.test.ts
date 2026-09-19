@@ -393,6 +393,11 @@ mock.module("~/lib/colbert", () => ({
     isError: true,
     notice: "",
   })),
+  // Service backend re-exports (barrel must stay complete: unified-code-search
+  // imports these names, and Bun validates named imports against the mock).
+  // Off here — launcher tests never exercise the service path.
+  serviceBackendEnabled: mock(() => false),
+  runServiceSearch: mock(async () => ({ status: "unavailable" })),
   __resetColbertStartedForTests: mock(() => {}),
 }))
 
