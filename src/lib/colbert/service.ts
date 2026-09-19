@@ -327,6 +327,13 @@ export interface ManagedServerOpts {
   indexDir: string
   /** `--int8` quantized inference (default true: matches colgrep edge config). */
   int8?: boolean
+  /**
+   * `--cuda` GPU inference (default false). Only set when the binary was
+   * built with the `cuda` feature AND a GPU was detected at runtime —
+   * otherwise the flag makes the server fail to start. Requires
+   * `modelDir` (upstream CLI contract, same as `--int8`).
+   */
+  cuda?: boolean
   /** `--parallel` ONNX sessions (default 1: safe on 4-core boxes). */
   parallel?: number
   /** Extra env for the child (ORT_DYLIB_PATH etc.). */
@@ -368,11 +375,16 @@ async function freePort(): Promise<number> {
  * child exits early (stderr is captured, truncated, never logged raw —
  * it can embed paths, not source, but the discipline is cheap).
  */
-export async function startManagedServer(
-  opts: ManagedServerOpts,
-): Promise<ManagedServer> {
-  const port = opts.port ?? (await freePort())
-  const args = opts.argv ?? [
+/**
+ * Build the next-plaid-api argv (exported for unit tests; production
+ * goes through `startManagedServer`). `--int8`/`--cuda` both require
+ * `--model` (upstream CLI contract) and are never passed alone.
+ */
+export function serverArgv(
+  opts: Pick<ManagedServerOpts, "indexDir" | "modelDir" | "int8" | "cuda" | "parallel">,
+  port: number,
+): Array<string> {
+  return [
     "--host",
     "127.0.0.1",
     "--port",
@@ -380,11 +392,18 @@ export async function startManagedServer(
     "--index-dir",
     opts.indexDir,
     ...(opts.modelDir ? ["--model", opts.modelDir] : []),
-    // --int8 requires --model (upstream CLI contract); never pass it alone.
     ...(opts.modelDir && opts.int8 !== false ? ["--int8"] : []),
+    ...(opts.modelDir && opts.cuda === true ? ["--cuda"] : []),
     "--parallel",
     String(Math.max(1, Math.floor(opts.parallel ?? 1))),
   ]
+}
+
+export async function startManagedServer(
+  opts: ManagedServerOpts,
+): Promise<ManagedServer> {
+  const port = opts.port ?? (await freePort())
+  const args = opts.argv ?? serverArgv(opts, port)
 
   let child: ChildProcess
   try {

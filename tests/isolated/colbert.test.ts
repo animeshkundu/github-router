@@ -125,6 +125,35 @@ describe("colbert manifest", () => {
     expect(m.COLGREP_BIN["linux-x64"].archive).toBe("tar.xz")
     expect(m.COLGREP_BIN["win32-x64"].archive).toBe("zip")
   })
+
+  test("server matrix: cpu on all supported platforms, cuda linux/win x64 only", async () => {
+    const m = await import("../../src/lib/colbert/manifest")
+    // cpu everywhere colgrep runs; cuda only where NVIDIA targets exist.
+    for (const key of ["linux-x64", "win32-x64", "darwin-arm64", "darwin-x64"] as const) {
+      expect(m.nextPlaidServerAsset("cpu", ...key.split("-") as [NodeJS.Platform, string])).toBeDefined()
+    }
+    expect(m.nextPlaidServerAsset("cuda", "linux", "x64")).toBeDefined()
+    expect(m.nextPlaidServerAsset("cuda", "win32", "x64")).toBeDefined()
+    expect(m.nextPlaidServerAsset("cuda", "darwin", "arm64")).toBeUndefined()
+    expect(m.nextPlaidServerAsset("cuda", "linux", "arm64")).toBeUndefined()
+    expect(m.nextPlaidServerAsset("cpu", "linux", "arm64")).toBeUndefined()
+  })
+
+  test("server entries carry either empty sha (fail-closed until promotion) or a pinned digest", async () => {
+    const m = await import("../../src/lib/colbert/manifest")
+    const hex = /^[0-9a-f]{64}$/
+    for (const [key, asset] of Object.entries(m.NEXTPLAID_SERVER)) {
+      expect(asset.sha256 === "" || hex.test(asset.sha256), `server ${key}`).toBe(true)
+    }
+    // Promotion state is per-variant and platform-dependent: an entry is
+    // usable iff its digest is pinned. Empty stays fail-closed.
+    for (const key of Object.keys(m.NEXTPLAID_SERVER)) {
+      const [platform, arch, variant] = key.split("-") as [NodeJS.Platform, string, "cpu" | "cuda"]
+      expect(m.nextPlaidServerPromoted(variant, platform, arch)).toBe(
+        m.nextPlaidServerAsset(variant, platform, arch)!.sha256.length > 0,
+      )
+    }
+  })
 })
 
 // ---------------------------------------------------------------------

@@ -1564,8 +1564,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         "the literal keywords may not appear (\"where do we rate-limit\", " +
         "\"auth token refresh\"). When that index is building/stale/absent it " +
         "TRANSPARENTLY returns lexical (BM25F) results and labels the " +
-        "response `source` (\"lexical-fallback\") so a degrade is never " +
-        "silent. On a `lexical-fallback` the `notice` says how to proceed: " +
+        "response `source` (\"semantic\" | \"lexical\" | \"lexical-fallback\") " +
+        "so a degrade is never silent. Semantic hits carry `score` (0-1 " +
+        "relevance), `endLine`, `name`; stale semantic carries " +
+        "`freshness:\"stale\" + `stale_files:N` (results predate recent " +
+        "edits). On a `lexical-fallback` the `notice` says how to proceed: " +
         "retry `mode:\"semantic\"` shortly (the index self-heals in the " +
         "background) or re-query with specific symbols — the lexical engine " +
         "matches keywords/symbols, not natural-language phrases. " +
@@ -1654,12 +1657,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           summary: {
             type: "boolean",
             description:
-              "Structural summary, ON BY DEFAULT: the response includes " +
-              "`outlines` — a tree-sitter outline (top-level symbols + " +
-              "line numbers) of the distinct files in the result set " +
-              "(first 10, in result order), a compact map of where the " +
-              "matches live that augments each hit's `snippet`. Set false " +
-              "to omit it when you only need the matching lines.",
+              "Structural summary, OPT-IN (default false): pass true and " +
+              "the response includes `outlines` — a tree-sitter outline " +
+              "(top-level symbols + line numbers) of the distinct files " +
+              "in the result set (first 10, in result order), a compact " +
+              "map of where the matches live that augments each hit's " +
+              "`snippet`. Omit it when you only need the matching lines.",
           },
           complete: {
             type: "boolean",

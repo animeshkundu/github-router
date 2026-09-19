@@ -869,14 +869,19 @@ export function browseAgentEnabled(): boolean {
  * single question "should the `code` tool attempt ColBERT before
  * falling back to lexical?"
  *
-  * Delegates to the leaf `colbertSearchEnabled()` (the single source of
-  * truth, in `src/lib/colbert/`) so the unified helper can read the same
-  * decision without importing this module (cycle avoidance). True iff the
-  * operator opted in (`--search` / `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`,
-  * unless `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1` hard-disables) AND the
-  * colgrep binary + model + ORT are provisioned on disk AND the
-  * post-provision smoke test passed.
-  */
+ * Delegates to the leaf `colbertSearchEnabled()` (the single source of
+ * truth, in `src/lib/colbert/`) so the unified helper can read the same
+ * decision without importing this module (cycle avoidance). True iff the
+ * operator opted in (`--search` / `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`,
+ * unless `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1` hard-disables) AND the
+ * colgrep binary + model + ORT are provisioned on disk AND the
+ * post-provision smoke test passed.
+ *
+ * NOTE: the service backend (`GH_ROUTER_SEMANTIC_BACKEND=service`, a
+ * persistent next-plaid-api server) has its own availability check
+ * (`serviceBackendEnabled()`) and runs BEFORE the colgrep path inside
+ * the unified helper — this predicate only gates the colgrep attempt.
+ */
 export function semanticSearchEnabled(): boolean {
   return colbertSearchEnabled()
 }

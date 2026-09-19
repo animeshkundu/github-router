@@ -38,6 +38,7 @@ test("lexical search caps outline entries per file", async () => {
     mode: "ranked",
     file_glob: DENSE_GLOB,
     limit: 3,
+    summary: true,
   })
 
   // Guard the guard: if the query stops matching, an absent outline would
@@ -58,6 +59,7 @@ test("unified search caps outline entries per file on the lexical path", async (
     mode: "lexical",
     file_glob: DENSE_GLOB,
     limit: 3,
+    summary: true,
   })
 
   expect(r.outlines?.length).toBeGreaterThan(0)

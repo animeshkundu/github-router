@@ -90,6 +90,7 @@ describe("structural-pass → outline tree reuse (A1)", () => {
         query: "alphaWidget",
         workspace: root,
         mode: "ranked",
+        summary: true,
       })
       expect(resp.results.length).toBeGreaterThan(0)
       expect(resp.outlines).toBeDefined()

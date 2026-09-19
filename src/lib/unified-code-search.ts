@@ -38,7 +38,7 @@ import {
   searchCode,
   type CodeSearchResponse,
 } from "./code-search"
-import { colbertSearchEnabled, runSemanticSearch } from "./colbert"
+import { colbertSearchEnabled, runSemanticSearch, runServiceSearch, serviceBackendEnabled } from "./colbert"
 import type { SemanticSearchResult, SemanticStatus } from "./colbert/runner"
 import { outlineFile } from "./tree-sitter-grammars"
 
@@ -55,6 +55,7 @@ export interface UnifiedCodeSearchInput {
   limit?: number
   context_lines?: number
   structural?: "full" | "topN"
+  /** Opt-in outlines (default off). `true` attaches per-file outlines. */
   summary?: boolean
   complete?: boolean
   multiline?: boolean
@@ -132,23 +133,22 @@ function lexicalSearchCodeMode(mode: UnifiedMode): "ranked" | "literal" | "regex
 
 const FALLBACK_GUIDANCE_MARKER = 'retry mode:"semantic"'
 const FALLBACK_GUIDANCE =
-  `${FALLBACK_GUIDANCE_MARKER} in a few minutes (a build takes minutes on a large repo), `
-  + "or re-query now with specific symbol/keyword terms"
+  `${FALLBACK_GUIDANCE_MARKER} in minutes or use exact symbols`
 
 function fallbackNoticeFor(status: SemanticStatus): string {
   const tail = FALLBACK_GUIDANCE
   switch (status) {
     case "building":
-      return `semantic index is building; returned lexical keyword matches. ${tail}`
+      return `semantic index building — returned lexical matches; ${tail}`
     case "stale":
-      return `semantic index predates the current HEAD/tree (a background re-index was started); returned lexical keyword matches. ${tail}`
+      return `semantic index stale (HEAD moved) — re-index started, returned lexical matches; ${tail}`
     case "unavailable":
-      return `no semantic index for this workspace yet (a background build was started); returned lexical keyword matches. ${tail}`
+      return `no semantic index yet — build started, returned lexical matches; ${tail}`
     case "failed":
       // The recovery path most likely to be misread as a dead tool: this very
       // query is what schedules the rebuild, so it CANNOT return semantic
       // results itself. Say so, or the next fallback reads as no progress.
-      return `semantic index unavailable; this query started a background rebuild, so it returned lexical keyword matches. ${tail}`
+      return `semantic index failed — this query started a background rebuild, returned lexical matches; ${tail}`
     default:
       return "returned lexical results"
   }
@@ -181,7 +181,7 @@ async function outlinesForSemanticResults(
   results: Array<UnifiedResultRow>,
   signal?: AbortSignal,
 ): Promise<CodeSearchResponse["outlines"]> {
-  if (input.summary === false) return undefined
+  if (input.summary !== true) return undefined
   const seen = new Set<string>()
   const files: Array<string> = []
   for (const result of results) {
@@ -331,12 +331,47 @@ export async function runUnifiedCodeSearch(
     }
   }
 
+  // Service backend first (opt-in via GH_ROUTER_SEMANTIC_BACKEND=service).
+  // Fallback chain: service → colgrep CLI → lexical. Any service miss
+  // falls THROUGH to the colgrep path below, never straight to lexical,
+  // so a half-provisioned service degrades gracefully instead of hiding
+  // a working colgrep index.
+  if (serviceBackendEnabled()) {
+    try {
+      const svc = await runServiceSearch({
+        query: input.query,
+        workspace: input.workspace,
+        limit: input.limit,
+        signal,
+      })
+      if (svc.status === "ready") {
+        const results = (svc.results ?? []).map((r) => ({
+          file: r.file,
+          line: r.line,
+          snippet: r.snippet,
+          ...(r.endLine !== undefined ? { endLine: r.endLine } : {}),
+          ...(r.name !== undefined ? { name: r.name } : {}),
+          ...(r.score !== undefined ? { score: r.score } : {}),
+        }))
+        return {
+          source: "semantic",
+          results,
+          outlines: await outlinesForSemanticResults(input, results, signal),
+          ...(svc.freshness ? { freshness: svc.freshness } : {}),
+          ...(svc.stale_files !== undefined ? { stale_files: svc.stale_files } : {}),
+        }
+      }
+    } catch {
+      // fall through to the colgrep path
+    }
+  }
+
   // The runner returns honest statuses, but a transport/internal error
   // could still throw; the merged tool's "transparent fallback" promise
   // must hold even then, so guard the call and fall back to lexical.
   // serveStale: an LLM editing session dirties the tree constantly; a
   // refuse-when-stale policy would make semantic permanently unavailable
-  // during exactly those sessions. Small content deltas serve labeled.
+  // during those sessions. Small content deltas serve labeled.
   let sem: SemanticSearchResult
   try {
     sem = await runSemanticSearch({
