@@ -1,4 +1,7 @@
-export const PLAN_SKILL = {
+import type { InjectedSkill } from "./index"
+
+export function buildPlanSkill(_searchEnabled?: boolean): InjectedSkill {
+  return {
   name: "gh-plan",
   md: `---
 name: gh-plan
@@ -137,4 +140,7 @@ Return:
 - Do not start planning while gather-context Explore subagents still run; record them superseded first.
 - Do not dispatch implementation subagents from planning: stages never overlap.
 `,
-} as const
+  }
+}
+
+export const PLAN_SKILL = buildPlanSkill(true)

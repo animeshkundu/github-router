@@ -16,7 +16,7 @@
  *
  *   - `callInference` POSTs to `${serverUrl}/v1/responses` (no nonce — the /v1/*
  *     passthrough authenticates upstream with the proxy's own Copilot token) for
- *     the single gpt-5.6-sol scope/goal call the prompt hook makes.
+ *     the single gpt-5.6-luna scope/goal call the prompt hook makes.
  *
  * Everything here is best-effort and caller-fail-open: a transport error,
  * non-2xx, timeout, or malformed body throws, and every caller wraps the call so
@@ -109,9 +109,10 @@ interface ResponsesApiShape {
 }
 
 /**
- * One non-streaming gpt-5.6-sol (or any model id) inference via `/v1/responses`.
- * Returns the assistant text (possibly empty). Throws on transport/HTTP/parse
- * failure. `effort` maps to the Responses `reasoning.effort` knob.
+ * One non-streaming inference via `/v1/responses` (model id is caller-chosen;
+ * the prompt hook uses gpt-5.6-luna). Returns the assistant text (possibly
+ * empty). Throws on transport/HTTP/parse failure. `effort` maps to the
+ * Responses `reasoning.effort` knob.
  */
 export async function callInference(opts: {
   serverUrl: string

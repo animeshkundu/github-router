@@ -3,6 +3,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import {
   agentNamesForToolAllowlist,
   buildAgentPrompt,
+  buildCodeModeDescription,
+  buildCodeToolDescription,
   buildPeerAwarenessSnippet,
   buildPeerAwarenessSummary,
   enumerateInjectedMcpToolNames,
@@ -650,12 +652,60 @@ describe("buildPeerAwarenessSnippet", () => {
 
   test("code tool is described as semantic-first with transparent lexical fallback (no standalone semantic_search)", () => {
     // semantic_search is folded into the unified `code` tool — it is no
-    // longer a separate, availability-gated tool, so the snippet describes
-    // the merged behavior unconditionally and never names `semantic_search`.
-    const snippet = buildPeerAwarenessSnippet(MINIMAL)
+    // longer a separate, availability-gated tool. With semantic search
+    // available the snippet describes the merged behavior and never names
+    // `semantic_search`.
+    const snippet = buildPeerAwarenessSnippet({ ...MINIMAL, semanticSearchAvailable: true })
     expect(snippet).not.toContain("semantic_search")
     expect(snippet).toContain("ColBERT")
     expect(snippet).toContain("source")
+  })
+
+  test("code tool is lexical-only when semantic search is unavailable (--search off)", () => {
+    for (const opts of [MINIMAL, { ...MINIMAL, semanticSearchAvailable: false }]) {
+      const snippet = buildPeerAwarenessSnippet(opts)
+      expect(snippet).toContain("mcp__search__code")
+      expect(snippet).toContain("BM25F")
+      expect(snippet).not.toContain("ColBERT")
+      expect(snippet).not.toMatch(/ranks by MEANING/i)
+      expect(snippet).not.toMatch(/mode:?"semantic"?/i)
+    }
+    // Enabled variant keeps the semantic-first framing.
+    const on = buildPeerAwarenessSnippet({ ...MINIMAL, semanticSearchAvailable: true })
+    expect(on).toContain("ColBERT")
+    expect(on).toContain("ranks by MEANING")
+  })
+
+  test("buildCodeToolDescription/buildCodeModeDescription match the launch flag", () => {
+    // Static registry entry stays semantic-first (full capability contract).
+    const tool = NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === "code")!
+    expect(tool.description).toBe(buildCodeToolDescription(true))
+    expect(tool.description).toContain("ColBERT")
+    // Disabled variant is lexical-only and never names semantic search.
+    const off = buildCodeToolDescription(false)
+    expect(off).toContain("Lexical engine")
+    expect(off).toContain("BM25F")
+    expect(off).not.toContain("ColBERT")
+    expect(off).not.toMatch(/ranks by MEANING/i)
+    expect(buildCodeModeDescription(true)).toContain("'semantic' (DEFAULT)")
+    const offMode = buildCodeModeDescription(false)
+    expect(offMode).toContain("'lexical' (DEFAULT when semantic search is off)")
+    expect(offMode).not.toMatch(/ColBERT|meaning-based/i)
+  })
+
+  test("awareness summary names lexical search when semantic is unavailable", () => {
+    const base = {
+      workerToolsAvailable: false,
+      standInAvailable: false,
+      browseAvailable: false,
+    }
+    const on = buildPeerAwarenessSummary({ ...base, semanticSearchAvailable: true })
+    expect(on).toContain("meaning-first code search")
+    const off = buildPeerAwarenessSummary({ ...base, semanticSearchAvailable: false })
+    expect(off).toContain("lexical code search")
+    expect(off).not.toMatch(/meaning-first|semantic/i)
+    // Absent flag defaults to lexical-only.
+    expect(buildPeerAwarenessSummary(base)).toContain("lexical code search")
   })
 
   test("describes the non-code fallback (per peer-review #4 — grep/glob still apply)", () => {

@@ -1,3 +1,5 @@
+import type { InjectedSkill } from "./index"
+
 /**
  * The `/gh-worker` skill: the operating model for the NON-BLOCKING workers
  * surface. Materialized into the per-launch mirror whenever `workerToolsEnabled()`
@@ -5,7 +7,8 @@
  * load-bearing enforcement is the PreToolUse guard + the `worker-*` dispatcher
  * subagents (see src/lib/worker-dispatch.ts).
  */
-export const WORKER_SKILL = {
+export function buildWorkerSkill(_searchEnabled?: boolean): InjectedSkill {
+  return {
   name: "gh-worker",
   md: `---
 name: gh-worker
@@ -55,4 +58,7 @@ The dispatcher calls the worker once and relays its result verbatim.
   headless (claude -p) runs the task surface behaves differently; prefer interactive
   for long worker fan-out.
 `,
-} as const
+  }
+}
+
+export const WORKER_SKILL = buildWorkerSkill(true)

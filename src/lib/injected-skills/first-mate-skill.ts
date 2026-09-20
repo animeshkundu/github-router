@@ -1,4 +1,7 @@
-export const FIRST_MATE_SKILL = {
+import type { InjectedSkill } from "./index"
+
+export function buildFirstMateSkill(_searchEnabled?: boolean): InjectedSkill {
+  return {
   name: "gh-first-mate",
   md: `---
 name: gh-first-mate
@@ -156,4 +159,7 @@ When reporting progress, return:
 - Needs human: decision ids/packet paths and the user's required choice.
 - Next wake: the heartbeat state — armed and next check in nextWakeSeconds seconds, or idle (disarmed).
 `,
-} as const
+  }
+}
+
+export const FIRST_MATE_SKILL = buildFirstMateSkill(true)

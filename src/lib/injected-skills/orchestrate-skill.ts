@@ -1,6 +1,13 @@
-export const ORCHESTRATE_SKILL = {
-  name: "gh-orchestrate",
-  md: `---
+import type { InjectedSkill } from "./index"
+
+export function buildOrchestrateSkill(searchEnabled: boolean): InjectedSkill {
+  const researchLine = searchEnabled
+    ? "- research: worker-explore (Agent subagent) and mcp__search__code for focused follow-ups (semantic for concepts, lexical for exact symbols)."
+    : "- research: worker-explore (Agent subagent) and mcp__search__code for focused follow-ups (lexical for exact symbols, filenames, errors, routes, flags, and config keys)."
+
+  return {
+    name: "gh-orchestrate",
+    md: `---
 name: gh-orchestrate
 description: Right-sized blind-spot-elimination for non-trivial implementation asks: captures user-blessed acceptance criteria, delegates bounded research, decomposes and plans, composes a native Workflow with explicit deterministic/advisory annotations, verifies the workflow, checkpoints residual risks and cost, then runs only when the pipeline actually raises the floor. Use when a non-trivial implementation ask benefits from workflow-level blind-spot reduction.
 user-invocable: true
@@ -83,7 +90,7 @@ Parallelism (the Workflow tool's core optimization rule):
 
 Role to tool mapping:
 
-- research: worker-explore (Agent subagent) and mcp__search__code for focused follow-ups.
+${researchLine}
 - plan: worker-plan (Agent subagent).
 - implement: worker-implement (Agent subagent), with worktree:true for parallel writers.
 - test: worker-test (Agent subagent), authored by a DIFFERENT LAB than the implementer when possible. This is an advisory practice, not enforced provenance.
@@ -133,4 +140,7 @@ Return:
 - Advisory review results, if any.
 - Final residual risks and next action.
 `,
-} as const
+  }
+}
+
+export const ORCHESTRATE_SKILL = buildOrchestrateSkill(true)

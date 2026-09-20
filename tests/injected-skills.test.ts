@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { ARTIFACT_REVIEW_SKILL, buildArtifactReviewSkill, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, INJECTED_SKILLS, injectedSkillsForLaunch, SWE_PIPELINE_SKILL, writeInjectedSkill } from "../src/lib/injected-skills"
+import { ARTIFACT_REVIEW_SKILL, buildArtifactReviewSkill, buildGatherContextSkill, buildOrchestrateSkill, buildResearchSkill, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, getInjectedSkills, getPipelineSkills, INJECTED_SKILLS, injectedSkillsForLaunch, SWE_PIPELINE_SKILL, writeInjectedSkill } from "../src/lib/injected-skills"
 import { CONDENSED_OPERATING_SEQUENCE, DEFINITION_OF_GREATNESS } from "../src/lib/first-mate/operating-protocol"
 
 function frontmatterFor(md: string): string {
@@ -72,6 +72,7 @@ describe("INJECTED_SKILLS", () => {
       profileId: "standard",
       workerSkillsActive: true,
       firstMateEnabled: true,
+      searchEnabled: true,
     })
     expect(standardWithFirstMate).toEqual(INJECTED_SKILLS)
 
@@ -281,5 +282,77 @@ describe("writeInjectedSkill", () => {
   test("rejects names that are not lowercase kebab path segments before writing", async () => {
     expect(await writeInjectedSkill("Invalid Name", "x")).toEqual({ written: false })
     expect(await writeInjectedSkill("bad/name", "x")).toEqual({ written: false })
+  })
+})
+
+describe("search-gated skill text (--search)", () => {
+  test("research skill is semantic-first when enabled, lexical-only when disabled", () => {
+    const on = buildResearchSkill(true)
+    expect(on.name).toBe("gh-research")
+    expect(on.md).toContain("Use mcp__search__code semantically first to find concepts and likely files.")
+    expect(on.md).toContain("Then use mcp__search__code lexically for exact symbols")
+    const off = buildResearchSkill(false)
+    expect(off.name).toBe("gh-research")
+    expect(off.md).toContain("Use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.")
+    expect(off.md).not.toContain("semantically")
+    expect(off.md).not.toContain("semantic-to-lexical")
+  })
+
+  test("gather-context skill is semantic-first when enabled, lexical-only when disabled", () => {
+    const on = buildGatherContextSkill(true)
+    expect(on.md).toContain("Run semantic search first for concepts, then lexical for symbols")
+    expect(on.md).toContain("Maximum searches per round: 10.")
+    const off = buildGatherContextSkill(false)
+    expect(off.md).toContain("Run lexical search first, in parallel, in a single turn.")
+    expect(off.md).toContain("Maximum lexical searches per round: 10.")
+    expect(off.md).not.toMatch(/semantically|semantic search first/i)
+  })
+
+  test("orchestrate skill names semantic follow-ups only when enabled", () => {
+    const on = buildOrchestrateSkill(true)
+    expect(on.md).toContain("semantic for concepts, lexical for exact symbols")
+    const off = buildOrchestrateSkill(false)
+    expect(off.md).toContain("mcp__search__code for focused follow-ups")
+    expect(off.md).not.toContain("semantic")
+  })
+
+  test("getInjectedSkills/getPipelineSkills match the launch flag", () => {
+    expect(getInjectedSkills(true).length).toBe(11)
+    expect(getInjectedSkills(false).length).toBe(11)
+    expect(getPipelineSkills(true).map((s) => s.name)).toEqual([
+      "gh-gather-context",
+      "gh-plan",
+      "gh-implement",
+      "gh-swe-pipeline",
+    ])
+    const onResearch = getInjectedSkills(true).find((s) => s.name === "gh-research")!
+    const offResearch = getInjectedSkills(false).find((s) => s.name === "gh-research")!
+    expect(onResearch.md).toContain("semantically first")
+    expect(offResearch.md).not.toContain("semantically")
+  })
+
+  test("injectedSkillsForLaunch forwards the search flag", () => {
+    const on = injectedSkillsForLaunch({
+      profileId: "standard",
+      workerSkillsActive: true,
+      firstMateEnabled: false,
+      searchEnabled: true,
+    })
+    const off = injectedSkillsForLaunch({
+      profileId: "standard",
+      workerSkillsActive: true,
+      firstMateEnabled: false,
+      searchEnabled: false,
+    })
+    expect(on.map((s) => s.name)).toEqual(off.map((s) => s.name))
+    expect(on.find((s) => s.name === "gh-research")!.md).toContain("semantically first")
+    expect(off.find((s) => s.name === "gh-research")!.md).not.toContain("semantically")
+    // Absent flag defaults to lexical-only.
+    const absent = injectedSkillsForLaunch({
+      profileId: "standard",
+      workerSkillsActive: true,
+      firstMateEnabled: false,
+    })
+    expect(absent.find((s) => s.name === "gh-research")!.md).not.toContain("semantically")
   })
 })

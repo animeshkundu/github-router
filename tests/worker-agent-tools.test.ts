@@ -789,6 +789,27 @@ describe("code_search", () => {
       cleanup()
     }
   })
+
+  test("tool description is semantic-first when enabled, lexical-only when disabled (--search)", async () => {
+    const { dir, cleanup } = freshWorkspace()
+    try {
+      const on = __testExports.codeSearchTool(dir, true)
+      expect(on.label).toBe("Code search (semantic-first)")
+      expect(on.description).toContain("Semantic-first")
+      expect(on.description).toContain("ColBERT")
+      const off = __testExports.codeSearchTool(dir, false)
+      expect(off.label).toBe("Code search (lexical)")
+      expect(off.description).toContain("Lexical code search")
+      expect(off.description).not.toContain("ColBERT")
+      expect(off.description).not.toMatch(/semantic-first/i)
+      // Omitted flag defaults to lexical-only.
+      const def = __testExports.codeSearchTool(dir)
+      expect(def.label).toBe("Code search (lexical)")
+      expect(def.description).not.toContain("ColBERT")
+    } finally {
+      cleanup()
+    }
+  })
 })
 
 // ============================================================

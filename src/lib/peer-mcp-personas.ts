@@ -676,7 +676,7 @@ export function buildPeerAwarenessSnippet(opts: {
       "",
       "Max native roster: `Explore` discovers broadly; `Plan` structures cross-boundary changes; `general-purpose` owns bounded mixed execution; `implementer` writes a settled change; `reviewer` verifies against the repository and runtime; `brainstorm` explores materially different approaches; `peer-review-coordinator` synthesizes multiple distinct fresh-context lenses. Configured models are deliberate role defaults.",
       `Available cold-start peers under \`mcp__${peersKey}__*\`: ${personas || "none"}. They cannot inspect the repository or transcript and evaluate only the supplied artifact, constraints, and images. Their tool descriptions state the exact lens and boundary. Use the native \`reviewer\` when navigation, commands, tests, or reproduction are required; a peer suits a self-contained artifact. The coordinator has peer tools only and cannot gather missing repository context.`,
-      `\`mcp__${searchKey}__code\` provides semantic-first code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is transcript-aware, primary-lead-only, and unavailable to native subagents and browse workers; it can detect framing drift but is not independent verification.${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
+      `\`mcp__${searchKey}__code\` provides ${opts.semanticSearchAvailable === true ? "semantic-first" : "lexical"} code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is transcript-aware, primary-lead-only, and unavailable to native subagents and browse workers; it can detect framing drift but is not independent verification.${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
     ].join("\n")
   }
   if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
@@ -757,8 +757,11 @@ export function buildPeerAwarenessSnippet(opts: {
   // single space; conditional sentences (workers, stand_in) only
   // appear when their gate is on, so the snippet never names a tool
   // missing from the live tools/list.
+  const codeSearchSentence = opts.semanticSearchAvailable === true
+    ? `\`mcp__${searchKey}__code\` is the one-stop code search (no extra model call). Its DEFAULT mode (or \`mode:"semantic"\`) ranks by MEANING via ColBERT over a per-workspace index, the first thing to reach for on intent/concept questions ("where is retry/backoff handled", "how does auth work"); when that index isn't ready it transparently falls back to lexical (the response \`source\` says which engine ran). Forced modes cover the rest: \`lexical\` (BM25F-ranked + tree-sitter, best for exact symbols), \`exact\`, \`regex\`, \`complete\` (exhaustive set), \`ast_pattern\`+\`ast_lang\` for multi-line AST shapes, \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`
+    : `\`mcp__${searchKey}__code\` is the one-stop code search (no extra model call). It ranks lexically via BM25F + tree-sitter structural boost, the first thing to reach for on "where is X defined" / "which files reference Y" discovery with exact symbols, filenames, errors, routes, flags, and config keys. Modes: \`lexical\` (ranked, best for exact symbols), \`exact\` (fixed-string), \`regex\` (PCRE2), \`complete\` (exhaustive set), \`ast_pattern\`+\`ast_lang\` for multi-line AST shapes, \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple queries can run in a single turn. For unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`
   const para2Parts: Array<string> = [
-    `\`mcp__${searchKey}__code\` is the one-stop code search (no extra model call). Its DEFAULT mode (or \`mode:"semantic"\`) ranks by MEANING via ColBERT over a per-workspace index, the first thing to reach for on intent/concept questions ("where is retry/backoff handled", "how does auth work"); when that index isn't ready it transparently falls back to lexical (the response \`source\` says which engine ran). Forced modes cover the rest: \`lexical\` (BM25F-ranked + tree-sitter, best for exact symbols), \`exact\`, \`regex\`, \`complete\` (exhaustive set), \`ast_pattern\`+\`ast_lang\` for multi-line AST shapes, \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`,
+    codeSearchSentence,
   ]
   if (opts.workerToolsAvailable) {
     para2Parts.push(
@@ -892,6 +895,10 @@ export function buildPeerAwarenessSummary(opts: {
   groupKeys?: Partial<Record<McpGroup, string>>
   /** Whether GPT-6 Astra is available for the fast profile. */
   astraAvailable?: boolean
+  /** Whether ColBERT semantic code search is enabled for this launch. When
+   *  false/absent the `code` tool is lexical-only, so the summary describes
+   *  lexical search and never names semantic search. */
+  semanticSearchAvailable?: boolean
   /** `"fast"` for the fast launch profile: a hard roster restriction (see the
    *  matching option on `buildPeerAwarenessSnippet`). Every other flag on
    *  this call is ignored in favor of a short fast-profile rendering. Same
@@ -986,7 +993,7 @@ export function buildPeerAwarenessSummary(opts: {
     // a per-agent description is the CROSS-CUTTING fact, so that is what stays:
     // the roster exists, and natives can execute where the critics cannot.
     `${summaryNativeLead} ${summaryNativeNames.join(", ")}. Each agent's own description states when it applies. They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
-    `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is meaning-first code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
+    `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is ${opts.semanticSearchAvailable === true ? "meaning-first" : "lexical"} code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
   ]
   if (opts.workerToolsAvailable) {
     lines.push(`Background \`worker-*\` agents (explore, review, plan, implement, test${opts.browseAvailable ? ", browse" : ""}) run delegated work in their own context without blocking your turn, and \`mcp__${key("orchestrate")}__*\` composes, verifies, and runs floor-raising workflows.`)
@@ -1455,6 +1462,109 @@ const WORKER_READ_ONLY_NOTE =
   + "actually needs to change."
 
 /**
+ * Build the `code` tool description for the launch's search capability.
+ * When semantic search is available the default mode ranks by meaning via
+ * ColBERT with transparent lexical fallback; otherwise the tool is described
+ * as lexical-only (the `mode:"semantic"` alias is documented as running the
+ * lexical engine, since the schema still accepts it), so the description
+ * never advertises meaning-ranked search that is not present.
+ */
+export function buildCodeToolDescription(searchEnabled: boolean): string {
+  if (searchEnabled) {
+    return (
+      "Fast structured code search over a local workspace. Default "
+      + "(`mode:\"semantic\"`, or omit `mode`) ranks by MEANING via ColBERT "
+      + "over a per-workspace index — best for intent/concept queries where "
+      + "the literal keywords may not appear (\"where do we rate-limit\", "
+      + "\"auth token refresh\"). When that index is building/stale/absent it "
+      + "TRANSPARENTLY returns lexical (BM25F) results and labels the "
+      + "response `source` (\"semantic\" | \"lexical\" | \"lexical-fallback\") "
+      + "so a degrade is never silent. Semantic hits carry `score` (0-1 "
+      + "relevance), `endLine`, `name`; stale semantic carries "
+      + "`freshness:\"stale\" + `stale_files:N` (results predate recent "
+      + "edits). On a `lexical-fallback` the `notice` says how to proceed: "
+      + "retry `mode:\"semantic\"` shortly (the index self-heals in the "
+      + "background) or re-query with specific symbols — the lexical engine "
+      + "matches keywords/symbols, not natural-language phrases. "
+      + "Other modes force the lexical engine: `lexical` (BM25F "
+      + "ranked, best for exact symbols), `exact` (fixed-string), `regex` "
+      + "(PCRE2), `ast` (ast-grep structural via `ast_pattern`+`ast_lang`). "
+      + "Lexical ranking refines a `symbol-context` field with tree-sitter "
+      + "AST analysis so definitions outrank incidental matches. Launch "
+      + "multiple code searches in parallel to triangulate — "
+      + "e.g. definition + callers + tests in one round-trip. "
+      + "Prefer this over Grep/Bash+grep for ranked discovery "
+      + "(\"where is X defined\", \"which files reference Y\", "
+      + "\"find code that does Z\"). Use Grep for "
+      + "exact-pattern enumeration when you need every hit unranked, "
+      + "and Glob for file-name patterns (no content match). "
+      + "`workspace` is any absolute path to a DIRECTORY the proxy "
+      + "process can read — typically the project root or a sub-tree "
+      + "you're working in. It must be a directory, not a file; to "
+      + "narrow to one file or a set of them, keep `workspace` at the "
+      + "root and pass `file_glob`. Each response also carries a "
+      + "tree-sitter structural "
+      + "outline of the matched files (`summary` on by default; set it "
+      + "false to omit)."
+    )
+  }
+  return (
+    "Fast structured code search over a local workspace. Lexical engine "
+    + "(BM25F-ranked + tree-sitter structural boost) over a per-workspace "
+    + "live tree — best for exact symbols, filenames, errors, routes, flags, "
+    + "and config keys (\"where is X defined\", \"which files reference Y\"). "
+    + "Modes: `lexical` (BM25F ranked, best for exact symbols), `exact` "
+    + "(fixed-string), `regex` (PCRE2), `ast` (ast-grep structural via "
+    + "`ast_pattern`+`ast_lang`). The `mode:\"semantic\"` alias is accepted "
+    + "and runs the lexical engine (the response `source` says which engine "
+    + "ran). Lexical ranking refines a `symbol-context` field with tree-sitter "
+    + "AST analysis so definitions outrank incidental matches. Launch "
+    + "multiple code searches in parallel to triangulate — "
+    + "e.g. definition + callers + tests in one round-trip. "
+    + "Prefer this over Grep/Bash+grep for ranked discovery. Use Grep for "
+    + "exact-pattern enumeration when you need every hit unranked, "
+    + "and Glob for file-name patterns (no content match). "
+    + "`workspace` is any absolute path to a DIRECTORY the proxy "
+    + "process can read — typically the project root or a sub-tree "
+    + "you're working in. It must be a directory, not a file; to "
+    + "narrow to one file or a set of them, keep `workspace` at the "
+    + "root and pass `file_glob`. Each response also carries a "
+    + "tree-sitter structural "
+    + "outline of the matched files (`summary` on by default; set it "
+    + "false to omit)."
+  )
+}
+
+/**
+ * Build the `code` tool `mode` field description for the launch's search
+ * capability. Mirrors `buildCodeToolDescription`: semantic-first when
+ * available, lexical-only otherwise.
+ */
+export function buildCodeModeDescription(searchEnabled: boolean): string {
+  if (searchEnabled) {
+    return (
+      "Search mode. 'semantic' (DEFAULT): ColBERT meaning-based "
+      + "ranking over a per-workspace index; transparently falls back "
+      + "to lexical when the index is building/stale/absent (the "
+      + "response `source` says which engine ran). 'lexical': BM25F + "
+      + "tree-sitter structural boost, ordered by score with shoulder "
+      + "pruning — best for exact symbols. 'exact': fixed-string, "
+      + "ripgrep document order. 'regex': PCRE2, ripgrep document "
+      + "order. 'ast': ast-grep structural match (requires "
+      + "`ast_pattern` + `ast_lang`)."
+    )
+  }
+  return (
+    "Search mode. 'lexical' (DEFAULT when semantic search is off): BM25F + "
+    + "tree-sitter structural boost, ordered by score with shoulder "
+    + "pruning — best for exact symbols. 'semantic' is accepted and runs "
+    + "the lexical engine. 'exact': fixed-string, ripgrep document order. "
+    + "'regex': PCRE2, ripgrep document order. 'ast': ast-grep structural "
+    + "match (requires `ast_pattern` + `ast_lang`)."
+  )
+}
+
+/**
  * Oversized-result contract, appended to EVERY `worker_*` tool description.
  *
  * `relaySafeText` (`~/lib/worker-agent/relay-cap`) is the final transform at
@@ -1557,41 +1667,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       // Do NOT widen further without re-reading the principle section.
       toolNameHttp: "code",
       group: "search",
-      description:
-        "Fast structured code search over a local workspace. Default " +
-        "(`mode:\"semantic\"`, or omit `mode`) ranks by MEANING via ColBERT " +
-        "over a per-workspace index — best for intent/concept queries where " +
-        "the literal keywords may not appear (\"where do we rate-limit\", " +
-        "\"auth token refresh\"). When that index is building/stale/absent it " +
-        "TRANSPARENTLY returns lexical (BM25F) results and labels the " +
-        "response `source` (\"semantic\" | \"lexical\" | \"lexical-fallback\") " +
-        "so a degrade is never silent. Semantic hits carry `score` (0-1 " +
-        "relevance), `endLine`, `name`; stale semantic carries " +
-        "`freshness:\"stale\" + `stale_files:N` (results predate recent " +
-        "edits). On a `lexical-fallback` the `notice` says how to proceed: " +
-        "retry `mode:\"semantic\"` shortly (the index self-heals in the " +
-        "background) or re-query with specific symbols — the lexical engine " +
-        "matches keywords/symbols, not natural-language phrases. " +
-        "Other modes force the lexical engine: `lexical` (BM25F " +
-        "ranked, best for exact symbols), `exact` (fixed-string), `regex` " +
-        "(PCRE2), `ast` (ast-grep structural via `ast_pattern`+`ast_lang`). " +
-        "Lexical ranking refines a `symbol-context` field with tree-sitter " +
-        "AST analysis so definitions outrank incidental matches. Launch " +
-        "multiple code searches in parallel to triangulate — " +
-        "e.g. definition + callers + tests in one round-trip. " +
-        "Prefer this over Grep/Bash+grep for ranked discovery " +
-        "(\"where is X defined\", \"which files reference Y\", " +
-        "\"find code that does Z\"). Use Grep for " +
-        "exact-pattern enumeration when you need every hit unranked, " +
-        "and Glob for file-name patterns (no content match). " +
-        "`workspace` is any absolute path to a DIRECTORY the proxy " +
-        "process can read — typically the project root or a sub-tree " +
-        "you're working in. It must be a directory, not a file; to " +
-        "narrow to one file or a set of them, keep `workspace` at the " +
-        "root and pass `file_glob`. Each response also carries a " +
-        "tree-sitter structural " +
-        "outline of the matched files (`summary` on by default; set it " +
-        "false to omit).",
+      description: buildCodeToolDescription(true),
       inputSchema: {
         type: "object",
         required: ["query", "workspace"],
@@ -1616,16 +1692,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           mode: {
             type: "string",
             enum: ["semantic", "lexical", "exact", "regex", "ast"],
-            description:
-              "Search mode. 'semantic' (DEFAULT): ColBERT meaning-based " +
-              "ranking over a per-workspace index; transparently falls back " +
-              "to lexical when the index is building/stale/absent (the " +
-              "response `source` says which engine ran). 'lexical': BM25F + " +
-              "tree-sitter structural boost, ordered by score with shoulder " +
-              "pruning — best for exact symbols. 'exact': fixed-string, " +
-              "ripgrep document order. 'regex': PCRE2, ripgrep document " +
-              "order. 'ast': ast-grep structural match (requires " +
-              "`ast_pattern` + `ast_lang`).",
+            description: buildCodeModeDescription(true),
           },
           pattern: {
             type: "string",

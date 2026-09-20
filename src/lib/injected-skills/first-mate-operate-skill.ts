@@ -1,6 +1,8 @@
 import { CONDENSED_OPERATING_SEQUENCE, DEFINITION_OF_GREATNESS } from "~/lib/first-mate/operating-protocol"
+import type { InjectedSkill } from "./index"
 
-export const FIRST_MATE_OPERATE_SKILL = {
+export function buildFirstMateOperateSkill(_searchEnabled?: boolean): InjectedSkill {
+  return {
   name: "gh-first-mate-operate",
   md: `---
 name: gh-first-mate-operate
@@ -98,4 +100,7 @@ Hard authority limits: launching to real external channels, any spend or paid ac
 
 Report the current phase, its checkpoint and whether it is met with reproducible evidence, the active mission(s) and their phase-appropriate acceptance criteria, and the next decision or escalation.
 `,
-} as const
+  }
+}
+
+export const FIRST_MATE_OPERATE_SKILL = buildFirstMateOperateSkill(true)

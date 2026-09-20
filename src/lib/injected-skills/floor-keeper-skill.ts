@@ -1,4 +1,7 @@
-export const FLOOR_KEEPER_SKILL = {
+import type { InjectedSkill } from "./index"
+
+export function buildFloorKeeperSkill(_searchEnabled?: boolean): InjectedSkill {
+  return {
   name: "gh-floor-keeper",
   md: `---
 name: gh-floor-keeper
@@ -145,4 +148,7 @@ Return a compact final checkpoint:
 - Do not spend unbounded attempts creating tests.
 - Do not bury cap-hit or unknown states in a green-sounding summary.
 `,
-} as const
+  }
+}
+
+export const FLOOR_KEEPER_SKILL = buildFloorKeeperSkill(true)

@@ -1,6 +1,22 @@
-export const GATHER_CONTEXT_SKILL = {
-  name: "gh-gather-context",
-  md: `---
+import type { InjectedSkill } from "./index"
+
+export function buildGatherContextSkill(searchEnabled: boolean): InjectedSkill {
+  const searchStep = searchEnabled
+    ? `3. Run semantic search first for concepts, then lexical for symbols, in parallel, in a single turn.
+   - Use mcp__search__code semantically first to find concepts and likely files.
+   - Then use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.
+   - Use git log and git blame when authorship, regression timing, or intent matters.
+   - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.`
+    : `3. Run lexical search first, in parallel, in a single turn.
+   - Use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.
+   - Use git log and git blame when authorship, regression timing, or intent matters.
+   - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.`
+
+  const searchCap = searchEnabled ? "Maximum searches per round: 10." : "Maximum lexical searches per round: 10."
+
+  return {
+    name: "gh-gather-context",
+    md: `---
 name: gh-gather-context
 description: Gather grounded codebase context before planning. Use when unfamiliar code must be understood, files located, or claims verified against source. Returns a freshness-stamped brief with file:line citations. Not for trivial reads or already-known code.
 user-invocable: true
@@ -24,7 +40,7 @@ stage: Explore evidence plus targeted follow-up reads is the verification path.
 
 - Maximum rounds: 3.
 - Maximum parallel Explore subagents per round: 6.
-- Maximum lexical searches per round: 10.
+- ${searchCap}
 - Maximum follow-up reads per round: 5.
 - Advisory budget: keep each Explore dispatch under ~3 minutes of wall-clock;
   the Task tool has no maxWallClockMs parameter, so count your own dispatches
@@ -46,17 +62,13 @@ Use these exact tags on every finding and claim:
    - Identify whether this is a bug, feature, refactor, incident, or design question.
    - Name the expected downstream consumer: planner, implementer, or user.
 
-2. Decompose the ask into searchable entities.
+ 2. Decompose the ask into searchable entities.
    - Extract symbols, filenames, error strings, routes, flags, config keys, and types.
    - Define what must be true for a correct implementation.
 
-3. Run lexical search first, in parallel, in a single turn.
-   - Use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.
-   - Use mcp__search__code semantically only to find concepts, then refine to lexical.
-   - Use git log and git blame when authorship, regression timing, or intent matters.
-   - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.
+${searchStep}
 
-4. Decompose into bounded Explore subagents.
+ 4. Decompose into bounded Explore subagents.
    - Cluster search results into at most 6 coherent investigation areas.
    - For each area, write a narrow brief: the specific question, the expected artifact, and the files to focus on.
    - Dispatch ALL Explore subagents in a single turn via the Agent tool (subagent_type Explore). Each runs read-only at the 200K default window and returns a summary with an evidence table and file:line citations. Advisory: keep each dispatch under ~3 minutes; the Task tool enforces no wall-clock, so terminate at saturation.
@@ -115,4 +127,7 @@ summaries, never full file contents or pasted source blocks.
 - Do not return full file contents in briefs, summaries, or evidence tables; cite file:line plus one line of purpose.
 - Do not finish without the .complete marker: a marker-less brief is not a completed stage.
 `,
-} as const
+  }
+}
+
+export const GATHER_CONTEXT_SKILL = buildGatherContextSkill(true)

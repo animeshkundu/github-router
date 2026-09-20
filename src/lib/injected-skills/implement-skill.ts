@@ -1,4 +1,7 @@
-export const IMPLEMENT_SKILL = {
+import type { InjectedSkill } from "./index"
+
+export function buildImplementSkill(_searchEnabled?: boolean): InjectedSkill {
+  return {
   name: "gh-implement",
   md: `---
 name: gh-implement
@@ -107,4 +110,7 @@ Return:
 - Do not nest workflow invocations: subagents must not re-invoke /gh-implement (or any /gh-* pipeline skill).
 - Do not claim completeness when retries or review cycles are exhausted with open failures.
 `,
-} as const
+  }
+}
+
+export const IMPLEMENT_SKILL = buildImplementSkill(true)

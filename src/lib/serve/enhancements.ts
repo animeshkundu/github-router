@@ -19,7 +19,7 @@ import {
   prependStyleDirectiveToMirroredClaudeMd,
 } from "../claude-md-injection"
 import { type SelfInvocation } from "../hook-launcher/self-invocation"
-import { INJECTED_SKILLS, writeInjectedSkill } from "../injected-skills"
+import { getInjectedSkills, writeInjectedSkill } from "../injected-skills"
 import { injectModelPickerSettingsFile } from "../model-picker-settings"
 import {
   configureServeDefaultPermissionMode,
@@ -193,6 +193,7 @@ export async function provisionServeEnhancements(
       compoundBrowseAvailable: browseAllowed && browserCompoundToolsEnabled(),
       powerBrowseAvailable: browseAllowed && state.powerBrowseEnabled,
       agentToolsAvailable: firstMateAllowed,
+      semanticSearchAvailable: state.searchEnabled === true,
       ...nativeAvailability,
       groupKeys,
     })
@@ -217,8 +218,11 @@ export async function provisionServeEnhancements(
     }
 
     // gh-* skills, minus the operator/tab-specific ones (first-mate, artifact).
+    // Export the resolved search capability for child processes (same reason
+    // as the `claude` launcher: the hook process inherits env, not state).
+    process.env.GH_ROUTER_SEARCH_ENABLED = state.searchEnabled === true ? "1" : "0"
     let skillsWritten = 0
-    for (const s of INJECTED_SKILLS) {
+    for (const s of getInjectedSkills(state.searchEnabled === true)) {
       if (s.name.startsWith("gh-first-mate") || s.name === "gh-artifact-review") {
         continue
       }

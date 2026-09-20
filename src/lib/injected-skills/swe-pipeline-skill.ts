@@ -1,4 +1,7 @@
-export const SWE_PIPELINE_SKILL = {
+import type { InjectedSkill } from "./index"
+
+export function buildSwePipelineSkill(_searchEnabled?: boolean): InjectedSkill {
+  return {
   name: "gh-swe-pipeline",
   md: `---
 name: gh-swe-pipeline
@@ -118,4 +121,7 @@ Return:
   /gh-swe-pipeline or any /gh-* pipeline skill.
 - Do not present judgment-only conclusions as executable guarantees.
 `,
-} as const
+  }
+}
+
+export const SWE_PIPELINE_SKILL = buildSwePipelineSkill(true)

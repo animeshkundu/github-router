@@ -2,6 +2,8 @@ import { describe, expect, mock, test } from "bun:test"
 
 import {
   decidePromptSubmitV2,
+  getPromptSearchTip,
+  getPromptScopeSystem,
   PROMPT_SEARCH_TIP,
   PROMPT_STEER_GOAL,
   type PromptSubmitV2IO,
@@ -84,6 +86,7 @@ describe("decidePromptSubmitV2", () => {
     const result = await decidePromptSubmitV2({
       stdin: JSON.stringify({ session_id: "s1", prompt: "Please refactor the auth handler across all modules" }),
       steerEnabled: true,
+      searchEnabled: true,
       io,
     })
 
@@ -94,6 +97,32 @@ describe("decidePromptSubmitV2", () => {
     expect(infer.mock.calls.length).toBe(1)
     expect(infer.mock.calls[0]?.[1]).toContain("lexical auth handler result")
     expect(infer.mock.calls[0]?.[1]).toContain("semantic auth handler result")
+  })
+
+  test("search disabled: substantive prompt runs lexical-only search and a lexical tip", async () => {
+    const groundedGoal = "SCOPE: focused\nGOAL: do X"
+    const { io, searchCode, infer } = makeIo({
+      searchCode: async (_query, mode) => `${mode} auth handler result`,
+      infer: async () => groundedGoal,
+    })
+
+    const result = await decidePromptSubmitV2({
+      stdin: JSON.stringify({ session_id: "s1", prompt: "Please refactor the auth handler across all modules" }),
+      steerEnabled: true,
+      searchEnabled: false,
+      io,
+    })
+
+    const lexicalTip = getPromptSearchTip(false)
+    expect(result.inject).toContain(lexicalTip)
+    expect(result.inject).not.toContain(PROMPT_SEARCH_TIP)
+    expect(result.inject).toContain(groundedGoal)
+    expect(searchCode.mock.calls.length).toBe(1)
+    expect(searchCode.mock.calls[0]?.[1]).toBe("lexical")
+    expect(infer.mock.calls.length).toBe(1)
+    expect(infer.mock.calls[0]?.[0]).toBe(getPromptScopeSystem(false))
+    expect(infer.mock.calls[0]?.[1]).toContain("lexical auth handler result")
+    expect(infer.mock.calls[0]?.[1]).not.toContain("Semantic search results")
   })
 
   test("threads an AbortSignal into searchCode and infer, and aborts it after the race", async () => {
@@ -130,6 +159,7 @@ describe("decidePromptSubmitV2", () => {
     const result = await decidePromptSubmitV2({
       stdin: JSON.stringify({ session_id: "s1", prompt: "Please refactor the auth handler across all modules" }),
       steerEnabled: true,
+      searchEnabled: true,
       io,
     })
 
@@ -206,11 +236,20 @@ describe("decidePromptSubmitV2", () => {
     const result = await decidePromptSubmitV2({
       stdin: JSON.stringify({ session_id: "s1", prompt: "Please refactor the auth handler across all modules" }),
       steerEnabled: true,
+      searchEnabled: true,
       io,
     })
 
     expect(result.inject).toContain(PROMPT_SEARCH_TIP)
     expect(result.inject).toContain(PROMPT_STEER_GOAL)
     expect(performance.now() - start).toBeLessThan(1_000)
+  })
+
+  test("search tip builders never name semantic search when disabled", () => {
+    expect(getPromptSearchTip(true)).toContain('mode:"semantic"')
+    expect(getPromptSearchTip(false)).not.toMatch(/semantic/i)
+    expect(getPromptScopeSystem(true)).toContain("lexical + semantic")
+    expect(getPromptScopeSystem(false)).not.toMatch(/semantic/i)
+    expect(getPromptScopeSystem(false)).toContain("lexical code search")
   })
 })
