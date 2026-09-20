@@ -451,8 +451,12 @@ describe("delta populate", () => {
     const ws = await mkRepo3("svcdrop")
     // Orphaned server state: a populated index with no sidecar (the
     // sidecar was deleted/lost). Seed docs directly under the fake index
-    // name the mocked indexer uses for this workspace.
-    fakeIndices.set(`ws-mock-${ws.length}`, [
+    // name populate will compute: the mocked indexer keys on the
+    // canonical workspace length, and canonicalization is platform
+    // specific (Windows extended-length prefix strip), so derive it via
+    // the REAL canonicalizer rather than guessing the spelling.
+    const { canonicalWorkspace } = await import("../../src/lib/colbert/index-store")
+    fakeIndices.set(`ws-mock-${canonicalWorkspace(ws).length}`, [
       { text: "stale", metadata: { file: "src/ghost.ts", line: 1 } },
     ])
     const r = await backend.populateWorkspace(ws, { settle: FAST_SETTLE })
