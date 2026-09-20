@@ -40,6 +40,7 @@ import {
 } from "./code-search"
 import { colbertSearchEnabled, runSemanticSearch, runServiceSearch, serviceBackendEnabled } from "./colbert"
 import type { SemanticSearchResult, SemanticStatus } from "./colbert/runner"
+import { octocodeSearchEnabled, octocodeSemanticSearch } from "./octocode/index"
 import { outlineFile } from "./tree-sitter-grammars"
 
 export type UnifiedMode = "semantic" | "lexical" | "exact" | "regex" | "ast"
@@ -317,10 +318,39 @@ export async function runUnifiedCodeSearch(
     return runLexical(input, mode, "lexical", signal)
   }
 
-  // Semantic / default. If colgrep isn't attemptable on this host, go
-  // straight to lexical (labelled as a fallback so the caller knows it
-  // didn't get a meaning-ranked result).
-  if (!colbertSearchEnabled()) {
+  // Semantic / default. Prefer octocode (ColBERT replacement) when
+  // opted in and provisioned; fall back to the legacy colgrep path, then
+  // lexical. If NEITHER semantic backend is attemptable, go straight to
+  // lexical (labelled as a fallback).
+  if (octocodeSearchEnabled()) {
+    try {
+      const oct = await octocodeSemanticSearch({
+        workspace: input.workspace,
+        query: input.query,
+        limit: input.limit,
+        signal,
+      });
+      if (oct.results.length > 0) {
+        const results = oct.results.map((r) => ({
+          file: r.file,
+          line: r.line,
+          snippet: r.snippet,
+          ...(r.name !== undefined ? { name: r.name } : {}),
+          ...(typeof r.score === "number" ? { score: r.score } : {}),
+        }));
+        return {
+          source: "semantic",
+          results,
+          outlines: await outlinesForSemanticResults(input, results, signal),
+        };
+      }
+      // Empty octocode result → fall through to colgrep/lexical chain
+      // (cold index behaves like a fallback, not an error).
+    } catch {
+      // Transport/handshake failure → fall through to colgrep/lexical.
+    }
+  }
+  if (!colbertSearchEnabled() && !octocodeSearchEnabled()) {
     const r = await runLexical(input, "lexical", "lexical-fallback", signal)
     return {
       ...r,

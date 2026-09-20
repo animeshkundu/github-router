@@ -7,6 +7,7 @@ import consola from "consola"
 
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { provisionAndIndexColbert } from "./lib/colbert"
+import { provisionAndIndexOctocode } from "./lib/octocode/index"
 import { resolveCodexCliBackend } from "./lib/codex-mcp-config"
 import { killChildProcessTree } from "./lib/exec"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
@@ -292,6 +293,7 @@ export const serve = defineCommand({
     // NOT a repo the user works on — per-workspace on-demand indexing (kicked by
     // the first search for a given repo) covers real queries instead.
     void provisionAndIndexColbert({ skipCwdIndex: true })
+    void provisionAndIndexOctocode()
 
     // Best-effort LLM toolbelt materialization. The mirror awareness line is
     // written by provisionServeEnhancements below, matching `github-router claude`.

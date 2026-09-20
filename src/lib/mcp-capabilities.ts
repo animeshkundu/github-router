@@ -19,6 +19,7 @@ import { compressorAvailable } from "./browser-mcp/compressor"
 import {
   colbertSearchEnabled,
 } from "./colbert"
+import { octocodeSearchEnabled } from "./octocode/index"
 import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
 import { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 import { ONE_M_TOKENS } from "./one-m-context"
@@ -883,6 +884,6 @@ export function browseAgentEnabled(): boolean {
  * the unified helper — this predicate only gates the colgrep attempt.
  */
 export function semanticSearchEnabled(): boolean {
-  return colbertSearchEnabled()
+  return colbertSearchEnabled() || octocodeSearchEnabled()
 }
 
