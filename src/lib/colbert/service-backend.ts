@@ -46,6 +46,8 @@ import {
 import { nextPlaidServerPromoted, MODEL_REVISION, type NextPlaidServerVariant } from "./manifest"
 import {
   indexNameForWorkspace,
+  isServerMemoryOverLimit,
+  recordServerRestart,
   serverParallelSessions,
   ServerCrashedError,
   ServiceBusyError,
@@ -193,21 +195,67 @@ export function serviceTuningEnv(foreground: boolean): NodeJS.ProcessEnv {
   return out
 }
 
+/**
+ * Queries served since the last server (re)start. At the budget the server
+ * is proactively recycled: ONNX Runtime arenas grow per encode and never
+ * fully return pages to the OS, so a bounded lifetime keeps commit charge
+ * flat across long proxy sessions. `0` disables the budget.
+ */
+let _serviceQueryCount = 0
+
+/** Test-only: reset the query counter. */
+export function __resetServiceQueryCountForTests(): void {
+  _serviceQueryCount = 0
+}
+
+/** Max queries per server lifetime (`0` = never recycle). */
+export function serviceMaxQueries(): number {
+  const raw = Number(process.env.GH_ROUTER_SERVICE_MAX_QUERIES)
+  if (raw === 0) return Number.POSITIVE_INFINITY
+  if (Number.isSafeInteger(raw) && raw > 0) return raw
+  return 500
+}
+
+/** Slow-query warn threshold (ms). */
+function serviceMaxQueryMs(): number {
+  const raw = Number(process.env.GH_ROUTER_SERVICE_MAX_QUERY_MS)
+  if (Number.isSafeInteger(raw) && raw > 0) return raw
+  return 5000
+}
+
 /** Start (once) and health-check the server; null when unavailable. */
 export async function ensureServer(opts: { foreground?: boolean } = {}): Promise<ManagedServer | null> {
   if (_server) {
+    let healthy = false
     try {
-      const h = await _server.client.health()
-      if (h.ok) return _server
+      healthy = (await _server.client.health()).ok
     } catch {
-      // fall through to restart
+      // stays false — fall through to stop + fresh start below
     }
-    try {
-      await _server.stop()
-    } catch {
-      // best effort
+    if (healthy) {
+      // Health passed but memory may still be leaking underneath (the
+      // ONNX arena failure mode): recycle proactively. The sample is
+      // cached 60s, so the hot query path rarely pays for it.
+      if (await isServerMemoryOverLimit(_server)) {
+        consola.warn("service-backend: memory pressure — restarting server")
+        recordServerRestart("memory")
+        try {
+          await _server.stop()
+        } catch {
+          // best effort
+        }
+        _server = null
+      } else {
+        return _server
+      }
+    } else {
+      try {
+        await _server.stop()
+      } catch {
+        // best effort
+      }
+      _server = null
     }
-    _server = null
   }
   if (_starting) return _starting.catch(() => null)
   const resolved = await resolveServerBinaryWithVariant(await selectServerVariant())
@@ -1227,7 +1275,35 @@ export async function runServiceSearch(opts: {
   }
   const svc = await ensureServer()
   if (!svc) return { status: "unavailable" }
+  // Pre-flight: fail fast to colgrep/lexical when the server is dead or
+  // wedged, instead of timing out mid-search. Cached (30s TTL) so the
+  // hot query path pays no extra round trip.
+  try {
+    await svc.client.ensureHealthy()
+  } catch {
+    return { status: "unavailable" }
+  }
   const index = indexNameForWorkspace(canonical)
+
+  // Query budget: recycle the server every N searches so ONNX arena
+  // growth never accumulates across a long proxy session. The recycle is
+  // transparent — the fresh server re-mmaps the same on-disk index.
+  _serviceQueryCount += 1
+  let client = svc.client
+  if (_serviceQueryCount >= serviceMaxQueries()) {
+    consola.info(`service-backend: query budget reached (${_serviceQueryCount}) — restarting server`)
+    recordServerRestart("query-budget")
+    await stopServiceServer()
+    _serviceQueryCount = 0
+    const fresh = await ensureServer()
+    if (!fresh) return { status: "unavailable" }
+    try {
+      await fresh.client.ensureHealthy()
+    } catch {
+      return { status: "unavailable" }
+    }
+    client = fresh.client
+  }
 
   // Freshness vs git state (mirrors the colbert newly-dirty rule), computed
   // against THIS backend's sidecar — never the colgrep verdict, which
@@ -1257,12 +1333,20 @@ export async function runServiceSearch(opts: {
     }
   }
 
+  const queryStartMs = Date.now()
   try {
-    const hits = await svc.client.search(index, query, {
+    const hits = await client.search(index, query, {
       topK: limit,
       textQuery: query,
       alpha: 0.75,
     })
+    const elapsedMs = Date.now() - queryStartMs
+    if (elapsedMs > serviceMaxQueryMs()) {
+      consola.warn(`service-backend: slow search (${elapsedMs}ms for "${query.slice(0, 60)}")`)
+    }
+    consola.debug(
+      `service-backend: search ok (${elapsedMs}ms, query #${_serviceQueryCount}, ${hits.length} hits)`,
+    )
     return {
       status: "ready",
       results: hits.map((h) => ({

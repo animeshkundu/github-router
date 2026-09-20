@@ -56,9 +56,18 @@ let fakeUnhealthy = false
 /** When set, updateDocuments throws this (simulates a dead socket). */
 let fakeUpdateError: Error | null = null
 
+/** When true, the fake server reports memory pressure (restart path). */
+let mockMemoryOver = false
+/** Restart reasons recorded via the mocked recordServerRestart. */
+const restartReasons: Array<string> = []
+
 mock.module("../../src/lib/colbert/service", () => ({
   indexNameForWorkspace: (ws: string) => `ws-mock-${ws.length}`,
   serverParallelSessions: () => 1,
+  isServerMemoryOverLimit: async () => mockMemoryOver,
+  recordServerRestart: (reason: string) => {
+    restartReasons.push(reason)
+  },
   ServiceBusyError: class extends Error {},
   ServerCrashedError: class extends Error {
     exitCode: number | null = null;
@@ -76,6 +85,9 @@ mock.module("../../src/lib/colbert/service", () => ({
     return {
       url: "http://127.0.0.1:9",
       client: {
+        ensureHealthy: async () => {
+          if (fakeUnhealthy) throw new Error("fake server unhealthy")
+        },
         health: async () => ({
           ok: !fakeUnhealthy,
           indices: [...fakeIndices.entries()].map(([name, docs]) => ({
@@ -215,6 +227,11 @@ beforeEach(async () => {
   fakeProcess = null
   fakeUnhealthy = false
   fakeUpdateError = null
+  mockMemoryOver = false
+  restartReasons.length = 0
+  delete process.env.GH_ROUTER_SERVICE_MAX_QUERIES
+  delete process.env.GH_ROUTER_SERVICE_MAX_QUERY_MS
+  delete process.env.GH_ROUTER_SERVICE_HEALTH_TTL_MS
   delete process.env.GH_ROUTER_SEMANTIC_BACKEND
   delete process.env.GH_ROUTER_NEXTPLAID_BIN
   await mkModelDir()
@@ -227,6 +244,7 @@ afterEach(async () => {
   fakePendingMerges.length = 0
   b.__resetServiceSingletonForTests()
   b.__resetServicePopulateForTests()
+  b.__resetServiceQueryCountForTests()
   delete process.env.GH_ROUTER_SEMANTIC_BACKEND
   delete process.env.GH_ROUTER_NEXTPLAID_BIN
   delete process.env.GH_ROUTER_NEXTPLAID_VARIANT
@@ -747,5 +765,77 @@ describe("server crash during populate", () => {
     fakeUpdateError = new Error("Unable to connect. Is the computer able to access the url?")
     const err = await backend.populateWorkspace(ws, {}).catch((e: unknown) => e)
     expect(err).toBe(fakeUpdateError)
+  })
+})
+
+describe("query-time stability", () => {
+  beforeEach(() => {
+    process.env.GH_ROUTER_NEXTPLAID_BIN = process.execPath
+  })
+
+  async function readyRepo(name: string): Promise<string> {
+    const ws = fsSync.realpathSync(await fs.mkdtemp(path.join(TEST_HOME, `${name}-`)))
+    await fs.mkdir(path.join(ws, "src"), { recursive: true })
+    await fs.writeFile(
+      path.join(ws, "src", "auth.ts"),
+      "export function refreshAuthToken() { return 'tok' }\n",
+    )
+    // First call kicks the background populate; poll until servable.
+    await backend.runServiceSearch({ query: "x", workspace: ws })
+    const t0 = Date.now()
+    for (;;) {
+      const r = await backend.runServiceSearch({ query: "x", workspace: ws })
+      if (r.status === "ready") break
+      if (Date.now() - t0 > 30_000) throw new Error("never became ready")
+      await Bun.sleep(300)
+    }
+    return ws
+  }
+
+  test("memory pressure restarts the server and search still serves", async () => {
+    const ws = await readyRepo("svcmem")
+    const startsBefore = startCalls
+    mockMemoryOver = true
+    const r = await backend.runServiceSearch({ query: "refreshAuthToken", workspace: ws })
+    expect(r.status).toBe("ready")
+    expect(startCalls).toBeGreaterThan(startsBefore)
+    expect(restartReasons).toContain("memory")
+  })
+
+  test("query budget recycles the server", async () => {
+    const ws = await readyRepo("svcbudget")
+    process.env.GH_ROUTER_SERVICE_MAX_QUERIES = "1"
+    const startsBefore = startCalls
+    const r = await backend.runServiceSearch({ query: "refreshAuthToken", workspace: ws })
+    expect(r.status).toBe("ready")
+    expect(startCalls).toBeGreaterThan(startsBefore)
+    expect(restartReasons).toContain("query-budget")
+  })
+
+  test("query budget of 0 disables recycling", async () => {
+    const ws = await readyRepo("svcnobudget")
+    process.env.GH_ROUTER_SERVICE_MAX_QUERIES = "0"
+    const startsBefore = startCalls
+    const r = await backend.runServiceSearch({ query: "refreshAuthToken", workspace: ws })
+    expect(r.status).toBe("ready")
+    expect(startCalls).toBe(startsBefore)
+    expect(restartReasons).toHaveLength(0)
+  })
+
+  test("pre-flight unhealthy → unavailable (caller falls back)", async () => {
+    const ws = await readyRepo("svcpreflight")
+    fakeUnhealthy = true
+    const r = await backend.runServiceSearch({ query: "refreshAuthToken", workspace: ws })
+    expect(r.status).toBe("unavailable")
+  })
+
+  test("serviceMaxQueries parses env (default 500, 0 disables)", async () => {
+    expect(backend.serviceMaxQueries()).toBe(500)
+    process.env.GH_ROUTER_SERVICE_MAX_QUERIES = "25"
+    expect(backend.serviceMaxQueries()).toBe(25)
+    process.env.GH_ROUTER_SERVICE_MAX_QUERIES = "0"
+    expect(backend.serviceMaxQueries()).toBe(Number.POSITIVE_INFINITY)
+    process.env.GH_ROUTER_SERVICE_MAX_QUERIES = "junk"
+    expect(backend.serviceMaxQueries()).toBe(500)
   })
 })

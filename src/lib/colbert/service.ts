@@ -102,13 +102,47 @@ async function fetchJson(
  * the base URL (`http://127.0.0.1:PORT`); use `startManagedServer` below
  * for process lifecycle, or point at an externally managed server.
  */
+/**
+ * Health-check cache TTL (ms). Override with `GH_ROUTER_SERVICE_HEALTH_TTL_MS`
+ * (a non-negative integer; 0 = always re-check). Caches only HEALTHY
+ * results — an unhealthy verdict is always re-probed, so a restarted
+ * server is picked up immediately instead of serving 30s of false
+ * negatives.
+ */
+export function serviceHealthTtlMs(): number {
+  const raw = Number(process.env.GH_ROUTER_SERVICE_HEALTH_TTL_MS)
+  if (Number.isSafeInteger(raw) && raw >= 0) return raw
+  return 30_000
+}
+
 export class NextPlaidClient {
   readonly baseUrl: string
   private readonly timeoutMs: number
+  private cachedHealth: ServiceHealth | null = null
+  private lastHealthAt = 0
 
   constructor(baseUrl: string, timeoutMs = DEFAULT_TIMEOUT_MS) {
     this.baseUrl = baseUrl.replace(/\/+$/, "")
     this.timeoutMs = timeoutMs
+  }
+
+  /**
+   * Throw unless the server is healthy NOW (within the TTL cache).
+   * Pre-flight for every query-path call so a dead/wedged server fails
+   * fast here — with a clear error — instead of timing out mid-search.
+   */
+  async ensureHealthy(): Promise<ServiceHealth> {
+    const now = Date.now()
+    const cached = this.cachedHealth
+    if (cached?.ok === true && now - this.lastHealthAt < serviceHealthTtlMs()) {
+      return cached
+    }
+    // Unhealthy-or-stale: re-probe (a restarted server must be picked up).
+    const h = await this.health()
+    this.cachedHealth = h
+    this.lastHealthAt = now
+    if (!h.ok) throw new Error("next-plaid server unhealthy")
+    return h
   }
 
   async health(): Promise<ServiceHealth> {
@@ -289,6 +323,132 @@ export class NextPlaidClient {
     }
     return toHits(res as ApiSearchResponse)
   }
+}
+
+/** Sampled child-process memory (best-effort; null when unmeasurable). */
+export interface ServerMemorySample {
+  rssBytes: number
+  /** Windows commit charge (PagedMemorySize); null on other platforms. */
+  commitBytes: number | null
+}
+
+function intEnv(name: string, fallback: number): number {
+  const raw = Number(process.env[name])
+  return Number.isSafeInteger(raw) && raw > 0 ? raw : fallback
+}
+
+/** Memory thresholds for proactive server restart (operator-tunable). */
+export function serviceMemoryLimits(): { maxRssBytes: number; maxCommitBytes: number } {
+  return {
+    maxRssBytes: intEnv("GH_ROUTER_SERVICE_MAX_RSS_MB", 4096) * 1024 * 1024,
+    maxCommitBytes: intEnv("GH_ROUTER_SERVICE_MAX_COMMIT_MB", 6144) * 1024 * 1024,
+  }
+}
+
+/**
+ * RSS (+ Windows commit charge) of a child pid. One shell-out (5s cap),
+ * so callers MUST cache (see `isServerMemoryOverLimit`). Returns null when
+ * the pid is gone or the platform tooling is unavailable — unmeasurable
+ * reads as "not over" (fail open; the health gate still applies).
+ */
+export async function sampleChildMemory(pid: number): Promise<ServerMemorySample | null> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null
+  try {
+    const { execFile } = await import("node:child_process")
+    const run = (cmd: string, args: Array<string>): Promise<string> =>
+      new Promise((resolve, reject) => {
+        execFile(cmd, args, { timeout: 5000, windowsHide: true }, (err, stdout) => {
+          if (err) reject(err)
+          else resolve(stdout)
+        })
+      })
+    if (process.platform === "win32") {
+      const out = await run("powershell", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `$p=Get-Process -Id ${pid} -ErrorAction Stop; "$($p.WorkingSet64) $($p.PagedMemorySize64)"`,
+      ])
+      const parts = out.trim().split(/\s+/)
+      const rss = Number(parts[0])
+      const commit = Number(parts[1])
+      if (!Number.isFinite(rss) || rss <= 0) return null
+      return {
+        rssBytes: rss,
+        commitBytes: Number.isFinite(commit) && commit > 0 ? commit : null,
+      }
+    }
+    const out = await run("ps", ["-o", "rss=", "-p", String(pid)])
+    const kb = Number(out.trim())
+    if (!Number.isFinite(kb) || kb <= 0) return null
+    return { rssBytes: kb * 1024, commitBytes: null }
+  } catch {
+    return null
+  }
+}
+
+let _memSampleAt = 0
+let _memOverLimit = false
+
+/** Test-only: reset the memory-sample cache. */
+export function __resetServerMemoryCacheForTests(): void {
+  _memSampleAt = 0
+  _memOverLimit = false
+}
+
+/**
+ * True when the managed server's sampled memory exceeds the limits.
+ * Samples at most once per 60s (a powershell/ps shell-out per query would
+ * add unacceptable latency to the hot search path). No managed process
+ * (test fakes) or unmeasurable sample reads as false.
+ */
+export async function isServerMemoryOverLimit(server: ManagedServer): Promise<boolean> {
+  const now = Date.now()
+  if (now - _memSampleAt < 60_000) return _memOverLimit
+  _memSampleAt = now
+  const pid = server.process?.pid
+  if (pid === undefined) {
+    _memOverLimit = false
+    return false
+  }
+  const sample = await sampleChildMemory(pid)
+  if (!sample) {
+    _memOverLimit = false
+    return false
+  }
+  const limits = serviceMemoryLimits()
+  _memOverLimit =
+    sample.rssBytes > limits.maxRssBytes ||
+    (sample.commitBytes !== null && sample.commitBytes > limits.maxCommitBytes)
+  return _memOverLimit
+}
+
+/** Lifetime restart accounting for the managed server. */
+export interface ServerStats {
+  restartsTotal: number
+  lastRestartAt: string | null
+  lastRestartReason: string | null
+}
+
+const _serverStats: ServerStats = { restartsTotal: 0, lastRestartAt: null, lastRestartReason: null }
+
+/** Record a proactive server restart (memory pressure, query budget). */
+export function recordServerRestart(reason: string): void {
+  _serverStats.restartsTotal += 1
+  _serverStats.lastRestartAt = new Date().toISOString()
+  _serverStats.lastRestartReason = reason
+}
+
+/** Snapshot of server restart accounting (observability seam). */
+export function getServerStats(): ServerStats {
+  return { ..._serverStats }
+}
+
+/** Test-only: reset server stats. */
+export function __resetServerStatsForTests(): void {
+  _serverStats.restartsTotal = 0
+  _serverStats.lastRestartAt = null
+  _serverStats.lastRestartReason = null
 }
 
 /** Queue-full signal: retry after backoff, never fatal. */
