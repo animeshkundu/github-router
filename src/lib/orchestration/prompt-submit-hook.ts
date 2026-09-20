@@ -128,7 +128,7 @@ export function getPromptScopeSystem(searchEnabled: boolean): string {
   )
 }
 
-/** System prompt for the single gpt-5.6-sol scope/goal inference. Steers a SHORT,
+/** System prompt for the single gpt-5.6-luna scope/goal inference. Steers a SHORT,
  *  user-derived (not invented) advisory note grounded in the search results.
  *
  * @deprecated Prefer `getPromptScopeSystem(searchEnabled)` so the prompt
@@ -151,7 +151,7 @@ export interface PromptSubmitV2IO {
    *  Receives the orchestrator's AbortSignal so a timed-out enrichment cancels
    *  the in-flight request (live callers thread it into the HTTP fetch). */
   searchCode: (query: string, mode: "lexical" | "semantic", signal?: AbortSignal) => Promise<string>
-  /** One gpt-5.6-sol `/v1/responses` inference; returns assistant text ("" on failure).
+  /** One gpt-5.6-luna `/v1/responses` inference; returns assistant text ("" on failure).
    *  Receives the orchestrator's AbortSignal (see `searchCode`). */
   infer: (system: string, user: string, signal?: AbortSignal) => Promise<string>
   /** Pending advisory findings from the prior turn's background review. */
@@ -171,7 +171,7 @@ const SEARCH_CONTEXT_CAP = 6 * 1024
 function framePendingFindings(findings: string): string {
   return (
     "ADVISORY — independent review of your PREVIOUS change (NON-AUTHORITATIVE): an independent "
-    + "gpt-5.6-sol reviewer flagged the following. Evaluate each on its merits — fix the real ones, and "
+    + "gpt-5.6-luna reviewer flagged the following. Evaluate each on its merits — fix the real ones, and "
     + "ignore any wrong one with a one-line reason. You are NOT obligated to act on these.\n"
     + findings.trim()
   )
@@ -195,7 +195,7 @@ function joinSections(sections: Array<string>): string {
  *   - trivial prompt     -> findings only (no search tip, no model call).
  *   - substantive prompt -> search tip + grounded enrichment (parallel
  *                           lexical+semantic when `searchEnabled`, else
- *                           lexical-only) -> ONE gpt-5.6-sol call
+ *                           lexical-only) -> ONE gpt-5.6-luna call
  *                           -> grounded scope/goal note. Fail-open to PROMPT_STEER_GOAL.
  *   - steerEnabled=false -> findings only (no goal/tip).
  */
