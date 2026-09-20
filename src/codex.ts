@@ -21,6 +21,7 @@ import { state } from "./lib/state"
 import { toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
+import { provisionAndIndexOctocode } from "./lib/octocode/index"
 import { startKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
@@ -76,6 +77,7 @@ export const codex = defineCommand({
     // the launch cwd. Opt-IN via --search (no-op otherwise); never blocks
     // launch, never throws.
     void provisionAndIndexColbert()
+    void provisionAndIndexOctocode()
 
     // Surface a terminally-failed semantic index to the HUMAN (see the note
     // in claude.ts). Fire-and-forget; lexical search still works.

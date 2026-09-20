@@ -9,6 +9,7 @@ import { DEFAULT_CODEX_MODEL, DEFAULT_PORT } from "./lib/port"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { browserToolsEnabled } from "./lib/mcp-capabilities"
 import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
+import { provisionAndIndexOctocode } from "./lib/octocode/index"
 import { startKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import {
@@ -85,6 +86,8 @@ export const start = defineCommand({
     // the launch cwd (if a git repo). Opt-IN via --search (no-op otherwise);
     // never blocks launch, never throws.
     void provisionAndIndexColbert()
+    // octocode (ColBERT replacement): binary ensure, same --search opt-in.
+    void provisionAndIndexOctocode()
 
     // Surface a terminally-failed semantic index to the HUMAN (see the note
     // in claude.ts). Fire-and-forget; lexical search still works.

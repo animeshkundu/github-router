@@ -125,6 +125,7 @@ import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirrore
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { colbertDegradedWarning, provisionAndIndexColbert, semanticSearchOptedIn } from "./lib/colbert"
+import { provisionAndIndexOctocode } from "./lib/octocode/index"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
@@ -913,6 +914,7 @@ export const claude = defineCommand({
     // the launch cwd (if a git repo). Opt-IN via --search (no-op otherwise);
     // never blocks launch, never throws.
     void provisionAndIndexColbert()
+    void provisionAndIndexOctocode()
 
     // Surface a terminally-failed semantic index to the HUMAN. Without this
     // the only signals are a `notice` the model reads and a log line, so a

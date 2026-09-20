@@ -191,6 +191,22 @@ export const PATHS = {
   get COLBERT_META_DIR() {
     return path.join(appDir(), "colbert", "indices", ".gh-router-meta")
   },
+  /**
+   * Router-owned install dir for the octocode binary (the
+   * ColBERT/colgrep replacement for semantic + lexical code search).
+   * Layout:
+   *   octocode/
+   *     bin/octocode[.exe]   # version-pinned binary
+   *     .version             # installed version marker
+   * Cross-launch cache (like TOOLBELT_BIN_DIR), deliberately OUTSIDE
+   * the per-launch CLAUDE_CONFIG_DIR mirror.
+   */
+  get OCTOCODE_DIR() {
+    return path.join(appDir(), "octocode")
+  },
+  get OCTOCODE_BIN_DIR() {
+    return path.join(appDir(), "octocode", "bin")
+  },
 }
 
 /**
