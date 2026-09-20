@@ -1052,7 +1052,9 @@ function codeSearchToolDescription(searchEnabled: boolean): string {
       "Semantic-first code search over the worker's workspace. Default " +
       "(`mode:\"semantic\"`) ranks by MEANING via ColBERT and transparently " +
       "falls back to lexical BM25F when the index isn't ready (the response " +
-      "`source` is \"semantic\" | \"lexical\" | \"lexical-fallback\"). " +
+      "`source` is \"semantic\" | \"lexical\" | \"lexical-fallback\"; under " +
+      "--bluebird semantic/lexical run on the Bluebird index and failures " +
+      "surface as \"error\" with no silent fallback). " +
       "Semantic hits carry `score` (0-1 relevance), `endLine`, `name`; " +
       "stale semantic carries `freshness:\"stale\"` + `stale_files:N`. " +
       "Force lexical with mode `lexical` (exact symbols) / `exact` / " +

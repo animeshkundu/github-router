@@ -1,6 +1,9 @@
 import path from "node:path"
+import process from "node:process"
 
 import consola from "consola"
+
+import { bluebirdScopeSummary, ensureBluebirdClient } from "../bluebird-client"
 
 import { injectAttributionSuppressionIntoSettingsFile } from "../attribution-settings"
 import {
@@ -136,6 +139,25 @@ export async function provisionServeEnhancements(
   opts: ServeEnhancementOpts,
 ): Promise<ServeEnhancementsHandle> {
   try {
+    // Best-effort Bluebird pre-warm: detect the Azure DevOps scope, fetch
+    // the `az` token, and initialize the MCP client now so a broken
+    // setup surfaces at launch (not on the first query). Never blocks or
+    // fails provisioning — queries lazy-provision via
+    // `ensureBluebirdClient` anyway.
+    if (state.bluebirdEnabled === true && !state.bluebirdClient) {
+      try {
+        await ensureBluebirdClient(process.cwd())
+        const scope = bluebirdScopeSummary()
+        consola.info(
+          `Bluebird Azure DevOps search connected${scope ? `: ${scope}` : ""}.`,
+        )
+      } catch (err) {
+        consola.warn(
+          `Bluebird init deferred (${err instanceof Error ? err.message : String(err)}). `
+          + "The first semantic/lexical search will provision it; exact/regex/ast stay local.",
+        )
+      }
+    }
     const tunnelExposed = opts.tunnelExposed === true
     const browseAllowed = browserToolsEnabled() && (!tunnelExposed || opts.browseOverTunnel === true)
     const firstMateAllowed = agentToolsEnabled() && (!tunnelExposed || opts.agentsOverTunnel === true)

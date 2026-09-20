@@ -1565,6 +1565,56 @@ export function buildCodeModeDescription(searchEnabled: boolean): string {
 }
 
 /**
+ * `code` tool description when `--bluebird` is active. Same schema as the
+ * local engine, but `semantic` (default) and `lexical` run on the Bluebird
+ * Azure DevOps index (vector / ranked-keyword); `exact`/`regex`/`ast`
+ * stay on the local engine. Bluebird failures surface as
+ * `source:"error"` with the cause in `notice` — there is no silent local
+ * fallback, so an `error` source means "fix auth/service", not "try
+ * different keywords".
+ */
+export function buildBluebirdCodeToolDescription(): string {
+  return (
+    "Fast structured code search backed by the Bluebird Azure DevOps index. Default "
+    + "(`mode:\"semantic\"`, or omit `mode`) ranks by MEANING via code-aware "
+    + "embeddings — best for intent/concept queries where the literal keywords "
+    + "may not appear (\"where do we rate-limit\", \"auth token refresh\"). "
+    + "`mode:\"lexical\"` runs the indexed ranked-keyword search — best for "
+    + "exact symbols, filenames, errors, routes, flags, and config keys. The "
+    + "response `source` says which path ran (\"semantic\" | \"lexical\" | "
+    + "\"error\"); semantic hits carry `score` (0-1 relevance), `endLine`, "
+    + "`name`. On `source:\"error\"` the `notice` carries the cause (auth, "
+    + "service, retries exhausted) — retry or fix the cause rather than "
+    + "rephrasing. `exact` (fixed-string), `regex` (PCRE2), and `ast` "
+    + "(ast-grep structural via `ast_pattern`+`ast_lang`) run on the LOCAL "
+    + "live tree instead. Launch multiple code searches in parallel to "
+    + "triangulate — e.g. definition + callers + tests in one round-trip. "
+    + "Prefer this over Grep/Bash+grep for ranked discovery. `workspace` is "
+    + "any absolute path to a DIRECTORY the proxy process can read — "
+    + "typically the project root or a sub-tree you're working in; Bluebird "
+    + "scopes server-side to the detected Azure DevOps org/project/repos. "
+    + "Each response also carries a tree-sitter structural outline of the "
+    + "matched files (`summary` on by default; set it false to omit)."
+  )
+}
+
+/**
+ * `code` tool `mode` field description when `--bluebird` is active.
+ * Mirrors `buildBluebirdCodeToolDescription`.
+ */
+export function buildBluebirdCodeModeDescription(): string {
+  return (
+    "Search mode. 'semantic' (DEFAULT): Bluebird vector search over the "
+    + "Azure DevOps index (meaning-ranked; failures surface as "
+    + "`source:\"error\"` with no silent local fallback). 'lexical': "
+    + "Bluebird indexed ranked-keyword search — best for exact symbols. "
+    + "'exact': local fixed-string, ripgrep document order. 'regex': local "
+    + "PCRE2, ripgrep document order. 'ast': local ast-grep structural "
+    + "match (requires `ast_pattern` + `ast_lang`)."
+  )
+}
+
+/**
  * Oversized-result contract, appended to EVERY `worker_*` tool description.
  *
  * `relaySafeText` (`~/lib/worker-agent/relay-cap`) is the final transform at

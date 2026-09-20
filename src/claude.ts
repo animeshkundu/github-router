@@ -124,6 +124,7 @@ import {
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, buildOperatingDefaultsDigest, buildOperatingDefaultsDirective, type NativeAgentAvailability, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
+import { bluebirdScopeSummary, ensureBluebirdClient } from "./lib/bluebird-client"
 import { colbertDegradedWarning, provisionAndIndexColbert, semanticSearchOptedIn } from "./lib/colbert"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
@@ -913,6 +914,21 @@ export const claude = defineCommand({
     // the launch cwd (if a git repo). Opt-IN via --search (no-op otherwise);
     // never blocks launch, never throws.
     void provisionAndIndexColbert()
+
+    // Best-effort Bluebird provision under --bluebird: detect the Azure
+    // DevOps scope, fetch the `az` token, and initialize the MCP client now
+    // so a broken setup surfaces at launch instead of on the first query.
+    // Never blocks launch, never throws (queries lazy-provision anyway).
+    if (state.bluebirdEnabled === true && !state.bluebirdClient) {
+      void ensureBluebirdClient(process.cwd())
+        .then(() => {
+          const scope = bluebirdScopeSummary()
+          process.stderr.write(
+            `Bluebird Azure DevOps search connected${scope ? `: ${scope}` : ""}.\n`,
+          )
+        })
+        .catch(() => {})
+    }
 
     // Surface a terminally-failed semantic index to the HUMAN. Without this
     // the only signals are a `notice` the model reads and a log line, so a
