@@ -60,6 +60,11 @@ mock.module("../../src/lib/colbert/service", () => ({
     exitCode: number | null = null;
     signal: string | null = null;
     stderrTail = "";
+    detail = "";
+    constructor(opts: { detail?: string } = {}) {
+      super("fake server crash");
+      this.detail = opts.detail ?? "";
+    }
   },
   startManagedServer: async (_opts: unknown) => {
     startCalls += 1
@@ -697,5 +702,8 @@ describe("server crash during populate", () => {
     fakeProcess = { exitCode: 1, signalCode: null, once: () => {}, off: () => {} }
     const err = await backend.populateWorkspace(ws, {}).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(svcMod.ServerCrashedError)
+    // Crash context is plumbed through (this early crash fires before the
+    // encode counters exist, so only elapsed is present here).
+    expect((err as { detail: string }).detail).toMatch(/elapsed=/)
   })
 })

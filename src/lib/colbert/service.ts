@@ -315,16 +315,30 @@ export class ServerCrashedError extends Error {
   readonly exitCode: number | null
   readonly signal: string | null
   readonly stderrTail: string
-  constructor(opts: { exitCode?: number | null; signal?: string | null; stderrTail?: string }) {
+  /**
+   * Crash-time context supplied by the caller (units sent, files parsed,
+   * elapsed). Tells "died on batch 6 of 12K files" apart from "died after
+   * 11K units" — load-bearing for distinguishing a poison input / early
+   * external kill from a progressive leak.
+   */
+  readonly detail: string
+  constructor(opts: {
+    exitCode?: number | null
+    signal?: string | null
+    stderrTail?: string
+    detail?: string
+  }) {
     super(
       `next-plaid server crashed during encode` +
         (opts.exitCode !== undefined && opts.exitCode !== null ? ` (exit code ${opts.exitCode})` : "") +
-        (opts.signal ? ` (signal ${opts.signal})` : ""),
+        (opts.signal ? ` (signal ${opts.signal})` : "") +
+        (opts.detail ? ` [${opts.detail}]` : ""),
     )
     this.name = "ServerCrashedError"
     this.exitCode = opts.exitCode ?? null
     this.signal = opts.signal ?? null
     this.stderrTail = (opts.stderrTail ?? "").slice(-2048)
+    this.detail = opts.detail ?? ""
   }
 }
 

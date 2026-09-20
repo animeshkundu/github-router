@@ -672,7 +672,15 @@ export async function populateWorkspace(
   const timeout = setTimeout(() => ac.abort(), 30 * 60 * 1000)
   timeout.unref?.()
   const signal = opts.signal ? anySignal([opts.signal, ac.signal]) : ac.signal
+  const populateStartMs = Date.now()
   let detachServerExit: (() => void) | null = null
+  let clearHeartbeat: (() => void) | null = null
+  // Crash context for ServerCrashedError. Assigned once the encode-phase
+  // counters exist; defaults to elapsed-only so early throws (ensureIndex)
+  // still carry timing. A closure (not direct counter reads) avoids TDZ
+  // issues: throwIfServerCrashed is defined before the counters are.
+  let crashDetail: () => string = () =>
+    `elapsed=${Math.round((Date.now() - populateStartMs) / 1000)}s`
   try {
     const files = await enumerateSourceFiles(rgPath, canonical, signal)
     const parseable = files.filter((f) => getLanguageKeyForPath(f) !== null)
@@ -759,6 +767,7 @@ export async function populateWorkspace(
           exitCode: serverExit.code,
           signal: serverExit.signal ?? undefined,
           stderrTail: serverStderr(),
+          detail: crashDetail(),
         })
       }
       if (svc.process && svc.process.exitCode !== null && svc.process.exitCode !== undefined) {
@@ -766,6 +775,7 @@ export async function populateWorkspace(
           exitCode: svc.process.exitCode,
           signal: svc.process.signalCode ?? undefined,
           stderrTail: serverStderr(),
+          detail: crashDetail(),
         })
       }
     }
@@ -929,7 +939,34 @@ export async function populateWorkspace(
       opts.foreground === true ? Math.max(4, Math.min(16, cpus)) : POPULATE_PARSE_CONCURRENCY
     let units: Array<{ text: string; metadata: Record<string, unknown> }> = []
     let unitTotal = 0
+    let filesParsed = 0
     const fileUnitCounts: Record<string, number> = {}
+    crashDetail = () =>
+      `units sent=${unitTotal} files parsed=${filesParsed}/${changed.length} ` +
+      `elapsed=${Math.round((Date.now() - populateStartMs) / 1000)}s`
+    // Heartbeat during the extract phase: tree-sitter parsing of 10K files
+    // takes minutes and logs NOTHING (progress fires only on batch flush),
+    // so a server that died early went unnoticed until the next flush —
+    // the ~5-minute silent gap in every crash log. The tick re-checks the
+    // exit listener (synchronous, no polling needed) and aborts parsing
+    // immediately so the in-flight guarded call throws ServerCrashedError
+    // instead of chewing through thousands more files first. Foreground
+    // only logs; background populates stay quiet.
+    const heartbeat = setInterval(() => {
+      try {
+        throwIfServerCrashed()
+      } catch {
+        ac.abort()
+        return
+      }
+      if (opts.foreground === true) {
+        consola.info(
+          `… encode heartbeat: ${filesParsed}/${changed.length} files parsed, ${unitTotal} units sent`,
+        )
+      }
+    }, 30_000)
+    heartbeat.unref?.()
+    clearHeartbeat = () => clearInterval(heartbeat)
     let flushCount = 0
     const flush = async (): Promise<void> => {
       if (units.length === 0) return
@@ -987,8 +1024,10 @@ export async function populateWorkspace(
               })
               if (units.length >= POPULATE_BATCH_UNITS) await flush()
             }
+            filesParsed += 1
           } catch {
             // per-file failure: skip, keep going
+            filesParsed += 1
           }
         }
       },
@@ -1070,6 +1109,11 @@ export async function populateWorkspace(
       detachServerExit?.()
     } catch {
       // best effort — listener cleanup must never throw
+    }
+    try {
+      clearHeartbeat?.()
+    } catch {
+      // best effort — timer cleanup must never throw
     }
   }
 }

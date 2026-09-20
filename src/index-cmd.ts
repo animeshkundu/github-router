@@ -369,6 +369,7 @@ function printServerCrash(err: ServerCrashedError): void {
         ? ` (signal ${err.signal})`
         : "";
   consola.error(`index: service server crashed during encode${where}`);
+  if (err.detail) consola.error(`Context: ${err.detail}`);
   const tail = err.stderrTail.trim().slice(-1500);
   if (tail.length > 0) {
     consola.error("Server stderr (last lines):");
