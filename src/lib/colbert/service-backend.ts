@@ -50,6 +50,7 @@ import {
   ServiceBusyError,
   startManagedServer,
   type ManagedServer,
+  type NextPlaidClient,
 } from "./service"
 import { buildUnitText, extractUnits } from "./units"
 import { getLanguageKeyForPath } from "../tree-sitter-grammars"
@@ -64,6 +65,17 @@ export function semanticBackend(): SemanticBackend {
 /** True when the service backend is selected AND actionable. */
 export function serviceBackendEnabled(): boolean {
   if (semanticBackend() !== "service") return false
+  return serviceBackendProvisionable()
+}
+
+/**
+ * True when the service backend COULD run here (binary on disk or promoted
+ * download + model present), regardless of the `GH_ROUTER_SEMANTIC_BACKEND`
+ * opt-in. The `index` command's `auto` backend uses this: an explicit
+ * `index` invocation is its own opt-in, while the query path stays gated
+ * on the env var via `serviceBackendEnabled`.
+ */
+export function serviceBackendProvisionable(): boolean {
   // A binary on disk OR a promoted download (provisioned lazily in
   // ensureServer) makes the backend actionable; otherwise colgrep owns it.
   if (resolveServiceBinary() === null && !nextPlaidServerPromoted("cpu") && !nextPlaidServerPromoted("cuda")) {
@@ -226,6 +238,16 @@ export interface ServiceIndexMeta {
    * the next populate records hashes and embeds everything once).
    */
   fileHashes?: Record<string, string>
+  /**
+   * Units contributed per file (`relPath` → unit count) at the last
+   * successful populate. Gates the delete phase: deletes are only
+   * reported merged once the doc count drops by the expected amount, so
+   * updates are never sent while a delete is still in flight (a late
+   * delete would wipe the new units — the server merges deletes slowly
+   * and out of order with fast updates). Absent together with
+   * `fileHashes` on pre-delta sidecars (full rebuild, no gating needed).
+   */
+  fileUnits?: Record<string, number>
   /** Model revision at index time: a change forces a full rebuild. */
   modelRev?: string
 }
@@ -288,6 +310,31 @@ export async function __waitForServicePopulateForTests(): Promise<void> {
 /** Start the server with foreground (all-core) parallelism for `index`. */
 export async function ensureServerForeground(): Promise<ManagedServer | null> {
   return ensureServer({ foreground: true })
+}
+
+/**
+ * Stop the managed server and clear the singleton. The `index` command
+ * must call this before returning: unlike short-lived colgrep children,
+ * the persistent server holds the event loop open forever, so a
+ * foreground build that never stops it never exits (orphaning the
+ * server on every invocation).
+ */
+export async function stopServiceServer(): Promise<void> {
+  try {
+    await _starting?.catch(() => null)
+  } catch {
+    // start failed — nothing to stop below
+  }
+  _starting = null
+  const svc = _server
+  _server = null
+  if (svc) {
+    try {
+      await svc.stop()
+    } catch {
+      // best effort — the exit sweep reaps tracked children on signals
+    }
+  }
 }
 
 export type ServiceFreshnessVerdict = "fresh" | "stale" | "absent"
@@ -475,6 +522,99 @@ export interface ServicePopulateOptions {
   foreground?: boolean
   signal?: AbortSignal
   onProgress?: (p: ServicePopulateProgress) => void
+  /** Settle-wait tuning (tests use tiny values; production uses defaults). */
+  settle?: { minWaitMs?: number; timeoutMs?: number; pollMs?: number }
+}
+
+/**
+ * Wait for delete batches to merge: the doc count must fall to the
+ * expected post-delete level. Deletes rebuild PLAID partitions (seconds),
+ * far slower than update merges — sending updates first risks a late
+ * delete wiping the new units, which is unrecoverable data loss (the
+ * file predicate cannot tell old units from new ones).
+ *
+ * Throws on timeout WITHOUT writing the sidecar, so a later run retries
+ * the same classification instead of recording a lie. Callers must only
+ * invoke this when at least one counted delete was issued; a fully
+ * unknown drop has no observable target (see the unknown-file handling
+ * at the call site).
+ */
+export async function waitForDocCountDrop(
+  client: Pick<NextPlaidClient, "health">,
+  index: string,
+  target: number,
+  opts: { timeoutMs?: number; pollMs?: number } = {},
+  signal?: AbortSignal,
+): Promise<number> {
+  const timeoutMs = opts.timeoutMs ?? 120_000
+  const pollMs = opts.pollMs ?? 250
+  const start = Date.now()
+  let last = Number.POSITIVE_INFINITY
+  for (;;) {
+    if (signal?.aborted) throw new Error("populate aborted")
+    const count = await client
+      .health()
+      .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
+      .catch(() => undefined)
+    if (count !== undefined) {
+      last = count
+      if (count <= target) return count
+    }
+    if (Date.now() - start >= timeoutMs) {
+      throw new Error(
+        `delete batches for ${index} did not merge within ${Math.round(timeoutMs / 1000)}s (docs=${Number.isFinite(last) ? last : "unknown"}, target<=${target})`,
+      )
+    }
+    await new Promise<void>((r) => {
+      const t = setTimeout(r, pollMs)
+      t.unref?.()
+    })
+  }
+}
+
+/**
+ * Wait for the server's async write queue to settle after a populate.
+ *
+ * `updateDocuments`/`deleteDocuments` return 202 on ACCEPT, not on merge —
+ * reporting ready (or reading `docCount`) immediately would observe the
+ * pre-merge state: searches miss new units, and the unchanged fast-path
+ * anchor (`num_documents > 0`) never fires. Update batches are visible in
+ * `/health.updates[]` (`running` → `complete`); delete batches are NOT, so
+ * count stability is the second signal and `waitForDocCountDrop` (above)
+ * gates the delete phase separately.
+ */
+export async function waitForIndexSettled(
+  client: Pick<NextPlaidClient, "health">,
+  index: string,
+  expectDocs: boolean,
+  opts: { minWaitMs?: number; timeoutMs?: number; pollMs?: number } = {},
+  signal?: AbortSignal,
+): Promise<number | undefined> {
+  const minWaitMs = opts.minWaitMs ?? 2000
+  const timeoutMs = opts.timeoutMs ?? 60_000
+  const pollMs = opts.pollMs ?? 250
+  const start = Date.now()
+  let prev: number | undefined
+  for (;;) {
+    if (signal?.aborted) return prev
+    const h = await client.health().catch(() => undefined)
+    const count = h?.indices.find((i) => i.name === index)?.num_documents
+    const running =
+      h?.updates?.some((u) => u.index === index && u.status !== "complete") ?? false
+    const elapsed = Date.now() - start
+    if (count !== undefined) {
+      const stable = prev !== undefined && prev === count
+      if (elapsed >= minWaitMs && stable && !running && (!expectDocs || count > 0)) {
+        return count
+      }
+      prev = count
+    }
+    if (elapsed >= timeoutMs) return prev
+    await new Promise<void>((r) => {
+      const t = setTimeout(r, pollMs)
+      t.unref?.()
+    })
+  }
 }
 
 /**
@@ -494,7 +634,9 @@ export async function populateWorkspace(
   const index = indexNameForWorkspace(canonical)
   const prev = await readServiceMeta(canonical)
   const prevHashes = prev?.fileHashes ?? {}
-  const hasBaseline = prev !== null && prev.fileHashes !== undefined && !opts.full
+  const prevUnits = prev?.fileUnits ?? {}
+  const hasBaseline =
+    prev !== null && prev.fileHashes !== undefined && prev.fileUnits !== undefined && !opts.full
 
   const rgPath = resolveRipgrepBin()
   const ac = new AbortController()
@@ -570,13 +712,26 @@ export async function populateWorkspace(
         .catch(() => undefined)
       if (known && known.num_documents > 0) {
         const g = await gitState(canonical).catch(() => ({ isRepo: false as const }))
+        // Nothing changed: carry the baseline forward (plus prev entries
+        // for files unreadable this run, mirroring the merge path below).
+        const carriedHashes: Record<string, string> = { ...currentHashes }
+        const carriedUnits: Record<string, number> = {}
+        for (const rel of parseable) {
+          if (currentHashes[rel] !== undefined) {
+            carriedUnits[rel] = prevUnits[rel] ?? 0
+          } else {
+            if (prevHashes[rel] !== undefined) carriedHashes[rel] = prevHashes[rel]
+            if (prevUnits[rel] !== undefined) carriedUnits[rel] = prevUnits[rel]
+          }
+        }
         await writeServiceMeta({
           workspace: canonical,
           index,
           ...(g.isRepo ? { head: g.head, dirty: g.dirty ?? false } : {}),
           indexedAt: new Date().toISOString(),
           docCount: known.num_documents,
-          fileHashes: currentHashes,
+          fileHashes: carriedHashes,
+          fileUnits: carriedUnits,
           modelRev: MODEL_REVISION,
         })
         opts.onProgress?.({
@@ -603,10 +758,71 @@ export async function populateWorkspace(
       unchanged = 0
     }
 
-    // Delete stale documents (changed files' old units + removed files).
-    for (const rel of [...changed, ...removed]) {
+    // Phase 1 — clear stale state. Two cases:
+    //
+    // No baseline (first build / --full / legacy sidecar): no trustworthy
+    // per-file counts exist, so per-file deletes cannot be merge-gated.
+    // Drop the whole index when it holds anything (verified primitive on
+    // v1.7.0), then rebuild from empty. Servers without drop support fall
+    // back to per-file deletes + dwell (best effort, logged).
+    //
+    // Delta (baseline present): every tracked file carries a known unit
+    // count, so deletes are gated on the observed doc-count drop below and
+    // updates are never sent while a delete is still merging — a late
+    // delete would wipe the new units (the file predicate cannot tell old
+    // units from new ones), which is unrecoverable data loss. Files with
+    // unknown counts (hand-edited sidecars only — hashes and units are
+    // always written together) are SKIPPED: stale units beat lost units.
+    if (!hasBaseline) {
+      const existing = await svc.client
+        .health()
+        .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
+        .catch(() => undefined)
+      if ((existing ?? 0) > 0) {
+        const dropped = await svc.client.dropIndex(index).catch(() => false)
+        if (dropped) {
+          await svc.client.ensureIndex(index, { nbits: 4 })
+        } else {
+          consola.warn(`service-backend: index drop unsupported, per-file reset for ${canonical}`)
+          for (const rel of changed) {
+            if (signal.aborted) throw new Error("populate aborted")
+            await svc.client.deleteDocuments(index, "file = ?", [rel])
+          }
+          await waitForIndexSettled(
+            svc.client,
+            index,
+            false,
+            { minWaitMs: 5000, ...(opts.settle ?? {}) },
+            signal,
+          )
+        }
+      }
       if (signal.aborted) throw new Error("populate aborted")
-      await svc.client.deleteDocuments(index, "file = ?", [rel])
+    } else {
+      const deleteTargets = [...changed, ...removed].filter((rel) => (prevUnits[rel] ?? 0) > 0)
+      const expectedDrop = deleteTargets.reduce((sum, rel) => sum + (prevUnits[rel] ?? 0), 0)
+      if (deleteTargets.length > 0) {
+        const before = await svc.client
+          .health()
+          .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
+          .catch(() => undefined)
+        for (const rel of deleteTargets) {
+          if (signal.aborted) throw new Error("populate aborted")
+          await svc.client.deleteDocuments(index, "file = ?", [rel])
+        }
+        // Fail closed on timeout (no sidecar write below): a late delete
+        // merging after the updates would wipe the new units.
+        if (expectedDrop > 0 && before !== undefined) {
+          await waitForDocCountDrop(
+            svc.client,
+            index,
+            before - expectedDrop,
+            { timeoutMs: 120_000, ...(opts.settle ?? {}) },
+            signal,
+          )
+        }
+        if (signal.aborted) throw new Error("populate aborted")
+      }
     }
 
     // Extract + encode only the changed files.
@@ -620,6 +836,7 @@ export async function populateWorkspace(
       opts.foreground === true ? Math.max(4, Math.min(16, cpus)) : POPULATE_PARSE_CONCURRENCY
     let units: Array<{ text: string; metadata: Record<string, unknown> }> = []
     let unitTotal = 0
+    const fileUnitCounts: Record<string, number> = {}
     const flush = async (): Promise<void> => {
       if (units.length === 0) return
       const batch = units
@@ -651,6 +868,7 @@ export async function populateWorkspace(
           const rel = changed[i]
           try {
             const r = await extractUnits(path.join(canonical, rel), rel, signal)
+            fileUnitCounts[rel] = r.units.length
             for (const u of r.units) {
               units.push({
                 text: buildUnitText(u, rel),
@@ -676,10 +894,37 @@ export async function populateWorkspace(
     await flush()
     if (signal.aborted) throw new Error("populate aborted")
 
-    const docCount = await svc.client
-      .health()
-      .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
-      .catch(() => undefined)
+    // The server merges accepted writes asynchronously: wait for the queue
+    // to settle before recording docCount, or searches served off this
+    // populate observe the pre-merge state.
+    const docCount = await waitForIndexSettled(
+      svc.client,
+      index,
+      unitTotal > 0,
+      opts.settle ?? {},
+      signal,
+    )
+    if (signal.aborted) throw new Error("populate aborted")
+    // Merge sidecar state: current hashes/units for successfully processed
+    // files, carried-over entries for files unreadable this run (retry
+    // next time), dropped entries for removed files. A changed file whose
+    // extraction FAILED carries no unit count — drop its hash so the next
+    // run re-classifies it as new instead of trusting a build that never
+    // embedded it (its stale units were already deleted above).
+    const mergedHashes: Record<string, string> = { ...currentHashes }
+    const mergedUnits: Record<string, number> = {}
+    for (const rel of parseable) {
+      if (currentHashes[rel] === undefined) {
+        if (prevHashes[rel] !== undefined) mergedHashes[rel] = prevHashes[rel]
+        if (prevUnits[rel] !== undefined) mergedUnits[rel] = prevUnits[rel]
+      } else if (hasBaseline && prevHashes[rel] === currentHashes[rel]) {
+        mergedUnits[rel] = prevUnits[rel] ?? 0
+      } else if (fileUnitCounts[rel] !== undefined) {
+        mergedUnits[rel] = fileUnitCounts[rel]
+      } else {
+        delete mergedHashes[rel]
+      }
+    }
     const g = await gitState(canonical).catch(() => ({ isRepo: false as const }))
     await writeServiceMeta({
       workspace: canonical,
@@ -687,7 +932,8 @@ export async function populateWorkspace(
       ...(g.isRepo ? { head: g.head, dirty: g.dirty ?? false } : {}),
       indexedAt: new Date().toISOString(),
       docCount,
-      fileHashes: currentHashes,
+      fileHashes: mergedHashes,
+      fileUnits: mergedUnits,
       modelRev: MODEL_REVISION,
     })
     consola.debug(`service-backend: indexed ${unitTotal} units in ${canonical}`)

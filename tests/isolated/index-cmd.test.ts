@@ -27,7 +27,7 @@ const kickBackgroundInitMock = mock((_workspace: string) => {})
 const waitForInitMock = mock(async (_workspace: string) => {})
 const registerExitHandlersMock = mock(() => {})
 const semanticBackendMock = mock(() => "colgrep")
-const serviceEnabledMock = mock(() => false)
+const serviceProvisionableMock = mock(() => false)
 const selectVariantMock = mock(async () => "cpu")
 const serviceFreshnessMock = mock(
   async (_workspace: string): Promise<{ verdict: string; meta: null }> => ({
@@ -55,6 +55,7 @@ const populateServiceMock = mock(
     units: 0,
   }),
 )
+const stopServerMock = mock(async () => {})
 
 // Scripted freshness sequence (shifted per call).
 let freshnessScript: Array<{ verdict: string }> = []
@@ -79,11 +80,12 @@ mock.module("~/lib/colbert/provision", () => ({
 
 mock.module("~/lib/colbert/service-backend", () => ({
   semanticBackend: semanticBackendMock,
-  serviceBackendEnabled: serviceEnabledMock,
+  serviceBackendProvisionable: serviceProvisionableMock,
   selectServerVariant: selectVariantMock,
   serviceFreshness: serviceFreshnessMock,
   populateWorkspace: populateServiceMock,
   ensureServerForeground: async () => ({ url: "http://127.0.0.1:9" }),
+  stopServiceServer: stopServerMock,
 }))
 
 mock.module("~/lib/colbert/runner", () => ({
@@ -150,10 +152,11 @@ beforeEach(() => {
     waitForInitMock,
     registerExitHandlersMock,
     semanticBackendMock,
-    serviceEnabledMock,
+    serviceProvisionableMock,
     selectVariantMock,
     serviceFreshnessMock,
     populateServiceMock,
+    stopServerMock,
     freshnessMock,
     consolaInfoMock,
     consolaWarnMock,
@@ -167,7 +170,7 @@ beforeEach(() => {
   delete process.env.GH_ROUTER_COLBERT_PARALLEL
   // Scripted service defaults: colgrep path unless a test opts into service.
   semanticBackendMock.mockReturnValue("colgrep")
-  serviceEnabledMock.mockReturnValue(false)
+  serviceProvisionableMock.mockReturnValue(false)
   selectVariantMock.mockResolvedValue("cpu")
   provisionServerMock.mockResolvedValue({ path: "/tmp/fake-server" })
   serviceFreshnessMock.mockResolvedValue({ verdict: "fresh", meta: null })
@@ -273,7 +276,7 @@ describe("github-router index", () => {
   })
 
   test("--backend=colgrep forces colgrep even when service actionable", async () => {
-    serviceEnabledMock.mockReturnValue(true)
+    serviceProvisionableMock.mockReturnValue(true)
     freshnessScript = [{ verdict: "fresh" }]
     await run({ workspace: root, backend: "colgrep" })
     expect(exitCode()).toBe(0)
@@ -289,6 +292,15 @@ describe("github-router index", () => {
     expect(kickBackgroundInitMock).toHaveBeenCalledTimes(0)
     expect(populateServiceMock).toHaveBeenCalledTimes(0)
     expect(consolaSuccessMock.mock.calls.some((c) => String(c[0]).includes("already fresh"))).toBe(true)
+  })
+
+  test("--backend=service --full rebuilds even when fresh", async () => {
+    serviceFreshnessMock.mockResolvedValue({ verdict: "fresh", meta: null })
+    await run({ workspace: root, backend: "service", full: true })
+    expect(exitCode()).toBe(0)
+    expect(populateServiceMock).toHaveBeenCalledTimes(1)
+    const opts = populateServiceMock.mock.calls[0][1] as Record<string, unknown>
+    expect(opts.full).toBe(true)
   })
 
   test("--backend=service stale → delta populate with foreground + progress", async () => {
@@ -307,6 +319,8 @@ describe("github-router index", () => {
     expect(opts.full).toBe(false)
     expect(opts.foreground).toBe(true)
     expect(consolaSuccessMock.mock.calls.some((c) => String(c[0]).includes("delta"))).toBe(true)
+    // The persistent server must be stopped or the CLI never exits.
+    expect(stopServerMock).toHaveBeenCalledTimes(1)
   })
 
   test("--backend=service --full forwards full rebuild", async () => {
@@ -341,7 +355,7 @@ describe("github-router index", () => {
   })
 
   test("auto + server unavailable → colgrep fallback", async () => {
-    serviceEnabledMock.mockReturnValue(true)
+    serviceProvisionableMock.mockReturnValue(true)
     provisionServerMock.mockResolvedValue({ reason: "no network" })
     freshnessScript = [{ verdict: "fresh" }]
     await run({ workspace: root })
@@ -351,7 +365,7 @@ describe("github-router index", () => {
   })
 
   test("auto prefers service when actionable", async () => {
-    serviceEnabledMock.mockReturnValue(true)
+    serviceProvisionableMock.mockReturnValue(true)
     provisionServerMock.mockResolvedValue({ path: "/tmp/fake-server" })
     serviceFreshnessMock.mockResolvedValue({ verdict: "fresh", meta: null })
     await run({ workspace: root })

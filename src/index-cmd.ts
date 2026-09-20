@@ -37,8 +37,9 @@ import {
   populateWorkspace,
   selectServerVariant,
   semanticBackend,
-  serviceBackendEnabled,
+  serviceBackendProvisionable,
   serviceFreshness,
+  stopServiceServer,
 } from "~/lib/colbert/service-backend";
 import { PATHS } from "~/lib/paths";
 import { parseBoolEnv } from "~/lib/exec";
@@ -152,9 +153,9 @@ function resolveIndexBackend(requested: unknown): { backend: IndexBackend; expli
     return { backend: "service", explicit: true };
   }
   if (raw === "colgrep") return { backend: "colgrep", explicit: false };
-  // Auto: service when actionable (binary on disk or promoted download +
-  // model present), else the colgrep fallback.
-  return serviceBackendEnabled()
+  // Auto: service when provisionable (binary on disk or promoted
+  // download + model present), else the colgrep fallback.
+  return serviceBackendProvisionable()
     ? { backend: "service", explicit: false }
     : { backend: "colgrep", explicit: false };
 }
@@ -287,7 +288,7 @@ export const indexCmd = defineCommand({
     }
 
     // Auto resolves the backend AFTER provisioning (the model dir must
-    // exist before serviceBackendEnabled can report actionable). An
+    // exist before provisionability can report actionable). An
     // explicit service request that cannot provision the server binary
     // fails closed; auto silently falls back to colgrep.
     if (backend === "service") {
@@ -376,7 +377,7 @@ async function runServiceIndex(
   }
 
   const first = await serviceFreshness(workspace);
-  if (first.verdict === "fresh") {
+  if (first.verdict === "fresh" && !opts.full) {
     consola.success("index is already fresh — nothing to build");
     printServiceStatus(await collectServiceStatus(workspace));
     return;
@@ -394,8 +395,7 @@ async function runServiceIndex(
     return;
   }
   let lastLogMs = 0;
-  try {
-    const result = await populateWorkspace(workspace, {
+  try {    const result = await populateWorkspace(workspace, {
       full: opts.full,
       foreground: true,
       ...(signal ? { signal } : {}),
@@ -430,6 +430,10 @@ async function runServiceIndex(
       consola.error("index: service build failed:", err);
     }
     process.exitCode = 1;
+  } finally {
+    // The persistent server holds the event loop open — stop it or this
+    // foreground command never exits (and orphans a server per run).
+    await stopServiceServer();
   }
 }
 
