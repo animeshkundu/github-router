@@ -122,8 +122,14 @@ runs as long as it needs; a hung one dies fast. A generous absolute
 FULL thread count, so a background index build saturates the box — the
 opposite of what a background build should do during a long interactive
 session (the proxy even holds a keep-awake assertion so those sessions run
-unattended). Before each `init` the runner caps it at **25% of threads with
-a floor of 2** (16 threads → 4 sessions; a 4-thread box → 2, not 1).
+unattended). Before each background `init` the runner caps it at **25% of
+threads with a floor of 2** (16 threads → 4 sessions; a 4-thread box → 2,
+not 1). An explicit `github-router index` is a **foreground** build and
+gets **all threads, capped at colgrep's max of 16 sessions** — maximum
+speed while the operator watches. `github-router index` defaults to the
+colgrep backend for this reason (no persistent process, no memory
+accumulation across encodes); `--backend=service` opts into the
+persistent server instead.
 
 `--parallel` exists only on colgrep's `settings` subcommand — there is no
 per-run flag and no env var — and it writes `parallel_sessions` into

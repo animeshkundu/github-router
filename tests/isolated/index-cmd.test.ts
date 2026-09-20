@@ -231,12 +231,12 @@ describe("github-router index", () => {
     expect(consolaSuccessMock.mock.calls.some((c) => String(c[0]).includes("already fresh"))).toBe(true)
   })
 
-  test("building → fresh: kicks once, waits, reports ready", async () => {
+  test("building → fresh: kicks once (foreground), waits, reports ready", async () => {
     freshnessScript = [{ verdict: "building" }, { verdict: "fresh" }]
     await run({ workspace: root })
     expect(exitCode()).toBe(0)
     expect(kickBackgroundInitMock).toHaveBeenCalledTimes(1)
-    expect(kickBackgroundInitMock).toHaveBeenCalledWith(root)
+    expect(kickBackgroundInitMock).toHaveBeenCalledWith(root, { foreground: true })
     expect(waitForInitMock).toHaveBeenCalledWith(root)
     expect(consolaSuccessMock.mock.calls.some((c) => String(c[0]).includes("ready"))).toBe(true)
   })
@@ -255,11 +255,11 @@ describe("github-router index", () => {
     expect(kickBackgroundInitMock).toHaveBeenCalledTimes(0)
   })
 
-  test("foreground build defaults parallelism to core count (overridable)", async () => {
+  test("foreground build defaults parallelism to core count, capped at 16 (overridable)", async () => {
     freshnessScript = [{ verdict: "fresh" }]
     await run({ workspace: root })
     const cpus = (await import("node:os")).cpus().length
-    expect(process.env.GH_ROUTER_COLBERT_PARALLEL).toBe(String(cpus))
+    expect(process.env.GH_ROUTER_COLBERT_PARALLEL).toBe(String(Math.max(1, Math.min(cpus, 16))))
   })
 
   test("explicit GH_ROUTER_COLBERT_PARALLEL is respected", async () => {
@@ -354,23 +354,24 @@ describe("github-router index", () => {
     expect(populateServiceMock).toHaveBeenCalledTimes(0)
   })
 
-  test("auto + server unavailable → colgrep fallback", async () => {
+  test("auto never provisions the server — straight to colgrep", async () => {
     serviceProvisionableMock.mockReturnValue(true)
     provisionServerMock.mockResolvedValue({ reason: "no network" })
     freshnessScript = [{ verdict: "fresh" }]
     await run({ workspace: root })
     expect(exitCode()).toBe(0)
+    expect(provisionServerMock).toHaveBeenCalledTimes(0)
     expect(kickBackgroundInitMock).toHaveBeenCalledTimes(0)
-    expect(consolaWarnMock.mock.calls.some((c) => String(c[0]).includes("falling back"))).toBe(true)
   })
 
-  test("auto prefers service when actionable", async () => {
+  test("auto uses colgrep even when service is actionable", async () => {
     serviceProvisionableMock.mockReturnValue(true)
     provisionServerMock.mockResolvedValue({ path: "/tmp/fake-server" })
-    serviceFreshnessMock.mockResolvedValue({ verdict: "fresh", meta: null })
+    freshnessScript = [{ verdict: "building" }, { verdict: "fresh" }]
     await run({ workspace: root })
     expect(exitCode()).toBe(0)
-    expect(provisionServerMock).toHaveBeenCalledTimes(1)
-    expect(kickBackgroundInitMock).toHaveBeenCalledTimes(0)
+    expect(provisionServerMock).toHaveBeenCalledTimes(0)
+    expect(kickBackgroundInitMock).toHaveBeenCalledTimes(1)
+    expect(kickBackgroundInitMock).toHaveBeenCalledWith(root, { foreground: true })
   })
 })
