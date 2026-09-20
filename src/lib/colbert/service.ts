@@ -301,6 +301,33 @@ export class ServiceBusyError extends Error {
   }
 }
 
+/**
+ * Server-process death during a long populate/encode. Thrown (instead of a
+ * bare `fetch failed / ECONNREFUSED`) when the managed `next-plaid-api`
+ * child exits while the router still has work to send it. Carries the exit
+ * code, signal, and the captured stderr tail so the `index` command can
+ * print an actionable diagnostic instead of a generic connection error.
+ *
+ * Stderr is truncated server-side (never full source — the server only ever
+ * logs paths, not code) and truncated again here to the last 2 KB.
+ */
+export class ServerCrashedError extends Error {
+  readonly exitCode: number | null
+  readonly signal: string | null
+  readonly stderrTail: string
+  constructor(opts: { exitCode?: number | null; signal?: string | null; stderrTail?: string }) {
+    super(
+      `next-plaid server crashed during encode` +
+        (opts.exitCode !== undefined && opts.exitCode !== null ? ` (exit code ${opts.exitCode})` : "") +
+        (opts.signal ? ` (signal ${opts.signal})` : ""),
+    )
+    this.name = "ServerCrashedError"
+    this.exitCode = opts.exitCode ?? null
+    this.signal = opts.signal ?? null
+    this.stderrTail = (opts.stderrTail ?? "").slice(-2048)
+  }
+}
+
 function describeError(body: unknown): string {
   if (typeof body === "object" && body !== null) {
     const b = body as { code?: unknown; message?: unknown }
@@ -385,6 +412,15 @@ export interface ManagedServer {
   client: NextPlaidClient
   /** Graceful shutdown (SIGTERM, wait, SIGKILL escalation). */
   stop: () => Promise<void>
+  /**
+   * Managed child process (optional for backward-compat with test fakes).
+   * Callers use this to detect server death DURING a long populate — the
+   * startup path already gates on health, but a 30-minute encode can
+   * outlive the server (OOM / access violation / Windows commit limit).
+   */
+  process?: ChildProcess
+  /** Last 4 KB of server stderr (paths only, never source). */
+  stderrTail?: () => string
 }
 
 /** Find a free loopback port (TOCTOU-racy by nature; retry on collision). */
@@ -489,7 +525,15 @@ export async function startManagedServer(
         // Any HTTP answer (even unhealthy) proves the socket is live;
         // model load completes asynchronously — readiness follows.
         void h
-        if (h.ok) return { url, client, stop: () => stopServer(child) }
+        if (h.ok) {
+          return {
+            url,
+            client,
+            stop: () => stopServer(child),
+            process: child,
+            stderrTail: () => stderrTail,
+          }
+        }
       } catch {
         // Not listening yet — keep polling.
       }
@@ -582,7 +626,12 @@ export function serverParallelSessions(foreground = false): number {
   } catch {
     // keep default
   }
-  if (foreground) return Math.max(1, cpus)
+  // Foreground `index` is capped at 8 sessions (not all cores): each ONNX
+  // session duplicates model state (~100-200 MB) plus batch-queue buffers,
+  // so 16 sessions on a 16-core box can exceed 12 GB working set and trip
+  // Windows commit-charge limits / RADAR_PRE_LEAK_64 on large repos. 8 is
+  // still 2x the background share and 2x the colgrep default.
+  if (foreground) return Math.max(1, Math.min(cpus, 8))
   // Encode sessions duplicate model state; 25% keeps a background server
   // from saturating an interactive box (mirrors colbertParallelSessions).
   return Math.max(1, Math.floor(cpus * 0.25))

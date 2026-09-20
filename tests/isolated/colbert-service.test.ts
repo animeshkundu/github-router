@@ -198,9 +198,11 @@ describe("naming + sizing helpers", () => {
     expect(serverParallelSessions()).toBeGreaterThanOrEqual(1)
   })
 
-  test("serverParallelSessions foreground uses all cores", async () => {
+  test("serverParallelSessions foreground caps at 8 sessions", async () => {
     const os = await import("node:os")
-    expect(serverParallelSessions(true)).toBe(os.cpus().length)
+    // Capped at 8: each ONNX session duplicates model state, so uncapped
+    // all-core foreground encodes OOM large repos (Windows commit limit).
+    expect(serverParallelSessions(true)).toBe(Math.max(1, Math.min(os.cpus().length, 8)))
     expect(serverParallelSessions(false)).toBeLessThanOrEqual(os.cpus().length)
   })
 })

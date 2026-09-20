@@ -39,11 +39,28 @@ let dropCalls = 0
 let deleteMergeDelayMs = 0
 /** In-flight deferred merges (drained per test to avoid cross-test leaks). */
 const fakePendingMerges: Array<Promise<void>> = []
+/**
+ * Fake server child process for crash-path tests. Null = healthy server
+ * (default). Set to `{ exitCode: 1, ... }` to simulate a server that died
+ * mid-populate; `populateWorkspace` must then throw `ServerCrashedError`,
+ * not a bare connection error.
+ */
+let fakeProcess: {
+  exitCode: number | null
+  signalCode: string | null
+  once: (...args: Array<unknown>) => void
+  off: (...args: Array<unknown>) => void
+} | null = null
 
 mock.module("../../src/lib/colbert/service", () => ({
   indexNameForWorkspace: (ws: string) => `ws-mock-${ws.length}`,
   serverParallelSessions: () => 1,
   ServiceBusyError: class extends Error {},
+  ServerCrashedError: class extends Error {
+    exitCode: number | null = null;
+    signal: string | null = null;
+    stderrTail = "";
+  },
   startManagedServer: async (_opts: unknown) => {
     startCalls += 1
     if (failStart) throw new Error("fake spawn failure")
@@ -129,6 +146,9 @@ mock.module("../../src/lib/colbert/service", () => ({
         },
       },
       stop: async () => {},
+      ...(fakeProcess
+        ? { process: fakeProcess, stderrTail: () => "fake boom: OOM" }
+        : {}),
     }
   },
 }))
@@ -182,6 +202,7 @@ beforeEach(async () => {
   dropCalls = 0
   deleteMergeDelayMs = 0
   fakePendingMerges.length = 0
+  fakeProcess = null
   delete process.env.GH_ROUTER_SEMANTIC_BACKEND
   delete process.env.GH_ROUTER_NEXTPLAID_BIN
   await mkModelDir()
@@ -653,5 +674,28 @@ describe("slow delete merge (ordering hazard)", () => {
     expect(meta?.fileHashes?.["src/auth.ts"]).not.toBe(
       (await import("node:crypto")).createHash("sha256").update("export function alphaV2() { return 2 }\n").digest("hex"),
     )
+  })
+})
+
+describe("server crash during populate", () => {
+  beforeEach(() => {
+    process.env.GH_ROUTER_NEXTPLAID_BIN = process.execPath
+  })
+
+  test("dead server process throws ServerCrashedError, not a bare connection error", async () => {
+    const svcMod = (await import("../../src/lib/colbert/service")) as unknown as {
+      ServerCrashedError: new () => Error
+    }
+    const ws = fsSync.realpathSync(await fs.mkdtemp(path.join(TEST_HOME, "svccrash-")))
+    await fs.mkdir(path.join(ws, "src"), { recursive: true })
+    await fs.writeFile(
+      path.join(ws, "src", "auth.ts"),
+      "export function alphaOne() { return 1 }\n",
+    )
+    // Simulate a server that died (OOM / access violation) before the
+    // first encode batch: exit code already set on the child.
+    fakeProcess = { exitCode: 1, signalCode: null, once: () => {}, off: () => {} }
+    const err = await backend.populateWorkspace(ws, {}).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(svcMod.ServerCrashedError)
   })
 })

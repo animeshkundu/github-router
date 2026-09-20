@@ -341,7 +341,7 @@ cpu fallback → router-owned dir → PATH (cpu only). Detection is
 | `GH_ROUTER_NEXTPLAID_BIN=<path>` | Use this server binary as-is (skips provisioning). |
 | `GH_ROUTER_NEXTPLAID_VARIANT=cpu\|cuda` | Force a variant (skips GPU probing; test/operator seam). |
 | `GH_ROUTER_NEXTPLAID_CUDA=1` | Pass `--cuda` to an explicit binary (provisioned cuda binaries get it automatically; never passed without `--model`). |
-| `GH_ROUTER_NP_PARALLEL=<n>` | ONNX sessions (default: 25% of CPUs; encode sessions duplicate model state). |
+| `GH_ROUTER_NP_PARALLEL=<n>` | ONNX sessions (default: 25% of CPUs background, min(all cores, 8) foreground; encode sessions duplicate model state). |
 
 Minimum NVIDIA driver for the cuda variant: 570+ (CUDA 12.8).
 

@@ -1091,13 +1091,14 @@ async function applyParallelismCap(binary: string): Promise<void> {
 async function runInit(workspace: string): Promise<void> {
   const binary = colgrepBinaryPath()
   if (!existsSync(binary)) {
-    throw new Error("colgrep binary is missing")
+    throw new Error(`colgrep binary is missing (${binary})`)
   }
   // Fail closed if the ORT dylib is missing — otherwise the background
   // init would spawn colgrep, which silently downloads an UNVERIFIED ONNX
   // runtime when ORT_DYLIB_PATH can't be loaded.
-  if (!existsSync(colbertOrtDylibPath())) {
-    throw new Error("ColBERT ONNX runtime is missing")
+  const ortPath = colbertOrtDylibPath()
+  if (!existsSync(ortPath)) {
+    throw new Error(`ColBERT ONNX runtime is missing (${ortPath})`)
   }
   // Cap parallelism before the encode starts. The setting persists in our
   // data dir, so it also governs the reconcile a later `search` may run.
@@ -1212,7 +1213,10 @@ async function runInit(workspace: string): Promise<void> {
   } catch (err) {
     ok = false
     failureClass = "launch"
-    consola.error("colbert: init failed to launch:", err)
+    consola.error(
+      `colbert: init failed to launch (binary=${binary} ort=${colbertOrtDylibPath()} model=${canonicalColbertModelDir()}):`,
+      err,
+    )
   } finally {
     releaseInit(workspace)
   }

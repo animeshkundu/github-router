@@ -47,6 +47,7 @@ import { nextPlaidServerPromoted, MODEL_REVISION, type NextPlaidServerVariant } 
 import {
   indexNameForWorkspace,
   serverParallelSessions,
+  ServerCrashedError,
   ServiceBusyError,
   startManagedServer,
   type ManagedServer,
@@ -172,6 +173,26 @@ export function __resetServiceSingletonForTests(): void {
   _starting = null
 }
 
+/**
+ * Bounded batch-queue env for the managed server. Only sets a var when the
+ * operator has NOT set it explicitly (explicit wins). Foreground `index`
+ * gets tighter bounds than a background server: a 12K-file encode with
+ * upstream defaults (300 docs/batch, 256-slot encode queue) can grow
+ * queues faster than the merge worker drains them.
+ */
+export function serviceTuningEnv(foreground: boolean): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {}
+  const set = (key: string, fg: string, bg: string): void => {
+    if (process.env[key] !== undefined) return
+    out[key] = foreground ? fg : bg
+  }
+  set("MAX_BATCH_DOCUMENTS", "50", "100")
+  set("BATCH_CHANNEL_SIZE", "20", "50")
+  set("ENCODE_BATCH_CHANNEL_SIZE", "32", "64")
+  set("MAX_QUEUED_TASKS_PER_INDEX", "5", "10")
+  return out
+}
+
 /** Start (once) and health-check the server; null when unavailable. */
 export async function ensureServer(opts: { foreground?: boolean } = {}): Promise<ManagedServer | null> {
   if (_server) {
@@ -202,6 +223,13 @@ export async function ensureServer(opts: { foreground?: boolean } = {}): Promise
       env: {
         ORT_DYLIB_PATH: colbertOrtDylibPath(),
         PATH: `${ortDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        // Bound server-side batch queues for long foreground encodes.
+        // Upstream defaults (300 docs / 100-slot channels) let queues grow
+        // unbounded on 10K-file repos, which surfaces as RADAR_PRE_LEAK_64
+        // on Windows and eventual OOM. Smaller batches = lower peak memory
+        // at the cost of more merge rounds (throughput-neutral on CPU).
+        // Explicit GH_ROUTER_* overrides win (operator/test seam).
+        ...serviceTuningEnv(opts.foreground === true),
       },
       startupTimeoutMs: 120_000,
     })
@@ -644,6 +672,7 @@ export async function populateWorkspace(
   const timeout = setTimeout(() => ac.abort(), 30 * 60 * 1000)
   timeout.unref?.()
   const signal = opts.signal ? anySignal([opts.signal, ac.signal]) : ac.signal
+  let detachServerExit: (() => void) | null = null
   try {
     const files = await enumerateSourceFiles(rgPath, canonical, signal)
     const parseable = files.filter((f) => getLanguageKeyForPath(f) !== null)
@@ -700,7 +729,57 @@ export async function populateWorkspace(
 
     const svc = await ensureServer(opts.foreground === true ? { foreground: true } : undefined)
     if (!svc) throw new Error("service server unavailable")
-    await svc.client.ensureIndex(index, { nbits: 4 })
+
+    // Crash monitor: the server passed health at startup, but a 10K-file
+    // encode runs for minutes — long enough to OOM / hit Windows commit
+    // limits / trip RADAR_PRE_LEAK_64. Without this, a dead server
+    // surfaces as bare `fetch failed / ECONNREFUSED` with zero context.
+    let serverExit: { code: number | null; signal: string | null } | null = null
+    const onServerExit = (code: number | null, signal: string | null): void => {
+      serverExit ??= { code, signal }
+    }
+    svc.process?.once("exit", onServerExit)
+    detachServerExit = () => {
+      try {
+        svc.process?.off("exit", onServerExit)
+      } catch {
+        // best effort — listener cleanup must never throw
+      }
+    }
+    const serverStderr = (): string => {
+      try {
+        return svc.stderrTail?.() ?? ""
+      } catch {
+        return ""
+      }
+    }
+    const throwIfServerCrashed = (): void => {
+      if (serverExit) {
+        throw new ServerCrashedError({
+          exitCode: serverExit.code,
+          signal: serverExit.signal ?? undefined,
+          stderrTail: serverStderr(),
+        })
+      }
+      if (svc.process && svc.process.exitCode !== null && svc.process.exitCode !== undefined) {
+        throw new ServerCrashedError({
+          exitCode: svc.process.exitCode,
+          signal: svc.process.signalCode ?? undefined,
+          stderrTail: serverStderr(),
+        })
+      }
+    }
+    /** Run a server call; convert ECONNREFUSED into ServerCrashedError when the child is dead. */
+    const guarded = async <T>(fn: () => Promise<T>): Promise<T> => {
+      throwIfServerCrashed()
+      try {
+        return await fn()
+      } catch (err) {
+        throwIfServerCrashed()
+        throw err
+      }
+    }
+    await guarded(() => svc.client.ensureIndex(index, { nbits: 4 }))
 
     // Anchor: a hashes-match verdict is only trustworthy when the server
     // actually holds this index. A wiped server data dir with a surviving
@@ -774,27 +853,34 @@ export async function populateWorkspace(
     // unknown counts (hand-edited sidecars only — hashes and units are
     // always written together) are SKIPPED: stale units beat lost units.
     if (!hasBaseline) {
-      const existing = await svc.client
-        .health()
-        .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
-        .catch(() => undefined)
+      const existing = await guarded(() =>
+        svc.client
+          .health()
+          .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
+          .catch(() => undefined),
+      )
       if ((existing ?? 0) > 0) {
-        const dropped = await svc.client.dropIndex(index).catch(() => false)
+        const dropped = await guarded(() => svc.client.dropIndex(index)).catch(() => false)
         if (dropped) {
-          await svc.client.ensureIndex(index, { nbits: 4 })
+          await guarded(() => svc.client.ensureIndex(index, { nbits: 4 }))
         } else {
           consola.warn(`service-backend: index drop unsupported, per-file reset for ${canonical}`)
           for (const rel of changed) {
             if (signal.aborted) throw new Error("populate aborted")
-            await svc.client.deleteDocuments(index, "file = ?", [rel])
+            await guarded(() => svc.client.deleteDocuments(index, "file = ?", [rel]))
           }
-          await waitForIndexSettled(
-            svc.client,
-            index,
-            false,
-            { minWaitMs: 5000, ...(opts.settle ?? {}) },
-            signal,
-          )
+          try {
+            await waitForIndexSettled(
+              svc.client,
+              index,
+              false,
+              { minWaitMs: 5000, ...(opts.settle ?? {}) },
+              signal,
+            )
+          } catch (err) {
+            throwIfServerCrashed()
+            throw err
+          }
         }
       }
       if (signal.aborted) throw new Error("populate aborted")
@@ -802,24 +888,31 @@ export async function populateWorkspace(
       const deleteTargets = [...changed, ...removed].filter((rel) => (prevUnits[rel] ?? 0) > 0)
       const expectedDrop = deleteTargets.reduce((sum, rel) => sum + (prevUnits[rel] ?? 0), 0)
       if (deleteTargets.length > 0) {
-        const before = await svc.client
-          .health()
-          .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
-          .catch(() => undefined)
+        const before = await guarded(() =>
+          svc.client
+            .health()
+            .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
+            .catch(() => undefined),
+        )
         for (const rel of deleteTargets) {
           if (signal.aborted) throw new Error("populate aborted")
-          await svc.client.deleteDocuments(index, "file = ?", [rel])
+          await guarded(() => svc.client.deleteDocuments(index, "file = ?", [rel]))
         }
         // Fail closed on timeout (no sidecar write below): a late delete
         // merging after the updates would wipe the new units.
         if (expectedDrop > 0 && before !== undefined) {
-          await waitForDocCountDrop(
-            svc.client,
-            index,
-            before - expectedDrop,
-            { timeoutMs: 120_000, ...(opts.settle ?? {}) },
-            signal,
-          )
+          try {
+            await waitForDocCountDrop(
+              svc.client,
+              index,
+              before - expectedDrop,
+              { timeoutMs: 120_000, ...(opts.settle ?? {}) },
+              signal,
+            )
+          } catch (err) {
+            throwIfServerCrashed()
+            throw err
+          }
         }
         if (signal.aborted) throw new Error("populate aborted")
       }
@@ -837,16 +930,26 @@ export async function populateWorkspace(
     let units: Array<{ text: string; metadata: Record<string, unknown> }> = []
     let unitTotal = 0
     const fileUnitCounts: Record<string, number> = {}
+    let flushCount = 0
     const flush = async (): Promise<void> => {
       if (units.length === 0) return
       const batch = units
       units = []
-      await svc.client.updateDocuments(
-        index,
-        batch.map((u) => u.text),
-        batch.map((u) => u.metadata),
+      await guarded(() =>
+        svc.client.updateDocuments(
+          index,
+          batch.map((u) => u.text),
+          batch.map((u) => u.metadata),
+        ),
       )
       unitTotal += batch.length
+      flushCount += 1
+      // Periodic liveness probe on long encodes: a server that died
+      // mid-encode would otherwise surface 10 minutes later as a bare
+      // ECONNREFUSED. Probe every ~10 batches (~1K units).
+      if (flushCount % 10 === 0) {
+        await guarded(() => svc.client.health().then(() => undefined))
+      }
       opts.onProgress?.({
         phase: "encode",
         scanned: parseable.length,
@@ -897,13 +1000,19 @@ export async function populateWorkspace(
     // The server merges accepted writes asynchronously: wait for the queue
     // to settle before recording docCount, or searches served off this
     // populate observe the pre-merge state.
-    const docCount = await waitForIndexSettled(
-      svc.client,
-      index,
-      unitTotal > 0,
-      opts.settle ?? {},
-      signal,
-    )
+    let docCount: number | undefined
+    try {
+      docCount = await waitForIndexSettled(
+        svc.client,
+        index,
+        unitTotal > 0,
+        opts.settle ?? {},
+        signal,
+      )
+    } catch (err) {
+      throwIfServerCrashed()
+      throw err
+    }
     if (signal.aborted) throw new Error("populate aborted")
     // Merge sidecar state: current hashes/units for successfully processed
     // files, carried-over entries for files unreadable this run (retry
@@ -957,6 +1066,11 @@ export async function populateWorkspace(
     }
   } finally {
     clearTimeout(timeout)
+    try {
+      detachServerExit?.()
+    } catch {
+      // best effort — listener cleanup must never throw
+    }
   }
 }
 

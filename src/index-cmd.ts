@@ -4,9 +4,10 @@
  *
  * Phase 4a: drives the CURRENT colbert backend (foreground `init` with
  * progress). Phase 5: `auto` (default) prefers the persistent service
- * backend — foreground all-core encode with CUDA when a GPU is visible —
- * with TRUE DELTA indexing (only changed files are re-embedded); falls
- * back to colbert when the service is not actionable. `--backend` forces
+ * backend — foreground encode (capped at 8 ONNX sessions) with CUDA when
+ * a GPU is visible — with TRUE DELTA indexing (only changed files are
+ * re-embedded); falls back to colbert when the service is not actionable.
+ * `--backend` forces
  * `service` or `colbert`. The explicit invocation IS the opt-in — `--search` is not
  * required — but `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1` still hard-disables
  * (building an index that can never be served is pointless).
@@ -17,10 +18,12 @@
 
 import { defineCommand } from "citty";
 import consola from "consola";
+import { existsSync } from "node:fs";
 import * as os from "node:os";
 import process from "node:process";
 
 import { validateWorkspace } from "~/lib/code-search";
+import { ServerCrashedError } from "~/lib/colbert/service";
 import {
   colbertProjectDir,
   completedIndexOnDisk,
@@ -30,7 +33,13 @@ import {
   validateIndexIntegrity,
 } from "~/lib/colbert/index-store";
 import { registerColbertExitHandlers } from "~/lib/colbert/lifecycle";
-import { provisionColbert, provisionNextPlaidServer } from "~/lib/colbert/provision";
+import {
+  canonicalColbertModelDir,
+  colbertOrtDylibPath,
+  colgrepBinaryPath,
+  provisionColbert,
+  provisionNextPlaidServer,
+} from "~/lib/colbert/provision";
 import { kickBackgroundInit, waitForInit } from "~/lib/colbert/runner";
 import {
   ensureServerForeground,
@@ -347,6 +356,35 @@ export const indexCmd = defineCommand({
   },
 });
 
+/**
+ * Print a server crash with the captured stderr tail and actionable
+ * mitigations. Replaces the bare `fetch failed / ECONNREFUSED` the client
+ * used to surface when the `next-plaid-api` child died mid-encode.
+ */
+function printServerCrash(err: ServerCrashedError): void {
+  const where =
+    err.exitCode !== null && err.exitCode !== undefined
+      ? ` (exit code ${err.exitCode}${err.signal ? ` / ${err.signal}` : ""})`
+      : err.signal
+        ? ` (signal ${err.signal})`
+        : "";
+  consola.error(`index: service server crashed during encode${where}`);
+  const tail = err.stderrTail.trim().slice(-1500);
+  if (tail.length > 0) {
+    consola.error("Server stderr (last lines):");
+    for (const line of tail.split("\n").slice(-30)) {
+      consola.error(`  ${line}`);
+    }
+  } else {
+    consola.error("Server stderr: (empty — the process died without logging)");
+  }
+  consola.info("Suggestions:");
+  consola.info("  • Reduce parallelism: GH_ROUTER_NP_PARALLEL=4 github-router index --backend=service");
+  consola.info("  • Use the colgrep backend: github-router index --backend=colgrep");
+  consola.info("  • On Windows: increase the page file (System → Advanced → Virtual Memory)");
+  consola.info("  • For full logs, run the server manually with RUST_LOG=info");
+}
+
 async function runServiceIndex(
   workspace: string,
   opts: {
@@ -426,6 +464,8 @@ async function runServiceIndex(
       consola.error(
         `index: timed out after ${opts.timeoutMin}min — retry or raise --timeout`,
       );
+    } else if (err instanceof ServerCrashedError) {
+      printServerCrash(err);
     } else {
       consola.error("index: service build failed:", err);
     }
@@ -452,6 +492,28 @@ async function runColbertIndex(
     consola.warn(
       "index: last build failed; starting one bounded rebuild attempt",
     );
+  }
+
+  // Pre-flight: surface missing artifacts BEFORE kicking a build that
+  // would fail in 5s with a bare `init error`. The background init logs
+  // only the failure class, so a missing binary/ORT/model here would
+  // otherwise look like a colgrep bug.
+  const colgrepChecks = [
+    { name: "colgrep binary", path: colgrepBinaryPath() },
+    { name: "ORT runtime", path: colbertOrtDylibPath() },
+    { name: "model dir", path: canonicalColbertModelDir() },
+  ];
+  const missing = colgrepChecks.filter((c) => !existsSync(c.path));
+  if (missing.length > 0) {
+    for (const m of missing) {
+      consola.error(`index: missing ${m.name}: ${m.path}`);
+    }
+    consola.error(
+      "index: provisioning incomplete — re-run provisioning, then retry. " +
+        "On Windows, also verify vc_redist.x64 is installed and the AV has not quarantined colgrep.exe.",
+    );
+    process.exitCode = 1;
+    return;
   }
 
   consola.info(
@@ -483,9 +545,19 @@ async function runColbertIndex(
       v.verdict === "crashed" ||
       v.verdict === "corrupt"
     ) {
+      const meta = await readColbertMeta(workspace).catch(() => null);
+      const cls = meta?.failureClass ? ` (class=${meta.failureClass})` : "";
+      const attempts =
+        typeof meta?.failedAttempts === "number" ? ` after ${meta.failedAttempts} attempt(s)` : "";
       consola.error(
-        `index: build ended ${v.verdict} — lexical code search still works; see the proxy error log for the failure class`,
+        `index: build ended ${v.verdict}${cls}${attempts} — lexical code search still works; see ${PATHS.ERROR_LOG_PATH} for details`,
       );
+      if (meta?.failureClass === "launch") {
+        consola.error(
+          `index: launch failure — verify colgrep binary runs (${colgrepBinaryPath()} --version), ` +
+            `ORT runtime loads (${colbertOrtDylibPath()}), and model dir exists (${canonicalColbertModelDir()})`,
+        );
+      }
       process.exitCode = 1;
       return;
     }
