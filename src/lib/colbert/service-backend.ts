@@ -779,13 +779,43 @@ export async function populateWorkspace(
         })
       }
     }
-    /** Run a server call; convert ECONNREFUSED into ServerCrashedError when the child is dead. */
+    let lastContactAt = Date.now()
+    /**
+     * Run a server call; convert a dead server into ServerCrashedError.
+     *
+     * Race note: a loopback fetch fails in milliseconds while Node delivers
+     * the child's `exit` event / sets `exitCode` afterwards — so a bare
+     * re-check on catch LOSES to the fetch error every time (observed live:
+     * heartbeats passing, then `Unable to connect` from the next flush).
+     * On connection-shaped failures we therefore wait 1s for the exit
+     * bookkeeping to catch up, then confirm with a direct health probe: a
+     * live server means transient blip (rethrow original), a failing one
+     * means dead/wedged (formatted crash error, even when no exit was
+     * ever observed).
+     */
     const guarded = async <T>(fn: () => Promise<T>): Promise<T> => {
       throwIfServerCrashed()
       try {
-        return await fn()
+        const out = await fn()
+        lastContactAt = Date.now()
+        return out
       } catch (err) {
-        throwIfServerCrashed()
+        if (isConnectionError(err)) {
+          await delay(1000)
+          // Throws when the exit has now been observed.
+          throwIfServerCrashed()
+          const alive = await svc.client.health().then((h) => h.ok).catch(() => false)
+          if (!alive) {
+            throw new ServerCrashedError({
+              exitCode: svc.process?.exitCode ?? null,
+              signal: svc.process?.signalCode ?? undefined,
+              stderrTail: serverStderr(),
+              detail: `${crashDetail()} (exit not observed; server not responding)`,
+            })
+          }
+        } else {
+          throwIfServerCrashed()
+        }
         throw err
       }
     }
@@ -943,7 +973,8 @@ export async function populateWorkspace(
     const fileUnitCounts: Record<string, number> = {}
     crashDetail = () =>
       `units sent=${unitTotal} files parsed=${filesParsed}/${changed.length} ` +
-      `elapsed=${Math.round((Date.now() - populateStartMs) / 1000)}s`
+      `elapsed=${Math.round((Date.now() - populateStartMs) / 1000)}s ` +
+      `last contact ${Math.round((Date.now() - lastContactAt) / 1000)}s ago`
     // Heartbeat during the extract phase: tree-sitter parsing of 10K files
     // takes minutes and logs NOTHING (progress fires only on batch flush),
     // so a server that died early went unnoticed until the next flush —
@@ -1116,6 +1147,26 @@ export async function populateWorkspace(
       // best effort — timer cleanup must never throw
     }
   }
+}
+
+/** True for loopback-connection failures (server gone), not HTTP errors. */
+function isConnectionError(err: unknown): boolean {
+  const cause = (err as { cause?: unknown })?.cause
+  const text = [
+    err instanceof Error ? err.message : String(err),
+    cause instanceof Error ? cause.message : "",
+  ].join(" ")
+  return /econnrefused|unable to connect|fetch failed|econnreset|socket hang up|network[^a-z]*unreachable/i.test(
+    text,
+  )
+}
+
+/** Sleep that never keeps the event loop alive. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms)
+    t.unref?.()
+  })
 }
 
 /** Combine abort signals (cleanup listeners once settled). */

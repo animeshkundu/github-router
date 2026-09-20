@@ -51,6 +51,10 @@ let fakeProcess: {
   once: (...args: Array<unknown>) => void
   off: (...args: Array<unknown>) => void
 } | null = null
+/** When true, the fake server reports unhealthy (for no-exit-observed tests). */
+let fakeUnhealthy = false
+/** When set, updateDocuments throws this (simulates a dead socket). */
+let fakeUpdateError: Error | null = null
 
 mock.module("../../src/lib/colbert/service", () => ({
   indexNameForWorkspace: (ws: string) => `ws-mock-${ws.length}`,
@@ -73,7 +77,7 @@ mock.module("../../src/lib/colbert/service", () => ({
       url: "http://127.0.0.1:9",
       client: {
         health: async () => ({
-          ok: true,
+          ok: !fakeUnhealthy,
           indices: [...fakeIndices.entries()].map(([name, docs]) => ({
             name,
             num_documents: docs.length,
@@ -95,6 +99,7 @@ mock.module("../../src/lib/colbert/service", () => ({
           documents: Array<string>,
           metadata: Array<Record<string, unknown>>,
         ) => {
+          if (fakeUpdateError) throw fakeUpdateError
           updateCalls += documents.length
           const docs = fakeIndices.get(name) ?? []
           documents.forEach((text, i) => docs.push({ text, metadata: metadata[i] ?? {} }))
@@ -208,6 +213,8 @@ beforeEach(async () => {
   deleteMergeDelayMs = 0
   fakePendingMerges.length = 0
   fakeProcess = null
+  fakeUnhealthy = false
+  fakeUpdateError = null
   delete process.env.GH_ROUTER_SEMANTIC_BACKEND
   delete process.env.GH_ROUTER_NEXTPLAID_BIN
   await mkModelDir()
@@ -705,5 +712,40 @@ describe("server crash during populate", () => {
     // Crash context is plumbed through (this early crash fires before the
     // encode counters exist, so only elapsed is present here).
     expect((err as { detail: string }).detail).toMatch(/elapsed=/)
+  })
+
+  test("connection error with no exit observed + failing health throws ServerCrashedError", async () => {
+    const svcMod = (await import("../../src/lib/colbert/service")) as unknown as {
+      ServerCrashedError: new () => Error
+    }
+    const ws = fsSync.realpathSync(await fs.mkdtemp(path.join(TEST_HOME, "svccrashrace-")))
+    await fs.mkdir(path.join(ws, "src"), { recursive: true })
+    await fs.writeFile(
+      path.join(ws, "src", "auth.ts"),
+      "export function alphaOne() { return 1 }\n",
+    )
+    // The race: fetch fails BEFORE Node delivers the child exit event, so
+    // exitCode is still null. Health also fails → dead/wedged server.
+    fakeProcess = { exitCode: null, signalCode: null, once: () => {}, off: () => {} }
+    fakeUpdateError = new Error("Unable to connect. Is the computer able to access the url?")
+    fakeUnhealthy = true
+    const err = await backend.populateWorkspace(ws, {}).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(svcMod.ServerCrashedError)
+    expect((err as { detail: string }).detail).toMatch(/exit not observed/)
+  })
+
+  test("connection error with healthy server rethrows the original error", async () => {
+    const ws = fsSync.realpathSync(await fs.mkdtemp(path.join(TEST_HOME, "svccrashblip-")))
+    await fs.mkdir(path.join(ws, "src"), { recursive: true })
+    await fs.writeFile(
+      path.join(ws, "src", "auth.ts"),
+      "export function alphaOne() { return 1 }\n",
+    )
+    // Transient blip: socket fails once but the server is alive (health
+    // ok, process running) → the original error surfaces, not a crash.
+    fakeProcess = { exitCode: null, signalCode: null, once: () => {}, off: () => {} }
+    fakeUpdateError = new Error("Unable to connect. Is the computer able to access the url?")
+    const err = await backend.populateWorkspace(ws, {}).catch((e: unknown) => e)
+    expect(err).toBe(fakeUpdateError)
   })
 })

@@ -465,8 +465,14 @@ async function runServiceIndex(
       consola.error(
         `index: timed out after ${opts.timeoutMin}min — retry or raise --timeout`,
       );
-    } else if (err instanceof ServerCrashedError) {
-      printServerCrash(err);
+    } else if (
+      err instanceof ServerCrashedError ||
+      (err as { name?: unknown })?.name === "ServerCrashedError"
+    ) {
+      // Name fallback: tsdown code-splitting could (in theory) duplicate
+      // the class across chunks, breaking instanceof while the shape stays
+      // identical. Either way the formatted output is correct.
+      printServerCrash(err as ServerCrashedError);
     } else {
       consola.error("index: service build failed:", err);
     }
