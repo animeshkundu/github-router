@@ -18,9 +18,44 @@ import path from "node:path"
 import * as realProvision from "~/lib/colbert/provision"
 
 const provisionColbertMock = mock(async () => ({ status: "ready" as const }))
+const provisionServerMock = mock(
+  async (_variant: string): Promise<{ path?: string; reason?: string }> => ({
+    path: "/tmp/fake-server",
+  }),
+)
 const kickBackgroundInitMock = mock((_workspace: string) => {})
 const waitForInitMock = mock(async (_workspace: string) => {})
 const registerExitHandlersMock = mock(() => {})
+const semanticBackendMock = mock(() => "colgrep")
+const serviceProvisionableMock = mock(() => false)
+const selectVariantMock = mock(async () => "cpu")
+const serviceFreshnessMock = mock(
+  async (_workspace: string): Promise<{ verdict: string; meta: null }> => ({
+    verdict: "fresh",
+    meta: null,
+  }),
+)
+const populateServiceMock = mock(
+  async (
+    _workspace: string,
+    _opts: unknown,
+  ): Promise<{
+    status: string
+    scanned: number
+    unchanged: number
+    updatedFiles: number
+    removedFiles: number
+    units: number
+  }> => ({
+    status: "ready",
+    scanned: 0,
+    unchanged: 0,
+    updatedFiles: 0,
+    removedFiles: 0,
+    units: 0,
+  }),
+)
+const stopServerMock = mock(async () => {})
 
 // Scripted freshness sequence (shifted per call).
 let freshnessScript: Array<{ verdict: string }> = []
@@ -40,6 +75,17 @@ mock.module("~/lib/colbert/provision", () => ({
   // provisionColbert breaks its named imports.
   ...realProvision,
   provisionColbert: provisionColbertMock,
+  provisionNextPlaidServer: provisionServerMock,
+}))
+
+mock.module("~/lib/colbert/service-backend", () => ({
+  semanticBackend: semanticBackendMock,
+  serviceBackendProvisionable: serviceProvisionableMock,
+  selectServerVariant: selectVariantMock,
+  serviceFreshness: serviceFreshnessMock,
+  populateWorkspace: populateServiceMock,
+  ensureServerForeground: async () => ({ url: "http://127.0.0.1:9" }),
+  stopServiceServer: stopServerMock,
 }))
 
 mock.module("~/lib/colbert/runner", () => ({
@@ -101,9 +147,16 @@ beforeEach(() => {
   freshnessScript = []
   for (const m of [
     provisionColbertMock,
+    provisionServerMock,
     kickBackgroundInitMock,
     waitForInitMock,
     registerExitHandlersMock,
+    semanticBackendMock,
+    serviceProvisionableMock,
+    selectVariantMock,
+    serviceFreshnessMock,
+    populateServiceMock,
+    stopServerMock,
     freshnessMock,
     consolaInfoMock,
     consolaWarnMock,
@@ -115,6 +168,20 @@ beforeEach(() => {
   }
   delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
   delete process.env.GH_ROUTER_COLBERT_PARALLEL
+  // Scripted service defaults: colgrep path unless a test opts into service.
+  semanticBackendMock.mockReturnValue("colgrep")
+  serviceProvisionableMock.mockReturnValue(false)
+  selectVariantMock.mockResolvedValue("cpu")
+  provisionServerMock.mockResolvedValue({ path: "/tmp/fake-server" })
+  serviceFreshnessMock.mockResolvedValue({ verdict: "fresh", meta: null })
+  populateServiceMock.mockResolvedValue({
+    status: "ready",
+    scanned: 0,
+    unchanged: 0,
+    updatedFiles: 0,
+    removedFiles: 0,
+    units: 0,
+  })
 })
 
 afterEach(() => {
@@ -200,5 +267,110 @@ describe("github-router index", () => {
     freshnessScript = [{ verdict: "fresh" }]
     await run({ workspace: root })
     expect(process.env.GH_ROUTER_COLBERT_PARALLEL).toBe("2")
+  })
+
+  test("invalid --backend → exit 2, no side effects", async () => {
+    await run({ workspace: root, backend: "gpu" })
+    expect(process.exitCode).toBe(2)
+    expect(provisionColbertMock).toHaveBeenCalledTimes(0)
+  })
+
+  test("--backend=colgrep forces colgrep even when service actionable", async () => {
+    serviceProvisionableMock.mockReturnValue(true)
+    freshnessScript = [{ verdict: "fresh" }]
+    await run({ workspace: root, backend: "colgrep" })
+    expect(exitCode()).toBe(0)
+    expect(provisionServerMock).toHaveBeenCalledTimes(0)
+    expect(kickBackgroundInitMock).toHaveBeenCalledTimes(0)
+  })
+
+  test("--backend=service fresh → success via service path, no colgrep kick", async () => {
+    serviceFreshnessMock.mockResolvedValue({ verdict: "fresh", meta: null })
+    await run({ workspace: root, backend: "service" })
+    expect(exitCode()).toBe(0)
+    expect(provisionColbertMock).toHaveBeenCalledTimes(1)
+    expect(kickBackgroundInitMock).toHaveBeenCalledTimes(0)
+    expect(populateServiceMock).toHaveBeenCalledTimes(0)
+    expect(consolaSuccessMock.mock.calls.some((c) => String(c[0]).includes("already fresh"))).toBe(true)
+  })
+
+  test("--backend=service --full rebuilds even when fresh", async () => {
+    serviceFreshnessMock.mockResolvedValue({ verdict: "fresh", meta: null })
+    await run({ workspace: root, backend: "service", full: true })
+    expect(exitCode()).toBe(0)
+    expect(populateServiceMock).toHaveBeenCalledTimes(1)
+    const opts = populateServiceMock.mock.calls[0][1] as Record<string, unknown>
+    expect(opts.full).toBe(true)
+  })
+
+  test("--backend=service stale → delta populate with foreground + progress", async () => {
+    serviceFreshnessMock.mockResolvedValue({ verdict: "stale", meta: null })
+    populateServiceMock.mockResolvedValue({
+      status: "ready",
+      scanned: 10,
+      unchanged: 9,
+      updatedFiles: 1,
+      removedFiles: 0,
+      units: 5,
+    })
+    await run({ workspace: root, backend: "service" })
+    expect(exitCode()).toBe(0)
+    const opts = populateServiceMock.mock.calls[0][1] as Record<string, unknown>
+    expect(opts.full).toBe(false)
+    expect(opts.foreground).toBe(true)
+    expect(consolaSuccessMock.mock.calls.some((c) => String(c[0]).includes("delta"))).toBe(true)
+    // The persistent server must be stopped or the CLI never exits.
+    expect(stopServerMock).toHaveBeenCalledTimes(1)
+  })
+
+  test("--backend=service --full forwards full rebuild", async () => {
+    serviceFreshnessMock.mockResolvedValue({ verdict: "stale", meta: null })
+    await run({ workspace: root, backend: "service", full: true })
+    expect(exitCode()).toBe(0)
+    const opts = populateServiceMock.mock.calls[0][1] as Record<string, unknown>
+    expect(opts.full).toBe(true)
+  })
+
+  test("--backend=service --dry-run classifies without building", async () => {
+    populateServiceMock.mockResolvedValue({
+      status: "dry-run",
+      scanned: 10,
+      unchanged: 8,
+      updatedFiles: 2,
+      removedFiles: 0,
+      units: 0,
+    })
+    await run({ workspace: root, backend: "service", dryRun: true })
+    expect(exitCode()).toBe(0)
+    const opts = populateServiceMock.mock.calls[0][1] as Record<string, unknown>
+    expect(opts.dryRun).toBe(true)
+    expect(serviceFreshnessMock).toHaveBeenCalledTimes(0)
+  })
+
+  test("explicit service + server unavailable → exit 1 (fail closed)", async () => {
+    provisionServerMock.mockResolvedValue({ reason: "no network" })
+    await run({ workspace: root, backend: "service" })
+    expect(process.exitCode).toBe(1)
+    expect(populateServiceMock).toHaveBeenCalledTimes(0)
+  })
+
+  test("auto + server unavailable → colgrep fallback", async () => {
+    serviceProvisionableMock.mockReturnValue(true)
+    provisionServerMock.mockResolvedValue({ reason: "no network" })
+    freshnessScript = [{ verdict: "fresh" }]
+    await run({ workspace: root })
+    expect(exitCode()).toBe(0)
+    expect(kickBackgroundInitMock).toHaveBeenCalledTimes(0)
+    expect(consolaWarnMock.mock.calls.some((c) => String(c[0]).includes("falling back"))).toBe(true)
+  })
+
+  test("auto prefers service when actionable", async () => {
+    serviceProvisionableMock.mockReturnValue(true)
+    provisionServerMock.mockResolvedValue({ path: "/tmp/fake-server" })
+    serviceFreshnessMock.mockResolvedValue({ verdict: "fresh", meta: null })
+    await run({ workspace: root })
+    expect(exitCode()).toBe(0)
+    expect(provisionServerMock).toHaveBeenCalledTimes(1)
+    expect(kickBackgroundInitMock).toHaveBeenCalledTimes(0)
   })
 })

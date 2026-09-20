@@ -72,6 +72,7 @@ describe("NextPlaidClient protocol", () => {
         status: "healthy",
         indices: [{ name: "ws-1", num_documents: 10, num_embeddings: 300, dimension: 48 }],
         model: { name: "LateOn-Code-edge" },
+        updates: [{ index: "ws-1", status: "running" }],
       },
     ]
     const c = new NextPlaidClient(mockBase)
@@ -80,6 +81,7 @@ describe("NextPlaidClient protocol", () => {
     expect(h.indices).toHaveLength(1)
     expect(h.indices[0].num_documents).toBe(10)
     expect(h.model).toBe("LateOn-Code-edge")
+    expect(h.updates).toEqual([{ index: "ws-1", status: "running" }])
   })
 
   test("health degrades on non-200 / garbage", async () => {
@@ -123,6 +125,14 @@ describe("NextPlaidClient protocol", () => {
     await c.deleteDocuments("ws-1", "file = ?", ["gone"])
     canned["DELETE /indices/ws-1/documents"] = [503, {}]
     await expect(c.deleteDocuments("ws-1", "x = ?", [])).rejects.toBeInstanceOf(ServiceBusyError)
+  })
+
+  test("dropIndex: 200/404 → true; 405 → false (fallback)", async () => {
+    const c = new NextPlaidClient(mockBase)
+    for (const [code, want] of [[200, true], [404, true], [405, false]] as const) {
+      canned["DELETE /indices/ws-1"] = [code, {}]
+      expect(await c.dropIndex("ws-1")).toBe(want)
+    }
   })
 
   test("search maps hits, drops file-less rows, 404 → []", async () => {
@@ -183,8 +193,15 @@ describe("naming + sizing helpers", () => {
   test("serverParallelSessions honors env, defaults to 25%", () => {
     process.env.GH_ROUTER_NP_PARALLEL = "3"
     expect(serverParallelSessions()).toBe(3)
+    expect(serverParallelSessions(true)).toBe(3)
     delete process.env.GH_ROUTER_NP_PARALLEL
     expect(serverParallelSessions()).toBeGreaterThanOrEqual(1)
+  })
+
+  test("serverParallelSessions foreground uses all cores", async () => {
+    const os = await import("node:os")
+    expect(serverParallelSessions(true)).toBe(os.cpus().length)
+    expect(serverParallelSessions(false)).toBeLessThanOrEqual(os.cpus().length)
   })
 })
 

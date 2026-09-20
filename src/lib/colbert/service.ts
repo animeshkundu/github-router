@@ -51,6 +51,16 @@ export interface ServiceHealth {
     dimension: number
   }>
   model?: string
+  /**
+   * Server-side batch queue (`running` → `complete`). Update batches show
+   * up here; delete batches do NOT reliably (only the doc count reveals
+   * a merged delete) — so deletes are gated on counts, updates on this
+   * queue + count stability. Absent on servers that omit the field.
+   */
+  updates: Array<{
+    index: string
+    status: string
+  }>
 }
 
 interface ApiSearchResponse {
@@ -104,7 +114,7 @@ export class NextPlaidClient {
   async health(): Promise<ServiceHealth> {
     const { status, body } = await fetchJson(`${this.baseUrl}/health`, {}, this.timeoutMs)
     if (status !== 200 || typeof body !== "object" || body === null) {
-      return { ok: false, indices: [] }
+      return { ok: false, indices: [], updates: [] }
     }
     const b = body as {
       status?: string
@@ -115,6 +125,7 @@ export class NextPlaidClient {
         dimension?: number
       }>
       model?: { name?: string }
+      updates?: Array<{ index?: string; name?: string; status?: string }>
     }
     return {
       ok: b.status === "healthy",
@@ -125,12 +136,15 @@ export class NextPlaidClient {
         dimension: typeof i.dimension === "number" ? i.dimension : 0,
       })),
       model: b.model?.name,
+      updates: (b.updates ?? []).map((u) => ({
+        index: typeof u.index === "string" ? u.index : typeof u.name === "string" ? u.name : "",
+        status: typeof u.status === "string" ? u.status : "",
+      })),
     }
   }
 
   /** Declare an index (idempotent: 409 taken is success). */
-  async ensureIndex(
-    name: string,
+  async ensureIndex(    name: string,
     config: { nbits?: number; pool_factor?: number; start_from_scratch?: number } = {},
   ): Promise<void> {
     const { status, body } = await fetchJson(
@@ -183,6 +197,23 @@ export class NextPlaidClient {
     throw new Error(
       `update ${index} failed: HTTP ${status} (${describeError(body)})`,
     )
+  }
+
+  /**
+   * Drop an entire index. Returns true when the index is guaranteed absent
+   * afterwards (dropped, or never existed). Returns false when the server
+   * does not support the operation (405/501) or reports an error — the
+   * caller falls back to per-file deletes. Verified against v1.7.0:
+   * `{"deleted":true}` with HTTP 200.
+   */
+  async dropIndex(name: string): Promise<boolean> {
+    const { status } = await fetchJson(
+      `${this.baseUrl}/indices/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+      this.timeoutMs,
+    )
+    if (status === 200 || status === 201 || status === 204 || status === 404) return true
+    return false
   }
 
   /** Delete by SQL predicate (batched server-side, 202 accepted). */
@@ -542,7 +573,7 @@ async function stopServer(child: ChildProcess): Promise<void> {
 }
 
 /** CPU-aware default parallelism for the managed server. */
-export function serverParallelSessions(): number {
+export function serverParallelSessions(foreground = false): number {
   const raw = Number(process.env.GH_ROUTER_NP_PARALLEL)
   if (Number.isSafeInteger(raw) && raw > 0) return raw
   let cpus = 4
@@ -551,6 +582,7 @@ export function serverParallelSessions(): number {
   } catch {
     // keep default
   }
+  if (foreground) return Math.max(1, cpus)
   // Encode sessions duplicate model state; 25% keeps a background server
   // from saturating an interactive box (mirrors colbertParallelSessions).
   return Math.max(1, Math.floor(cpus * 0.25))
