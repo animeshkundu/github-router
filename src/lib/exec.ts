@@ -4,8 +4,11 @@
  * Why this module exists: on Windows, npm-installed CLIs (`claude`,
  * `npm`, `codex`) are `.cmd`/`.bat` shims. Node's `execFile`/`spawn`
  * with `shell:false` cannot launch them (CreateProcess only resolves
- * `.exe`), so callers must go through `cmd.exe` (`shell:true`). That in
- * turn opens two hazards this module closes:
+ * `.exe`), so callers must invoke `cmd.exe` explicitly. Using
+ * `shell:true` delegates quoting back to the runtime and breaks absolute shim
+ * paths containing spaces, so this module builds one verified `/s /c`
+ * envelope and asks CreateProcess to pass it verbatim. That opens two hazards
+ * this module closes:
  *
  *   1. **Metacharacter injection** (`& | < > ^ ( ) ! %`). A naive
  *      "quote only tokens with spaces" scheme lets `pkg@latest&calc`
@@ -204,16 +207,48 @@ export interface ExecInvocation {
   command: string
   args: string[]
   shell: boolean
+  /** Pass our already-quoted cmd.exe payload directly to CreateProcess. */
+  windowsVerbatimArguments?: boolean
+}
+
+function assertSafeBatchToken(value: string, kind: "executable" | "argument"): void {
+  const hasControl = [...value].some((char) => char.charCodeAt(0) < 0x20)
+  if (hasControl || value.includes('"') || value.includes("%")) {
+    throw new Error(
+      `buildExecInvocation: ${kind} contains a character that cannot be `
+        + "safely passed through cmd.exe; refusing to build the command.",
+    )
+  }
+}
+
+function quoteBatchArg(arg: string): string {
+  assertSafeBatchToken(arg, "argument")
+  // `/s` removes the envelope's outer quotes before cmd parses this token.
+  // Quotes keep spaces, parentheses, and `!` (with /v:OFF) literal; the four
+  // always-active operators and the caret itself still need caret escaping.
+  return `"${arg.replaceAll("^", "^^").replace(/[&|<>]/g, "^$&")}"`
+}
+
+function windowsCmdExe(): string {
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT
+  return systemRoot
+    ? path.win32.join(systemRoot, "System32", "cmd.exe")
+    : (process.env.ComSpec ?? "cmd.exe")
 }
 
 /**
  * Build the platform-correct `spawn` invocation for a command given as
  * an argv array. Pure / unit-testable (no spawn).
  *
- *   - win32 → a single caret/argv-quoted command string + `shell:true`
- *     + empty args array (the empty array avoids the DEP0190 warning
- *     that fires when args and `shell:true` are combined). `cmd[0]`
- *     should already be an absolute path from `resolveExecutable`.
+ *   - win32 native executables (`.exe`/`.com`) → direct spawn with split
+ *     argv. This avoids cmd.exe quoting and correctly handles absolute paths
+ *     containing spaces (for example `C:\\Program Files\\Git\\...\\git.exe`).
+ *   - win32 batch shims (`.cmd`/`.bat`) → explicit cmd.exe with `shell:false`
+ *     and one verbatim `/s /c` envelope. Every token is quoted, so shell
+ *     metacharacters are data; `%`, quotes, and controls fail closed.
+ *   - unresolved win32 bare commands retain the legacy quoted `shell:true`
+ *     path. Normal callers resolve first, so this is only a compatibility
+ *     fallback.
  *   - posix → `(cmd[0], cmd.slice(1))` with `shell:false` — no shell,
  *     no injection surface.
  */
@@ -223,6 +258,28 @@ export function buildExecInvocation(
 ): ExecInvocation {
   if (cmd.length === 0) throw new Error("buildExecInvocation: empty command")
   if (platform === "win32") {
+    const ext = path.extname(cmd[0]).toLowerCase()
+    if (ext === ".exe" || ext === ".com") {
+      return { command: cmd[0], args: cmd.slice(1), shell: false }
+    }
+    if (ext === ".cmd" || ext === ".bat") {
+      if (!path.win32.isAbsolute(cmd[0])) {
+        throw new Error(
+          "buildExecInvocation: Windows batch executable must be an absolute path",
+        )
+      }
+      assertSafeBatchToken(cmd[0], "executable")
+      const line = `""${cmd[0]}"${cmd
+        .slice(1)
+        .map((arg) => ` ${quoteBatchArg(arg)}`)
+        .join("")}"`
+      return {
+        command: windowsCmdExe(),
+        args: ["/d", "/s", "/v:OFF", "/c", line],
+        shell: false,
+        windowsVerbatimArguments: true,
+      }
+    }
     return { command: cmd.map(quoteWinArg).join(" "), args: [], shell: true }
   }
   return { command: cmd[0], args: cmd.slice(1), shell: false }
@@ -234,6 +291,8 @@ export interface RunOpts {
   timeoutMs?: number
   /** Extra env to merge over the parent env for the child. */
   env?: NodeJS.ProcessEnv
+  /** Abort the command and kill its process tree when the signal fires. */
+  signal?: AbortSignal
   /**
    * Byte ceiling on captured stdout. Defaults to {@link DEFAULT_CAPTURE_CAP}.
    *
@@ -293,7 +352,8 @@ function runInternal(
   stdoutMode: "pipe" | "inherit" | "ignore",
   opts: RunOpts,
 ): Promise<RunResult> {
-  const { command, args, shell } = buildExecInvocation(cmd)
+  const { command, args, shell, windowsVerbatimArguments } =
+    buildExecInvocation(cmd)
   return new Promise<RunResult>((resolve, reject) => {
     let child: ReturnType<typeof spawn>
     try {
@@ -301,6 +361,7 @@ function runInternal(
         cwd: opts.cwd,
         env: opts.env ?? process.env,
         shell,
+        windowsVerbatimArguments,
         windowsHide: true,
         stdio: [
           "ignore",
@@ -337,6 +398,9 @@ function runInternal(
         }, opts.timeoutMs)
       : undefined
     timer?.unref?.()
+    const onAbort = () => killTree(child.pid)
+    if (opts.signal?.aborted) onAbort()
+    else opts.signal?.addEventListener("abort", onAbort, { once: true })
 
     child.stdout?.on("data", (c: Buffer) => {
       // Past the cap: keep draining the pipe, stop growing the string. The
@@ -379,6 +443,7 @@ function runInternal(
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
+      opts.signal?.removeEventListener("abort", onAbort)
       // Flush the decoders' held-back bytes.
       //
       // NOT flushed on the truncated path: the cap deliberately cuts mid-byte-
@@ -396,6 +461,7 @@ function runInternal(
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
+      opts.signal?.removeEventListener("abort", onAbort)
       reject(err)
     })
     child.on("close", (code) => finish(code))

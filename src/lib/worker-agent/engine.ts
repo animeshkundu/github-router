@@ -549,6 +549,7 @@ async function runWorkerAgentOnce(
             planState,
             isolated: useWorktree,
             searchEnabled: state.searchEnabled === true,
+            bluebirdEnabled: state.bluebirdEnabled === true,
           })
 
     // Step 7: Agent. `streamFn` is the routing override (per Pi docs
@@ -563,7 +564,11 @@ async function runWorkerAgentOnce(
     // serialization source.)
     const agentOptions: ConstructorParameters<typeof Agent>[0] = {
       initialState: {
-        systemPrompt: systemPromptFor(opts.mode, state.searchEnabled === true),
+        systemPrompt: systemPromptFor(
+          opts.mode,
+          state.searchEnabled === true,
+          state.bluebirdEnabled === true,
+        ),
         model: makeModelShim(resolved.modelId),
         thinkingLevel: resolved.thinking,
         tools,

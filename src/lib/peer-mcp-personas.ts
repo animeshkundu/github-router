@@ -647,10 +647,11 @@ export function buildPeerAwarenessSnippet(opts: {
    *  Absent/`"standard"` preserves the full standard surface. Same field as
    *  `NativeAgentAvailability.profile` in claude-md-injection.ts. */
   profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
-  /** Whether ColBERT semantic code search is enabled for this launch. When
-   *  false/absent the `code` tool is lexical-only, so the snippet describes
-   *  lexical-first discovery and never names semantic search. */
+  /** Whether local ColBERT semantic search or Bluebird semantic routing is
+   *  available for this launch. When false/absent the `code` tool is lexical-only. */
   semanticSearchAvailable?: boolean
+  /** Whether Bluebird owns semantic and lexical modes for this launch. */
+  bluebirdEnabled?: boolean
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
@@ -676,7 +677,7 @@ export function buildPeerAwarenessSnippet(opts: {
       "",
       "Max native roster: `Explore` discovers broadly; `Plan` structures cross-boundary changes; `general-purpose` owns bounded mixed execution; `implementer` writes a settled change; `reviewer` verifies against the repository and runtime; `brainstorm` explores materially different approaches; `peer-review-coordinator` synthesizes multiple distinct fresh-context lenses. Configured models are deliberate role defaults.",
       `Available cold-start peers under \`mcp__${peersKey}__*\`: ${personas || "none"}. They cannot inspect the repository or transcript and evaluate only the supplied artifact, constraints, and images. Their tool descriptions state the exact lens and boundary. Use the native \`reviewer\` when navigation, commands, tests, or reproduction are required; a peer suits a self-contained artifact. The coordinator has peer tools only and cannot gather missing repository context.`,
-      `\`mcp__${searchKey}__code\` provides ${opts.semanticSearchAvailable === true ? "semantic-first" : "lexical"} code search and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is transcript-aware, primary-lead-only, and unavailable to native subagents and browse workers; it can detect framing drift but is not independent verification.${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
+      `\`mcp__${searchKey}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search (failures stay visible with no local fallback)" : opts.semanticSearchAvailable === true ? "local ColBERT semantic-first search with lexical fallback" : "local lexical search"} and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is transcript-aware, primary-lead-only, and unavailable to native subagents and browse workers; it can detect framing drift but is not independent verification.${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
     ].join("\n")
   }
   if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
@@ -705,9 +706,11 @@ export function buildPeerAwarenessSnippet(opts: {
     const astraClause = opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? ` \`mcp__${fastPeersKey}__astra\` is GPT-6 Astra (${astraDescriptor}), an expensive terminal escalation consultant available to the lead only for hardest dead ends.`
       : ""
-    const searchClause = opts.semanticSearchAvailable === true
-      ? `\`mcp__${fastSearchKey}__code\` is semantic-first code search (meaning-ranked; start lexical with mode:"lexical"/"exact" for symbols, filenames, errors, and config keys, then semantic for concepts) and \`mcp__${fastSearchKey}__web\` surfaces citable sources.`
-      : `\`mcp__${fastSearchKey}__code\` is lexical code search (mode:"lexical"/"exact" for symbols, filenames, errors, and config keys; no model call) and \`mcp__${fastSearchKey}__web\` surfaces citable sources.`
+    const searchClause = opts.bluebirdEnabled === true
+      ? `\`mcp__${fastSearchKey}__code\` uses Bluebird for semantic and lexical modes over the checked-out Azure DevOps repository; Bluebird failures stay visible with no local fallback, while exact/regex/AST stay local. \`mcp__${fastSearchKey}__web\` surfaces citable sources.`
+      : opts.semanticSearchAvailable === true
+        ? `\`mcp__${fastSearchKey}__code\` is local ColBERT semantic-first code search (start lexical with mode:"lexical"/"exact" for symbols, filenames, errors, and config keys, then semantic for concepts; semantic falls back lexically while the local index is unavailable) and \`mcp__${fastSearchKey}__web\` surfaces citable sources.`
+        : `\`mcp__${fastSearchKey}__code\` is local lexical code search (mode:"lexical"/"exact" for symbols, filenames, errors, and config keys; no model call) and \`mcp__${fastSearchKey}__web\` surfaces citable sources.`
     // Cheapest is tuned for straightforward tasks: no proactive fan-out push,
     // so the lead handles simple work inline instead of paying handoff
     // overhead. The other pinned profiles explicitly push parallel Explore,
@@ -757,9 +760,11 @@ export function buildPeerAwarenessSnippet(opts: {
   // single space; conditional sentences (workers, stand_in) only
   // appear when their gate is on, so the snippet never names a tool
   // missing from the live tools/list.
-  const codeSearchSentence = opts.semanticSearchAvailable === true
-    ? `\`mcp__${searchKey}__code\` is the one-stop code search (no extra model call). Its DEFAULT mode (or \`mode:"semantic"\`) ranks by MEANING via ColBERT over a per-workspace index, the first thing to reach for on intent/concept questions ("where is retry/backoff handled", "how does auth work"); when that index isn't ready it transparently falls back to lexical (the response \`source\` says which engine ran). Forced modes cover the rest: \`lexical\` (BM25F-ranked + tree-sitter, best for exact symbols), \`exact\`, \`regex\`, \`complete\` (exhaustive set), \`ast_pattern\`+\`ast_lang\` for multi-line AST shapes, \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`
-    : `\`mcp__${searchKey}__code\` is the one-stop code search (no extra model call). It ranks lexically via BM25F + tree-sitter structural boost, the first thing to reach for on "where is X defined" / "which files reference Y" discovery with exact symbols, filenames, errors, routes, flags, and config keys. Modes: \`lexical\` (ranked, best for exact symbols), \`exact\` (fixed-string), \`regex\` (PCRE2), \`complete\` (exhaustive set), \`ast_pattern\`+\`ast_lang\` for multi-line AST shapes, \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple queries can run in a single turn. For unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`
+  const codeSearchSentence = opts.bluebirdEnabled === true
+    ? `\`mcp__${searchKey}__code\` uses Bluebird's Azure DevOps index for \`semantic\` meaning search and \`lexical\` indexed keyword search over exactly the checked-out repository. Bluebird failures return \`source:"error"\` and never fall back locally. Forced \`exact\`, \`regex\`, and \`ast\` modes stay on the local live tree; \`scan\` provides a local whole-workspace symbol outline. Multiple queries can run in a single turn.`
+    : opts.semanticSearchAvailable === true
+      ? `\`mcp__${searchKey}__code\` is the one-stop local code search (no extra model call). Its DEFAULT mode (or \`mode:"semantic"\`) ranks by MEANING via ColBERT over a per-workspace index, the first thing to reach for on intent/concept questions ("where is retry/backoff handled", "how does auth work"); when that index isn't ready it transparently falls back to lexical (the response \`source\` says which engine ran). Forced modes cover the rest: \`lexical\` (BM25F-ranked + tree-sitter, best for exact symbols), \`exact\`, \`regex\`, \`complete\` (exhaustive set), \`ast_pattern\`+\`ast_lang\` for multi-line AST shapes, \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`
+      : `\`mcp__${searchKey}__code\` is the one-stop local code search (no extra model call). It ranks lexically via BM25F + tree-sitter structural boost, the first thing to reach for on "where is X defined" / "which files reference Y" discovery with exact symbols, filenames, errors, routes, flags, and config keys. Modes: \`lexical\` (ranked, best for exact symbols), \`exact\` (fixed-string), \`regex\` (PCRE2), \`complete\` (exhaustive set), \`ast_pattern\`+\`ast_lang\` for multi-line AST shapes, \`scan\` for a whole-workspace symbol outline, \`multiline\` for cross-line regex. Multiple queries can run in a single turn. For unstructured files (logs, \`.csv\`, \`.env*\`, config-only wiring), \`grep\`/\`glob\` still apply.`
   const para2Parts: Array<string> = [
     codeSearchSentence,
   ]
@@ -895,10 +900,11 @@ export function buildPeerAwarenessSummary(opts: {
   groupKeys?: Partial<Record<McpGroup, string>>
   /** Whether GPT-6 Astra is available for the fast profile. */
   astraAvailable?: boolean
-  /** Whether ColBERT semantic code search is enabled for this launch. When
-   *  false/absent the `code` tool is lexical-only, so the summary describes
-   *  lexical search and never names semantic search. */
+  /** Whether local ColBERT semantic search or Bluebird semantic routing is
+   *  available for this launch. When false/absent the `code` tool is lexical-only. */
   semanticSearchAvailable?: boolean
+  /** Whether Bluebird owns semantic and lexical modes for this launch. */
+  bluebirdEnabled?: boolean
   /** `"fast"` for the fast launch profile: a hard roster restriction (see the
    *  matching option on `buildPeerAwarenessSnippet`). Every other flag on
    *  this call is ignored in favor of a short fast-profile rendering. Same
@@ -907,11 +913,16 @@ export function buildPeerAwarenessSummary(opts: {
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
+    const searchSummary = opts.bluebirdEnabled === true
+      ? " Code search uses Bluebird for semantic and lexical modes with visible no-fallback errors; exact/regex/AST remain local."
+      : opts.semanticSearchAvailable === true
+        ? " Code search uses local ColBERT semantic search with lexical fallback."
+        : " Code search uses local lexical search."
     return [
       "## Injected capabilities (summary)",
       "",
       "Max native roster: `Explore` for broad discovery; `Plan` for interfaces, sequencing, risks, and acceptance criteria; `general-purpose` for bounded mixed execution; `implementer` for settled coding changes; `reviewer` for repository-aware verification and reproduction; `brainstorm` for materially different open approaches; and `peer-review-coordinator` for several distinct fresh-context review lenses. Configured models are deliberate role defaults.",
-      "Native roles can inspect the repository within their listed tools. Fresh-context peers see only the artifact and constraints supplied to them. Advisor is transcript-aware, optional, non-binding, and primary-lead-only; it can identify framing drift but is not independent verification or an approval gate. Detailed routing lives in each role or tool description, and the full gated capability inventory lives in CLAUDE.md.",
+      `Native roles can inspect the repository within their listed tools. Fresh-context peers see only the artifact and constraints supplied to them. Advisor is transcript-aware, optional, non-binding, and primary-lead-only; it can identify framing drift but is not independent verification or an approval gate.${searchSummary} Detailed routing lives in each role or tool description, and the full gated capability inventory lives in CLAUDE.md.`,
     ].join("\n")
   }
   if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
@@ -939,7 +950,7 @@ export function buildPeerAwarenessSummary(opts: {
       "",
       rosterLine,
       "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.",
-      `Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). \`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, an expert consultant for the lead and \`Plan\`, preferred over advisor for substantive trade-offs.${astraClause} \`mcp__${key("search")}__code\` and \`mcp__${key("search")}__web\` provide search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
+      `Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). \`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, an expert consultant for the lead and \`Plan\`, preferred over advisor for substantive trade-offs.${astraClause} \`mcp__${key("search")}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search with visible no-fallback errors and local exact/regex/AST" : opts.semanticSearchAvailable === true ? "local ColBERT semantic search with lexical fallback" : "local lexical search"}; \`mcp__${key("search")}__web\` provides web search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`,
     ].join("\n")
   }
   const renderNative = (name: NativeAgentName): string => {
@@ -993,7 +1004,7 @@ export function buildPeerAwarenessSummary(opts: {
     // a per-agent description is the CROSS-CUTTING fact, so that is what stays:
     // the roster exists, and natives can execute where the critics cannot.
     `${summaryNativeLead} ${summaryNativeNames.join(", ")}. Each agent's own description states when it applies. They read the repo and can run things; the peer critics below cannot, so reach for \`reviewer\` when an assessment needs execution or repo context and for a critic when you already hold the artifact.`,
-    `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is ${opts.semanticSearchAvailable === true ? "meaning-first" : "lexical"} code search and \`mcp__${key("search")}__web\` returns citable web sources.`,
+    `A layer of MCP tools, background workers, and skills is injected into this session. Cross-lab peer critics under \`mcp__${key("peers")}__*\` (plus the \`peer-review-coordinator\` subagent) review plans and diffs adversarially, and Claude Code's built-in \`advisor\` catches approach drift. \`mcp__${key("search")}__code\` is ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical code search with visible no-fallback errors" : opts.semanticSearchAvailable === true ? "local ColBERT meaning-first code search with lexical fallback" : "local lexical code search"} and \`mcp__${key("search")}__web\` returns citable web sources.`,
   ]
   if (opts.workerToolsAvailable) {
     lines.push(`Background \`worker-*\` agents (explore, review, plan, implement, test${opts.browseAvailable ? ", browse" : ""}) run delegated work in their own context without blocking your turn, and \`mcp__${key("orchestrate")}__*\` composes, verifies, and runs floor-raising workflows.`)
@@ -1565,6 +1576,56 @@ export function buildCodeModeDescription(searchEnabled: boolean): string {
 }
 
 /**
+ * `code` tool description when `--bluebird` is active. Same schema as the
+ * local engine, but `semantic` (default) and `lexical` run on the Bluebird
+ * Azure DevOps index (vector / ranked-keyword); `exact`/`regex`/`ast`
+ * stay on the local engine. Bluebird failures surface as
+ * `source:"error"` with the cause in `notice` — there is no silent local
+ * fallback, so an `error` source means "fix auth/service", not "try
+ * different keywords".
+ */
+export function buildBluebirdCodeToolDescription(): string {
+  return (
+    "Fast structured code search backed by the Bluebird Azure DevOps index. Default "
+    + "(`mode:\"semantic\"`, or omit `mode`) ranks by MEANING via code-aware "
+    + "embeddings — best for intent/concept queries where the literal keywords "
+    + "may not appear (\"where do we rate-limit\", \"auth token refresh\"). "
+    + "`mode:\"lexical\"` runs the indexed ranked-keyword search — best for "
+    + "exact symbols, filenames, errors, routes, flags, and config keys. The "
+    + "response `source` says which path ran (\"semantic\" | \"lexical\" | "
+    + "\"error\"); semantic hits carry `score` (0-1 relevance), `endLine`, "
+    + "`name`. On `source:\"error\"` the `notice` carries the cause (auth, "
+    + "service, retries exhausted) — retry or fix the cause rather than "
+    + "rephrasing. `exact` (fixed-string), `regex` (PCRE2), and `ast` "
+    + "(ast-grep structural via `ast_pattern`+`ast_lang`) run on the LOCAL "
+    + "live tree instead. Launch multiple code searches in parallel to "
+    + "triangulate — e.g. definition + callers + tests in one round-trip. "
+    + "Prefer this over Grep/Bash+grep for ranked discovery. `workspace` is "
+    + "any absolute path to a DIRECTORY the proxy process can read — "
+    + "typically the project root or a sub-tree you're working in; Bluebird "
+    + "scopes server-side to the detected Azure DevOps org/project/repos. "
+    + "Each response also carries a tree-sitter structural outline of the "
+    + "matched files (`summary` on by default; set it false to omit)."
+  )
+}
+
+/**
+ * `code` tool `mode` field description when `--bluebird` is active.
+ * Mirrors `buildBluebirdCodeToolDescription`.
+ */
+export function buildBluebirdCodeModeDescription(): string {
+  return (
+    "Search mode. 'semantic' (DEFAULT): Bluebird vector search over the "
+    + "Azure DevOps index (meaning-ranked; failures surface as "
+    + "`source:\"error\"` with no silent local fallback). 'lexical': "
+    + "Bluebird indexed ranked-keyword search — best for exact symbols. "
+    + "'exact': local fixed-string, ripgrep document order. 'regex': local "
+    + "PCRE2, ripgrep document order. 'ast': local ast-grep structural "
+    + "match (requires `ast_pattern` + `ast_lang`)."
+  )
+}
+
+/**
  * Oversized-result contract, appended to EVERY `worker_*` tool description.
  *
  * `relaySafeText` (`~/lib/worker-agent/relay-cap`) is the final transform at
@@ -1724,12 +1785,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           summary: {
             type: "boolean",
             description:
-              "Structural summary, OPT-IN (default false): pass true and " +
+              "Structural summary, default true (pass false to omit): " +
               "the response includes `outlines` — a tree-sitter outline " +
               "(top-level symbols + line numbers) of the distinct files " +
               "in the result set (first 10, in result order), a compact " +
               "map of where the matches live that augments each hit's " +
-              "`snippet`. Omit it when you only need the matching lines.",
+              "`snippet`.",
           },
           complete: {
             type: "boolean",

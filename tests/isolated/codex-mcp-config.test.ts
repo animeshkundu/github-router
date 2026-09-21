@@ -1174,12 +1174,20 @@ describe("buildPeerAgentDefinitions", () => {
       expect(cheapest.Plan!.prompt).not.toContain("launching one or more `Explore` subagents in parallel")
     })
 
-    test("Explore prompt is lexical-only unless semantic search is enabled", () => {
+    test("Explore prompt distinguishes lexical, local semantic, and Bluebird search", () => {
       const lexical = buildBalancedAgents()
-      expect(lexical.Explore!.prompt).toContain("mode:\"lexical\"")
+      expect(lexical.Explore!.prompt).toContain("local exact lexical")
       expect(lexical.Explore!.prompt).not.toContain("meaning-ranked")
       const semantic = buildBalancedAgents({ semanticSearchAvailable: true })
-      expect(semantic.Explore!.prompt).toContain("meaning-ranked")
+      expect(semantic.Explore!.prompt).toContain("local ColBERT semantic search")
+      expect(semantic.Explore!.prompt).toContain("lexical fallback")
+      const bluebird = buildBalancedAgents({
+        semanticSearchAvailable: true,
+        bluebirdEnabled: true,
+      })
+      expect(bluebird.Explore!.prompt).toContain("Bluebird indexed keyword search")
+      expect(bluebird.Explore!.prompt).toContain("never fall back locally")
+      expect(bluebird.Explore!.prompt).not.toContain("ColBERT")
     })
 
     test("browseAvailable with workers group adds a bare balanced worker-browse", () => {

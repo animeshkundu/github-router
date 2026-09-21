@@ -831,35 +831,32 @@ describe("MCP handler trims the response per the minimality principle", () => {
     }
   })
 
-  test("summary is forwarded through the handler: summary:true → outlines present; default/absent → omitted", async () => {
+  test("summary is forwarded through the handler: default/present → outlines present; summary:false → omitted", async () => {
     const { NON_PERSONA_MCP_TOOLS } = await import(
       "../src/lib/peer-mcp-personas"
     )
     const tool = NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === "code")!
 
-    // Opt-in (summary:true) → outlines present.
-    const optedIn = await tool.handler({
+    // Default (no summary arg) and summary:true → outlines present.
+    for (const args of [
+      { query: "findMe", workspace: fx.root, mode: "exact", limit: 5 },
+      { query: "findMe", workspace: fx.root, mode: "exact", limit: 5, summary: true },
+    ] as const) {
+      const res = await tool.handler(args)
+      const body = JSON.parse(firstText(res)) as Record<string, unknown>
+      expect("outlines" in body).toBe(true)
+    }
+
+    // summary:false MUST omit outlines.
+    const res = await tool.handler({
       query: "findMe",
       workspace: fx.root,
       mode: "exact",
       limit: 5,
-      summary: true,
+      summary: false,
     })
-    const onBody = JSON.parse(firstText(optedIn)) as Record<
-      string,
-      unknown
-    >
-    expect("outlines" in onBody).toBe(true)
-
-    // Default (no summary arg) and summary:false MUST omit outlines.
-    for (const args of [
-      { query: "findMe", workspace: fx.root, mode: "exact", limit: 5 },
-      { query: "findMe", workspace: fx.root, mode: "exact", limit: 5, summary: false },
-    ] as const) {
-      const res = await tool.handler(args)
-      const body = JSON.parse(firstText(res)) as Record<string, unknown>
-      expect("outlines" in body).toBe(false)
-    }
+    const body = JSON.parse(firstText(res)) as Record<string, unknown>
+    expect("outlines" in body).toBe(false)
   })
 
   test("context_lines param is no longer accepted in the schema", async () => {
@@ -1045,8 +1042,8 @@ describe("binary file handling (NUL-byte defense)", () => {
   })
 })
 
-describe("searchCode — structural summary (summary: true)", () => {
-  test("outlines matched files with summary:true; omitted by default and with summary:false", async () => {
+describe("searchCode — structural summary", () => {
+  test("outlines matched files by default and with summary:true; omitted with summary:false", async () => {
     const fx = makeFixture((root) => {
       writeFileSync(
         path.join(root, "svc.ts"),
@@ -1060,38 +1057,38 @@ describe("searchCode — structural summary (summary: true)", () => {
       )
     })
     try {
-      // Opt-in (summary:true) — outlines are attached.
-      const byDefault = await searchCode({
-        query: "MARKER",
-        workspace: fx.root,
-        summary: true,
-      })
-      expect(byDefault.results.length).toBeGreaterThan(0)
-      const outlines = byDefault.outlines ?? []
-      const svc = outlines.find((o) => o.file.includes("svc.ts"))
-      expect(svc).toBeDefined()
-      const names = (svc?.outline ?? []).map((e) => e.name)
-      // Top-level symbols present...
-      expect(names).toContain("UserService")
-      expect(names).toContain("makeUser")
-      // ...and navigable class members, but not function-local declarations.
-      expect(names).toContain("getUser")
-      expect(names).not.toContain("localOnly")
-      expect(names).not.toContain("tmp")
-      // The method is marked deeper than its enclosing class.
-      const cls = (svc?.outline ?? []).find((e) => e.name === "UserService")
-      const method = (svc?.outline ?? []).find((e) => e.name === "getUser")
-      expect(method?.depth ?? 0).toBeGreaterThan(cls?.depth ?? 0)
-
-      // Omitted by default and with summary:false.
-      for (const summary of [undefined, false] as const) {
-        const r = await searchCode({
+      // Default and summary:true — outlines are attached.
+      for (const summary of [undefined, true] as const) {
+        const byDefault = await searchCode({
           query: "MARKER",
           workspace: fx.root,
           ...(summary === undefined ? {} : { summary }),
         })
-        expect(r.outlines).toBeUndefined()
+        expect(byDefault.results.length).toBeGreaterThan(0)
+        const outlines = byDefault.outlines ?? []
+        const svc = outlines.find((o) => o.file.includes("svc.ts"))
+        expect(svc).toBeDefined()
+        const names = (svc?.outline ?? []).map((e) => e.name)
+        // Top-level symbols present...
+        expect(names).toContain("UserService")
+        expect(names).toContain("makeUser")
+        // ...and navigable class members, but not function-local declarations.
+        expect(names).toContain("getUser")
+        expect(names).not.toContain("localOnly")
+        expect(names).not.toContain("tmp")
+        // The method is marked deeper than its enclosing class.
+        const cls = (svc?.outline ?? []).find((e) => e.name === "UserService")
+        const method = (svc?.outline ?? []).find((e) => e.name === "getUser")
+        expect(method?.depth ?? 0).toBeGreaterThan(cls?.depth ?? 0)
       }
+
+      // Omitted with summary:false.
+      const r = await searchCode({
+        query: "MARKER",
+        workspace: fx.root,
+        summary: false,
+      })
+      expect(r.outlines).toBeUndefined()
     } finally {
       fx.cleanup()
     }

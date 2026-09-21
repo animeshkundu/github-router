@@ -99,6 +99,31 @@ describe("decidePromptSubmitV2", () => {
     expect(infer.mock.calls[0]?.[1]).toContain("semantic auth handler result")
   })
 
+  test("Bluebird-only substantive prompt runs semantic and lexical search with Bluebird guidance", async () => {
+    const groundedGoal = "SCOPE: focused\nGOAL: do X"
+    const { io, searchCode, infer } = makeIo({
+      searchCode: async (_query, mode) => `${mode} auth handler result`,
+      infer: async () => groundedGoal,
+    })
+
+    const result = await decidePromptSubmitV2({
+      stdin: JSON.stringify({ session_id: "s1", prompt: "Please refactor the auth handler across all modules" }),
+      steerEnabled: true,
+      searchEnabled: false,
+      bluebirdEnabled: true,
+      io,
+    })
+
+    expect(result.inject).toContain("Bluebird semantic + lexical")
+    expect(result.inject).toContain("do not fall back locally")
+    expect(result.inject).toContain(groundedGoal)
+    expect(searchCode.mock.calls.map((call) => call[1]).sort()).toEqual(["lexical", "semantic"])
+    expect(infer.mock.calls.length).toBe(1)
+    expect(infer.mock.calls[0]?.[0]).toContain("Bluebird lexical + semantic")
+    expect(infer.mock.calls[0]?.[1]).toContain("lexical auth handler result")
+    expect(infer.mock.calls[0]?.[1]).toContain("semantic auth handler result")
+  })
+
   test("search disabled: substantive prompt runs lexical-only search and a lexical tip", async () => {
     const groundedGoal = "SCOPE: focused\nGOAL: do X"
     const { io, searchCode, infer } = makeIo({
@@ -245,11 +270,21 @@ describe("decidePromptSubmitV2", () => {
     expect(performance.now() - start).toBeLessThan(1_000)
   })
 
-  test("search tip builders never name semantic search when disabled", () => {
-    expect(getPromptSearchTip(true)).toContain('mode:"semantic"')
-    expect(getPromptSearchTip(false)).not.toMatch(/semantic/i)
-    expect(getPromptScopeSystem(true)).toContain("lexical + semantic")
-    expect(getPromptScopeSystem(false)).not.toMatch(/semantic/i)
-    expect(getPromptScopeSystem(false)).toContain("lexical code search")
+  test("search guidance covers all four independent backend combinations", () => {
+    expect(getPromptSearchTip(false, false)).not.toMatch(/semantic/i)
+    expect(getPromptScopeSystem(false, false)).not.toMatch(/semantic/i)
+    expect(getPromptScopeSystem(false, false)).toContain("lexical code search")
+
+    expect(getPromptSearchTip(true, false)).toContain('mode:"semantic"')
+    expect(getPromptScopeSystem(true, false)).toContain("local lexical + semantic")
+    expect(getPromptSearchTip(true, false)).not.toContain("Bluebird")
+
+    expect(getPromptSearchTip(false, true)).toContain("Bluebird semantic + lexical")
+    expect(getPromptSearchTip(false, true)).toContain("do not fall back locally")
+    expect(getPromptScopeSystem(false, true)).toContain("Bluebird lexical + semantic")
+
+    expect(getPromptSearchTip(true, true)).toContain("Bluebird semantic + lexical")
+    expect(getPromptScopeSystem(true, true)).toContain("Bluebird lexical + semantic")
+    expect(getPromptScopeSystem(true, true)).not.toContain("local lexical + semantic")
   })
 })

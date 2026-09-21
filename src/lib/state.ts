@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto"
 
 import type { ModelsResponse } from "~/services/copilot/get-models"
+import type { BluebirdMcpClient } from "./bluebird-client"
 import type { LaunchProfileId } from "./launch-profile"
 
 /**
@@ -183,6 +184,28 @@ export interface State {
   searchEnabled: boolean
 
   /**
+   * Opt-in flag for Bluebird Azure DevOps code search. Set by
+   * `setupAndServe` from the `--bluebird` CLI flag or
+   * `GH_ROUTER_ENABLE_BLUEBIRD=1` env var. When true, the `code` MCP
+   * tool routes `semantic`/`lexical` modes through the Bluebird MCP
+   * server. This flag is independent from `searchEnabled`, which controls
+   * local ColBERT provisioning; `exact`/`regex`/`ast` stay local.
+   * See `src/lib/bluebird-client.ts`.
+   */
+  bluebirdEnabled: boolean
+
+  /** Last connected Bluebird client, retained only for compatibility and
+   * diagnostics. Client selection is owned by the Bluebird runtime manager. */
+  bluebirdClient: BluebirdMcpClient | null
+
+  /** Resolved Bluebird scope (org/project/repos/branch), for logging and
+   *  the `x-mcp-ec-*` headers baked into the client. */
+  bluebirdOrganization: string | null
+  bluebirdProject: string | null
+  bluebirdRepositories: Array<string>
+  bluebirdBranch: string | null
+
+  /**
    * Humanlike pacing override:
    *   "on"   - --humanlike CLI flag or GH_ROUTER_HUMANLIKE=1 env;
    *            inject Beta-distributed inter-action delays, Bezier
@@ -255,6 +278,12 @@ export const state: State = {
   agentsEnabled: false,
   powerBrowseEnabled: false,
   searchEnabled: false,
+  bluebirdEnabled: false,
+  bluebirdClient: null,
+  bluebirdOrganization: null,
+  bluebirdProject: null,
+  bluebirdRepositories: [],
+  bluebirdBranch: null,
   humanlikeForce: "auto",
   sessionId: randomUUID(),
   machineId: randomBytes(32).toString("hex"),

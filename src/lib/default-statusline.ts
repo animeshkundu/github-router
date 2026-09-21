@@ -287,16 +287,18 @@ export function resolveGitBranch(cwd: string | undefined): string {
     if (!cwd) return ""
     const gitPath = resolveExecutable("git")
     if (!gitPath) return ""
-    const { command, args, shell } = buildExecInvocation([
-      gitPath,
-      "-C",
-      cwd,
-      "rev-parse",
-      "--abbrev-ref",
-      "HEAD",
-    ])
+    const { command, args, shell, windowsVerbatimArguments } =
+      buildExecInvocation([
+        gitPath,
+        "-C",
+        cwd,
+        "rev-parse",
+        "--abbrev-ref",
+        "HEAD",
+      ])
     const result = spawnSync(command, args, {
       shell,
+      windowsVerbatimArguments,
       timeout: GIT_TIMEOUT_MS,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],

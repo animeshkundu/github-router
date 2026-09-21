@@ -1,6 +1,8 @@
 import path from "node:path"
+import process from "node:process"
 
 import consola from "consola"
+
 
 import { injectAttributionSuppressionIntoSettingsFile } from "../attribution-settings"
 import {
@@ -164,6 +166,9 @@ export async function provisionServeEnhancements(
       groupKeys,
       workerToolsAvailable: workerToolsEnabled(),
       browseAvailable: browseAllowed && browseAgentEnabled(),
+      semanticSearchAvailable:
+        state.searchEnabled === true || state.bluebirdEnabled === true,
+      bluebirdEnabled: state.bluebirdEnabled === true,
       ...nativeModels,
       // Serve-only: register Claude Code's built-in Explore/Plan/general-purpose
       // subagents (the Agent SDK doesn't) so the model's habitual Agent() calls
@@ -193,7 +198,8 @@ export async function provisionServeEnhancements(
       compoundBrowseAvailable: browseAllowed && browserCompoundToolsEnabled(),
       powerBrowseAvailable: browseAllowed && state.powerBrowseEnabled,
       agentToolsAvailable: firstMateAllowed,
-      semanticSearchAvailable: state.searchEnabled === true,
+      semanticSearchAvailable: state.searchEnabled === true || state.bluebirdEnabled === true,
+      bluebirdEnabled: state.bluebirdEnabled === true,
       ...nativeAvailability,
       groupKeys,
     })
@@ -204,7 +210,13 @@ export async function provisionServeEnhancements(
       consola.warn(`Style-directive CLAUDE.md prepend failed: ${String(err)}`),
     )
     await prependOperatingDefaultsToMirroredClaudeMd(
-      buildOperatingDefaultsDirective(nativeAvailability),
+      buildOperatingDefaultsDirective({
+        ...nativeAvailability,
+        semanticSearchAvailable:
+          state.searchEnabled === true || state.bluebirdEnabled === true,
+        bluebirdEnabled: state.bluebirdEnabled === true,
+        groupKeys,
+      }),
     ).catch((err) =>
       consola.warn(`Operating-defaults CLAUDE.md prepend failed: ${String(err)}`),
     )
@@ -221,8 +233,12 @@ export async function provisionServeEnhancements(
     // Export the resolved search capability for child processes (same reason
     // as the `claude` launcher: the hook process inherits env, not state).
     process.env.GH_ROUTER_SEARCH_ENABLED = state.searchEnabled === true ? "1" : "0"
+    process.env.GH_ROUTER_BLUEBIRD_ENABLED = state.bluebirdEnabled === true ? "1" : "0"
     let skillsWritten = 0
-    for (const s of getInjectedSkills(state.searchEnabled === true)) {
+    for (const s of getInjectedSkills(
+      state.searchEnabled === true,
+      state.bluebirdEnabled === true,
+    )) {
       if (s.name.startsWith("gh-first-mate") || s.name === "gh-artifact-review") {
         continue
       }

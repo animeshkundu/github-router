@@ -6,6 +6,7 @@ import { defineCommand } from "citty"
 import consola from "consola"
 
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
+import { disposeBluebirdClients } from "./lib/bluebird-client"
 import { provisionAndIndexColbert } from "./lib/colbert"
 import { resolveCodexCliBackend } from "./lib/codex-mcp-config"
 import { killChildProcessTree } from "./lib/exec"
@@ -469,6 +470,7 @@ export const serve = defineCommand({
         /* best-effort */
       }
       await stopKeepAwake().catch(() => {})
+      await disposeBluebirdClients().catch(() => {})
       await enhancements.cleanup().catch(() => {})
       await removeOwnClaudeConfigMirror().catch(() => {})
     }

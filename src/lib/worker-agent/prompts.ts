@@ -51,6 +51,9 @@ const SECURITY_BOUNDARY = `You are operating inside a sandboxed coding worker. I
 const CODE_SEARCH_NOTE_SEMANTIC =
   "`code_search` — semantic-first code search: the default `semantic` mode ranks by MEANING (ColBERT), falling back to lexical BM25F-ranked hits when the index isn't ready (the `source` field says which ran); use `lexical`/`exact`/`regex`/`ast` for exact symbols. Multiple independent queries can run in a single turn. The index covers code-shaped files; for unstructured files (logs, `.csv`, `.env*`, config-only wiring) and when a search returns no hits, `grep`/`glob` apply."
 
+const CODE_SEARCH_NOTE_BLUEBIRD =
+  "`code_search` — Bluebird-backed code search: `semantic` ranks by meaning and `lexical` uses the indexed keyword search over the checked-out Azure DevOps repository; failures surface as `source:\"error\"` with no local fallback. `exact`/`regex`/`ast` stay on the local live tree. Multiple independent queries can run in a single turn."
+
 const CODE_SEARCH_NOTE_LEXICAL =
   "`code_search` — lexical code search (BM25F + tree-sitter structural ranking). Modes: `lexical` (ranked, best for exact symbols), `exact` (fixed-string), `regex` (PCRE2), `ast` (ast-grep structural via `ast_pattern`+`ast_lang`). Multiple independent queries can run in a single turn. For unstructured files (logs, `.csv`, `.env*`, config-only wiring) and when a search returns no hits, `grep`/`glob` apply."
 
@@ -68,10 +71,18 @@ const READ_TOOL_NOTES_TAIL = [
   "`update_plan` — maintain a short ordered checklist of your steps (send the full list each call); it's re-surfaced to you each turn so it survives context compaction.",
 ] as const
 
-function readToolNotes(searchEnabled: boolean): ReadonlyArray<string> {
+function readToolNotes(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean,
+): ReadonlyArray<string> {
+  const searchNote = bluebirdEnabled
+    ? CODE_SEARCH_NOTE_BLUEBIRD
+    : searchEnabled
+      ? CODE_SEARCH_NOTE_SEMANTIC
+      : CODE_SEARCH_NOTE_LEXICAL
   return [
     ...READ_TOOL_NOTES_BASE,
-    searchEnabled ? CODE_SEARCH_NOTE_SEMANTIC : CODE_SEARCH_NOTE_LEXICAL,
+    searchNote,
     ...READ_TOOL_NOTES_TAIL,
   ]
 }
@@ -87,12 +98,12 @@ function buildToolBlock(tools: ReadonlyArray<string>): string {
   return tools.map((t) => `- ${t}`).join("\n")
 }
 
-function exploreModeNote(searchEnabled: boolean): string {
-  return `Read-only mode — tools:\n${buildToolBlock(readToolNotes(searchEnabled))}`
+function exploreModeNote(searchEnabled: boolean, bluebirdEnabled: boolean): string {
+  return `Read-only mode — tools:\n${buildToolBlock(readToolNotes(searchEnabled, bluebirdEnabled))}`
 }
 
-function implementModeNote(searchEnabled: boolean): string {
-  return `Read+write mode — tools:\n${buildToolBlock([...readToolNotes(searchEnabled), ...WRITE_TOOL_NOTES])}`
+function implementModeNote(searchEnabled: boolean, bluebirdEnabled: boolean): string {
+  return `Read+write mode — tools:\n${buildToolBlock([...readToolNotes(searchEnabled, bluebirdEnabled), ...WRITE_TOOL_NOTES])}`
 }
 
 // Review/plan modes share explore's read-only tool surface. Each adds a
@@ -109,23 +120,26 @@ const TEST_ROLE = `You are an INDEPENDENT test author; you did NOT write the cod
 // (always), plus edit/write (only with an isolated worktree). It must NOT list
 // `codex_review`, which is implement/test-only — a prompt that names a tool the
 // agent does not have wastes a turn on a call that cannot succeed.
-function reviewToolNotes(searchEnabled: boolean): ReadonlyArray<string> {
+function reviewToolNotes(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean,
+): ReadonlyArray<string> {
   return [
-    ...readToolNotes(searchEnabled),
+    ...readToolNotes(searchEnabled, bluebirdEnabled),
     ...WRITE_TOOL_NOTES.filter((n) => !n.startsWith("`codex_review`")),
   ]
 }
 
-function reviewModeNote(searchEnabled: boolean): string {
-  return `${REVIEW_ROLE}\n\nTools (edit/write appear only when this run owns an isolated worktree):\n${buildToolBlock(reviewToolNotes(searchEnabled))}`
+function reviewModeNote(searchEnabled: boolean, bluebirdEnabled: boolean): string {
+  return `${REVIEW_ROLE}\n\nTools (edit/write appear only when this run owns an isolated worktree):\n${buildToolBlock(reviewToolNotes(searchEnabled, bluebirdEnabled))}`
 }
 
-function planModeNote(searchEnabled: boolean): string {
-  return `${PLAN_ROLE}\n\nRead-only mode — tools:\n${buildToolBlock(readToolNotes(searchEnabled))}`
+function planModeNote(searchEnabled: boolean, bluebirdEnabled: boolean): string {
+  return `${PLAN_ROLE}\n\nRead-only mode — tools:\n${buildToolBlock(readToolNotes(searchEnabled, bluebirdEnabled))}`
 }
 
-function testModeNote(searchEnabled: boolean): string {
-  return `${TEST_ROLE}\n\nRead+write mode — tools:\n${buildToolBlock([...readToolNotes(searchEnabled), ...WRITE_TOOL_NOTES])}`
+function testModeNote(searchEnabled: boolean, bluebirdEnabled: boolean): string {
+  return `${TEST_ROLE}\n\nRead+write mode — tools:\n${buildToolBlock([...readToolNotes(searchEnabled, bluebirdEnabled), ...WRITE_TOOL_NOTES])}`
 }
 
 // ============================================================
@@ -172,16 +186,15 @@ const BROWSE_MODE_NOTE = `Browser-control mode. Finish by calling submit_answer 
  * behavioral contract (when to finish, never fabricate) rather than a
  * tool list.
  *
- * `searchEnabled` selects the `code_search` capability line. When true
- * (operator launched with --search / GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1)
- * the tool is described as semantic-first with transparent lexical
- * fallback; when false it is described as lexical-only and semantic
- * search is never named, so the prompt never advertises a tool mode
- * that is not present.
+ * `searchEnabled` and `bluebirdEnabled` select the `code_search` capability
+ * line. Bluebird takes ownership of semantic and lexical modes when enabled;
+ * otherwise local ColBERT is described only when `--search` enabled it. With
+ * neither capability the prompt remains lexical-only.
  */
 export function systemPromptFor(
   mode: "explore" | "review" | "plan" | "implement" | "test" | "browse",
   searchEnabled: boolean = false,
+  bluebirdEnabled: boolean = false,
 ): string {
   if (mode === "browse") {
     return `${BROWSE_BOUNDARY}\n\n${BROWSE_MODE_NOTE}`
@@ -190,19 +203,19 @@ export function systemPromptFor(
   let note: string
   switch (mode) {
     case "explore":
-      note = exploreModeNote(searchEnabled)
+      note = exploreModeNote(searchEnabled, bluebirdEnabled)
       break
     case "review":
-      note = reviewModeNote(searchEnabled)
+      note = reviewModeNote(searchEnabled, bluebirdEnabled)
       break
     case "plan":
-      note = planModeNote(searchEnabled)
+      note = planModeNote(searchEnabled, bluebirdEnabled)
       break
     case "implement":
-      note = implementModeNote(searchEnabled)
+      note = implementModeNote(searchEnabled, bluebirdEnabled)
       break
     case "test":
-      note = testModeNote(searchEnabled)
+      note = testModeNote(searchEnabled, bluebirdEnabled)
       break
   }
   return `${SECURITY_BOUNDARY}\n\n${note}`

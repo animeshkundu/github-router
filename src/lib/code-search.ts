@@ -130,8 +130,8 @@ const MAX_GLOB_LEN = 512;
 const DEFAULT_LIMIT = 200;
 const MAX_CONTEXT_LINES = 10;
 /**
- * `summary: true` outlines at most this many distinct result files (in
- * result order) — a structural map of where the matches live, bounded
+ * The default structural summary outlines at most this many distinct result
+ * files (in result order) — a map of where the matches live, bounded
  * so a broad query doesn't trigger hundreds of tree-sitter parses.
  */
 const CODE_SUMMARY_MAX_FILES = 10;
@@ -254,12 +254,12 @@ export interface CodeSearchInput {
    */
   structural?: "full" | "topN";
   /**
-   * Structural summary, OPT-IN. Pass `summary: true` and the response
+   * Structural summary, ON by default. Unless `summary: false`, the response
    * carries a tree-sitter STRUCTURAL OUTLINE (`outlines`) of the distinct
    * files in the result set (top-level symbols + line numbers), capped at
    * the first `CODE_SUMMARY_MAX_FILES` files in result order — a compact
    * map of where the matches live that augments, never replaces, `snippet`.
-   * Omitted by default (saves ~2-5KB tokens per call).
+   * Pass `false` when only matching rows are needed.
    */
   summary?: boolean;
   /**
@@ -349,9 +349,9 @@ export interface CodeSearchResponse {
     k1?: number;
   };
   /**
-   * Present only when `summary: true` was requested: a tree-sitter
-   * structural outline of each distinct file in the result set (capped
-   * at `CODE_SUMMARY_MAX_FILES`, in result order). Absent otherwise.
+   * Present by default: a tree-sitter structural outline of each distinct
+   * file in the result set (capped at `CODE_SUMMARY_MAX_FILES`, in result
+   * order). Absent when `summary: false` is requested.
    */
   outlines?: Array<{ file: string; outline: Array<FileOutlineEntry> }>;
   /**
@@ -2693,12 +2693,11 @@ export async function searchCode(
       return baseHit;
     });
 
-    // Structural summary is OPT-IN — outline the distinct files in the
-    // result set (capped, in result order) only when the caller passes
-    // `summary: true` (saves ~2-5KB tokens per call otherwise). `scan: true`
-    // instead outlines the ENTIRE workspace (every non-ignored,
-    // non-sensitive source file), up to SCAN_MAX_FILES, so the model gets
-    // a whole-tree symbol map in one call.
+    // Structural summary is ON by default — outline distinct result files
+    // (capped, in result order) unless the caller passes `summary: false`.
+    // `scan: true` independently outlines the ENTIRE workspace (every
+    // non-ignored, non-sensitive source file), up to SCAN_MAX_FILES, so the
+    // model gets a whole-tree symbol map in one call.
     // Reuses the shared tree-sitter outliner; each file is bounded by its
     // own 1 MiB parse cap and the outliner never throws. Computed BEFORE
     // `elapsed_ms` so telemetry reflects the real latency. `outline_ms`
@@ -2713,7 +2712,7 @@ export async function searchCode(
     // the heaviest path and runs AFTER the search-phase wallTimer is torn
     // down, so it self-bounds against this absolute deadline.
     const scanDeadline = Date.now() + WALL_TIME_MS;
-    if (rawInput.summary === true || wantScan) {
+    if (rawInput.summary !== false || wantScan) {
       let distinct: Array<string>;
       if (wantScan) {
         // Whole-workspace enumeration (respects ignore rules; sensitive
