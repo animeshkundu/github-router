@@ -263,7 +263,7 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
         "`Plan` for architectural sequencing, interface contracts, migration risk, and runnable acceptance criteria",
         "`General-Purpose` for mixed, iterative, or multi-step execution tasks",
         "`reviewer` for independent adversarial verification, reproduction, and root-causing",
-      ])
+      ]) + ". All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
     }
     // Balanced: lead owns planning, implementation, verification by default —
     // only Plan and reviewer are gated behind genuine need.
@@ -273,14 +273,23 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
         "`Plan` for architectural sequencing, interface contracts, migration risk, and runnable acceptance criteria ONLY when genuinely complex (lead owns planning by default)",
         "`General-Purpose` for mixed, iterative, or multi-step execution tasks (delegate freely)",
         "`reviewer` for independent adversarial verification, reproduction, and root-causing ONLY when genuinely behavior-changing (lead owns verification by default)",
-      ])
+      ]) + ". All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
     }
-    return joinClauses([
+    const shared = joinClauses([
       "`Explore` for broad repository discovery, dependency mapping, and convention tracking (launch in parallel)",
       "`Plan` for architectural sequencing, interface contracts, migration risk, and runnable acceptance criteria (delegates discovery to `Explore`)",
       "`General-Purpose` for mixed, iterative, or multi-step execution tasks (follows a Plan handoff when one exists)",
       "`reviewer` for independent adversarial verification, reproduction, and root-causing after non-trivial changes",
     ])
+    // 200K profiles only: fast keeps 1M throughout. cheap1m's lead is 1M
+    // but every subagent is 200K, so it gets the subagent-scoped variant.
+    if (opts.profile === "cheap") {
+      return `${shared}. All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads`
+    }
+    if (opts.profile === "cheap1m") {
+      return `${shared}. Subagents run at a 200K context window — brief them with targeted evidence and prefer targeted reads over full file reads`
+    }
+    return shared
   }
   const clauses: Array<string> = []
   const implementerFast = opts.implementerFastAvailable !== false
@@ -503,6 +512,15 @@ export function buildOperatingDefaultsDirective(
         + "`Explore` is cheap and may be launched in parallel across independent discovery questions. Send independent subagent calls in parallel within a single turn. "
         + "Delegation graph: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
 
+    // 200K profiles: every role the lead can reach runs at the 200K default
+    // window (cheap1m's lead excepted at 1M), so the directive names targeted
+    // reads once instead of repeating it per role.
+    const windowNote = isCheapest || isBalanced
+      ? "All roles run at a 200K context window — use targeted reads (search, Grep, Read specific files) over full file reads.\n\n"
+      : isCheap
+        ? "The lead runs at a 200K context window on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — use targeted reads (search, Grep, Read specific files) over full file reads.\n\n"
+        : ""
+
     // Pipeline awareness is --swe-gated: without the flag the skill files are
     // not written, so the directive must not name them. Absent keeps the
     // legacy text for callers without a flag concept (serve path).
@@ -520,6 +538,7 @@ export function buildOperatingDefaultsDirective(
     return (
       "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + pipeline
+      + windowNote
       + consultation
       + searchGuidance
       + `\`mcp__${searchKey}__web\` provides citable sources.${browserClause}${workerBrowseClause}${artifactClause}\n\n`
@@ -623,10 +642,17 @@ export function buildOperatingDefaultsDigest(
         + oracleDescriptor
         + " for self-contained technical/architectural trade-offs"
         + astraStep
+    // Mirror of the directive's windowNote, condensed for the digest.
+    const digestWindowNote = isCheapest || isBalanced
+      ? "All roles run at a 200K context window — use targeted reads over full file reads.\n\n"
+      : isCheap
+        ? "The lead runs at 200K on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — use targeted reads over full file reads.\n\n"
+        : ""
     return (
       "## Operating defaults (these layer with the user's direction and the domain's standards as addons: follow all three; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + delegation
       + digestPipelineSentence
+      + digestWindowNote
       + consultationLadder
     )
   }

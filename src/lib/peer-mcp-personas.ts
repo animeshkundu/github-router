@@ -728,12 +728,19 @@ export function buildPeerAwarenessSnippet(opts: {
     const delegationClause = isBalanced
       ? "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `reviewer` may invoke `Explore` for targeted discovery; `Explore` and `worker-browse` cannot invoke native subagents."
       : "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents."
+    // 200K profiles: name the window once so every role prefers targeted
+    // reads. cheap1m's lead is 1M; its subagents are still 200K.
+    const rosterWindow = isCheapest || isBalanced
+      ? " All roles run at a 200K context window — prefer targeted reads over full file reads."
+      : isCheap
+        ? " The lead runs at 200K on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — prefer targeted reads over full file reads."
+        : ""
     return [
       "## Peer review and advisor",
       "",
       escalationClause,
       "",
-      `${searchClause} ${isBalanced ? balancedRosterClause : rosterClause}${browserClause}${workerBrowseClause}${artifactClause}`,
+      `${searchClause} ${isBalanced ? balancedRosterClause : rosterClause}${rosterWindow}${browserClause}${workerBrowseClause}${artifactClause}`,
       delegationClause,
     ].join("\n")
   }
@@ -956,10 +963,16 @@ export function buildPeerAwarenessSummary(opts: {
     const summaryDelegation = isBalanced
       ? "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `reviewer` may invoke `Explore` for targeted discovery; `Explore` and `worker-browse` cannot invoke native subagents."
       : "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents."
+    // 200K profiles mirror the snippet's roster window note.
+    const summaryWindow = isCheapest || isBalanced
+      ? " All roles run at a 200K context window — prefer targeted reads over full file reads."
+      : isCheap
+        ? " The lead runs at 200K on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — prefer targeted reads over full file reads."
+        : ""
     return [
       "## Injected capabilities (summary)",
       "",
-      isBalanced ? balancedRosterLine : rosterLine,
+      (isBalanced ? balancedRosterLine : rosterLine) + summaryWindow,
       summaryDelegation,
       peerLine,
     ].join("\n")

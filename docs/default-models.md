@@ -205,6 +205,8 @@ Oracle remains separate and stateless. It is available to the lead and `Plan` as
 
 Standard Advisor behavior is unchanged: Sol/xhigh (high floor) on the normal Opus path and Opus escalation for lighter Claude leads.
 
+In a cheapest launch the Advisor is `gpt-5.6-sol` at medium effort via Responses, pinned to the bare slug at the 200K cost class like cheap (transcript capped at 200K with the original ask pinned).
+
 ## Cheap launch profiles (`-m cheap`, `-m cheap1m`)
 
 The literal raw aliases `cheap` and `cheap1m` select the **cost-classed sibling of fast**: identical roster shape, delegation graph, MCP surface, and fixed per-role efforts, but every subagent and peer runs at the bare 200K default window (no `[1m]` decoration). Subagent frontmatter carries bare router-owned alias ids (`gh-router-cheap-*`, never real catalog ids): Claude Code resolves a bare real id against the live catalog and upgrades the subagent to `[1m]` accounting when the entry advertises >=1M — an alias matches no catalog entry, so the client holds the 200K default while the proxy canonicalizes to the real model upstream. The one identity swap is `reviewer`: Luna at max effort instead of fast's Sonnet 5 at xhigh. The two aliases differ only on the **leader**:
@@ -268,6 +270,10 @@ Two deliberate divergences from the fast/cheap delegation graph:
 - **`reviewer` may invoke `Explore`** for targeted discovery (the only graph edge no other pinned profile has). The reviewer narrows scope with `code` + `web` search first, then delegates scoped evidence questions; the in-session ACL enforces this via a balanced graph variant selected by the persisted hook command.
 - **Search-first funnel, no Advisor.** Unknowns funnel cheapest-first: `code_search` + `web` search narrow scope and rule out hypotheses first, `Explore` only when search is insufficient, `Plan` only when genuinely complex, `oracle` as a second opinion for precise, self-contained trade-offs that search, `Explore`, and (where consulted) `Plan` cannot settle. Oracle is a second opinion on a framed question, never a discovery tool. The awareness snippet, summary, directive, and digest name no Advisor for this profile.
 - **Lead owns by default.** The lead plans, implements, and verifies itself: it delegates FREELY to the Luna-powered `Explore` (targeted breadth) and `General-Purpose` (multi-step execution), and to `Plan`/`reviewer` ONLY when genuinely needed (complex sequencing / behavior-changing review). Enforcement is soft — the ACL graph permits all four edges and the directive, descriptions, and roster clauses carry the policy.
+
+## 200K context efficiency
+
+Every role in `cheap`, `cheapest`, and `balanced` — and every subagent in `cheap1m` — runs at the 200K default window. All lead-facing surfaces (directive, digest, awareness snippet, summary, agent descriptions and prompts) carry the same one-line discipline: prefer targeted reads (search, Grep, Read specific files) over full file reads. The launcher additionally sets `ENABLE_TOOL_SEARCH=auto` on every launch (presence-guarded; an operator-set value wins) so MCP tool schemas load on demand instead of upfront. Auto-compaction (~167K), micro-compaction of old tool results, and `/compact` remain Claude Code built-ins underneath.
 
 ## 1M context accounting
 

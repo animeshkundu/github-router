@@ -824,6 +824,12 @@ export function getClaudeCodeEnvVars(
     vars.MCP_TOOL_TIMEOUT = mcpToolTimeoutMs
   }
 
+  // Defer MCP tool schemas until needed: Claude Code loads specific schemas
+  // on demand via tool search when a task needs them instead of injecting
+  // every schema upfront, saving roughly 10% of context. Presence-guarded
+  // like the timeout keys above — an operator-set value always wins.
+  if (process.env.ENABLE_TOOL_SEARCH === undefined) vars.ENABLE_TOOL_SEARCH = "auto"
+
   // Default the small/fast tier model (used by Claude Code for status
   // text, auto-compact summaries, session titles, background ops) to
   // claude-sonnet-5. Anthropic-published dashed slug that is also the

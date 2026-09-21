@@ -1266,6 +1266,54 @@ describe("balanced profile rendering (no Advisor; reviewer delegates to Explore)
     expect(snippet).not.toContain("`astra`")
   })
 
+  test("200K profiles carry the targeted-reads window note", () => {
+    const opts = (profile: "cheap" | "cheap1m" | "cheapest" | "balanced") => ({
+      codexCli: false,
+      geminiAvailable: true,
+      workerToolsAvailable: false,
+      standInAvailable: false,
+      browseAvailable: false,
+      compoundBrowseAvailable: false,
+      profile,
+      semanticSearchAvailable: true,
+    }) as const
+    for (const profile of ["cheapest", "balanced"] as const) {
+      const snippet = buildPeerAwarenessSnippet(opts(profile))
+      expect(snippet).toContain("All roles run at a 200K context window")
+      expect(snippet).toContain("targeted reads over full file reads")
+      const summary = buildPeerAwarenessSummary(opts(profile))
+      expect(summary).toContain("All roles run at a 200K context window")
+      expect(summary).toContain("targeted reads over full file reads")
+    }
+    for (const profile of ["cheap", "cheap1m"] as const) {
+      const snippet = buildPeerAwarenessSnippet(opts(profile))
+      expect(snippet).toContain("runs at 200K")
+      expect(snippet).toContain("targeted reads over full file reads")
+      const summary = buildPeerAwarenessSummary(opts(profile))
+      expect(summary).toContain("runs at 200K")
+      expect(summary).toContain("targeted reads over full file reads")
+    }
+    const fastSummary = buildPeerAwarenessSummary({
+      workerToolsAvailable: false,
+      standInAvailable: false,
+      browseAvailable: false,
+      profile: "fast",
+      semanticSearchAvailable: true,
+    } as const)
+    expect(fastSummary).not.toContain("200K context window")
+    const fast = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: true,
+      workerToolsAvailable: false,
+      standInAvailable: false,
+      browseAvailable: false,
+      compoundBrowseAvailable: false,
+      profile: "fast",
+      semanticSearchAvailable: true,
+    } as const)
+    expect(fast).not.toContain("200K context window")
+  })
+
   test("awareness summary names Oracle without Advisor", () => {
     const summary = buildPeerAwarenessSummary(BALANCED_OPTS)
     expect(summary).toContain("Balanced launch profile")

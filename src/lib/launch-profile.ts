@@ -46,7 +46,8 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  contract values; the three gates that differ are the lead slug, the lead
  *  prereq window, and the cheap1m-only `astra` peer. `"cheapest"` is the
  *  all-200K cheapest tier: a Luna/max lead, Luna Explore/GP roles, a Sol/high
- *  Plan and Oracle, and Gemini/high reviewer and Advisor — Oracle-only peer
+ *  Plan and Oracle, a Gemini/high reviewer and a Sol/medium Advisor —
+ *  Oracle-only peer
  *  set, no `astra` (see `./cheapest-profile-contract`). `"balanced"` is the
  *  most-complex-tasks tier: a Sol/high lead at the 200K default window, the
  *  same four-agent surface as cheap, and the Grok/medium Oracle-only peer
@@ -147,7 +148,7 @@ export const CHEAP_PROFILE: LaunchProfileDescriptor = Object.freeze({
 
 /**
  * The `-m cheapest` roster: the exact cheap surface and groups, but Luna-led
- * (`gpt-5.6-luna`/max at the 200K default window), a Gemini/high Advisor, a
+ * (`gpt-5.6-luna`/max at the 200K default window), a Sol/medium Advisor, a
  * Sol/high Oracle, and a Gemini/high reviewer. Oracle-only peer set, no
  * `astra`. Hard-denies match fast's: core workers, `orchestrate`, `decide`,
  * `fleet`, and `first-mate`.
@@ -966,9 +967,9 @@ const CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS =
 
 /**
  * Validate the live Copilot catalog for `-m cheapest`: Luna lead at the 200K
- * default window, Luna Explore/Plan/GP/implementer roles, Gemini reviewer and
- * Advisor, and a Sol Oracle — all at the 200K default with their fixed
- * efforts and supported endpoints.
+ * default window, Luna Explore/GP roles, a Sol Plan and Oracle, a Gemini
+ * reviewer, and a Sol/medium Advisor — all at the 200K default with
+ * their fixed efforts and supported endpoints.
  */
 export function validateCheapestProfilePrerequisites(
   catalog: ModelsResponse | undefined,

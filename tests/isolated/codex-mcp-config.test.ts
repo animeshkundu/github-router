@@ -1229,6 +1229,64 @@ describe("buildPeerAgentDefinitions", () => {
       expect(fast.reviewer!.prompt).not.toContain("delegate targeted discovery")
     })
 
+    test("200K agents carry the targeted-reads note; fast agents do not", () => {
+      const cheapestAgents = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        cheapestProfile: true,
+        serverUrl: URL,
+        nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
+        includeCoordinator: false,
+      })
+      for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
+        expect(cheapestAgents[name]!.description).toContain("200K context window")
+        expect(cheapestAgents[name]!.prompt).toContain("You operate at a 200K context window")
+      }
+      const fastAgents = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        fastProfile: true,
+        serverUrl: URL,
+        nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
+        includeCoordinator: false,
+        fastExploreModel: "gpt-5.6-luna",
+        fastPlanModel: "gpt-5.6-sol",
+        fastGeneralPurposeModel: "gemini-3.8-flash",
+        fastReviewerModel: "claude-sonnet-5",
+      })
+      for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
+        expect(fastAgents[name]!.description).not.toContain("200K context window")
+        expect(fastAgents[name]!.prompt).not.toContain("You operate at a 200K context window")
+      }
+
+      const balancedAgents = buildBalancedAgents()
+      for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
+        expect(balancedAgents[name]!.description).toContain("200K context window")
+        expect(balancedAgents[name]!.prompt).toContain("You operate at a 200K context window")
+      }
+      const cheapAgents = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        cheapProfile: true,
+        serverUrl: URL,
+        nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
+        includeCoordinator: false,
+      })
+      for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
+        expect(cheapAgents[name]!.description).toContain("200K context window")
+        expect(cheapAgents[name]!.prompt).toContain("You operate at a 200K context window")
+      }
+    })
+
     test("nativeRoster remains a hard filter on the balanced definitions", () => {
       const agents = buildBalancedAgents({ nativeRoster: ["Plan"] })
       expect(Object.keys(agents)).toEqual(["Plan"])

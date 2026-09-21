@@ -423,6 +423,23 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
   })
 
+  test("sets ENABLE_TOOL_SEARCH=auto unless the operator already set it", () => {
+    const prior = process.env.ENABLE_TOOL_SEARCH
+    delete process.env.ENABLE_TOOL_SEARCH
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars.ENABLE_TOOL_SEARCH).toBe("auto")
+      process.env.ENABLE_TOOL_SEARCH = "false"
+      const kept = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      // Operator value flows through the parent env naturally; vars must
+      // not override it.
+      expect(kept).not.toHaveProperty("ENABLE_TOOL_SEARCH")
+    } finally {
+      if (prior === undefined) delete process.env.ENABLE_TOOL_SEARCH
+      else process.env.ENABLE_TOOL_SEARCH = prior
+    }
+  })
+
   test("does NOT set ANTHROPIC_AUTH_TOKEN — auth flows from synthetic .credentials.json in CLAUDE_CONFIG_DIR mirror", () => {
     // Pre-fix: the proxy set ANTHROPIC_AUTH_TOKEN="dummy" so Claude
     // Code's pre-flight had an auth source. Spawned teammates dropped

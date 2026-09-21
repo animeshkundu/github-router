@@ -169,18 +169,18 @@ function fastProfileAdvisorAvailable(): boolean {
 }
 
 /** The Advisor model for an authenticated cheapest primary lead:
- * `gemini-3.8-flash` at high effort over its Chat endpoint, transcript
+ * `gpt-5.6-sol` at medium effort over its Responses endpoint, transcript
  * capped at `CHEAPEST_PROFILE_ADVISOR_CONTEXT_TOKENS` (200K). */
 export const ADVISOR_CHEAPEST_PROFILE_MODEL = CHEAPEST_PROFILE_ADVISOR_MODEL
 export const ADVISOR_CHEAPEST_PROFILE_EFFORT = CHEAPEST_PROFILE_ADVISOR_EFFORT
 
-/** True only when the live Gemini entry satisfies the fixed cheapest
- * transport (Chat Completions). */
+/** True only when the live Sol entry satisfies the fixed cheapest
+ * transport (Responses). */
 function cheapestProfileAdvisorAvailable(): boolean {
   return fastEndpointForCatalogId(
     ADVISOR_CHEAPEST_PROFILE_MODEL,
     state.models?.data,
-  ) === "chat"
+  ) === "responses"
 }
 
 /** Pick the cheapest Advisor model. Throws when the catalog gate fails so
@@ -188,7 +188,7 @@ function cheapestProfileAdvisorAvailable(): boolean {
 export function resolveCheapestAdvisorModel(): AdvisorModelChoice {
   if (!cheapestProfileAdvisorAvailable()) {
     throw new Error(
-      `cheapest Advisor invariant failed: ${ADVISOR_CHEAPEST_PROFILE_MODEL} must advertise the Chat Completions endpoint`,
+      `cheapest Advisor invariant failed: ${ADVISOR_CHEAPEST_PROFILE_MODEL} must advertise the Responses endpoint`,
     )
   }
   return {

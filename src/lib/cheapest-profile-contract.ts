@@ -3,7 +3,7 @@
  *
  * The cheapest all-200K tier: a `gpt-5.6-luna`/max LEAD at Claude Code's
  * DEFAULT (bare-slug) 200K window, every subagent at the same 200K default,
- * a `gemini-3.8-flash`/high Advisor (bare slug), and a `gpt-5.6-sol`/high
+ * a `gpt-5.6-sol`/medium Advisor (bare slug), and a `gpt-5.6-sol`/high
  * primary Oracle. Oracle-only peer set (no `astra`), same exact four-agent
  * surface and authority structure as the cheap family.
  *
@@ -19,7 +19,7 @@ export const CHEAPEST_PROFILE_MODELS = Object.freeze({
   plan: "gpt-5.6-sol",
   "General-Purpose": "gpt-5.6-luna",
   reviewer: "gemini-3.8-flash",
-  advisor: "gemini-3.8-flash",
+  advisor: "gpt-5.6-sol",
   oracle: "gpt-5.6-sol",
 } as const)
 
@@ -64,7 +64,7 @@ export const CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS = 200_000 as const
 
 export const CHEAPEST_PROFILE_ADVISOR_MODEL = CHEAPEST_PROFILE_MODELS.advisor
 /**
- * Client-visible Advisor identity for cheapest mode. The BARE Gemini slug
+ * Client-visible Advisor identity for cheapest mode. The BARE Sol slug
  * (no `[1m]` bracket): Claude Code budgets the Advisor tool as a 200K-model
  * and forwards no more than ~200K of the lead's transcript, and the proxy
  * mirrors that with `CHEAPEST_PROFILE_ADVISOR_CONTEXT_TOKENS`.
@@ -74,7 +74,7 @@ export const CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL =
 /** Advisor context window for cheapest mode (tokens). */
 export const CHEAPEST_PROFILE_ADVISOR_CONTEXT_TOKENS =
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS
-export const CHEAPEST_PROFILE_ADVISOR_EFFORT = "high" as const
+export const CHEAPEST_PROFILE_ADVISOR_EFFORT = "medium" as const
 export const CHEAPEST_PROFILE_ORACLE_MODEL = CHEAPEST_PROFILE_MODELS.oracle
 export const CHEAPEST_PROFILE_ORACLE_EFFORT = "high" as const
 

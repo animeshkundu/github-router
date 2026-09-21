@@ -1254,6 +1254,7 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   const cheapestDigest = buildOperatingDefaultsDigest({ profile: "cheapest" })
   expect(cheapestDigest).toContain("Cheapest launch profile")
   expect(cheapestDigest).toContain("directly")
+  expect(cheapestDigest).toContain("All roles run at a 200K context window")
 
   // `-m cheap` deliberately runs without astra even if the caller hints the
   // peer is "available" — the profile never wires it; only cheap1m does.
@@ -1309,6 +1310,27 @@ test("balanced directive funnels unknowns search-first with no Advisor", () => {
   expect(directive).toContain("Delegate to `General-Purpose` FREELY")
   expect(directive).toContain("lead owns verification")
   expect(directive).toContain("Invoke `reviewer` ONLY when")
+})
+
+test("200K profiles name targeted reads; fast/standard/max do not", () => {
+  for (const profile of ["cheapest", "balanced"] as const) {
+    const directive = buildOperatingDefaultsDirective({ profile })
+    expect(directive).toContain("All roles run at a 200K context window")
+    const digest = buildOperatingDefaultsDigest({ profile })
+    expect(digest).toContain("All roles run at a 200K context window")
+  }
+  for (const profile of ["cheap", "cheap1m"] as const) {
+    const directive = buildOperatingDefaultsDirective({ profile })
+    expect(directive).toContain("every subagent runs at 200K")
+    const digest = buildOperatingDefaultsDigest({ profile })
+    expect(digest).toContain("every subagent runs at 200K")
+  }
+  for (const profile of ["fast", "standard", "max"] as const) {
+    const directive = buildOperatingDefaultsDirective({ profile })
+    expect(directive).not.toContain("200K context window")
+    const digest = buildOperatingDefaultsDigest({ profile })
+    expect(digest).not.toContain("200K context window")
+  }
 })
 
 test("sweEnabled:false omits every pipeline-skill reference from directive and digest", () => {

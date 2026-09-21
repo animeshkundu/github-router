@@ -583,7 +583,7 @@ export function cheapReviewerModel(): string | undefined {
   return CHEAP_PROFILE_MODELS.reviewer
 }
 
-/** Gemini/high Advisor for the cheapest profile at the 200K default window. */
+/** Sol/medium Advisor for the cheapest profile at the 200K default window. */
 export function cheapestAdvisorModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === CHEAPEST_PROFILE_ADVISOR_MODEL)
   if (!found) return undefined
@@ -591,7 +591,7 @@ export function cheapestAdvisorModel(): string | undefined {
   if (found.capabilities?.supports?.tool_calls !== true) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST_PROFILE_ADVISOR_EFFORT)) return undefined
-  if (fastEndpointForModel(found) !== "chat") return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
   return CHEAPEST_PROFILE_ADVISOR_MODEL
 }
 

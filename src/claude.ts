@@ -1207,7 +1207,7 @@ export const claude = defineCommand({
         ) {
           if (launchProfileId === "cheapest") {
             throw new Error(
-              "cheapest profile prerequisite drift: exact reviewer, oracle (gpt-5.6-sol), or advisor (gemini-3.8-flash) model no longer resolves",
+              "cheapest profile prerequisite drift: exact reviewer, oracle (gpt-5.6-sol), or advisor (gpt-5.6-sol) model no longer resolves",
             )
           }
           if (launchProfileId === "balanced") {
