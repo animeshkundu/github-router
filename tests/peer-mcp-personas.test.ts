@@ -676,6 +676,19 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(on).toContain("ranks by MEANING")
   })
 
+  test("Bluebird awareness never describes the remote path as local ColBERT", () => {
+    const snippet = buildPeerAwarenessSnippet({
+      ...MINIMAL,
+      semanticSearchAvailable: true,
+      bluebirdEnabled: true,
+    })
+    expect(snippet).toContain("Bluebird")
+    expect(snippet).toContain("never fall back locally")
+    expect(snippet).toContain("exact")
+    expect(snippet).not.toContain("ColBERT")
+    expect(snippet).not.toContain("transparently falls back")
+  })
+
   test("buildCodeToolDescription/buildCodeModeDescription match the launch flag", () => {
     // Static registry entry stays semantic-first (full capability contract).
     const tool = NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === "code")!
@@ -693,19 +706,28 @@ describe("buildPeerAwarenessSnippet", () => {
     expect(offMode).not.toMatch(/ColBERT|meaning-based/i)
   })
 
-  test("awareness summary names lexical search when semantic is unavailable", () => {
+  test("awareness summary distinguishes local, Bluebird, and lexical-only search", () => {
     const base = {
       workerToolsAvailable: false,
       standInAvailable: false,
       browseAvailable: false,
     }
     const on = buildPeerAwarenessSummary({ ...base, semanticSearchAvailable: true })
-    expect(on).toContain("meaning-first code search")
+    expect(on).toContain("local ColBERT meaning-first code search")
+    expect(on).toContain("lexical fallback")
+    const bluebird = buildPeerAwarenessSummary({
+      ...base,
+      semanticSearchAvailable: true,
+      bluebirdEnabled: true,
+    })
+    expect(bluebird).toContain("Bluebird semantic + lexical")
+    expect(bluebird).toContain("no-fallback")
+    expect(bluebird).not.toContain("ColBERT")
     const off = buildPeerAwarenessSummary({ ...base, semanticSearchAvailable: false })
-    expect(off).toContain("lexical code search")
+    expect(off).toContain("local lexical code search")
     expect(off).not.toMatch(/meaning-first|semantic/i)
     // Absent flag defaults to lexical-only.
-    expect(buildPeerAwarenessSummary(base)).toContain("lexical code search")
+    expect(buildPeerAwarenessSummary(base)).toContain("local lexical code search")
   })
 
   test("describes the non-code fallback (per peer-review #4 — grep/glob still apply)", () => {

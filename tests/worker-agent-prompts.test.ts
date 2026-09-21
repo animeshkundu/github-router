@@ -175,6 +175,13 @@ describe("systemPromptFor", () => {
     expect(on).toContain("ColBERT")
     expect(on).not.toContain("lexical-fallback") // `source` values live in tool I/O, not the prompt
     expect(on).toContain("`lexical`/`exact`/`regex`/`ast` for exact symbols")
+    // Bluebird-only describes the remote backend without claiming ColBERT.
+    const bluebird = systemPromptFor("explore", false, true)
+    expect(bluebird).toContain("Bluebird-backed")
+    expect(bluebird).toContain("no local fallback")
+    expect(bluebird).not.toContain("ColBERT")
+    expect(systemPromptFor("explore", true, true)).toContain("Bluebird-backed")
+
     // Disabled (and the default): lexical-only, never names semantic search.
     for (const off of [systemPromptFor("explore", false), systemPromptFor("explore")]) {
       expect(off).toContain("lexical code search (BM25F + tree-sitter structural ranking)")

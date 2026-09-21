@@ -8,8 +8,9 @@
  *   2. stashes the prompt + surfaces the prior turn's advisory review findings;
  *  3. for a non-trivial prompt, injects a GROUNDED, user-derived scope/goal
  *      note (one gpt-5.6-luna call at high effort over the prompt + grounding
- *      code search — semantic-first when --search is on, lexical-only
- *      otherwise) — or, when the proxy URL/nonce isn't wired or anything errors,
+ *      code search — local ColBERT when --search is on, Bluebird when
+ *      --bluebird is on, lexical-only otherwise) — or, when the proxy URL/nonce
+ *      isn't wired or anything errors,
  *      falls open to the v1 regex goal.
  *
  * ALWAYS exits 0 (never blocks the prompt): the steer is additive context, and a
@@ -96,6 +97,7 @@ export const internalPromptSubmit = defineCommand({
       const searchEnabled = process.env.GH_ROUTER_SEARCH_ENABLED !== undefined
         ? process.env.GH_ROUTER_SEARCH_ENABLED === "1"
         : process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
+      const bluebirdEnabled = process.env.GH_ROUTER_BLUEBIRD_ENABLED === "1"
       const runtime = hookMcpRuntimeFromEnv()
 
       let decision: PromptSubmitDecision
@@ -105,6 +107,7 @@ export const internalPromptSubmit = defineCommand({
           stdin,
           steerEnabled,
           searchEnabled,
+          bluebirdEnabled,
           io: {
             searchCode: async (query, mode, signal) => {
               const r = await callMcpTool({

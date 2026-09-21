@@ -1,9 +1,16 @@
 import type { InjectedSkill } from "./index"
 
-export function buildGatherContextSkill(searchEnabled: boolean): InjectedSkill {
-  const searchStep = searchEnabled
+export function buildGatherContextSkill(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean = false,
+): InjectedSkill {
+  const semanticAvailable = searchEnabled || bluebirdEnabled
+  const semanticBackend = bluebirdEnabled
+    ? "Bluebird's Azure DevOps index; failures stay visible with no local fallback"
+    : "the local ColBERT index, with transparent lexical fallback while unavailable"
+  const searchStep = semanticAvailable
     ? `3. Run semantic search first for concepts, then lexical for symbols, in parallel, in a single turn.
-   - Use mcp__search__code semantically first to find concepts and likely files.
+   - Use mcp__search__code semantically first to find concepts and likely files via ${semanticBackend}.
    - Then use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.
    - Use git log and git blame when authorship, regression timing, or intent matters.
    - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.`
@@ -12,7 +19,7 @@ export function buildGatherContextSkill(searchEnabled: boolean): InjectedSkill {
    - Use git log and git blame when authorship, regression timing, or intent matters.
    - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.`
 
-  const searchCap = searchEnabled ? "Maximum searches per round: 10." : "Maximum lexical searches per round: 10."
+  const searchCap = semanticAvailable ? "Maximum searches per round: 10." : "Maximum lexical searches per round: 10."
 
   return {
     name: "gh-gather-context",

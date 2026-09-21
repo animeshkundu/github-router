@@ -42,12 +42,105 @@ describe("buildExecInvocation", () => {
     expect(inv.args).toEqual(["view", "pkg", "version"])
   })
 
-  test("win32: shell true, single command string, empty args", () => {
+  test("win32: unresolved command uses shell and one command string", () => {
     const inv = buildExecInvocation(["npm", "view", "pkg"], "win32")
     expect(inv.shell).toBe(true)
     expect(inv.args).toEqual([])
     expect(inv.command).toContain("npm")
     expect(inv.command).toContain("view")
+  })
+
+  test("win32: resolved native executable bypasses cmd.exe", () => {
+    const executable = "C:\\Program Files\\Git\\mingw64\\bin\\git.exe"
+    expect(buildExecInvocation([executable, "remote", "-v"], "win32")).toEqual({
+      command: executable,
+      args: ["remote", "-v"],
+      shell: false,
+    })
+  })
+
+  test("win32: resolved batch shim uses an explicit safe cmd.exe envelope", () => {
+    // windowsCmdExe() resolves SystemRoot → ComSpec → bare cmd.exe. Real
+    // Windows always sets SystemRoot, but this suite also runs on
+    // Linux/macOS CI, so simulate the Windows host explicitly — otherwise
+    // the assertion below depends on ambient env and fails off-Windows.
+    //
+    // NOTE: process.env keys are case-INSENSITIVE on Windows (Node merges
+    // `SystemRoot`/`SYSTEMROOT`), so never `delete` one casing while
+    // relying on the other to survive — set both casings to the same
+    // value instead. Deletion is only safe when absence is the goal.
+    const savedSystemRoot = process.env.SystemRoot
+    const savedSystemRootUpper = process.env.SYSTEMROOT
+    const savedComSpec = process.env.ComSpec
+    process.env.SystemRoot = "C:\\Windows"
+    process.env.SYSTEMROOT = "C:\\Windows"
+    delete process.env.ComSpec
+    try {
+      const executable = "C:\\Program Files (x86)\\nodejs\\npm.cmd"
+      const inv = buildExecInvocation(
+        [executable, "view", "pkg name", "a&b", "x|y", "(z)", "x!y", "x^y"],
+        "win32",
+      )
+      expect(inv.command.toLowerCase()).toEndWith("\\system32\\cmd.exe")
+      expect(inv.shell).toBe(false)
+      expect(inv.windowsVerbatimArguments).toBe(true)
+      expect(inv.args.slice(0, 4)).toEqual(["/d", "/s", "/v:OFF", "/c"])
+      expect(inv.args[4]).toBe(
+        `""${executable}" "view" "pkg name" "a^&b" "x^|y" "(z)" "x!y" "x^^y""`,
+      )
+    } finally {
+      if (savedSystemRoot === undefined) delete process.env.SystemRoot
+      else process.env.SystemRoot = savedSystemRoot
+      if (savedSystemRootUpper === undefined) delete process.env.SYSTEMROOT
+      else process.env.SYSTEMROOT = savedSystemRootUpper
+      if (savedComSpec === undefined) delete process.env.ComSpec
+      else process.env.ComSpec = savedComSpec
+    }
+  })
+
+  test("win32: cmd.exe resolution falls back ComSpec → bare cmd.exe", () => {
+    const savedSystemRoot = process.env.SystemRoot
+    const savedSystemRootUpper = process.env.SYSTEMROOT
+    const savedComSpec = process.env.ComSpec
+    const savedComSpecUpper = process.env.COMSPEC
+    const executable = "C:\\Program Files\\nodejs\\npm.cmd"
+    try {
+      // Absence is the goal here, so deleting BOTH casings is correct
+      // under either merge semantics (see the note above).
+      delete process.env.SystemRoot
+      delete process.env.SYSTEMROOT
+      process.env.ComSpec = "D:\\Tools\\cmd.exe"
+      expect(
+        buildExecInvocation([executable, "view"], "win32").command,
+      ).toBe("D:\\Tools\\cmd.exe")
+
+      delete process.env.ComSpec
+      delete process.env.COMSPEC
+      expect(
+        buildExecInvocation([executable, "view"], "win32").command,
+      ).toBe("cmd.exe")
+    } finally {
+      if (savedSystemRoot === undefined) delete process.env.SystemRoot
+      else process.env.SystemRoot = savedSystemRoot
+      if (savedSystemRootUpper === undefined) delete process.env.SYSTEMROOT
+      else process.env.SYSTEMROOT = savedSystemRootUpper
+      if (savedComSpec === undefined) delete process.env.ComSpec
+      else process.env.ComSpec = savedComSpec
+      if (savedComSpecUpper === undefined) delete process.env.COMSPEC
+      else process.env.COMSPEC = savedComSpecUpper
+    }
+  })
+
+  test("win32: batch shim rejects unsafe tokens and relative paths", () => {
+    const executable = "C:\\Program Files\\nodejs\\npm.cmd"
+    for (const unsafe of ["%PATH%", 'a"b', "a\r\nb", "a\0b"]) {
+      expect(() =>
+        buildExecInvocation([executable, unsafe], "win32"),
+      ).toThrow("cannot be safely passed through cmd.exe")
+    }
+    expect(() => buildExecInvocation(["npm.cmd", "view"], "win32")).toThrow(
+      "must be an absolute path",
+    )
   })
 
   test("throws on empty command", () => {
@@ -88,6 +181,82 @@ describe("quoteWinArg — injection safety", () => {
   test("plain args pass through without carets", () => {
     expect(quoteWinArg("--silent")).toBe("--silent")
     expect(quoteWinArg("github-router@latest")).toBe("github-router@latest")
+  })
+})
+
+describe("runCommandCapture: Windows batch shims", () => {
+  const isWin = process.platform === "win32"
+  let tmpDir = ""
+  let shim = ""
+  let injected = ""
+
+  beforeAll(async () => {
+    if (!isWin) return
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "ghr batch (safe)-"))
+    shim = path.join(tmpDir, "capture args.cmd")
+    injected = path.join(tmpDir, "INJECTED.txt")
+    await fs.writeFile(
+      shim,
+      [
+        "@echo off",
+        "setlocal DisableDelayedExpansion",
+        "echo [%~1]",
+        "echo [%~2]",
+        "echo [%~3]",
+        "echo [%~4]",
+        "echo [%~5]",
+        "echo [%~6]",
+        "echo [%~7]",
+        "echo [%~8]",
+      ].join("\r\n") + "\r\n",
+      "utf8",
+    )
+  })
+
+  afterAll(async () => {
+    if (tmpDir) await fs.rm(tmpDir, { recursive: true, force: true })
+  })
+
+  test.if(isWin)(
+    "executes a spaced .cmd path and preserves quoted metacharacters as data",
+    async () => {
+      const result = await runCommandCapture([
+        shim,
+        "hello world",
+        "a&b",
+        "a|b",
+        "a>b",
+        "a<b",
+        "(a)",
+        "a^b",
+        "a!b",
+      ])
+      expect(result.code).toBe(0)
+      expect(result.stdout.split(/\r?\n/).filter(Boolean)).toEqual([
+        "[hello world]",
+        "[a&b]",
+        "[a|b]",
+        "[a>b]",
+        "[a<b]",
+        "[(a)]",
+        "[a^b]",
+        "[a!b]",
+      ])
+      expect(await fs.exists(injected)).toBe(false)
+    },
+  )
+
+  test.if(isWin)("rejects command injection before spawning", async () => {
+    try {
+      await runCommandCapture([shim, `%PATH%&echo injected>${injected}`])
+      throw new Error("expected unsafe batch argument rejection")
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toContain(
+        "cannot be safely passed through cmd.exe",
+      )
+    }
+    expect(await fs.exists(injected)).toBe(false)
   })
 })
 
@@ -244,6 +413,23 @@ describe("runManagedExeCapture — inactivity watchdog", () => {
     })
     expect(drained.stdoutTruncated).toBe(true)
     expect(drained.code).toBe(0) // ran to completion, never killed
+  }, 15_000)
+})
+
+describe("runCommandCapture: caller cancellation", () => {
+  test("aborting the signal terminates the running child", async () => {
+    const controller = new AbortController()
+    const started = Date.now()
+    const pending = runCommandCapture(
+      [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+      { signal: controller.signal, timeoutMs: 30_000 },
+    )
+    setTimeout(() => controller.abort(new Error("test cancellation")), 250)
+
+    const result = await pending
+    expect(result.code).not.toBe(0)
+    expect(result.timedOut).toBe(false)
+    expect(Date.now() - started).toBeLessThan(10_000)
   }, 15_000)
 })
 

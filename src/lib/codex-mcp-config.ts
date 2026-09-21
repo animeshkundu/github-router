@@ -265,12 +265,11 @@ interface BuildOpts {
   scoutEffort?: SubagentEffort
   implementerEffort?: SubagentEffort
   reviewerEffort?: SubagentEffort
-  /** Whether ColBERT semantic code search is enabled for this launch
-   *  (`--search` / `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1`). Pinned-profile
-   *  Explore prompts mention semantic search ONLY when true; otherwise they
-   *  describe the lexical-only `code` tool so agents are never told to use a
-   *  mode that degrades to lexical anyway. Absent → false (lexical-only). */
+  /** Whether local ColBERT semantic search or Bluebird semantic routing is
+   *  available for this launch. Absent means lexical-only. */
   semanticSearchAvailable?: boolean
+  /** Whether Bluebird owns semantic and lexical modes for this launch. */
+  bluebirdEnabled?: boolean
   /** Compatibility fields for the original fast-profile implementation. */
   implementerFastEffort?: SubagentEffort
   reviewerFastEffort?: SubagentEffort
@@ -806,10 +805,11 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
  * Cost doctrine, cheapest to most expensive:
  *   1. LEXICAL code search (`mode:"lexical"`/`"exact"`) — zero model cost,
  *      exact symbols, filenames, errors, routes, config keys. Always first.
- *   2. SEMANTIC code search (`mode:"semantic"`) — meaning-ranked via ColBERT,
- *      for concepts and intent questions. Mentioned ONLY when the launch
- *      enabled it (`semanticSearchAvailable`); otherwise the `code` tool is
- *      lexical-only and agents must not be told to reach for semantic.
+ *   2. SEMANTIC code search (`mode:"semantic"`) — meaning-ranked via local
+ *      ColBERT or Bluebird, for concepts and intent questions. Mentioned ONLY
+ *      when this launch enabled one of those backends (`semanticSearchAvailable`);
+ *      otherwise the `code` tool is lexical-only and agents must not be told
+ *      to reach for semantic.
  *   3. `Explore` (budget model) — reads the narrowed files and synthesizes a
  *      file:line evidence report. Only the conclusion flows upward.
  *   4. `Plan` (Sol) / `reviewer` (Sonnet/Luna/Gemini) / `oracle` — expensive
@@ -825,13 +825,20 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
  *     `Plan`-first architecture, `General-Purpose` mixed execution, and
  *     post-integration `reviewer` verification.
  */
-function pinnedSearchGuidance(semanticAvailable: boolean, capitalize = true): string {
+function pinnedSearchGuidance(
+  semanticAvailable: boolean,
+  capitalize = true,
+  bluebirdEnabled = false,
+): string {
   const start = capitalize ? "Start with" : "start with"
-  const lexical = `${start} exact lexical and symbol search (\`code\` with mode:"lexical" or "exact", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys — it costs no model call`
+  if (bluebirdEnabled) {
+    return `${start} Bluebird indexed keyword search (\`code\` with mode:"lexical") for symbols, filenames, errors, routes, flags, and config keys; pair it with Bluebird semantic search for intent/concept questions where literal keywords may not appear. Bluebird failures remain visible and never fall back locally; mode:"exact", regex, AST, Grep, and Glob stay on the local live tree. Include surrounding context lines in your results so callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer.`
+  }
+  const lexical = `${start} local exact lexical and symbol search (\`code\` with mode:"lexical" or "exact", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys — it costs no model call`
   if (!semanticAvailable) {
     return `${lexical}. Pair it with surrounding context lines so callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer.`
   }
-  return `${lexical}; pair semantic search (meaning-ranked, best for intent/concept questions where literal keywords may not appear) with exact lexical and symbol search so that neither naming drift nor synonym mismatch hides a result. Include surrounding context lines in your search results so that callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer.`
+  return `${lexical}; pair local ColBERT semantic search (meaning-ranked, with lexical fallback while its index is unavailable) with exact lexical and symbol search so that neither naming drift nor synonym mismatch hides a result. Include surrounding context lines in your search results so that callers, guards, and types are visible without a second round trip, and inspect the file whenever the surrounding logic determines the answer.`
 }
 
 /**
@@ -860,10 +867,19 @@ function pinnedExploreDescription(explicit: boolean, is200K = false): string {
   return head + EXPLORE_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
 }
 
-function pinnedExplorePrompt(opts: { explicit: boolean; semanticAvailable: boolean; is200K?: boolean }): string {
+function pinnedExplorePrompt(opts: {
+  explicit: boolean
+  semanticAvailable: boolean
+  is200K?: boolean
+  bluebirdEnabled?: boolean
+}): string {
   // After the "…and " parallel prefix the guidance continues the sentence
   // (lowercase); standalone it opens one (capitalized).
-  const searchGuidance = pinnedSearchGuidance(opts.semanticAvailable, !opts.explicit)
+  const searchGuidance = pinnedSearchGuidance(
+    opts.semanticAvailable,
+    !opts.explicit,
+    opts.bluebirdEnabled === true,
+  )
   const parallel = opts.explicit
     ? "Issue independent searches in parallel in one turn rather than one at a time, and "
     : ""
@@ -1052,7 +1068,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
   const out: PeerAgentDefinitions = {
     Explore: {
       description: pinnedExploreDescription(true),
-      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable }),
+      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable, bluebirdEnabled: opts.bluebirdEnabled }),
       tools: readSearchTools,
       model: decorateGuaranteedOneM(LUNA_SCOUT_ALIAS_ID),
       effort: effort("Explore"),
@@ -1173,7 +1189,7 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
   const out: PeerAgentDefinitions = {
     Explore: {
       description: pinnedExploreDescription(true, true),
-      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable, is200K: true }),
+      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled }),
       tools: readSearchTools,
       model: exploreModel,
       effort: effort("Explore"),
@@ -1294,7 +1310,7 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
   const out: PeerAgentDefinitions = {
     Explore: {
       description: pinnedExploreDescription(false, true),
-      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable, is200K: true }),
+      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled }),
       tools: readSearchTools,
       model: exploreModel,
       effort: effort("Explore"),
@@ -1419,7 +1435,7 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
   const out: PeerAgentDefinitions = {
     Explore: {
       description: pinnedExploreDescription(true, true),
-      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable, is200K: true }),
+      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled }),
       tools: readSearchTools,
       model: exploreModel,
       effort: effort("Explore"),
@@ -1862,9 +1878,11 @@ interface WriteOpts {
   balancedPlanModel?: string
   balancedGeneralPurposeModel?: string
   balancedReviewerModel?: string
-  /** Whether ColBERT semantic code search is enabled for this launch.
-   *  Pinned-profile Explore prompts mention semantic search only when true. */
+  /** Whether local ColBERT semantic search or Bluebird semantic routing is
+   *  available for this launch. */
   semanticSearchAvailable?: boolean
+  /** Whether Bluebird owns semantic and lexical modes for this launch. */
+  bluebirdEnabled?: boolean
   implementerEffort?: SubagentEffort
   reviewerEffort?: SubagentEffort
   /** Max-profile role assignments. */
@@ -2444,6 +2462,7 @@ export async function writePeerMcpRuntimeFiles(
     balancedGeneralPurposeModel: opts.balancedGeneralPurposeModel,
     balancedReviewerModel: opts.balancedReviewerModel,
     semanticSearchAvailable: opts.semanticSearchAvailable,
+    bluebirdEnabled: opts.bluebirdEnabled,
     nativeRoster: opts.nativeRoster,
     personaAllowlist: opts.personaAllowlist,
     includeCoordinator: opts.includeCoordinator,

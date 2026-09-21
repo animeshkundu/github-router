@@ -95,31 +95,35 @@ describe("forced lexical family (never touches colgrep)", () => {
     expect(r.results.length).toBeGreaterThan(0)
   })
 
-  test("mode:'lexical' summary is opt-in (omitted by default)", async () => {
-    // Regression pin for the summary-forwarding chain: MCP `code` tool
-    // advertises `summary` (opt-in outlines), and the unified router
-    // must thread it into searchCode so outline parses run only on
-    // request. The semantic path has its own pin ("status 'ready' honors
-    // summary:true"); this covers runLexical → searchCode.
-    const withOutlines = await runUnifiedCodeSearch({
+  test("mode:'lexical' summary is on by default and omitted when summary:false", async () => {
+    // Regression pin for the summary contract: summaries/outlines are ON by
+    // default across search modes (summary !== false), and passing summary: false
+    // omits them.
+    const defaultOutlines = await runUnifiedCodeSearch({
+      query: "refreshAuthToken",
+      workspace: root,
+      mode: "lexical",
+    })
+    expect(defaultOutlines.outlines).toBeDefined()
+    expect(defaultOutlines.outlines!.length).toBeGreaterThan(0)
+
+    const explicitOutlines = await runUnifiedCodeSearch({
       query: "refreshAuthToken",
       workspace: root,
       mode: "lexical",
       summary: true,
     })
-    expect(withOutlines.outlines).toBeDefined()
-    expect(withOutlines.outlines!.length).toBeGreaterThan(0)
+    expect(explicitOutlines.outlines).toBeDefined()
+    expect(explicitOutlines.outlines!.length).toBeGreaterThan(0)
 
-    for (const summary of [undefined, false] as const) {
-      const withoutOutlines = await runUnifiedCodeSearch({
-        query: "refreshAuthToken",
-        workspace: root,
-        mode: "lexical",
-        ...(summary === undefined ? {} : { summary }),
-      })
-      expect(withoutOutlines.outlines).toBeUndefined()
-      expect(withoutOutlines.results.length).toBeGreaterThan(0)
-    }
+    const withoutOutlines = await runUnifiedCodeSearch({
+      query: "refreshAuthToken",
+      workspace: root,
+      mode: "lexical",
+      summary: false,
+    })
+    expect(withoutOutlines.outlines).toBeUndefined()
+    expect(withoutOutlines.results.length).toBeGreaterThan(0)
   })
 
   test("zero-hit multi-word lexical query returns a recovery notice, not a bare empty", async () => {

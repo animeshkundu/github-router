@@ -8,10 +8,9 @@ import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
  *
  * 2.1.260 reworded the Agent-spawn rewrite comment. Through 2.1.258 the
  * checkArgument explanation was "the Agent tool decided it; a rewrite
- * changes model alone". 2.1.260 still admits a string model on agent.spawn
- * via check:_((e)=>ut(e,"{ model }",(t)=>typeof t.model==="string")) while
- * pinning identity fields, so a PreToolUse hook may still return
- * updatedInput that changes model alone.
+ * changes model alone". Current builds still admit a string model on
+ * agent.spawn while pinning identity fields, so a PreToolUse hook may still
+ * return updatedInput that changes model alone.
  */
 const REQUIRED_MARKERS = [
   "--advisor <model>",
@@ -20,8 +19,10 @@ const REQUIRED_MARKERS = [
   "Advising",
   " using ",
   "updatedInput",
-  // 2.1.266+: it(e,"{ model }",(t)=>typeof t.model==="string"); 2.1.260: ut; 2.1.258-: "a rewrite changes model alone"
+  // 2.1.273: Et; 2.1.266+: it; 2.1.260: ut;
+  // 2.1.258-: "a rewrite changes model alone"
   [
+    'check:_((e)=>Et(e,"{ model }",(t)=>typeof t.model==="string"))',
     'check:A((e)=>it(e,"{ model }",(t)=>typeof t.model==="string"))',
     'check:_((e)=>ut(e,"{ model }",(t)=>typeof t.model==="string"))',
     "a rewrite changes model alone",

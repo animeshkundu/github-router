@@ -9,12 +9,21 @@
  * failed) or colgrep isn't provisioned on this host. The forced lexical
  * family (`lexical|exact|regex|ast`) never touches colgrep.
  *
- * Provenance is carried in a THREE-valued `source` field, independent of
+ * Under `--bluebird` (`state.bluebirdEnabled`), the `semantic` and
+ * `lexical` modes route through
+ * the Bluebird Azure DevOps MCP server instead (the unified `code_search`
+ * tool, with legacy tool-name compatibility); `exact|regex|ast` stay local, and
+ * Bluebird errors surface as `source:"error"` with NO silent local
+ * fallback.
+ *
+ * Provenance is carried in a FOUR-valued `source` field, independent of
  * `notice`:
- *   - "semantic"          colgrep ran and the index was fresh
+ *   - "semantic"          colgrep/Bluebird ran and the index was fresh
  *   - "lexical"           the caller explicitly forced a lexical mode
  *   - "lexical-fallback"  a semantic/default query degraded to lexical
  *                         because the index wasn't ready
+ *   - "error"             the Bluebird backend failed after retries; the
+ *                         response carries `notice` with the cause
  * `notice` keeps the lexical backend's size-cap > structural priority, so
  * on a hit-heavy fallback the urgent size notice can win; `source` still
  * conveys "this was a fallback" unambiguously, and never conflates a
@@ -24,27 +33,32 @@
  * NO-FALLBACK (it returns honest status, never another engine). The
  * fallback lives only here, at the merged-tool layer.
  *
- * Import-cycle note: this module imports ONLY from `./code-search` and
- * `./colbert` (both leaves w.r.t. the worker-agent graph). It must NOT
- * import `./mcp-capabilities`; that would close a cycle through
- * `worker-agent`. The colbert-availability decision is read from the leaf
- * `colbertSearchEnabled()`.
+ * Import-cycle note: this module imports ONLY from `./code-search`,
+ * `./colbert`, `./bluebird-client`, and `./state`. It must NOT import
+ * `./mcp-capabilities`; that would close a cycle through `worker-agent`.
+ * The colbert-availability decision is read from the leaf
+ * `colbertSearchEnabled()`. (`./state` reaches `./bluebird-client` by
+ * type-only import, and `./bluebird-client` reaches this module by
+ * type-only import, so neither edge exists at runtime.)
  */
 
 import path from "node:path"
 
+import { BluebirdError, ensureBluebirdClient } from "./bluebird-client"
 import {
   MAX_OUTLINE_ENTRIES_PER_FILE,
   searchCode,
+  validateWorkspace,
   type CodeSearchResponse,
 } from "./code-search"
 import { colbertSearchEnabled, runSemanticSearch, runServiceSearch, serviceBackendEnabled } from "./colbert"
 import type { SemanticSearchResult, SemanticStatus } from "./colbert/runner"
+import { state } from "./state"
 import { outlineFile } from "./tree-sitter-grammars"
 
 export type UnifiedMode = "semantic" | "lexical" | "exact" | "regex" | "ast"
 
-export type UnifiedSource = "semantic" | "lexical" | "lexical-fallback"
+export type UnifiedSource = "semantic" | "lexical" | "lexical-fallback" | "error"
 
 export interface UnifiedCodeSearchInput {
   query: string
@@ -55,7 +69,7 @@ export interface UnifiedCodeSearchInput {
   limit?: number
   context_lines?: number
   structural?: "full" | "topN"
-  /** Opt-in outlines (default off). `true` attaches per-file outlines. */
+  /** Per-result outlines are on by default; `false` omits them. */
   summary?: boolean
   complete?: boolean
   multiline?: boolean
@@ -181,7 +195,7 @@ async function outlinesForSemanticResults(
   results: Array<UnifiedResultRow>,
   signal?: AbortSignal,
 ): Promise<CodeSearchResponse["outlines"]> {
-  if (input.summary !== true) return undefined
+  if (input.summary === false) return undefined
   const seen = new Set<string>()
   const files: Array<string> = []
   for (const result of results) {
@@ -196,17 +210,24 @@ async function outlinesForSemanticResults(
   const workspace = path.resolve(input.workspace)
   for (const file of files) {
     if (signal?.aborted || Date.now() > deadline) break
-    const abs = path.resolve(workspace, file)
+    const normalized = file.replaceAll("\\", "/").replace(/^\/+/, "")
+    if (!normalized || normalized.includes("\0") || /^[A-Za-z]:/.test(normalized) || normalized.startsWith("//")) continue
+    if (normalized.split("/").some((part) => part === "..")) continue
+    const abs = path.resolve(workspace, normalized)
     const rel = path.relative(workspace, abs)
     // Semantic rows should already be workspace-relative. Fail closed if a
     // malformed/upstream row is absolute or escapes rather than outlining an
     // unrelated file outside the caller's workspace.
     if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue
-    const outlined = await outlineFile(abs, signal)
-    outlines.push({
-      file,
-      outline: outlined.outline.slice(0, MAX_OUTLINE_ENTRIES_PER_FILE),
-    })
+    try {
+      const outlined = await outlineFile(abs, signal)
+      outlines.push({
+        file: normalized,
+        outline: outlined.outline.slice(0, MAX_OUTLINE_ENTRIES_PER_FILE),
+      })
+    } catch {
+      // Outline enrichment is optional; preserve the valid remote hit.
+    }
   }
   return outlines
 }
@@ -302,15 +323,90 @@ function emptyPhraseHint(
 }
 
 /**
+ * Bluebird backend for the `semantic` and `lexical` modes. `exact|regex|ast`
+ * never reach here (they stay local by contract). Errors surface as
+ * `source:"error"` — the `--bluebird` promise is "Bluebird or a visible
+ * error", never a silent local fallback that would mask an auth/outage
+ * problem as a relevance problem.
+ */
+async function runBluebird(
+  input: UnifiedCodeSearchInput,
+  mode: "semantic" | "lexical",
+  signal?: AbortSignal,
+): Promise<UnifiedCodeSearchResult> {
+  const limit = input.limit ?? 200
+  try {
+    const workspace = validateWorkspace(input.workspace)
+    if (!workspace.ok || !workspace.canonical) {
+      throw new Error(workspace.error ?? "workspace path is not accessible")
+    }
+    // Lazy provision against the query's workspace ("the repo we are
+    // working with"). The runtime-owned manager isolates workspaces and
+    // scopes; it is not selected through process-global state.
+    const client = await ensureBluebirdClient(workspace.canonical, signal)
+    const rows = mode === "semantic"
+      ? await client.doVectorSearch(input.query, {
+        limit,
+        file_glob: input.file_glob,
+        signal,
+      })
+      : await client.searchFileContent(input.query, {
+        limit,
+        file_glob: input.file_glob,
+        signal,
+      })
+    const results = rows.slice(0, limit).map((r) => ({
+      file: r.file,
+      line: r.line,
+      snippet: r.snippet,
+      ...(r.endLine !== undefined ? { endLine: r.endLine } : {}),
+      ...(r.name !== undefined ? { name: r.name } : {}),
+      ...(r.score !== undefined ? { score: r.score } : {}),
+    }))
+    const outlines = await outlinesForSemanticResults(input, results, signal)
+    return {
+      source: mode,
+      results,
+      ...(outlines ? { outlines } : {}),
+    }
+  } catch (err) {
+    if (signal?.aborted) throw err
+    const detail = err instanceof BluebirdError
+      ? err.message
+      : err instanceof Error
+        ? err.message
+        : String(err)
+    return {
+      source: "error",
+      results: [],
+      notice:
+        `Bluebird ${mode} search failed: ${detail} `
+        + `(no local fallback under --bluebird; retry, or use mode:"exact"/"regex"/"ast" for the local engine)`,
+    }
+  }
+}
+
+/**
  * Route a unified code-search request. Throws only on input/workspace
  * validation failure (propagated from `searchCode`); callers wrap in
  * try/catch exactly as they do today for `searchCode`.
+ *
+ * Under `--bluebird` (initialized client present), `semantic` (the
+ * default) and `lexical` route through Bluebird; `exact|regex|ast` stay
+ * local. Bluebird failures return `source:"error"` with the cause in
+ * `notice` — never a silent local fallback.
  */
 export async function runUnifiedCodeSearch(
   input: UnifiedCodeSearchInput,
   signal?: AbortSignal,
 ): Promise<UnifiedCodeSearchResult> {
   const mode: UnifiedMode = input.mode ?? "semantic"
+
+  // --bluebird: semantic (default) and lexical route through Bluebird;
+  // exact|regex|ast stay local (see runBluebird).
+  if (state.bluebirdEnabled === true && (mode === "semantic" || mode === "lexical")) {
+    return runBluebird(input, mode, signal)
+  }
 
   // Forced lexical family; never touch colgrep.
   if (mode !== "semantic") {

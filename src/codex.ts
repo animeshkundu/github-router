@@ -21,10 +21,11 @@ import { state } from "./lib/state"
 import { toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
 import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
-import { startKeepAwake } from "./lib/keep-awake"
+import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { hasSupportedBrowserInstalled } from "./lib/browser-mcp/browser-detect"
+import { disposeBluebirdClients } from "./lib/bluebird-client"
 import { resolveCodexModel, resolveModel } from "./lib/utils"
 
 export const codex = defineCommand({
@@ -170,6 +171,12 @@ export const codex = defineCommand({
         serverUrl,
       },
       server,
+      {
+        onShutdown: async () => {
+          await stopKeepAwake()
+          await disposeBluebirdClients()
+        },
+      },
     )
   },
 })

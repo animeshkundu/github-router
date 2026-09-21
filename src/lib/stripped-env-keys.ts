@@ -49,6 +49,9 @@ export const STRIPPED_AUTH_ROUTING_ENV_KEYS = [
   // Emits `x-anthropic-additional-protection` — pure wire-fingerprint noise
   // that breaks the VS Code stealth posture.
   "CLAUDE_CODE_ADDITIONAL_PROTECTION",
+  // Optional Bluebird MCP bearer override. The router may consume it, but the
+  // spawned CLI and its descendant tools/MCPs must never inherit it.
+  "BLUEBIRD_TOKEN",
   // Codex CLI auth surface
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",

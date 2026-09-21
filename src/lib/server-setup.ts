@@ -246,6 +246,7 @@ export interface ServerSetupOptions {
   powerBrowseEnabled: boolean
   humanlikeEnabled: boolean
   searchEnabled: boolean
+  bluebirdEnabled: boolean
   silent: boolean
 }
 
@@ -362,8 +363,15 @@ export async function setupAndServe(
   // into ColBERT/colgrep semantic search (provision + background-index). Off
   // by default; GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1 hard-disables and wins
   // over both (see `semanticSearchOptedIn` in `./colbert`).
-  state.searchEnabled =
-    options.searchEnabled || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
+  // Bluebird and local ColBERT are independent backends. `--bluebird`
+  // controls remote semantic/lexical routing; `--search` controls local
+  // ColBERT provisioning.
+  const searchFlags = resolveSearchFlags({
+    searchEnabled: options.searchEnabled,
+    bluebirdEnabled: options.bluebirdEnabled,
+  })
+  state.searchEnabled = searchFlags.searchEnabled
+  state.bluebirdEnabled = searchFlags.bluebirdEnabled
   state.fleetEnabled =
     options.fleetEnabled || process.env.GH_ROUTER_ENABLE_FLEET === "1"
   // --agents + GH_ROUTER_ENABLE_AGENTS=1 enable the first-mate
@@ -617,9 +625,32 @@ export const sharedServerArgs = {
     description:
       "Enable ColBERT/colgrep semantic code search (meaning-ranked `code` tool results over a per-workspace index, with transparent lexical fallback). Off by default; the `code` tool is lexical-only unless this is set. Can also be enabled with GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1. GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1 hard-disables (wins over --search, for tests).",
   },
+  bluebird: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Route semantic + lexical `code` tool search through the Bluebird Azure DevOps MCP server (exact/regex/ast stay local). Requires an Azure DevOps git remote plus `az login`. Can also be enabled with GH_ROUTER_ENABLE_BLUEBIRD=1.",
+  },
 } as const
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
+
+/**
+ * Resolve the independent remote and local search flags for a launch.
+ * `bluebirdEnabled` controls Bluebird semantic/lexical routing only.
+ * `searchEnabled` controls local ColBERT provisioning only.
+ */
+export function resolveSearchFlags(opts: {
+  searchEnabled: boolean
+  bluebirdEnabled: boolean
+}): { searchEnabled: boolean; bluebirdEnabled: boolean } {
+  const bluebirdEnabled =
+    opts.bluebirdEnabled === true || process.env.GH_ROUTER_ENABLE_BLUEBIRD === "1"
+  const searchEnabled =
+    opts.searchEnabled === true
+    || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
+  return { searchEnabled, bluebirdEnabled }
+}
 
 /** Parse shared server args into ServerSetupOptions fields. */
 export function parseSharedArgs(args: Record<string, unknown>): {
@@ -639,6 +670,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   powerBrowseEnabled: boolean
   humanlikeEnabled: boolean
   searchEnabled: boolean
+  bluebirdEnabled: boolean
 } {
   const portRaw = args.port as string | undefined
   let port: number | undefined
@@ -690,6 +722,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     powerBrowseEnabled: args["power-browse"] as boolean,
     humanlikeEnabled: args.humanlike as boolean,
     searchEnabled: args.search as boolean,
+    bluebirdEnabled: args.bluebird as boolean,
   }
 }
 

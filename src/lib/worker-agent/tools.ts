@@ -182,6 +182,8 @@ export interface BuildWorkerToolsOpts {
    * lexical-only, never naming semantic search.
    */
   searchEnabled?: boolean
+  /** Whether Bluebird owns semantic and lexical search for this launch. */
+  bluebirdEnabled?: boolean
   /**
    * Absolute path to the worker's workspace. MUST be pre-realpath-
    * canonicalized by the engine; `confineToWorkspace` re-asserts on
@@ -955,21 +957,31 @@ function fetchUrlTool(): AgentTool<typeof FETCH_URL_PARAMS> {
   }
 }
 
-function buildCodeSearchParams(searchEnabled: boolean) {
-  const queryDescription = searchEnabled
+function buildCodeSearchParams(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean,
+) {
+  const semanticAvailable = searchEnabled || bluebirdEnabled
+  const queryDescription = semanticAvailable
     ? "Search text. Natural-language intent in the default `semantic` "
       + "mode; a literal string in `lexical`/`exact`; a PCRE2 regex in `regex`."
     : "Search text. A literal string in `lexical`/`exact`; a PCRE2 regex in `regex`."
-  const modeDescription = searchEnabled
-    ? "Search mode. `semantic` (DEFAULT): ColBERT meaning-based ranking, "
-      + "falls back to lexical when the index isn't ready (response "
-      + "`source` says which engine ran). `lexical`: BM25F + tree-sitter "
-      + "(best for exact symbols). `exact`: fixed-string. `regex`: PCRE2. "
-      + "`ast`: ast-grep structural (needs `ast_pattern` + `ast_lang`)."
-    : "Search mode. `lexical` (DEFAULT when semantic search is off): BM25F + "
-      + "tree-sitter (best for exact symbols). `semantic` is accepted and runs "
-      + "the lexical engine. `exact`: fixed-string. `regex`: PCRE2. "
-      + "`ast`: ast-grep structural (needs `ast_pattern` + `ast_lang`)."
+  const modeDescription = bluebirdEnabled
+    ? "Search mode. `semantic` (DEFAULT): Bluebird meaning-based search over "
+      + "the Azure DevOps index. `lexical`: Bluebird indexed keyword search. "
+      + "Bluebird failures surface as `source:\"error\"` with no local fallback. "
+      + "`exact`: local fixed-string. `regex`: local PCRE2. `ast`: local ast-grep "
+      + "structural (needs `ast_pattern` + `ast_lang`)."
+    : searchEnabled
+      ? "Search mode. `semantic` (DEFAULT): ColBERT meaning-based ranking, "
+        + "falls back to lexical when the index isn't ready (response "
+        + "`source` says which engine ran). `lexical`: BM25F + tree-sitter "
+        + "(best for exact symbols). `exact`: fixed-string. `regex`: PCRE2. "
+        + "`ast`: ast-grep structural (needs `ast_pattern` + `ast_lang`)."
+      : "Search mode. `lexical` (DEFAULT when semantic search is off): BM25F + "
+        + "tree-sitter (best for exact symbols). `semantic` is accepted and runs "
+        + "the lexical engine. `exact`: fixed-string. `regex`: PCRE2. "
+        + "`ast`: ast-grep structural (needs `ast_pattern` + `ast_lang`)."
   return Type.Object({
     query: Type.String({
       description: queryDescription,
@@ -991,8 +1003,8 @@ function buildCodeSearchParams(searchEnabled: boolean) {
     pattern: Type.Optional(
       Type.String({
         description:
-          "Semantic mode only: regex pre-filter (colgrep -e) — grep first, " +
-          "then rank semantically. Ignored in lexical modes.",
+          "Local ColBERT semantic mode only: regex pre-filter (colgrep -e) — " +
+          "grep first, then rank semantically. Ignored in Bluebird and lexical modes.",
       }),
     ),
     file_glob: Type.Optional(
@@ -1046,7 +1058,20 @@ function buildCodeSearchParams(searchEnabled: boolean) {
   })
 }
 
-function codeSearchToolDescription(searchEnabled: boolean): string {
+function codeSearchToolDescription(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean,
+): string {
+  if (bluebirdEnabled) {
+    return (
+      "Bluebird-backed code search over the worker's checked-out Azure DevOps "
+      + "repository. `semantic` (DEFAULT) ranks by meaning; `lexical` runs "
+      + "Bluebird indexed keyword search. Bluebird failures surface as "
+      + "`source:\"error\"` with no local fallback. `exact` / `regex` / `ast` "
+      + "stay on the local live tree. Prefer over `grep` for ranked discovery. "
+      + "Returns `{source, results:[{file,line,snippet,score?,endLine?,name?}], ...}` in JSON."
+    )
+  }
   if (searchEnabled) {
     return (
       "Semantic-first code search over the worker's workspace. Default " +
@@ -1073,13 +1098,21 @@ function codeSearchToolDescription(searchEnabled: boolean): string {
   )
 }
 
-function codeSearchTool(workspace: string, searchEnabled: boolean = false): AgentTool<ReturnType<typeof buildCodeSearchParams>> {
-  const semantic = searchEnabled
+function codeSearchTool(
+  workspace: string,
+  searchEnabled: boolean = false,
+  bluebirdEnabled: boolean = false,
+): AgentTool<ReturnType<typeof buildCodeSearchParams>> {
+  const semantic = searchEnabled || bluebirdEnabled
   return {
     name: "code_search",
-    label: semantic ? "Code search (semantic-first)" : "Code search (lexical)",
-    description: codeSearchToolDescription(semantic),
-    parameters: buildCodeSearchParams(semantic),
+    label: bluebirdEnabled
+      ? "Code search (Bluebird)"
+      : semantic
+        ? "Code search (semantic-first)"
+        : "Code search (lexical)",
+    description: codeSearchToolDescription(searchEnabled, bluebirdEnabled),
+    parameters: buildCodeSearchParams(searchEnabled, bluebirdEnabled),
     async execute(
       _toolCallId,
       params,
@@ -2063,11 +2096,12 @@ export function buildWorkerTools(
 ): Array<AgentTool<TSchema, Record<string, never>>> {
   const { mode, workspace, getMessages, planState } = opts
   const searchEnabled = opts.searchEnabled === true
+  const bluebirdEnabled = opts.bluebirdEnabled === true
   const explore: Array<AgentTool<TSchema, Record<string, never>>> = [
     readTool(workspace),
     globTool(workspace),
     grepTool(workspace),
-    codeSearchTool(workspace, searchEnabled),
+    codeSearchTool(workspace, searchEnabled, bluebirdEnabled),
     webSearchTool(),
     fetchUrlTool(),
     toolbeltTool(workspace),

@@ -32,6 +32,8 @@ import {
   type McpScope,
   type WorkspaceSource,
   resolveGeminiPersona,
+  buildBluebirdCodeModeDescription,
+  buildBluebirdCodeToolDescription,
   buildCodeToolDescription,
   buildCodeModeDescription,
 } from "~/lib/peer-mcp-personas"
@@ -210,10 +212,35 @@ interface ToolEntry {
  * without `--search` the served text describes the lexical engine (the
  * `mode:"semantic"` alias is documented as running lexical, since the enum
  * still accepts it), so clients never see a meaning-ranked mode that is
- * not present.
+ * not present. Under `--bluebird` the served text describes the Bluebird
+ * Azure DevOps index instead (semantic + lexical via Bluebird,
+ * exact/regex/ast local).
  */
 function nonPersonaToolEntry(tool: NonPersonaMcpTool): ToolEntry {
-  if (tool.toolNameHttp !== "code" || state.searchEnabled === true) {
+  if (tool.toolNameHttp !== "code") {
+    return {
+      name: tool.toolNameHttp,
+      description: tool.description,
+      inputSchema: tool.inputSchema as Record<string, unknown>,
+    }
+  }
+  if (state.bluebirdEnabled === true) {
+    const schema = structuredClone(tool.inputSchema) as {
+      properties?: Record<string, { description?: string } & Record<string, unknown>>
+    }
+    if (schema.properties?.mode) {
+      schema.properties.mode = {
+        ...schema.properties.mode,
+        description: buildBluebirdCodeModeDescription(),
+      }
+    }
+    return {
+      name: tool.toolNameHttp,
+      description: buildBluebirdCodeToolDescription(),
+      inputSchema: schema as Record<string, unknown>,
+    }
+  }
+  if (state.searchEnabled === true) {
     return {
       name: tool.toolNameHttp,
       description: tool.description,

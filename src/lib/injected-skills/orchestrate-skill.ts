@@ -1,8 +1,13 @@
 import type { InjectedSkill } from "./index"
 
-export function buildOrchestrateSkill(searchEnabled: boolean): InjectedSkill {
-  const researchLine = searchEnabled
-    ? "- research: worker-explore (Agent subagent) and mcp__search__code for focused follow-ups (semantic for concepts, lexical for exact symbols)."
+export function buildOrchestrateSkill(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean = false,
+): InjectedSkill {
+  const semanticAvailable = searchEnabled || bluebirdEnabled
+  const backend = bluebirdEnabled ? "Bluebird-backed" : "local ColBERT-backed"
+  const researchLine = semanticAvailable
+    ? `- research: worker-explore (Agent subagent) and mcp__search__code for focused follow-ups (${backend} semantic for concepts, lexical for exact symbols).`
     : "- research: worker-explore (Agent subagent) and mcp__search__code for focused follow-ups (lexical for exact symbols, filenames, errors, routes, flags, and config keys)."
 
   return {

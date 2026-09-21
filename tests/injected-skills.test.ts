@@ -331,7 +331,7 @@ describe("search-gated skill text (--search)", () => {
     expect(offResearch.md).not.toContain("semantically")
   })
 
-  test("injectedSkillsForLaunch forwards the search flag", () => {
+  test("injectedSkillsForLaunch preserves all four backend combinations", () => {
     const on = injectedSkillsForLaunch({
       profileId: "standard",
       workerSkillsActive: true,
@@ -345,7 +345,10 @@ describe("search-gated skill text (--search)", () => {
       searchEnabled: false,
     })
     expect(on.map((s) => s.name)).toEqual(off.map((s) => s.name))
-    expect(on.find((s) => s.name === "gh-research")!.md).toContain("semantically first")
+    const localResearch = on.find((s) => s.name === "gh-research")!.md
+    expect(localResearch).toContain("semantically first")
+    expect(localResearch).toContain("local ColBERT")
+    expect(localResearch).not.toContain("Bluebird")
     expect(off.find((s) => s.name === "gh-research")!.md).not.toContain("semantically")
     // Absent flag defaults to lexical-only.
     const absent = injectedSkillsForLaunch({
@@ -354,5 +357,28 @@ describe("search-gated skill text (--search)", () => {
       firstMateEnabled: false,
     })
     expect(absent.find((s) => s.name === "gh-research")!.md).not.toContain("semantically")
+
+    const bluebirdOnly = injectedSkillsForLaunch({
+      profileId: "standard",
+      workerSkillsActive: true,
+      firstMateEnabled: false,
+      searchEnabled: false,
+      bluebirdEnabled: true,
+    })
+    const bluebirdResearch = bluebirdOnly.find((s) => s.name === "gh-research")!.md
+    expect(bluebirdResearch).toContain("semantically first")
+    expect(bluebirdResearch).toContain("Bluebird")
+    expect(bluebirdResearch).not.toContain("local ColBERT")
+
+    const both = injectedSkillsForLaunch({
+      profileId: "standard",
+      workerSkillsActive: true,
+      firstMateEnabled: false,
+      searchEnabled: true,
+      bluebirdEnabled: true,
+    })
+    const bothResearch = both.find((s) => s.name === "gh-research")!.md
+    expect(bothResearch).toContain("Bluebird")
+    expect(bothResearch).not.toContain("local ColBERT")
   })
 })
