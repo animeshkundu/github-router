@@ -62,6 +62,8 @@ export interface InjectedSkillSelection {
    * semantic search.
    */
   searchEnabled?: boolean
+  /** Whether Bluebird owns semantic and lexical search for this launch. */
+  bluebirdEnabled?: boolean
 }
 
 /**
@@ -70,12 +72,15 @@ export interface InjectedSkillSelection {
  * other three in strict sequence; the three stages stay individually
  * invokable for users who only want one stage.
  */
-export function getPipelineSkills(searchEnabled: boolean): ReadonlyArray<InjectedSkill> {
+export function getPipelineSkills(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean = false,
+): ReadonlyArray<InjectedSkill> {
   return [
-    buildGatherContextSkill(searchEnabled),
-    buildPlanSkill(searchEnabled),
-    buildImplementSkill(searchEnabled),
-    buildSwePipelineSkill(searchEnabled),
+    buildGatherContextSkill(searchEnabled, bluebirdEnabled),
+    buildPlanSkill(searchEnabled || bluebirdEnabled),
+    buildImplementSkill(searchEnabled || bluebirdEnabled),
+    buildSwePipelineSkill(searchEnabled || bluebirdEnabled),
   ]
 }
 
@@ -85,8 +90,8 @@ export function getPipelineSkills(searchEnabled: boolean): ReadonlyArray<Injecte
  * strict sequence; the three stages stay individually invokable for users who
  * only want one stage.
  *
- * @deprecated Prefer `getPipelineSkills(searchEnabled)` so the skill text
- * matches the launch's search capability. Kept for callers without a flag
+ * @deprecated Prefer `getPipelineSkills(searchEnabled, bluebirdEnabled)` so
+ * the skill text matches the launch's search backend. Kept for callers without flags
  * concept (tests, drift audits); built with semantic search enabled.
  */
 export const PIPELINE_SKILLS: ReadonlyArray<InjectedSkill> = [
@@ -98,29 +103,33 @@ export const PIPELINE_SKILLS: ReadonlyArray<InjectedSkill> = [
 
 /**
  * Build all injected skills in dependency order (research underpins the
- * others), with search guidance matched to the launch's search capability.
+ * others), with search guidance matched to the launch's search backend.
  */
-export function getInjectedSkills(searchEnabled: boolean): ReadonlyArray<InjectedSkill> {
+export function getInjectedSkills(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean = false,
+): ReadonlyArray<InjectedSkill> {
+  const semanticAvailable = searchEnabled || bluebirdEnabled
   return [
-    buildResearchSkill(searchEnabled),
-    buildGatherContextSkill(searchEnabled),
-    buildPlanSkill(searchEnabled),
-    buildImplementSkill(searchEnabled),
-    buildOrchestrateSkill(searchEnabled),
-    buildFloorKeeperSkill(searchEnabled),
-    buildWorkerSkill(searchEnabled),
-    buildFirstMateSkill(searchEnabled),
-    buildFirstMateSetupSkill(searchEnabled),
-    buildFirstMateOperateSkill(searchEnabled),
-    buildFirstMateConductSkill(searchEnabled),
+    buildResearchSkill(searchEnabled, bluebirdEnabled),
+    buildGatherContextSkill(searchEnabled, bluebirdEnabled),
+    buildPlanSkill(semanticAvailable),
+    buildImplementSkill(semanticAvailable),
+    buildOrchestrateSkill(searchEnabled, bluebirdEnabled),
+    buildFloorKeeperSkill(semanticAvailable),
+    buildWorkerSkill(semanticAvailable),
+    buildFirstMateSkill(semanticAvailable),
+    buildFirstMateSetupSkill(semanticAvailable),
+    buildFirstMateOperateSkill(semanticAvailable),
+    buildFirstMateConductSkill(semanticAvailable),
   ]
 }
 
 /**
  * All injected skills, in dependency order (research underpins the others).
  *
- * @deprecated Prefer `getInjectedSkills(searchEnabled)` so the skill text
- * matches the launch's search capability. Kept for callers without a flag
+ * @deprecated Prefer `getInjectedSkills(searchEnabled, bluebirdEnabled)` so
+ * the skill text matches the launch's search backend. Kept for callers without flags
  * concept (tests, drift audits); built with semantic search enabled.
  */
 export const INJECTED_SKILLS: ReadonlyArray<InjectedSkill> = [
@@ -141,8 +150,9 @@ export function injectedSkillsForLaunch(
   selection: InjectedSkillSelection,
 ): ReadonlyArray<InjectedSkill> {
   const searchEnabled = selection.searchEnabled === true
-  const allSkills = getInjectedSkills(searchEnabled)
-  const pipelineSkills = getPipelineSkills(searchEnabled)
+  const bluebirdEnabled = selection.bluebirdEnabled === true
+  const allSkills = getInjectedSkills(searchEnabled, bluebirdEnabled)
+  const pipelineSkills = getPipelineSkills(searchEnabled, bluebirdEnabled)
   // The SWE pipeline skills are opt-in via `--swe` on pinned profiles only.
   // Without the flag, pinned profiles get NO pipeline slash commands (just
   // first-mate skills on max when enabled); standard keeps the existing

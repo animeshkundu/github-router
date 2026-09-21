@@ -124,7 +124,6 @@ import {
 import { appendPeerAwarenessToMirroredClaudeMd, appendToolbeltAwarenessToMirroredClaudeMd, buildOperatingDefaultsDigest, buildOperatingDefaultsDirective, type NativeAgentAvailability, prependArtifactPanelDirectiveToMirroredClaudeMd, prependOperatingDefaultsToMirroredClaudeMd, prependStyleDirectiveToMirroredClaudeMd } from "./lib/claude-md-injection"
 import { availableToolCommands, buildToolbeltAwareness, toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
-import { bluebirdScopeSummary, ensureBluebirdClient } from "./lib/bluebird-client"
 import { colbertDegradedWarning, provisionAndIndexColbert, semanticSearchOptedIn } from "./lib/colbert"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
@@ -915,21 +914,6 @@ export const claude = defineCommand({
     // never blocks launch, never throws.
     void provisionAndIndexColbert()
 
-    // Best-effort Bluebird provision under --bluebird: detect the Azure
-    // DevOps scope, fetch the `az` token, and initialize the MCP client now
-    // so a broken setup surfaces at launch instead of on the first query.
-    // Never blocks launch, never throws (queries lazy-provision anyway).
-    if (state.bluebirdEnabled === true && !state.bluebirdClient) {
-      void ensureBluebirdClient(process.cwd())
-        .then(() => {
-          const scope = bluebirdScopeSummary()
-          process.stderr.write(
-            `Bluebird Azure DevOps search connected${scope ? `: ${scope}` : ""}.\n`,
-          )
-        })
-        .catch(() => {})
-    }
-
     // Surface a terminally-failed semantic index to the HUMAN. Without this
     // the only signals are a `notice` the model reads and a log line, so a
     // degraded index can (and did) go unnoticed for weeks. Fire-and-forget:
@@ -988,6 +972,8 @@ export const claude = defineCommand({
     // belt-and-braces for everything else.
     const baseShutdown = async (): Promise<void> => {
       await stopKeepAwake()
+      const { disposeBluebirdClients } = await import("./lib/bluebird-client")
+      await disposeBluebirdClients()
       await removeOwnClaudeConfigMirror()
       await removeAicLedgerFile()
     }
@@ -1263,7 +1249,8 @@ export const claude = defineCommand({
               ? agentNamesForToolAllowlist(fastDescriptor.personaAllowlist)
               : undefined,
           includeCoordinator: fastDescriptor.hasCoordinator,
-          semanticSearchAvailable: semanticSearchOptedIn(),
+          semanticSearchAvailable: semanticSearchOptedIn() || state.bluebirdEnabled === true,
+          bluebirdEnabled: state.bluebirdEnabled === true,
           ...(isFastProfile
             ? {
                 fastProfile: true,
@@ -1535,12 +1522,14 @@ export const claude = defineCommand({
         // export the short-lived `internal-prompt-submit` hook could not tell
         // whether semantic search is present and would name it unconditionally.
         process.env.GH_ROUTER_SEARCH_ENABLED = state.searchEnabled === true ? "1" : "0"
+        process.env.GH_ROUTER_BLUEBIRD_ENABLED = state.bluebirdEnabled === true ? "1" : "0"
         const skillsToWrite = injectedSkillsForLaunch({
           profileId: launchProfileId,
           workerSkillsActive,
           firstMateEnabled: agentToolsEnabled(),
           sweEnabled,
           searchEnabled: state.searchEnabled === true,
+          bluebirdEnabled: state.bluebirdEnabled === true,
         })
         let skillsWritten = 0
         for (const s of skillsToWrite) {
@@ -1971,7 +1960,8 @@ export const claude = defineCommand({
           agentToolsAvailable: agentToolsEnabled(),
           artifactToolsAvailable: artifactAvailable,
           astraAvailable,
-          semanticSearchAvailable: semanticSearchOptedIn(),
+          semanticSearchAvailable: semanticSearchOptedIn() || state.bluebirdEnabled === true,
+          bluebirdEnabled: state.bluebirdEnabled === true,
           ...nativeAvailability,
           profile: launchProfileId,
           groupKeys,
@@ -1991,7 +1981,8 @@ export const claude = defineCommand({
           agentToolsAvailable: agentToolsEnabled(),
           artifactToolsAvailable: artifactAvailable,
           astraAvailable,
-          semanticSearchAvailable: semanticSearchOptedIn(),
+          semanticSearchAvailable: semanticSearchOptedIn() || state.bluebirdEnabled === true,
+          bluebirdEnabled: state.bluebirdEnabled === true,
           ...nativeAvailability,
           profile: launchProfileId,
           nativeAgentModels,
@@ -2096,7 +2087,8 @@ export const claude = defineCommand({
           browserToolsAvailable: directBrowserAvailable,
           artifactAvailable,
           astraAvailable,
-          semanticSearchAvailable: semanticSearchOptedIn(),
+          semanticSearchAvailable: semanticSearchOptedIn() || state.bluebirdEnabled === true,
+          bluebirdEnabled: state.bluebirdEnabled === true,
           groupKeys: operatingGroupKeys,
           peersKey: operatingGroupKeys.peers,
           sweEnabled,

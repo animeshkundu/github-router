@@ -214,10 +214,11 @@ export interface NativeAgentAvailability {
   agentToolsAvailable?: boolean
   artifactAvailable?: boolean
   astraAvailable?: boolean
-  /** Whether ColBERT semantic code search is enabled for this launch. When
-   *  false/absent the `code` tool is lexical-only, so generated guidance
-   *  describes lexical-first discovery and never names semantic search. */
+  /** Whether local ColBERT semantic search or Bluebird semantic routing is
+   *  available for this launch. When false/absent the `code` tool is lexical-only. */
   semanticSearchAvailable?: boolean
+  /** Whether Bluebird owns semantic and lexical modes for this launch. */
+  bluebirdEnabled?: boolean
   groupKeys?: Partial<Record<string, string>>
   peersKey?: string
   /**
@@ -426,9 +427,11 @@ export function buildOperatingDefaultsDirective(
         ? "Grok 4.6 (200K/medium)"
         : "exact Opus 5 (1M/high)"
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
-    const searchGuidance = opts.semanticSearchAvailable === true
-      ? "Search strategy (cheapest first): (1) LEXICAL `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys — zero model cost; (2) SEMANTIC `code` search for intent/concept questions where literal keywords may not appear; (3) `Explore` subagents read the narrowed files and return file:line conclusions — expensive models (Plan, reviewer, Oracle) see only the synthesized subset, never raw search output. "
-      : "Search strategy (cheapest first): LEXICAL `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys — zero model cost. `Explore` subagents read the narrowed files and return file:line conclusions — expensive models (Plan, reviewer, Oracle) see only the synthesized subset, never raw search output. "
+    const searchGuidance = opts.bluebirdEnabled === true
+      ? "Search strategy: use Bluebird `code` search in `lexical` mode for indexed keyword queries and `semantic` mode for intent/concept questions. Bluebird failures remain visible and never fall back locally; `exact`, `regex`, and `ast` stay on the local live tree. `Explore` subagents read the narrowed files and return file:line conclusions; expensive models (Plan, reviewer, Oracle) see only the synthesized subset, never raw search output. "
+      : opts.semanticSearchAvailable === true
+        ? "Search strategy (cheapest first): (1) LOCAL LEXICAL `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys; (2) local ColBERT SEMANTIC `code` search for intent/concept questions where literal keywords may not appear, with lexical fallback while its index is unavailable; (3) `Explore` subagents read the narrowed files and return file:line conclusions — expensive models (Plan, reviewer, Oracle) see only the synthesized subset, never raw search output. "
+        : "Search strategy (cheapest first): LOCAL LEXICAL `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys. `Explore` subagents read the narrowed files and return file:line conclusions — expensive models (Plan, reviewer, Oracle) see only the synthesized subset, never raw search output. "
     if (opts.fastRuntimeAvailable === false) {
       return (
         "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"

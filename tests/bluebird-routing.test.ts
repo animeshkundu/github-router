@@ -3,14 +3,22 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 
-import { BluebirdError, type BluebirdMcpClient } from "../src/lib/bluebird-client"
+import {
+  BluebirdError,
+  resetBluebirdManagerForTesting,
+  setBluebirdClientForTesting,
+  type BluebirdMcpClient,
+} from "../src/lib/bluebird-client"
 import {
   buildBluebirdCodeModeDescription,
   buildBluebirdCodeToolDescription,
 } from "../src/lib/peer-mcp-personas"
+import { semanticSearchOptedIn } from "../src/lib/colbert"
 import { parseSharedArgs, resolveSearchFlags } from "../src/lib/server-setup"
 import { state } from "../src/lib/state"
 import { runUnifiedCodeSearch } from "../src/lib/unified-code-search"
+
+const BLUEBIRD_TEST_WORKSPACE = realpathSync(os.tmpdir())
 
 function stubClient(impl: {
   searchFileContent?: (query: string) => Promise<Array<{ file: string; line: number; snippet: string }>>
@@ -24,21 +32,28 @@ function stubClient(impl: {
   } as unknown as BluebirdMcpClient
 }
 
-describe("resolveSearchFlags (--bluebird implies --search)", () => {
+describe("resolveSearchFlags keeps Bluebird and local search independent", () => {
   const OLD_BLUEBIRD = process.env.GH_ROUTER_ENABLE_BLUEBIRD
   const OLD_SEARCH = process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH
+  const OLD_DISABLE_SEARCH = process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
+  const OLD_SEARCH_STATE = state.searchEnabled
+  const OLD_BLUEBIRD_STATE = state.bluebirdEnabled
   afterEach(() => {
     if (OLD_BLUEBIRD === undefined) delete process.env.GH_ROUTER_ENABLE_BLUEBIRD
     else process.env.GH_ROUTER_ENABLE_BLUEBIRD = OLD_BLUEBIRD
     if (OLD_SEARCH === undefined) delete process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH
     else process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH = OLD_SEARCH
+    if (OLD_DISABLE_SEARCH === undefined) delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
+    else process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = OLD_DISABLE_SEARCH
+    state.searchEnabled = OLD_SEARCH_STATE
+    state.bluebirdEnabled = OLD_BLUEBIRD_STATE
   })
 
-  test("bluebird on forces search on", () => {
+  test("bluebird on does not enable local search", () => {
     delete process.env.GH_ROUTER_ENABLE_BLUEBIRD
     delete process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH
     expect(resolveSearchFlags({ searchEnabled: false, bluebirdEnabled: true })).toEqual({
-      searchEnabled: true,
+      searchEnabled: false,
       bluebirdEnabled: true,
     })
   })
@@ -61,13 +76,37 @@ describe("resolveSearchFlags (--bluebird implies --search)", () => {
     })
   })
 
-  test("GH_ROUTER_ENABLE_BLUEBIRD=1 enables both", () => {
+  test("GH_ROUTER_ENABLE_BLUEBIRD=1 enables only Bluebird", () => {
     process.env.GH_ROUTER_ENABLE_BLUEBIRD = "1"
     delete process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH
     expect(resolveSearchFlags({ searchEnabled: false, bluebirdEnabled: false })).toEqual({
-      searchEnabled: true,
+      searchEnabled: false,
       bluebirdEnabled: true,
     })
+  })
+
+  test("local ColBERT opt-in follows --search only across all four flag states", () => {
+    delete process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH
+    delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
+
+    const cases = [
+      { searchEnabled: false, bluebirdEnabled: false, optedIn: false },
+      { searchEnabled: true, bluebirdEnabled: false, optedIn: true },
+      { searchEnabled: false, bluebirdEnabled: true, optedIn: false },
+      { searchEnabled: true, bluebirdEnabled: true, optedIn: true },
+    ]
+    for (const testCase of cases) {
+      state.searchEnabled = testCase.searchEnabled
+      state.bluebirdEnabled = testCase.bluebirdEnabled
+      expect(semanticSearchOptedIn()).toBe(testCase.optedIn)
+    }
+  })
+
+  test("local ColBERT hard-disable wins even when both facilities are enabled", () => {
+    state.searchEnabled = true
+    state.bluebirdEnabled = true
+    process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH = "1"
+    expect(semanticSearchOptedIn()).toBe(false)
   })
 })
 
@@ -85,24 +124,23 @@ describe("parseSharedArgs bluebird flag", () => {
 
 describe("runUnifiedCodeSearch bluebird routing", () => {
   const OLD_BLUEBIRD_ENABLED = state.bluebirdEnabled
-  const OLD_CLIENT = state.bluebirdClient
   beforeEach(() => {
     state.bluebirdEnabled = true
   })
-  afterEach(() => {
+  afterEach(async () => {
     state.bluebirdEnabled = OLD_BLUEBIRD_ENABLED
-    state.bluebirdClient = OLD_CLIENT
+    await resetBluebirdManagerForTesting()
   })
 
   test("semantic routes to do_vector_search with source semantic", async () => {
-    state.bluebirdClient = stubClient({
+    setBluebirdClientForTesting(stubClient({
       doVectorSearch: async () => [
         { file: "src/auth.ts", line: 42, snippet: "refresh tokens here" },
       ],
-    })
+    }))
     const res = await runUnifiedCodeSearch({
       query: "where are auth tokens refreshed",
-      workspace: "/tmp/bluebird-test-ws",
+      workspace: BLUEBIRD_TEST_WORKSPACE,
     })
     expect(res.source).toBe("semantic")
     expect(res.results).toHaveLength(1)
@@ -111,14 +149,14 @@ describe("runUnifiedCodeSearch bluebird routing", () => {
   })
 
   test("explicit lexical routes to search_file_content with source lexical", async () => {
-    state.bluebirdClient = stubClient({
+    setBluebirdClientForTesting(stubClient({
       searchFileContent: async () => [
         { file: "src/main.ts", line: 7, snippet: "getUserName" },
       ],
-    })
+    }))
     const res = await runUnifiedCodeSearch({
       query: "getUserName",
-      workspace: "/tmp/bluebird-test-ws",
+      workspace: BLUEBIRD_TEST_WORKSPACE,
       mode: "lexical",
     })
     expect(res.source).toBe("lexical")
@@ -126,15 +164,33 @@ describe("runUnifiedCodeSearch bluebird routing", () => {
     expect(res.results[0].file).toBe("src/main.ts")
   })
 
+  test("rejects relative Bluebird workspaces without provisioning", async () => {
+    let called = false
+    setBluebirdClientForTesting(stubClient({
+      doVectorSearch: async () => {
+        called = true
+        return []
+      },
+    }))
+    const res = await runUnifiedCodeSearch({
+      query: "anything",
+      workspace: ".",
+      mode: "semantic",
+    })
+    expect(res.source).toBe("error")
+    expect(res.notice).toContain("workspace must be an absolute path")
+    expect(called).toBe(false)
+  })
+
   test("bluebird failure surfaces source error with no silent fallback", async () => {
-    state.bluebirdClient = stubClient({
+    setBluebirdClientForTesting(stubClient({
       doVectorSearch: async () => {
         throw new BluebirdError("Bluebird responded with HTTP 503.", { retriable: true })
       },
-    })
+    }))
     const res = await runUnifiedCodeSearch({
       query: "anything",
-      workspace: "/tmp/bluebird-test-ws",
+      workspace: BLUEBIRD_TEST_WORKSPACE,
       mode: "semantic",
     })
     expect(res.source).toBe("error")
@@ -144,7 +200,7 @@ describe("runUnifiedCodeSearch bluebird routing", () => {
   })
 
   test("exact stays local under --bluebird", async () => {
-    state.bluebirdClient = stubClient({
+    setBluebirdClientForTesting(stubClient({
       // If exact ever reached Bluebird, this throw would surface as error.
       searchFileContent: async () => {
         throw new BluebirdError("must not be called for exact", { retriable: false })
@@ -152,7 +208,7 @@ describe("runUnifiedCodeSearch bluebird routing", () => {
       doVectorSearch: async () => {
         throw new BluebirdError("must not be called for exact", { retriable: false })
       },
-    })
+    }))
     const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "gh-router-bb-")))
     try {
       writeFileSync(path.join(root, "needle.ts"), "const uniqueNeedleXyz = 1\n")

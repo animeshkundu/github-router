@@ -20,12 +20,12 @@ import { runSelfUpdate } from "./lib/self-update"
 import { state } from "./lib/state"
 import { toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
-import { bluebirdScopeSummary, ensureBluebirdClient } from "./lib/bluebird-client"
 import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
-import { startKeepAwake } from "./lib/keep-awake"
+import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { hasSupportedBrowserInstalled } from "./lib/browser-mcp/browser-detect"
+import { disposeBluebirdClients } from "./lib/bluebird-client"
 import { resolveCodexModel, resolveModel } from "./lib/utils"
 
 export const codex = defineCommand({
@@ -77,19 +77,6 @@ export const codex = defineCommand({
     // the launch cwd. Opt-IN via --search (no-op otherwise); never blocks
     // launch, never throws.
     void provisionAndIndexColbert()
-
-    // Best-effort Bluebird provision under --bluebird (same contract as
-    // the claude launcher: connect now, never block, never throw).
-    if (state.bluebirdEnabled === true && !state.bluebirdClient) {
-      void ensureBluebirdClient(process.cwd())
-        .then(() => {
-          const scope = bluebirdScopeSummary()
-          process.stderr.write(
-            `Bluebird Azure DevOps search connected${scope ? `: ${scope}` : ""}.\n`,
-          )
-        })
-        .catch(() => {})
-    }
 
     // Surface a terminally-failed semantic index to the HUMAN (see the note
     // in claude.ts). Fire-and-forget; lexical search still works.
@@ -184,6 +171,12 @@ export const codex = defineCommand({
         serverUrl,
       },
       server,
+      {
+        onShutdown: async () => {
+          await stopKeepAwake()
+          await disposeBluebirdClients()
+        },
+      },
     )
   },
 })

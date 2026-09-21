@@ -38,18 +38,18 @@ function fixture(): string {
 }
 
 function waitFor(
-  events: Array<WatchEvent>,
+  predicate: () => boolean,
   timeoutMs = 5000,
-): Promise<Array<WatchEvent>> {
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const t0 = Date.now()
     const poll = () => {
-      if (events.length > 0) {
-        resolve(events)
+      if (predicate()) {
+        resolve()
         return
       }
       if (Date.now() - t0 > timeoutMs) {
-        reject(new Error("timed out waiting for watch event"))
+        reject(new Error("timed out waiting for watch event predicate"))
         return
       }
       setTimeout(poll, 25).unref?.()
@@ -66,9 +66,13 @@ describe("watchWorkspace", () => {
     // Let the watcher attach before mutating.
     await Bun.sleep(200)
     writeFileSync(path.join(root, "src", "a.ts"), "const a = 2\n")
-    const got = await waitFor(events)
-    expect(got[0].files.some((f) => f === "src/a.ts" || f.endsWith("/a.ts"))).toBe(true)
-    expect(got[0].truncated).toBe(false)
+    await waitFor(() => events.some((e) =>
+      e.files.some((f) => f === "src/a.ts" || f.endsWith("/a.ts"))
+    ))
+    const matchingEvent = events.find((e) =>
+      e.files.some((f) => f === "src/a.ts" || f.endsWith("/a.ts"))
+    )!
+    expect(matchingEvent.truncated).toBe(false)
   })
 
   test("rapid edits coalesce into one signal", async () => {
@@ -79,7 +83,9 @@ describe("watchWorkspace", () => {
     for (let i = 0; i < 5; i++) {
       writeFileSync(path.join(root, "src", "a.ts"), `const a = ${i}\n`)
     }
-    await waitFor(events)
+    await waitFor(() => events.some((e) =>
+      e.files.some((f) => f === "src/a.ts" || f.endsWith("/a.ts"))
+    ))
     // Debounce may allow a second flush on slow filesystems; the point is
     // coalescing happened (far fewer signals than edits).
     expect(events.length).toBeLessThan(5)
@@ -91,11 +97,14 @@ describe("watchWorkspace", () => {
     handles.push(watchWorkspace(root, (e) => events.push(e)))
     await Bun.sleep(200)
     writeFileSync(path.join(root, "src", "b.ts"), "const b = 1\n")
-    await waitFor(events)
+    await waitFor(() => events.some((e) =>
+      e.files.some((f) => f === "src/b.ts" || f.endsWith("/b.ts"))
+    ))
     events.length = 0
     rmSync(path.join(root, "src", "b.ts"))
-    const got = await waitFor(events)
-    expect(got.length).toBeGreaterThan(0)
+    await waitFor(() => events.some((e) =>
+      e.files.some((f) => f === "src/b.ts" || f.endsWith("/b.ts"))
+    ))
   })
 
   test("ignored dirs (.git, node_modules) never fire", async () => {
@@ -109,8 +118,10 @@ describe("watchWorkspace", () => {
     writeFileSync(path.join(root, "node_modules", "p.js"), "x\n")
     // Also touch a real file to prove the watcher is alive at all.
     writeFileSync(path.join(root, "src", "a.ts"), "const a = 9\n")
-    const got = await waitFor(events)
-    const all = got.flatMap((e) => e.files)
+    await waitFor(() => events.some((e) =>
+      e.files.some((f) => f === "src/a.ts" || f.endsWith("/a.ts"))
+    ))
+    const all = events.flatMap((e) => e.files)
     expect(all.some((f) => f.includes(".git") || f.includes("node_modules"))).toBe(false)
     expect(all.length).toBeGreaterThan(0)
   })
@@ -124,7 +135,9 @@ describe("watchWorkspace", () => {
     // (FSEvents can deliver those late — they must not pollute the
     // post-close assertion).
     writeFileSync(path.join(root, "src", "a.ts"), "const a = 2\n")
-    await waitFor(events)
+    await waitFor(() => events.some((e) =>
+      e.files.some((f) => f === "src/a.ts" || f.endsWith("/a.ts"))
+    ))
     events.length = 0
     h.close()
     writeFileSync(path.join(root, "src", "a.ts"), "const a = 3\n")

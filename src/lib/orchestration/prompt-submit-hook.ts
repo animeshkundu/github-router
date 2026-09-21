@@ -79,18 +79,28 @@ export function decidePromptSubmit(input: { stdin: string; steerEnabled: boolean
  * call, no latency tax): nudge parallel lexical+semantic search before
  * concluding. Mirrors the v1 advisory tone: additive, never blocking.
  *
- * @deprecated Prefer `getPromptSearchTip(searchEnabled)` so the tip matches
- * the launch's search capability. Kept for callers without a flag concept;
+ * @deprecated Prefer `getPromptSearchTip(searchEnabled, bluebirdEnabled)` so
+ * the tip matches the launch's search backend. Kept for callers without flags;
  * built with semantic search enabled.
  */
 export const PROMPT_SEARCH_TIP = getPromptSearchTip(true)
 
 /**
- * Build the search tip for the launch's search capability. When semantic
- * search is available the tip nudges parallel lexical+semantic search;
- * otherwise it nudges lexical-only search and never names semantic search.
+ * Build the search tip for the launch's search backend. When Bluebird is
+ * enabled it owns both semantic and lexical calls; otherwise local ColBERT is
+ * used when enabled, or lexical-only search when neither backend is enabled.
  */
-export function getPromptSearchTip(searchEnabled: boolean): string {
+export function getPromptSearchTip(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean = false,
+): string {
+  if (bluebirdEnabled) {
+    return (
+      "TIP (advisory): when this task needs code context, search Bluebird semantic + "
+      + "lexical in parallel — two `mcp__search__code` calls issued in the same turn. "
+      + "Bluebird failures are visible and do not fall back locally."
+    )
+  }
   if (searchEnabled) {
     return (
       "TIP (advisory): when this task needs code context, search lexical + semantic in "
@@ -107,12 +117,19 @@ export function getPromptSearchTip(searchEnabled: boolean): string {
 }
 
 /**
- * Build the scope-inference system prompt for the launch's search capability.
- * Mirrors `getPromptSearchTip`: the semantic variant grounds the inference
- * in lexical + semantic results; the lexical variant in lexical results.
+ * Build the scope-inference system prompt for the launch's search backend.
+ * Mirrors `getPromptSearchTip`: Bluebird and local ColBERT variants ground the
+ * inference in lexical + semantic results; the local-only variant in lexical results.
  */
-export function getPromptScopeSystem(searchEnabled: boolean): string {
-  const searchNoun = searchEnabled ? "a lexical + semantic code search" : "a lexical code search"
+export function getPromptScopeSystem(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean = false,
+): string {
+  const searchNoun = bluebirdEnabled
+    ? "a Bluebird lexical + semantic code search"
+    : searchEnabled
+      ? "a local lexical + semantic code search"
+      : "a lexical code search"
   return (
     "You are a scoping assistant for a coding agent about to act on a user's request. "
     + `You are given the user's request and the results of ${searchNoun} `
@@ -131,9 +148,9 @@ export function getPromptScopeSystem(searchEnabled: boolean): string {
 /** System prompt for the single gpt-5.6-luna scope/goal inference. Steers a SHORT,
  *  user-derived (not invented) advisory note grounded in the search results.
  *
- * @deprecated Prefer `getPromptScopeSystem(searchEnabled)` so the prompt
- * matches the launch's search capability. Kept for callers without a flag
- * concept; built with semantic search enabled. */
+ * @deprecated Prefer `getPromptScopeSystem(searchEnabled, bluebirdEnabled)` so
+ * the prompt matches the launch's search backend. Kept for callers without flags;
+ * built with local semantic search enabled. */
 export const PROMPT_SCOPE_SYSTEM = getPromptScopeSystem(true)
 
 /** Injected IO for V2, all best-effort. Each network call returns its text and
@@ -194,8 +211,9 @@ function joinSections(sections: Array<string>): string {
  *   - findings           -> always surfaced (+ cleared) regardless of triviality.
  *   - trivial prompt     -> findings only (no search tip, no model call).
  *   - substantive prompt -> search tip + grounded enrichment (parallel
- *                           lexical+semantic when `searchEnabled`, else
- *                           lexical-only) -> ONE gpt-5.6-luna call
+ *                           lexical+semantic through Bluebird when enabled,
+ *                           otherwise local semantic when enabled, else lexical-only)
+ *                           -> ONE gpt-5.6-luna call
  *                           -> grounded scope/goal note. Fail-open to PROMPT_STEER_GOAL.
  *   - steerEnabled=false -> findings only (no goal/tip).
  */
@@ -203,9 +221,10 @@ export async function decidePromptSubmitV2(input: {
   stdin: string
   steerEnabled: boolean
   io: PromptSubmitV2IO
-  /** Whether semantic search is enabled for this launch. When false/absent
-   *  only a lexical search runs and the tip never names semantic search. */
+  /** Whether local ColBERT semantic search is enabled for this launch. */
   searchEnabled?: boolean
+  /** Whether Bluebird owns semantic and lexical search for this launch. */
+  bluebirdEnabled?: boolean
 }): Promise<PromptSubmitDecision> {
   let payload: { session_id?: unknown; prompt?: unknown; agent_type?: unknown; agent_id?: unknown } = {}
   try {
@@ -249,8 +268,10 @@ export async function decidePromptSubmitV2(input: {
 
   // Substantive prompt -> search tip + grounded enrichment, timeout-bounded + fail-open.
   const searchEnabled = input.searchEnabled === true
-  const searchTip = getPromptSearchTip(searchEnabled)
-  const scopeSystem = getPromptScopeSystem(searchEnabled)
+  const bluebirdEnabled = input.bluebirdEnabled === true
+  const semanticAvailable = searchEnabled || bluebirdEnabled
+  const searchTip = getPromptSearchTip(searchEnabled, bluebirdEnabled)
+  const scopeSystem = getPromptScopeSystem(searchEnabled, bluebirdEnabled)
   const timeoutMs = input.io.timeoutMs ?? 22_000
   let goal = PROMPT_STEER_GOAL // fail-open default.
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -260,7 +281,7 @@ export async function decidePromptSubmitV2(input: {
   const controller = new AbortController()
   try {
     const enrich = (async (): Promise<string> => {
-      if (!searchEnabled) {
+      if (!semanticAvailable) {
         const lexical = await input.io.searchCode(prompt, "lexical", controller.signal).catch(() => "")
         const searchContext = `Lexical search results:\n${lexical.slice(0, SEARCH_CONTEXT_CAP)}`
         const note = await input.io.infer(

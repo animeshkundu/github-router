@@ -188,13 +188,14 @@ export interface State {
    * `setupAndServe` from the `--bluebird` CLI flag or
    * `GH_ROUTER_ENABLE_BLUEBIRD=1` env var. When true, the `code` MCP
    * tool routes `semantic`/`lexical` modes through the Bluebird MCP
-   * server (which implies `searchEnabled`), while `exact`/`regex`/`ast`
-   * stay on the local engine. See `src/lib/bluebird-client.ts`.
+   * server. This flag is independent from `searchEnabled`, which controls
+   * local ColBERT provisioning; `exact`/`regex`/`ast` stay local.
+   * See `src/lib/bluebird-client.ts`.
    */
   bluebirdEnabled: boolean
 
-  /** Initialized Bluebird MCP client for this launch (null until the
-   *  startup provision in `serve/enhancements.ts` succeeds). */
+  /** Last connected Bluebird client, retained only for compatibility and
+   * diagnostics. Client selection is owned by the Bluebird runtime manager. */
   bluebirdClient: BluebirdMcpClient | null
 
   /** Resolved Bluebird scope (org/project/repos/branch), for logging and

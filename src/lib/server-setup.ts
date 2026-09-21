@@ -363,7 +363,9 @@ export async function setupAndServe(
   // into ColBERT/colgrep semantic search (provision + background-index). Off
   // by default; GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1 hard-disables and wins
   // over both (see `semanticSearchOptedIn` in `./colbert`).
-  // --bluebird implies --search (see `resolveSearchFlags`).
+  // Bluebird and local ColBERT are independent backends. `--bluebird`
+  // controls remote semantic/lexical routing; `--search` controls local
+  // ColBERT provisioning.
   const searchFlags = resolveSearchFlags({
     searchEnabled: options.searchEnabled,
     bluebirdEnabled: options.bluebirdEnabled,
@@ -627,20 +629,16 @@ export const sharedServerArgs = {
     type: "boolean" as const,
     default: false,
     description:
-      "Route semantic + lexical `code` tool search through the Bluebird Azure DevOps MCP server (implies --search; exact/regex/ast stay local). Requires an Azure DevOps git remote (or az CLI) plus `az login`. Can also be enabled with GH_ROUTER_ENABLE_BLUEBIRD=1.",
+      "Route semantic + lexical `code` tool search through the Bluebird Azure DevOps MCP server (exact/regex/ast stay local). Requires an Azure DevOps git remote plus `az login`. Can also be enabled with GH_ROUTER_ENABLE_BLUEBIRD=1.",
   },
 } as const
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
 
 /**
- * Resolve the effective search flags for a launch. `--bluebird`
- * (`bluebirdEnabled` / `GH_ROUTER_ENABLE_BLUEBIRD=1`) implies
- * `searchEnabled`: Bluebird IS the semantic backend, so the `code` tool's
- * semantic-first descriptions, prompts, and skills must read as enabled
- * even when `--search` was not passed explicitly. Bluebird never implies
- * ColBERT provisioning — the local semantic index stays off unless
- * `--search` / `GH_ROUTER_ENABLE_SEMANTIC_SEARCH=1` opts in.
+ * Resolve the independent remote and local search flags for a launch.
+ * `bluebirdEnabled` controls Bluebird semantic/lexical routing only.
+ * `searchEnabled` controls local ColBERT provisioning only.
  */
 export function resolveSearchFlags(opts: {
   searchEnabled: boolean
@@ -650,7 +648,6 @@ export function resolveSearchFlags(opts: {
     opts.bluebirdEnabled === true || process.env.GH_ROUTER_ENABLE_BLUEBIRD === "1"
   const searchEnabled =
     opts.searchEnabled === true
-    || bluebirdEnabled
     || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
   return { searchEnabled, bluebirdEnabled }
 }

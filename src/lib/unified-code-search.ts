@@ -9,10 +9,10 @@
  * failed) or colgrep isn't provisioned on this host. The forced lexical
  * family (`lexical|exact|regex|ast`) never touches colgrep.
  *
- * Under `--bluebird` (`state.bluebirdEnabled` with an initialized
- * `state.bluebirdClient`), the `semantic` and `lexical` modes route through
- * the Bluebird Azure DevOps MCP server instead (`do_vector_search` /
- * `search_file_content`); `exact|regex|ast` stay on the local engine, and
+ * Under `--bluebird` (`state.bluebirdEnabled`), the `semantic` and
+ * `lexical` modes route through
+ * the Bluebird Azure DevOps MCP server instead (the unified `code_search`
+ * tool, with legacy tool-name compatibility); `exact|regex|ast` stay local, and
  * Bluebird errors surface as `source:"error"` with NO silent local
  * fallback.
  *
@@ -48,6 +48,7 @@ import { BluebirdError, ensureBluebirdClient } from "./bluebird-client"
 import {
   MAX_OUTLINE_ENTRIES_PER_FILE,
   searchCode,
+  validateWorkspace,
   type CodeSearchResponse,
 } from "./code-search"
 import { colbertSearchEnabled, runSemanticSearch, runServiceSearch, serviceBackendEnabled } from "./colbert"
@@ -68,7 +69,7 @@ export interface UnifiedCodeSearchInput {
   limit?: number
   context_lines?: number
   structural?: "full" | "topN"
-  /** Opt-in outlines (default off). `true` attaches per-file outlines. */
+  /** Per-result outlines are on by default; `false` omits them. */
   summary?: boolean
   complete?: boolean
   multiline?: boolean
@@ -194,7 +195,7 @@ async function outlinesForSemanticResults(
   results: Array<UnifiedResultRow>,
   signal?: AbortSignal,
 ): Promise<CodeSearchResponse["outlines"]> {
-  if (input.summary !== true) return undefined
+  if (input.summary === false) return undefined
   const seen = new Set<string>()
   const files: Array<string> = []
   for (const result of results) {
@@ -209,17 +210,24 @@ async function outlinesForSemanticResults(
   const workspace = path.resolve(input.workspace)
   for (const file of files) {
     if (signal?.aborted || Date.now() > deadline) break
-    const abs = path.resolve(workspace, file)
+    const normalized = file.replaceAll("\\", "/").replace(/^\/+/, "")
+    if (!normalized || normalized.includes("\0") || /^[A-Za-z]:/.test(normalized) || normalized.startsWith("//")) continue
+    if (normalized.split("/").some((part) => part === "..")) continue
+    const abs = path.resolve(workspace, normalized)
     const rel = path.relative(workspace, abs)
     // Semantic rows should already be workspace-relative. Fail closed if a
     // malformed/upstream row is absolute or escapes rather than outlining an
     // unrelated file outside the caller's workspace.
     if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) continue
-    const outlined = await outlineFile(abs, signal)
-    outlines.push({
-      file,
-      outline: outlined.outline.slice(0, MAX_OUTLINE_ENTRIES_PER_FILE),
-    })
+    try {
+      const outlined = await outlineFile(abs, signal)
+      outlines.push({
+        file: normalized,
+        outline: outlined.outline.slice(0, MAX_OUTLINE_ENTRIES_PER_FILE),
+      })
+    } catch {
+      // Outline enrichment is optional; preserve the valid remote hit.
+    }
   }
   return outlines
 }
@@ -328,10 +336,14 @@ async function runBluebird(
 ): Promise<UnifiedCodeSearchResult> {
   const limit = input.limit ?? 200
   try {
+    const workspace = validateWorkspace(input.workspace)
+    if (!workspace.ok || !workspace.canonical) {
+      throw new Error(workspace.error ?? "workspace path is not accessible")
+    }
     // Lazy provision against the query's workspace ("the repo we are
-    // working with"); cached in state after first use. Tests preset
-    // `state.bluebirdClient` to skip provisioning.
-    const client = await ensureBluebirdClient(input.workspace, signal)
+    // working with"). The runtime-owned manager isolates workspaces and
+    // scopes; it is not selected through process-global state.
+    const client = await ensureBluebirdClient(workspace.canonical, signal)
     const rows = mode === "semantic"
       ? await client.doVectorSearch(input.query, {
         limit,

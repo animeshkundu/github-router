@@ -1,10 +1,17 @@
 import type { InjectedSkill } from "./index"
 
-export function buildResearchSkill(searchEnabled: boolean): InjectedSkill {
-  const searchStep = searchEnabled
+export function buildResearchSkill(
+  searchEnabled: boolean,
+  bluebirdEnabled: boolean = false,
+): InjectedSkill {
+  const semanticAvailable = searchEnabled || bluebirdEnabled
+  const semanticBackend = bluebirdEnabled
+    ? "Bluebird (semantic and lexical requests use its Azure DevOps index; failures stay visible with no local fallback)"
+    : "local ColBERT (with transparent lexical fallback while its index is unavailable)"
+  const searchStep = semanticAvailable
     ? `3. Fan out in parallel.
    - Run independent code, web, history, and explore calls concurrently where possible; only the semantic-to-lexical code-search refinement is ordered. Issue the independent calls in a SINGLE turn (one message, multiple tool calls) so the harness actually runs them in parallel rather than serializing.
-   - Use mcp__search__code semantically first to find concepts and likely files.
+   - Use mcp__search__code semantically first to find concepts and likely files. This launch uses ${semanticBackend}.
    - Then use mcp__search__code lexically for exact symbols, filenames, errors, routes, flags, and config keys.
    - Use git blame or history when authorship, regression timing, or intent matters.
    - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.
