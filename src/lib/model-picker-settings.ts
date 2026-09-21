@@ -104,8 +104,8 @@ const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
 
 const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   // Balanced reuses cheap's 200K pinning (`neverOneM`) with Sol leading:
-  // rows are Sol (lead/Plan/Advisor), Luna (Explore/reviewer), Gemini Flash
-  // (General-Purpose), and Grok 4.6 (Oracle).
+  // rows are Sol (lead/Plan/Advisor), Luna (Explore/General-Purpose), Gemini
+  // Flash (reviewer), and Grok 4.6 (Oracle).
   {
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",

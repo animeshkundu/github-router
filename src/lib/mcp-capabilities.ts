@@ -657,7 +657,7 @@ export function balancedOracleModel(): string | undefined {
   return BALANCED_PROFILE_ORACLE_MODEL
 }
 
-/** Luna/max reviewer for the balanced profile at the 200K default window. */
+/** Gemini/high reviewer for the balanced profile at the 200K default window. */
 export function balancedReviewerModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === BALANCED_PROFILE_MODELS.reviewer)
   if (!found) return undefined
@@ -665,7 +665,7 @@ export function balancedReviewerModel(): string | undefined {
   if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(BALANCED_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
-  if (fastEndpointForModel(found) !== "responses") return undefined
+  if (fastEndpointForModel(found) !== "chat") return undefined
   return BALANCED_PROFILE_MODELS.reviewer
 }
 

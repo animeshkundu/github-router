@@ -1145,8 +1145,8 @@ describe("buildPeerAgentDefinitions", () => {
 
       expect(agents.Explore!.effort).toBe("high")
       expect(agents.Plan!.effort).toBe("high")
-      expect(agents["General-Purpose"]!.effort).toBe("high")
-      expect(agents.reviewer!.effort).toBe("max")
+      expect(agents["General-Purpose"]!.effort).toBe("max")
+      expect(agents.reviewer!.effort).toBe("high")
 
       // Explicit delegation tuning (complex tasks): proactive parallel
       // Explore, Plan-first discovery delegation, and reviewer verification.

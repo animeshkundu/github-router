@@ -186,8 +186,8 @@ describe("cheap-family subagent aliases", () => {
   const balancedRows = [
     [BALANCED_EXPLORE_ALIAS_ID, BALANCED_PROFILE_MODELS.explore, "high"],
     [BALANCED_PLAN_ALIAS_ID, BALANCED_PROFILE_MODELS.plan, "high"],
-    [BALANCED_GENERAL_PURPOSE_ALIAS_ID, BALANCED_PROFILE_MODELS["General-Purpose"], "high"],
-    [BALANCED_REVIEWER_ALIAS_ID, BALANCED_PROFILE_MODELS.reviewer, "max"],
+    [BALANCED_GENERAL_PURPOSE_ALIAS_ID, BALANCED_PROFILE_MODELS["General-Purpose"], "max"],
+    [BALANCED_REVIEWER_ALIAS_ID, BALANCED_PROFILE_MODELS.reviewer, "high"],
   ] as const
 
   test("resolve and canonicalize (bare and bracketed) to the contract real id", () => {
@@ -462,7 +462,7 @@ describe("balanced startup prerequisites", () => {
   test("reports every missing role and the rollback command", () => {
     const result = validateBalancedProfilePrerequisites({ object: "list", data: [] } as never)
     expect(result.ok).toBe(false)
-    expect(result.missing).toHaveLength(4)
+    expect(result.missing).toHaveLength(5)
     const message = formatBalancedPrerequisiteFailure(result.missing)
     expect(message).toContain("gpt-5.6-sol")
     expect(message).toContain("gpt-5.6-luna")

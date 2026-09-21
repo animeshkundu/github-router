@@ -17,8 +17,8 @@ export const BALANCED_PROFILE_MODELS = Object.freeze({
   lead: "gpt-5.6-sol",
   explore: "gpt-5.6-luna",
   plan: "gpt-5.6-sol",
-  "General-Purpose": "gemini-3.8-flash",
-  reviewer: "gpt-5.6-luna",
+  "General-Purpose": "gpt-5.6-luna",
+  reviewer: "gemini-3.8-flash",
   advisor: "gpt-5.6-sol",
   oracle: "grok-4.6",
   astra: "gpt-6-astra",
@@ -46,8 +46,8 @@ export const BALANCED_PROFILE_NATIVE_MODELS: Readonly<
 export const BALANCED_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Explore: "high",
   Plan: "high",
-  "General-Purpose": "high",
-  reviewer: "max",
+  "General-Purpose": "max",
+  reviewer: "high",
 } as const)
 
 /**

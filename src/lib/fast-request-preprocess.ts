@@ -51,7 +51,7 @@ function explicitEffortOf(value: unknown): FastFixedEffort | undefined {
  * bare subagent slugs at the wiring layer), so this preprocess is shared.
  * Note the reviewer differs: fast reviews on Sonnet 5/xhigh while cheap
  * reviews on Luna/max, cheapest reviews on Gemini/high, and balanced reviews
- * on Luna/max — all rows exist here, so each profile's reviewer resolves to
+ * on Gemini/high — all rows exist here, so each profile's reviewer resolves to
  * its fixed effort.
  *
  * Pinned-profile isolation (fast/cheap/cheap1m/cheapest/balanced): only

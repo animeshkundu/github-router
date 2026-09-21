@@ -301,8 +301,8 @@ export const CHEAPEST_REVIEWER_ALIAS_ID = "gh-router-cheapest-reviewer-high"
 export const BALANCED_EXPLORE_ALIAS_ID = "gh-router-balanced-explore-high"
 export const BALANCED_PLAN_ALIAS_ID = "gh-router-balanced-plan-high"
 export const BALANCED_GENERAL_PURPOSE_ALIAS_ID =
-  "gh-router-balanced-general-purpose-high"
-export const BALANCED_REVIEWER_ALIAS_ID = "gh-router-balanced-reviewer-max"
+  "gh-router-balanced-general-purpose-max"
+export const BALANCED_REVIEWER_ALIAS_ID = "gh-router-balanced-reviewer-high"
 
 export const LUNA_SONNET_ALIAS_ID = "gh-router-luna-sonnet-xhigh"
 
@@ -391,6 +391,11 @@ export interface ModelAliasDescriptor {
 const RETIRED_FAST_ALIAS_IDS = new Set([
   LUNA_IMPLEMENTER_ALIAS_ID,
   FAST_CRITIC_ALIAS_ID,
+  // Pre-swap balanced aliases: General-Purpose was Gemini/high and reviewer
+  // was Luna/max. Renamed alongside the model swap so stale pinned clients
+  // fail loudly as retired instead of resolving with changed semantics.
+  "gh-router-balanced-general-purpose-high",
+  "gh-router-balanced-reviewer-max",
 ])
 
 const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
@@ -468,11 +473,11 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   ],
   [
     BALANCED_GENERAL_PURPOSE_ALIAS_ID,
-    { aliasId: BALANCED_GENERAL_PURPOSE_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "high" },
+    { aliasId: BALANCED_GENERAL_PURPOSE_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "max" },
   ],
   [
     BALANCED_REVIEWER_ALIAS_ID,
-    { aliasId: BALANCED_REVIEWER_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS.reviewer, absentEffortDefault: "max" },
+    { aliasId: BALANCED_REVIEWER_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS.reviewer, absentEffortDefault: "high" },
   ],
   [
     SKILL_GATHER_CONTEXT_LEAD_ALIAS_ID,
@@ -1077,8 +1082,8 @@ const BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS =
 
 /**
  * Validate the live Copilot catalog for `-m balanced`: Sol lead at the 200K
- * default window, Luna Explore/Reviewer roles, Sol Plan, Gemini
- * General-Purpose, and a Grok Oracle — all at the 200K default with their
+ * default window, Luna Explore/General-Purpose roles, Sol Plan, Gemini
+ * reviewer, and a Grok Oracle — all at the 200K default with their
  * fixed efforts and supported endpoints.
  */
 export function validateBalancedProfilePrerequisites(
@@ -1126,24 +1131,46 @@ export function validateBalancedProfilePrerequisites(
     }
   }
 
-  const gemini = findModel(catalog, BALANCED_PROFILE_MODELS["General-Purpose"])
-  if (!gemini) {
+  const generalPurpose = findModel(catalog, BALANCED_PROFILE_MODELS["General-Purpose"])
+  if (!generalPurpose) {
     missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: absent from the live catalog`)
   } else {
-    if (!hasToolCalls(gemini)) {
+    if (!hasToolCalls(generalPurpose)) {
       missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise tool_calls`)
     }
-    if (!hasContextAtLeast(gemini, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+    if (!hasContextAtLeast(generalPurpose, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
       missing.push(
         `${BALANCED_PROFILE_MODELS["General-Purpose"]}: advertised context window is below the 200K subagent floor`,
       )
     }
-    if (!supportsEffort(gemini, "high")) {
-      missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise a "high" reasoning effort`)
+    if (!supportsEffort(generalPurpose, "max")) {
+      missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise a "max" reasoning effort`)
     }
-    if (!supportsEndpoint(gemini, "chat")) {
+    if (!supportsEndpoint(generalPurpose, "responses")) {
       missing.push(
-        `${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise a supported chat-completions endpoint`,
+        `${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise a supported Responses endpoint`,
+      )
+    }
+  }
+
+  const balancedReviewer = findModel(catalog, BALANCED_PROFILE_MODELS.reviewer)
+  if (!balancedReviewer) {
+    missing.push(`${BALANCED_PROFILE_MODELS.reviewer}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(balancedReviewer)) {
+      missing.push(`${BALANCED_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(balancedReviewer, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+      missing.push(
+        `${BALANCED_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(balancedReviewer, "high")) {
+      missing.push(`${BALANCED_PROFILE_MODELS.reviewer}: does not advertise a "high" reasoning effort`)
+    }
+    if (!supportsEndpoint(balancedReviewer, "chat")) {
+      missing.push(
+        `${BALANCED_PROFILE_MODELS.reviewer}: does not advertise a supported chat-completions endpoint`,
       )
     }
   }
