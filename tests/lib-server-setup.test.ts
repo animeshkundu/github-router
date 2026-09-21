@@ -342,6 +342,26 @@ describe("getClaudeCodeEnvVars", () => {
     expect(value).toBe("816700")
   })
 
+  test("cheap-family launches derive the bound from the Luna 1M picker row", () => {
+    // The Luna row is the only decorated picker row in 200K-lead profiles.
+    // The bound covers a later `/model` switch to it and is harmless to the
+    // bare 200K rows via the client's Math.min.
+    const value = withCatalog(
+      [
+        catalogModel("gpt-5.6-sol", 1_050_000, 922_000),
+        catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
+        catalogModel("gemini-3.8-flash", 1_000_000, 983_040, 65_536),
+        catalogModel("grok-4.6", 500_000, 372_000),
+      ],
+      () =>
+        withoutCompactionEnv(() =>
+          getClaudeCodeEnvVars("http://127.0.0.1:8787", undefined, "cheap")
+            .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    expect(value).toBe("816700")
+  })
+
   test("omits the window entirely when catalog limits are unusable", () => {
     const vars = withCatalog([], () =>
       withoutCompactionEnv(() =>

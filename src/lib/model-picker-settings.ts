@@ -46,12 +46,14 @@ const MAX_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
 ])
 
 const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
-  // Cheap reuses Standard's rows but pins every one to the 200K default
-  // window (`neverOneM`), because the profile's whole cost lever is the
-  // reduced context budget on every non-fixed role. `withOneMSuffix` would
-  // otherwise decorate these rows off the live catalog and a `/model` switch
-  // would silently hand the session (and every downstream subagent) a 1M
-  // window again.
+  // Cheap reuses Standard's rows but pins every one except Luna to the 200K
+  // default window (`neverOneM`), because the profile's whole cost lever is
+  // the reduced context budget on every non-fixed role. Luna is exempt so a
+  // 1M Luna row stays an explicit `/model` opt-in: selecting it gives the
+  // session Luna 1M accounting (effort max) by user choice, while the
+  // default lead rows stay bare 200K. On 200K-lead traffic the request
+  // preprocessor still strips `[1m]` upstream and subagents run on bare
+  // aliases, and the launch compaction bound covers a switch to Luna 1M.
   {
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
@@ -62,7 +64,7 @@ const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
     id: "gpt-5.6-luna",
     label: "GPT-5.6 Luna",
     behavesAs: "claude-opus-5",
-    neverOneM: true,
+    neverOneM: false,
   },
   {
     id: "gemini-3.8-flash",
@@ -81,7 +83,8 @@ const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
 const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   // Cheapest reuses cheap's 200K pinning (`neverOneM`) but drops Grok (not in
   // the cheapest roster) — rows are Luna (lead/GP), Sol (Plan + Oracle), and
-  // Gemini Flash (reviewer + Advisor).
+  // Gemini Flash (reviewer + Advisor). Luna is exempt from the pin so its 1M
+  // row stays an explicit opt-in; the default lead rows stay bare 200K.
   {
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
@@ -92,7 +95,7 @@ const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
     id: "gpt-5.6-luna",
     label: "GPT-5.6 Luna",
     behavesAs: "claude-opus-5",
-    neverOneM: true,
+    neverOneM: false,
   },
   {
     id: "gemini-3.8-flash",
@@ -105,7 +108,9 @@ const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
 const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   // Balanced reuses cheap's 200K pinning (`neverOneM`) with Sol leading:
   // rows are Sol (lead/Plan/Advisor), Luna (Explore/General-Purpose), Gemini
-  // Flash (reviewer), and Grok 4.6 (Oracle).
+  // Flash (reviewer), and Grok 4.6 (Oracle). Luna is exempt from the pin so
+  // its 1M row stays an explicit opt-in; the default lead rows stay bare
+  // 200K (bare lead strip + bare subagent aliases still apply).
   {
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
@@ -116,7 +121,7 @@ const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
     id: "gpt-5.6-luna",
     label: "GPT-5.6 Luna",
     behavesAs: "claude-opus-5",
-    neverOneM: true,
+    neverOneM: false,
   },
   {
     id: "gemini-3.8-flash",
