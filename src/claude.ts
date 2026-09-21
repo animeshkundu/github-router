@@ -1439,6 +1439,12 @@ export const claude = defineCommand({
                 ...(fastDescriptor.nativeRoster ?? []),
                 ...(browseAgentAvailable ? ["worker-browse"] : []),
               ],
+              // Balanced additionally permits reviewer → Explore for targeted
+              // discovery; every other pinned profile keeps the fast graph.
+              // The flag adds no privilege: this command is persisted into the
+              // per-launch isolated mirror, and anyone able to rewrite it can
+              // already remove the hook entirely.
+              graph: launchProfileId === "balanced" ? "balanced" : undefined,
             })
             await injectStopHookIntoSettingsFile(
               settingsPath,

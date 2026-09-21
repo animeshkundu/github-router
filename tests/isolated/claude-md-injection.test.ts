@@ -1236,6 +1236,17 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(balancedDigest).toContain("`reviewer`")
   expect(balancedDigest).toContain("Grok 4.6 200K/medium")
   expect(balancedDigest).not.toContain("`astra`")
+  // Balanced exposes Oracle but no Advisor: the digest must not name the
+  // capability ("advisory planning capability" is fine — substring only).
+  expect(balancedDigest).not.toContain("`advisor`")
+  expect(balancedDigest).not.toContain("Advisor")
+  expect(balancedDigest).not.toContain("transcript-aware")
+  expect(balancedDigest).not.toContain("lead-only")
+  // Search-first funnel: narrow with search, then Explore, then Plan, then
+  // Oracle as a second opinion — optimized for lowest cost.
+  expect(balancedDigest).toContain("Funnel unknowns cheapest-first")
+  expect(balancedDigest).toContain("as a second opinion")
+  expect(balancedDigest).toContain("lowest cost")
 
   const cheapestDigest = buildOperatingDefaultsDigest({ profile: "cheapest" })
   expect(cheapestDigest).toContain("Cheapest launch profile")
@@ -1271,6 +1282,24 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   ]) {
     expect(maxDigest).not.toContain(inventoryDetail)
   }
+})
+
+test("balanced directive funnels unknowns search-first with no Advisor", () => {
+  const directive = buildOperatingDefaultsDirective({ profile: "balanced" })
+  expect(directive).toContain("Balanced launch profile")
+  // No Advisor surface in balanced: neither the sounding-board sentence nor
+  // the advisor-scoped Oracle comparison may appear.
+  expect(directive).not.toContain("Advisor")
+  expect(directive).not.toContain("`advisor`")
+  expect(directive).not.toContain("transcript-aware sounding board")
+  expect(directive).not.toContain("preferred over advisor")
+  // Search-first GATHER + Oracle second-opinion framing + cost line.
+  expect(directive).toContain("narrow scope first with `code_search`")
+  expect(directive).toContain("consult `mcp__peers__oracle` on unresolved trade-offs")
+  expect(directive).toContain("a second opinion for precise, self-contained architectural/spec trade-offs")
+  expect(directive).toContain("lowest cost")
+  // Reviewer → Explore edge is documented in the delegation graph.
+  expect(directive).toContain("`reviewer` may invoke `Explore` for targeted discovery")
 })
 
 test("sweEnabled:false omits every pipeline-skill reference from directive and digest", () => {

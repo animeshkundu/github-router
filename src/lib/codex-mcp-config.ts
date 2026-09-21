@@ -883,14 +883,17 @@ function pinnedPlanDescription(explicit: boolean): string {
   return PLAN_DESC_HEAD + middle + PLAN_DESC_TAIL
 }
 
-function pinnedPlanPrompt(opts: { explicit: boolean; semanticAvailable: boolean }): string {
+function pinnedPlanPrompt(opts: { explicit: boolean; semanticAvailable: boolean; oracleTool?: string }): string {
+  // Name the exact MCP tool when the caller wires one (key-aware); fall
+  // back to the generic name when the peers server is absent.
+  const oracleRef = opts.oracleTool ? `\`${opts.oracleTool}\`` : "Oracle"
   const discovery = opts.explicit
     ? "Do not sweep the repository yourself: delegate discovery to `Explore`, launching one or more `Explore` subagents in parallel with scoped evidence questions, then read directly only the files needed to resolve trade-offs and write executable steps. "
     : "Do not sweep the repository broadly yourself: keep discovery narrow, read directly only the files needed to resolve trade-offs and write executable steps, and record any repository fact you could not confirm as an explicit gap. "
   return "You are a software architect and planning specialist. Your mission is to turn a request into a decision-complete implementation plan: an ordered sequence of changes, the invariants that must hold throughout, and acceptance criteria a reviewer can actually run. "
     + "This is read-only work. Do not modify repository files. Produce the architecture, sequencing, and acceptance criteria for the lead to synthesize and execute. Plan is an advisory planning capability, not an approval gate. "
     + `Separate discoverable facts from genuine choices. ${discovery}Escalate only genuine product or architectural trade-offs, and escalate them as explicit options with consequences and a recommendation, never as an open question. For low-risk details, choose the reading most consistent with the codebase, proceed, and record it as an assumption. `
-    + "When a design trade-off has more than one viable answer and repository evidence cannot settle it, consult Oracle tool with one self-contained brief that states the constraints, the candidate designs, and the evidence you already gathered plus one precise question. If Oracle does not settle it, carry the options and the remaining gap into the plan rather than silently picking one. "
+    + `When a design trade-off has more than one viable answer and repository evidence cannot settle it, consult ${oracleRef} with one self-contained brief that states the constraints, the candidate designs, and the evidence you already gathered plus one precise question. If Oracle does not settle it, carry the options and the remaining gap into the plan rather than silently picking one. `
     + "Delegation: you may invoke Explore and `reviewer` for discovery and verification; do not invoke any other subagent. Behavior and code verification belongs to post-implementation review. "
     + "Write the plan for a General-Purpose execution agent who cannot see your reasoning. Every step must be executable without rediscovering what you already found: name the files, name the interfaces, and state the condition that means the step is done. Prefer the smallest design that satisfies the requirement and fits the conventions already in the codebase. Mark steps that are independent of each other and can run concurrently.\n\n"
     + "Return format:\n"
@@ -942,14 +945,24 @@ function pinnedReviewerDescription(explicit: boolean): string {
   return head + REVIEWER_DESC_TAIL
 }
 
-function pinnedReviewerPrompt(semanticAvailable = true): string {
+function pinnedReviewerPrompt(
+  semanticAvailable = true,
+  opts?: { allowExploreDelegation?: boolean },
+): string {
+  // Balanced-only: the reviewer narrows scope with search first, then
+  // delegates targeted discovery to Explore (permitted by the balanced
+  // delegation graph and ACL). Every other profile keeps the terminal,
+  // no-delegation reviewer.
+  const delegation = opts?.allowExploreDelegation === true
+    ? "Do not modify source code. Scope first with search, then delegate: use code search (lexical, then semantic when available) and web search to narrow scope and rule out hypotheses before delegating — cheapest, always first. When search is insufficient, delegate targeted discovery to `Explore`: launch one or more `Explore` subagents in parallel with scoped evidence questions (call chains, config patterns, test conventions, boundary conditions) and let them return file:line conclusions; do not sweep the repository yourself. You may invoke only `Explore`; do not invoke any other subagent. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
+    : "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
   return "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
     + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
     + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
     + "Then verify by execution. Run the builds, linters, or test suites relevant to what changed, and any command that would surface the specific failure you suspect. Verification means output you observed. Never state that something passes, compiles, or is covered unless you ran it and read the result; where you could not run something, say so explicitly rather than inferring the outcome. "
     + "Probe deliberately: boundary and empty inputs, error and early-return paths, concurrency and ordering, resource acquisition and cleanup on the failure path, partial failure and retry, backward compatibility of any changed interface, handling of untrusted input, and whether the new tests would actually fail if the change were reverted. "
     + "Judge against the bar the repository already holds itself to, not an abstract ideal. Do not soften a real finding, and do not manufacture findings to appear thorough. If the change is correct and verified, say so. "
-    + "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
+    + delegation
     + "Return a self-contained result the lead can act on immediately.\n\n"
     + "Return format. Line one must be exactly one of:\n"
     + "VERDICT: SHIP\n"
@@ -1028,7 +1041,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     },
     Plan: {
       description: pinnedPlanDescription(true),
-      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable }),
+      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable, oracleTool }),
       tools: planTools,
       model: oneM(planModel),
       effort: effort("Plan"),
@@ -1149,7 +1162,7 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
     },
     Plan: {
       description: pinnedPlanDescription(true),
-      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable }),
+      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable, oracleTool }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1270,7 +1283,7 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     },
     Plan: {
       description: pinnedPlanDescription(false),
-      prompt: pinnedPlanPrompt({ explicit: false, semanticAvailable }),
+      prompt: pinnedPlanPrompt({ explicit: false, semanticAvailable, oracleTool }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1336,9 +1349,12 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
  * alias (`gh-router-balanced-*`, no `[1m]`) rather than a real catalog id,
  * for the same client catalog-resolution reason as the cheap builder above.
  * Caller-supplied `opts.balanced*Model` values are deliberately ignored.
- * Explicit delegation tuning matches cheap: proactive parallel `Explore`
- * fan-out, `Plan`-first architecture, `General-Purpose` mixed execution, and
- * post-integration `reviewer` verification. */
+ * Explicit delegation tuning is search-first (unlike cheap): `code_search` +
+ * `web` search narrow scope before any `Explore` fan-out, `Plan`-first
+ * architecture with an explicitly named Oracle tool, `General-Purpose` mixed
+ * execution, and post-integration `reviewer` verification where the reviewer
+ * narrows scope with search and may invoke `Explore` for targeted
+ * discovery. */
 function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
   const exploreModel = BALANCED_EXPLORE_ALIAS_ID
   const planModel = BALANCED_PLAN_ALIAS_ID
@@ -1390,7 +1406,7 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     },
     Plan: {
       description: pinnedPlanDescription(true),
-      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable }),
+      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable, oracleTool }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1408,10 +1424,13 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     },
     reviewer: {
       description: pinnedReviewerDescription(true),
-      prompt: pinnedReviewerPrompt(semanticAvailable),
+      prompt: pinnedReviewerPrompt(semanticAvailable, { allowExploreDelegation: true }),
       model: reviewerModel,
       effort: effort("reviewer"),
-      tools: readSearchTools,
+      // Balanced reviewer may invoke Explore for targeted discovery (see
+      // BALANCED_PROFILE_DELEGATION_GRAPH + the balanced ACL graph); every
+      // other pinned reviewer stays terminal on read/search tools.
+      tools: [...readSearchTools, "Agent"],
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
   }

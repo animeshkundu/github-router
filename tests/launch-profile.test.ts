@@ -57,6 +57,7 @@ import {
 import {
   BALANCED_PROFILE_NATIVE_EFFORTS,
   BALANCED_PROFILE_MODELS,
+  BALANCED_PROFILE_DELEGATION_GRAPH,
 } from "../src/lib/balanced-profile-contract"
 import { FAST_PROFILE_DELEGATION_GRAPH } from "../src/lib/fast-profile-contract"
 
@@ -419,14 +420,21 @@ describe("cheap-family startup prerequisites", () => {
 
   test("each pinned profile owns its delegation graph with the four-agent shape", () => {
     // Every pinned profile owns its own graph literal (a shared alias would
-    // silently retune every roster at once); all four share the same shape.
+    // silently retune every roster at once); fast and cheap share the same
+    // shape, while balanced intentionally diverges: its reviewer may invoke
+    // Explore for targeted discovery.
     expect(CHEAP_PROFILE_DELEGATION_GRAPH).not.toBe(FAST_PROFILE_DELEGATION_GRAPH)
-    for (const graph of [FAST_PROFILE_DELEGATION_GRAPH, CHEAP_PROFILE_DELEGATION_GRAPH]) {
+    expect(BALANCED_PROFILE_DELEGATION_GRAPH).not.toBe(FAST_PROFILE_DELEGATION_GRAPH)
+    for (const graph of [FAST_PROFILE_DELEGATION_GRAPH, CHEAP_PROFILE_DELEGATION_GRAPH, BALANCED_PROFILE_DELEGATION_GRAPH]) {
       expect(Object.keys(graph).sort()).toEqual(
         ["Explore", "General-Purpose", "Plan", "reviewer"],
       )
     }
     expect(CHEAP_PROFILE_DELEGATION_GRAPH).toEqual(FAST_PROFILE_DELEGATION_GRAPH)
+    expect(BALANCED_PROFILE_DELEGATION_GRAPH).toEqual({
+      ...FAST_PROFILE_DELEGATION_GRAPH,
+      reviewer: ["Explore"],
+    })
   })
 
   test("rejects the oracle when context metadata is unusable", () => {    const noPrompt = cheapCatalog()

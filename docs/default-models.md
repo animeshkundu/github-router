@@ -250,6 +250,24 @@ The lead is `gemini-3.8-flash[1m]`, decorated only when the live catalog serves 
 - **Prerequisites**: `validateCheapProfilePrerequisites` gates the leader at the 200K floor; `validateCheap1mProfilePrerequisites` gates the same leader at 1M. Every other role needs just its fixed effort, tool-calling (where relevant), and a supported endpoint. `astra` is optional (exposed only when the catalog serves it); every other role in the roster is mandatory, and startup fails with an actionable list rather than substituting a model.
 - Delegation edges, Oracle scoping, MCP surface and hard-denies, and picker rows are otherwise identical to Fast.
 
+## Balanced launch profile (`-m balanced`)
+
+The literal raw alias `balanced` selects the Sol-led 200K tier: a `gpt-5.6-sol`/medium lead at the bare 200K default window, the same four-agent surface as cheap minus `implementer`, and an Oracle-only peer set (no `astra`, no Advisor surface).
+
+| Surface | Model | Effort | Window |
+|---|---|---|---|
+| Lead | `gpt-5.6-sol` | medium | 200K |
+| `Explore` | `gpt-5.6-luna` | high | 200K |
+| `Plan` | `gpt-5.6-sol` | high | 200K |
+| `General-Purpose` | `gpt-5.6-luna` | max | 200K |
+| `reviewer` | `gemini-3.8-flash` | high | 200K |
+| `oracle` | `grok-4.6` | medium | 200K |
+
+Two deliberate divergences from the fast/cheap delegation graph:
+
+- **`reviewer` may invoke `Explore`** for targeted discovery (the only graph edge no other pinned profile has). The reviewer narrows scope with `code` + `web` search first, then delegates scoped evidence questions; the in-session ACL enforces this via a balanced graph variant selected by the persisted hook command.
+- **Search-first funnel, no Advisor.** Unknowns funnel cheapest-first: `code_search` + `web` search narrow scope and rule out hypotheses first, `Explore` only when search is insufficient, `Plan` for sequencing, `oracle` as a second opinion for precise, self-contained trade-offs that search, `Explore`, and `Plan` cannot settle. Oracle is a second opinion on a framed question, never a discovery tool. The awareness snippet, summary, directive, and digest name no Advisor for this profile.
+
 ## 1M context accounting
 
 Claude Code locally recognizes the literal `[1m]` suffix. The proxy adds it only when the live catalog advertises at least 1M and strips it before upstream dispatch. `CLAUDE_CODE_DISABLE_1M_CONTEXT` remains a presence-based opt-out. Grok remains bare because its window is below 1M.

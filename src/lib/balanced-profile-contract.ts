@@ -4,8 +4,9 @@
  * The most-complex-tasks tier: a `gpt-5.6-sol`/medium LEAD at Claude Code's
  * DEFAULT (bare-slug) 200K window, every subagent at the same 200K default,
  * a `gpt-5.6-sol`/medium Advisor (bare slug), and a `grok-4.6`/medium primary
- * Oracle. Oracle-only peer set (no `astra`), same exact four-agent surface
- * and authority structure as the cheap family minus `implementer`.
+ * Oracle. Oracle-only peer set (no `astra`) and the same four-agent surface
+ * as the cheap family minus `implementer`, except the `reviewer` may invoke
+ * `Explore` for targeted discovery (search-first, then delegate).
  *
  * This module is deliberately dependency-free, including its own delegation
  * graph literal: balanced shares cheap's authority shape today, but each
@@ -88,12 +89,16 @@ export const BALANCED_PROFILE_SYNTHESIZED_PEERS = ["oracle"] as const
 export type BalancedProfileSynthesizedPeer =
   (typeof BALANCED_PROFILE_SYNTHESIZED_PEERS)[number]
 
-/** Each native role's permitted native-agent targets. The lead gets the roster. */
+/** Each native role's permitted native-agent targets. The lead gets the roster.
+ * Unlike the fast/cheap graphs, the balanced `reviewer` may invoke `Explore`
+ * for targeted discovery: the Gemini-backed reviewer narrows scope with
+ * search first, then delegates scoped evidence questions rather than
+ * sweeping the repository itself. */
 export const BALANCED_PROFILE_DELEGATION_GRAPH = Object.freeze({
   Explore: Object.freeze([]),
   Plan: Object.freeze(["Explore", "reviewer"]),
   "General-Purpose": Object.freeze(["reviewer"]),
-  reviewer: Object.freeze([]),
+  reviewer: Object.freeze(["Explore"]),
 } as const satisfies Record<
   BalancedProfileNativeAgentName,
   ReadonlyArray<BalancedProfileNativeAgentName>

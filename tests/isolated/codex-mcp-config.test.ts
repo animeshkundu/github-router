@@ -1190,6 +1190,38 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents["worker-browse"]!.effort).toBe("high")
     })
 
+    test("balanced reviewer narrows with search then delegates to Explore", () => {
+      const agents = buildBalancedAgents()
+      // Only the balanced reviewer carries the Agent tool (reviewer → Explore
+      // edge in BALANCED_PROFILE_DELEGATION_GRAPH + balanced ACL graph).
+      expect(agents.reviewer!.tools).toContain("Agent")
+      expect(agents.Explore!.tools).not.toContain("Agent")
+      expect(agents.reviewer!.prompt).toContain("Scope first with search, then delegate")
+      expect(agents.reviewer!.prompt).toContain("delegate targeted discovery to `Explore`")
+      expect(agents.reviewer!.prompt).toContain("You may invoke only `Explore`")
+      expect(agents.reviewer!.prompt).not.toContain("do not delegate to other agents")
+      // Plan names the exact Oracle MCP tool.
+      expect(agents.Plan!.prompt).toContain("consult `mcp__peers__oracle`")
+      expect(agents.Plan!.tools).toContain("mcp__peers__oracle")
+    })
+
+    test("non-balanced reviewers stay terminal with no Explore delegation", () => {
+      const fast = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        fastProfile: true,
+        serverUrl: URL,
+        nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
+        includeCoordinator: false,
+      })
+      expect(fast.reviewer!.tools).not.toContain("Agent")
+      expect(fast.reviewer!.prompt).toContain("do not delegate to other agents")
+      expect(fast.reviewer!.prompt).not.toContain("delegate targeted discovery")
+    })
+
     test("nativeRoster remains a hard filter on the balanced definitions", () => {
       const agents = buildBalancedAgents({ nativeRoster: ["Plan"] })
       expect(Object.keys(agents)).toEqual(["Plan"])
