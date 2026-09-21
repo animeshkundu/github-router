@@ -60,18 +60,64 @@ describe("buildExecInvocation", () => {
   })
 
   test("win32: resolved batch shim uses an explicit safe cmd.exe envelope", () => {
-    const executable = "C:\\Program Files (x86)\\nodejs\\npm.cmd"
-    const inv = buildExecInvocation(
-      [executable, "view", "pkg name", "a&b", "x|y", "(z)", "x!y", "x^y"],
-      "win32",
-    )
-    expect(inv.command.toLowerCase()).toEndWith("\\system32\\cmd.exe")
-    expect(inv.shell).toBe(false)
-    expect(inv.windowsVerbatimArguments).toBe(true)
-    expect(inv.args.slice(0, 4)).toEqual(["/d", "/s", "/v:OFF", "/c"])
-    expect(inv.args[4]).toBe(
-      `""${executable}" "view" "pkg name" "a^&b" "x^|y" "(z)" "x!y" "x^^y""`,
-    )
+    // windowsCmdExe() resolves SystemRoot → ComSpec → bare cmd.exe. Real
+    // Windows always sets SystemRoot, but this suite also runs on
+    // Linux/macOS CI, so simulate the Windows host explicitly — otherwise
+    // the assertion below depends on ambient env and fails off-Windows.
+    const savedSystemRoot = process.env.SystemRoot
+    const savedSystemRootUpper = process.env.SYSTEMROOT
+    const savedComSpec = process.env.ComSpec
+    process.env.SystemRoot = "C:\\Windows"
+    delete process.env.SYSTEMROOT
+    delete process.env.ComSpec
+    try {
+      const executable = "C:\\Program Files (x86)\\nodejs\\npm.cmd"
+      const inv = buildExecInvocation(
+        [executable, "view", "pkg name", "a&b", "x|y", "(z)", "x!y", "x^y"],
+        "win32",
+      )
+      expect(inv.command.toLowerCase()).toEndWith("\\system32\\cmd.exe")
+      expect(inv.shell).toBe(false)
+      expect(inv.windowsVerbatimArguments).toBe(true)
+      expect(inv.args.slice(0, 4)).toEqual(["/d", "/s", "/v:OFF", "/c"])
+      expect(inv.args[4]).toBe(
+        `""${executable}" "view" "pkg name" "a^&b" "x^|y" "(z)" "x!y" "x^^y""`,
+      )
+    } finally {
+      if (savedSystemRoot === undefined) delete process.env.SystemRoot
+      else process.env.SystemRoot = savedSystemRoot
+      if (savedSystemRootUpper === undefined) delete process.env.SYSTEMROOT
+      else process.env.SYSTEMROOT = savedSystemRootUpper
+      if (savedComSpec === undefined) delete process.env.ComSpec
+      else process.env.ComSpec = savedComSpec
+    }
+  })
+
+  test("win32: cmd.exe resolution falls back ComSpec → bare cmd.exe", () => {
+    const savedSystemRoot = process.env.SystemRoot
+    const savedSystemRootUpper = process.env.SYSTEMROOT
+    const savedComSpec = process.env.ComSpec
+    const executable = "C:\\Program Files\\nodejs\\npm.cmd"
+    try {
+      delete process.env.SystemRoot
+      delete process.env.SYSTEMROOT
+      process.env.ComSpec = "D:\\Tools\\cmd.exe"
+      expect(
+        buildExecInvocation([executable, "view"], "win32").command,
+      ).toBe("D:\\Tools\\cmd.exe")
+
+      delete process.env.ComSpec
+      expect(
+        buildExecInvocation([executable, "view"], "win32").command,
+      ).toBe("cmd.exe")
+    } finally {
+      if (savedSystemRoot === undefined) delete process.env.SystemRoot
+      else process.env.SystemRoot = savedSystemRoot
+      if (savedSystemRootUpper === undefined) delete process.env.SYSTEMROOT
+      else process.env.SYSTEMROOT = savedSystemRootUpper
+      if (savedComSpec === undefined) delete process.env.ComSpec
+      else process.env.ComSpec = savedComSpec
+    }
   })
 
   test("win32: batch shim rejects unsafe tokens and relative paths", () => {
