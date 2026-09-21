@@ -8,6 +8,11 @@
  * as the cheap family minus `implementer`, except the `reviewer` may invoke
  * `Explore` for targeted discovery (search-first, then delegate).
  *
+ * Delegation policy is lead-owns-by-default: the lead plans, implements,
+ * and verifies itself, delegating FREELY to the Luna-powered `Explore` and
+ * `General-Purpose` roles, and to `Plan`/`reviewer` ONLY when genuinely
+ * needed (complex sequencing / behavior-changing review).
+ *
  * This module is deliberately dependency-free, including its own delegation
  * graph literal: balanced shares cheap's authority shape today, but each
  * pinned profile owns its graph so tuning one roster cannot silently retune

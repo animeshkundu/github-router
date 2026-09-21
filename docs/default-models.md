@@ -266,7 +266,8 @@ The literal raw alias `balanced` selects the Sol-led 200K tier: a `gpt-5.6-sol`/
 Two deliberate divergences from the fast/cheap delegation graph:
 
 - **`reviewer` may invoke `Explore`** for targeted discovery (the only graph edge no other pinned profile has). The reviewer narrows scope with `code` + `web` search first, then delegates scoped evidence questions; the in-session ACL enforces this via a balanced graph variant selected by the persisted hook command.
-- **Search-first funnel, no Advisor.** Unknowns funnel cheapest-first: `code_search` + `web` search narrow scope and rule out hypotheses first, `Explore` only when search is insufficient, `Plan` for sequencing, `oracle` as a second opinion for precise, self-contained trade-offs that search, `Explore`, and `Plan` cannot settle. Oracle is a second opinion on a framed question, never a discovery tool. The awareness snippet, summary, directive, and digest name no Advisor for this profile.
+- **Search-first funnel, no Advisor.** Unknowns funnel cheapest-first: `code_search` + `web` search narrow scope and rule out hypotheses first, `Explore` only when search is insufficient, `Plan` only when genuinely complex, `oracle` as a second opinion for precise, self-contained trade-offs that search, `Explore`, and (where consulted) `Plan` cannot settle. Oracle is a second opinion on a framed question, never a discovery tool. The awareness snippet, summary, directive, and digest name no Advisor for this profile.
+- **Lead owns by default.** The lead plans, implements, and verifies itself: it delegates FREELY to the Luna-powered `Explore` (targeted breadth) and `General-Purpose` (multi-step execution), and to `Plan`/`reviewer` ONLY when genuinely needed (complex sequencing / behavior-changing review). Enforcement is soft — the ACL graph permits all four edges and the directive, descriptions, and roster clauses carry the policy.
 
 ## 1M context accounting
 

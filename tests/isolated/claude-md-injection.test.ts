@@ -1247,6 +1247,9 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(balancedDigest).toContain("Funnel unknowns cheapest-first")
   expect(balancedDigest).toContain("as a second opinion")
   expect(balancedDigest).toContain("lowest cost")
+  expect(balancedDigest).toContain("The lead owns planning, implementation, and verification by default")
+  expect(balancedDigest).toContain("delegate to `General-Purpose` FREELY")
+  expect(balancedDigest).toContain("ONLY when")
 
   const cheapestDigest = buildOperatingDefaultsDigest({ profile: "cheapest" })
   expect(cheapestDigest).toContain("Cheapest launch profile")
@@ -1300,6 +1303,12 @@ test("balanced directive funnels unknowns search-first with no Advisor", () => {
   expect(directive).toContain("lowest cost")
   // Reviewer → Explore edge is documented in the delegation graph.
   expect(directive).toContain("`reviewer` may invoke `Explore` for targeted discovery")
+  // Lead owns by default: Plan/Reviewer gated behind genuine need, GP free.
+  expect(directive).toContain("lead owns planning")
+  expect(directive).toContain("Delegate to `Plan` ONLY when")
+  expect(directive).toContain("Delegate to `General-Purpose` FREELY")
+  expect(directive).toContain("lead owns verification")
+  expect(directive).toContain("Invoke `reviewer` ONLY when")
 })
 
 test("sweEnabled:false omits every pipeline-skill reference from directive and digest", () => {

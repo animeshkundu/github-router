@@ -1156,6 +1156,13 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents["General-Purpose"]!.prompt).toContain("Plan handoff")
       expect(agents["General-Purpose"]!.description).not.toContain("implementer")
       expect(agents.reviewer!.description).toContain("Use proactively")
+      // Balanced: Plan/Reviewer delegate ONLY when genuinely needed (lead
+      // owns by default); Luna-powered General-Purpose delegates freely.
+      expect(agents.Plan!.description).toContain("ONLY when")
+      expect(agents.Plan!.description).toContain("lead owns planning by default")
+      expect(agents.reviewer!.description).toContain("ONLY when")
+      expect(agents.reviewer!.description).toContain("lead owns verification by default")
+      expect(agents["General-Purpose"]!.description).toContain("Use proactively and FREELY")
     })
 
     test("cheapest stays implicit while balanced stays explicit", () => {
