@@ -1145,8 +1145,8 @@ describe("buildPeerAgentDefinitions", () => {
 
       expect(agents.Explore!.effort).toBe("high")
       expect(agents.Plan!.effort).toBe("high")
-      expect(agents["General-Purpose"]!.effort).toBe("high")
-      expect(agents.reviewer!.effort).toBe("max")
+      expect(agents["General-Purpose"]!.effort).toBe("max")
+      expect(agents.reviewer!.effort).toBe("high")
 
       // Explicit delegation tuning (complex tasks): proactive parallel
       // Explore, Plan-first discovery delegation, and reviewer verification.
@@ -1156,6 +1156,13 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents["General-Purpose"]!.prompt).toContain("Plan handoff")
       expect(agents["General-Purpose"]!.description).not.toContain("implementer")
       expect(agents.reviewer!.description).toContain("Use proactively")
+      // Balanced: Plan/Reviewer delegate ONLY when genuinely needed (lead
+      // owns by default); Luna-powered General-Purpose delegates freely.
+      expect(agents.Plan!.description).toContain("ONLY when")
+      expect(agents.Plan!.description).toContain("lead owns planning by default")
+      expect(agents.reviewer!.description).toContain("ONLY when")
+      expect(agents.reviewer!.description).toContain("lead owns verification by default")
+      expect(agents["General-Purpose"]!.description).toContain("Use proactively and FREELY")
     })
 
     test("cheapest stays implicit while balanced stays explicit", () => {
@@ -1196,6 +1203,96 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents["worker-browse"]!.tools).toEqual(["mcp__workers__*"])
       expect(agents["worker-browse"]!.model).toBe(BALANCED_EXPLORE_ALIAS_ID)
       expect(agents["worker-browse"]!.effort).toBe("high")
+    })
+
+    test("balanced reviewer narrows with search then delegates to Explore", () => {
+      const agents = buildBalancedAgents()
+      // Only the balanced reviewer carries the Agent tool (reviewer → Explore
+      // edge in BALANCED_PROFILE_DELEGATION_GRAPH + balanced ACL graph).
+      expect(agents.reviewer!.tools).toContain("Agent")
+      expect(agents.Explore!.tools).not.toContain("Agent")
+      expect(agents.reviewer!.prompt).toContain("Scope first with search, then delegate")
+      expect(agents.reviewer!.prompt).toContain("delegate targeted discovery to `Explore`")
+      expect(agents.reviewer!.prompt).toContain("You may invoke only `Explore`")
+      expect(agents.reviewer!.prompt).not.toContain("do not delegate to other agents")
+      // Plan names the exact Oracle MCP tool.
+      expect(agents.Plan!.prompt).toContain("consult `mcp__peers__oracle`")
+      expect(agents.Plan!.tools).toContain("mcp__peers__oracle")
+    })
+
+    test("non-balanced reviewers stay terminal with no Explore delegation", () => {
+      const fast = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        fastProfile: true,
+        serverUrl: URL,
+        nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
+        includeCoordinator: false,
+      })
+      expect(fast.reviewer!.tools).not.toContain("Agent")
+      expect(fast.reviewer!.prompt).toContain("do not delegate to other agents")
+      expect(fast.reviewer!.prompt).not.toContain("delegate targeted discovery")
+    })
+
+    test("200K agents carry the targeted-reads note; fast agents do not", () => {
+      const cheapestAgents = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        cheapestProfile: true,
+        serverUrl: URL,
+        nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
+        includeCoordinator: false,
+      })
+      for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
+        expect(cheapestAgents[name]!.description).toContain("200K context window")
+        expect(cheapestAgents[name]!.prompt).toContain("You operate at a 200K context window")
+      }
+      const fastAgents = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        fastProfile: true,
+        serverUrl: URL,
+        nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
+        includeCoordinator: false,
+        fastExploreModel: "gpt-5.6-luna",
+        fastPlanModel: "gpt-5.6-sol",
+        fastGeneralPurposeModel: "gemini-3.8-flash",
+        fastReviewerModel: "claude-sonnet-5",
+      })
+      for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
+        expect(fastAgents[name]!.description).not.toContain("200K context window")
+        expect(fastAgents[name]!.prompt).not.toContain("You operate at a 200K context window")
+      }
+
+      const balancedAgents = buildBalancedAgents()
+      for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
+        expect(balancedAgents[name]!.description).toContain("200K context window")
+        expect(balancedAgents[name]!.prompt).toContain("You operate at a 200K context window")
+      }
+      const cheapAgents = buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        cheapProfile: true,
+        serverUrl: URL,
+        nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
+        includeCoordinator: false,
+      })
+      for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
+        expect(cheapAgents[name]!.description).toContain("200K context window")
+        expect(cheapAgents[name]!.prompt).toContain("You operate at a 200K context window")
+      }
     })
 
     test("nativeRoster remains a hard filter on the balanced definitions", () => {

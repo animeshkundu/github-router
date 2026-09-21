@@ -22,6 +22,15 @@ describe("fast dispatch hook wiring", () => {
     ).toBe(
       '"/usr/bin/node" "/app/main.js" internal-fast-dispatch-guard --allowBrowse --allowedTargets "Explore,Plan,worker-browse"',
     )
+    // Balanced launches additionally permit reviewer Explore via its own graph.
+    expect(
+      buildGuardDirectCommand(
+        { execPath: "/usr/bin/node", scriptPath: "/app/main.js" },
+        { allowBrowse: false, allowedTargets: ["Explore", "Plan"], graph: "balanced" },
+      ),
+    ).toBe(
+      '"/usr/bin/node" "/app/main.js" internal-fast-dispatch-guard --allowedTargets "Explore,Plan" --graph balanced',
+    )
     expect(new RegExp(FAST_DISPATCH_GUARD_MATCHER).test("Task")).toBe(true)
     expect(new RegExp(FAST_DISPATCH_GUARD_MATCHER).test("Agent")).toBe(true)
   })

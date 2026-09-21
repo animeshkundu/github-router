@@ -822,7 +822,10 @@ export const claude = defineCommand({
     // `[1m]` accounting bracket on any selectable id (lead, tier rows, or
     // picker rows) — warn loud if one slipped through so it gets fixed at
     // the seeding layer rather than silently relying on the request-time
-    // backstop. `fast`/`cheap1m` leads intentionally keep 1M.
+    // backstop. `fast`/`cheap1m` leads intentionally keep 1M. The Luna picker
+    // row is exempt: it is intentionally decorated so Luna 1M stays
+    // selectable, with the request preprocessor stripping `[1m]` on 200K-lead
+    // traffic and the compaction bound covering a switch to it.
     if (launchProfileId === "cheap" || launchProfileId === "cheapest" || launchProfileId === "balanced") {
       const suspectKeys = [
         "ANTHROPIC_MODEL",
@@ -831,7 +834,11 @@ export const claude = defineCommand({
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
         "ANTHROPIC_CUSTOM_MODEL_OPTION",
       ].filter((key) => typeof envVars[key] === "string" && /\[1m\]/i.test(envVars[key] as string))
-      const suspectPicker = (pickerModels ?? []).filter((id) => /\[1m\]/i.test(id))
+      // The Luna row is intentionally decorated (selectable 1M opt-in);
+      // anything else bracketed here is a seeding bug.
+      const suspectPicker = (pickerModels ?? []).filter(
+        (id) => /\[1m\]/i.test(id) && id.replace(/(?:\[1m\])+$/i, "") !== "gpt-5.6-luna",
+      )
       if (suspectKeys.length > 0 || suspectPicker.length > 0) {
         consola.warn(
           `Pinned-profile context leak (${launchProfileId} must be bare 200K): `
@@ -1202,7 +1209,7 @@ export const claude = defineCommand({
         ) {
           if (launchProfileId === "cheapest") {
             throw new Error(
-              "cheapest profile prerequisite drift: exact reviewer, oracle (gpt-5.6-sol), or advisor (gemini-3.8-flash) model no longer resolves",
+              "cheapest profile prerequisite drift: exact reviewer, oracle (gpt-5.6-sol), or advisor (gpt-5.6-sol) model no longer resolves",
             )
           }
           if (launchProfileId === "balanced") {
@@ -1442,6 +1449,12 @@ export const claude = defineCommand({
                 ...(fastDescriptor.nativeRoster ?? []),
                 ...(browseAgentAvailable ? ["worker-browse"] : []),
               ],
+              // Balanced additionally permits reviewer → Explore for targeted
+              // discovery; every other pinned profile keeps the fast graph.
+              // The flag adds no privilege: this command is persisted into the
+              // per-launch isolated mirror, and anyone able to rewrite it can
+              // already remove the hook entirely.
+              graph: launchProfileId === "balanced" ? "balanced" : undefined,
             })
             await injectStopHookIntoSettingsFile(
               settingsPath,

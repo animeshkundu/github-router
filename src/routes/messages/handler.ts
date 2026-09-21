@@ -567,7 +567,7 @@ export async function handleCompletion(c: Context) {
     }
   }
   if (cheapestAdvisorEnabled) {
-    // Fixed Gemini advisor at the 200K default window (bare client pin) with
+    // Fixed Sol advisor at the 200K default window (bare client pin) with
     // the 200K transcript cap applied at dispatch, mirroring cheap's shape.
     const mismatch = cheapestAdvisorMetadataMismatch(rawBody)
 

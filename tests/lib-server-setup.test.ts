@@ -342,6 +342,26 @@ describe("getClaudeCodeEnvVars", () => {
     expect(value).toBe("816700")
   })
 
+  test("cheap-family launches derive the bound from the Luna 1M picker row", () => {
+    // The Luna row is the only decorated picker row in 200K-lead profiles.
+    // The bound covers a later `/model` switch to it and is harmless to the
+    // bare 200K rows via the client's Math.min.
+    const value = withCatalog(
+      [
+        catalogModel("gpt-5.6-sol", 1_050_000, 922_000),
+        catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
+        catalogModel("gemini-3.8-flash", 1_000_000, 983_040, 65_536),
+        catalogModel("grok-4.6", 500_000, 372_000),
+      ],
+      () =>
+        withoutCompactionEnv(() =>
+          getClaudeCodeEnvVars("http://127.0.0.1:8787", undefined, "cheap")
+            .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+        ),
+    )
+    expect(value).toBe("816700")
+  })
+
   test("omits the window entirely when catalog limits are unusable", () => {
     const vars = withCatalog([], () =>
       withoutCompactionEnv(() =>
@@ -401,6 +421,23 @@ describe("getClaudeCodeEnvVars", () => {
     expect(vars.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8787")
     expect(vars.DISABLE_NON_ESSENTIAL_MODEL_CALLS).toBe("1")
     expect(vars.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1")
+  })
+
+  test("sets ENABLE_TOOL_SEARCH=auto unless the operator already set it", () => {
+    const prior = process.env.ENABLE_TOOL_SEARCH
+    delete process.env.ENABLE_TOOL_SEARCH
+    try {
+      const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      expect(vars.ENABLE_TOOL_SEARCH).toBe("auto")
+      process.env.ENABLE_TOOL_SEARCH = "false"
+      const kept = getClaudeCodeEnvVars("http://127.0.0.1:8787")
+      // Operator value flows through the parent env naturally; vars must
+      // not override it.
+      expect(kept).not.toHaveProperty("ENABLE_TOOL_SEARCH")
+    } finally {
+      if (prior === undefined) delete process.env.ENABLE_TOOL_SEARCH
+      else process.env.ENABLE_TOOL_SEARCH = prior
+    }
   })
 
   test("does NOT set ANTHROPIC_AUTH_TOKEN — auth flows from synthetic .credentials.json in CLAUDE_CONFIG_DIR mirror", () => {

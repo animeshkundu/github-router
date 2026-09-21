@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import {
+  BALANCED_DISPATCH_GRAPH,
   FAST_BROWSE_DISPATCH_AGENT,
   FAST_DISPATCH_GRAPH,
   FAST_DISPATCH_TOOL_MATCHER,
@@ -59,6 +60,40 @@ describe("fast native dispatch ACL", () => {
     for (const caller of ["reviewer", "Explore", "worker-browse"]) {
       for (const target of roles) expectDenied(dispatch(target, caller))
     }
+  })
+
+  test("balanced graph permits reviewer Explore while matching fast elsewhere", () => {
+    expect(BALANCED_DISPATCH_GRAPH).not.toBe(FAST_DISPATCH_GRAPH)
+    for (const caller of roles) {
+      for (const target of roles) {
+        const balancedAllowed = BALANCED_DISPATCH_GRAPH[caller].has(target)
+        const fastAllowed = FAST_DISPATCH_GRAPH[caller].has(target)
+        if (balancedAllowed) expectAllowed(dispatch(target, caller), { graph: "balanced" })
+        else expectDenied(dispatch(target, caller), { graph: "balanced" })
+        if (caller === "reviewer" && target === "Explore") {
+          expect(balancedAllowed).toBe(true)
+          expect(fastAllowed).toBe(false)
+        } else {
+          expect(balancedAllowed).toBe(fastAllowed)
+        }
+      }
+    }
+    // Unknown graph values fall back to the fast graph (fail closed).
+    expectDenied(dispatch("Explore", "reviewer"), { graph: "fast" })
+    expectDenied(dispatch("Explore", "reviewer"))
+  })
+
+  test("balanced reviewer Explore still honors the allowedTargets roster filter", () => {
+    // The target gate runs before the graph check: a roster-filtered launch
+    // without Explore denies reviewer Explore even on the balanced graph.
+    expectDenied(dispatch("Explore", "reviewer"), {
+      graph: "balanced",
+      allowedTargets: ["Plan", "reviewer"],
+    })
+    expectAllowed(dispatch("Explore", "reviewer"), {
+      graph: "balanced",
+      allowedTargets: ["Explore", "Plan", "reviewer"],
+    })
   })
 
   test("supports Task and snake/camel target aliases, but rejects conflicts", () => {

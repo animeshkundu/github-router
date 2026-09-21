@@ -1256,3 +1256,99 @@ describe("fastProfile rendering (buildPeerAwarenessSnippet / buildPeerAwarenessS
     expect(standard).toContain("peer-review-coordinator")
   })
 })
+
+describe("balanced profile rendering (no Advisor; reviewer delegates to Explore)", () => {
+  const BALANCED_OPTS = {
+    codexCli: false,
+    geminiAvailable: true,
+    workerToolsAvailable: false,
+    standInAvailable: false,
+    browseAvailable: false,
+    compoundBrowseAvailable: false,
+    profile: "balanced",
+    semanticSearchAvailable: true,
+  } as const
+
+  test("awareness snippet funnels unknowns search-first with Oracle as second opinion", () => {
+    const snippet = buildPeerAwarenessSnippet(BALANCED_OPTS)
+    expect(snippet).toContain("balanced launch profile")
+    expect(snippet).toContain("Funnel unknowns cheapest-first")
+    expect(snippet).toContain("mcp__peers__oracle")
+    expect(snippet).toContain("Grok 4.6 (200K/medium)")
+    expect(snippet).toContain("a second opinion for precise, self-contained")
+    expect(snippet).toContain("`reviewer` may invoke `Explore` for targeted discovery")
+    expect(snippet).toContain("the lead owns planning, implementation, and verification by default")
+    expect(snippet).toContain("delegate FREELY for multi-step work")
+    expect(snippet).toContain("delegate ONLY when genuinely complex")
+    // The "## Peer review and advisor" section header stays; the Advisor
+    // capability prose (sounding board, lead-only) must be gone.
+    expect(snippet).not.toContain("Advisor")
+    expect(snippet).not.toContain("sounding board")
+    expect(snippet).not.toContain("lead-only")
+    expect(snippet).not.toContain("`astra`")
+  })
+
+  test("200K profiles carry the targeted-reads window note", () => {
+    const opts = (profile: "cheap" | "cheap1m" | "cheapest" | "balanced") => ({
+      codexCli: false,
+      geminiAvailable: true,
+      workerToolsAvailable: false,
+      standInAvailable: false,
+      browseAvailable: false,
+      compoundBrowseAvailable: false,
+      profile,
+      semanticSearchAvailable: true,
+    }) as const
+    for (const profile of ["cheapest", "balanced"] as const) {
+      const snippet = buildPeerAwarenessSnippet(opts(profile))
+      expect(snippet).toContain("All roles run at a 200K context window")
+      expect(snippet).toContain("targeted reads over full file reads")
+      const summary = buildPeerAwarenessSummary(opts(profile))
+      expect(summary).toContain("All roles run at a 200K context window")
+      expect(summary).toContain("targeted reads over full file reads")
+    }
+    for (const profile of ["cheap", "cheap1m"] as const) {
+      const snippet = buildPeerAwarenessSnippet(opts(profile))
+      expect(snippet).toContain("runs at 200K")
+      expect(snippet).toContain("targeted reads over full file reads")
+      const summary = buildPeerAwarenessSummary(opts(profile))
+      expect(summary).toContain("runs at 200K")
+      expect(summary).toContain("targeted reads over full file reads")
+    }
+    const fastSummary = buildPeerAwarenessSummary({
+      workerToolsAvailable: false,
+      standInAvailable: false,
+      browseAvailable: false,
+      profile: "fast",
+      semanticSearchAvailable: true,
+    } as const)
+    expect(fastSummary).not.toContain("200K context window")
+    const fast = buildPeerAwarenessSnippet({
+      codexCli: false,
+      geminiAvailable: true,
+      workerToolsAvailable: false,
+      standInAvailable: false,
+      browseAvailable: false,
+      compoundBrowseAvailable: false,
+      profile: "fast",
+      semanticSearchAvailable: true,
+    } as const)
+    expect(fast).not.toContain("200K context window")
+  })
+
+  test("awareness summary names Oracle without Advisor", () => {
+    const summary = buildPeerAwarenessSummary(BALANCED_OPTS)
+    expect(summary).toContain("Balanced launch profile")
+    expect(summary).toContain("mcp__peers__oracle")
+    expect(summary).toContain("Grok 4.6 (200K/medium)")
+    expect(summary).toContain("`reviewer` may invoke `Explore` for targeted discovery")
+    expect(summary).toContain("The lead owns planning, implementation, and verification by default")
+    expect(summary).toContain("delegate FREELY for multi-step work")
+    expect(summary).toContain("delegate ONLY when genuinely complex")
+    expect(summary).not.toContain("Advisor")
+    expect(summary).not.toContain("`advisor`")
+    expect(summary).not.toContain("sounding board")
+    expect(summary).not.toContain("transcript-aware")
+    expect(summary).not.toContain("`astra`")
+  })
+})

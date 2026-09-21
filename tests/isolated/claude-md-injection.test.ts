@@ -1236,10 +1236,25 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(balancedDigest).toContain("`reviewer`")
   expect(balancedDigest).toContain("Grok 4.6 200K/medium")
   expect(balancedDigest).not.toContain("`astra`")
+  // Balanced exposes Oracle but no Advisor: the digest must not name the
+  // capability ("advisory planning capability" is fine — substring only).
+  expect(balancedDigest).not.toContain("`advisor`")
+  expect(balancedDigest).not.toContain("Advisor")
+  expect(balancedDigest).not.toContain("transcript-aware")
+  expect(balancedDigest).not.toContain("lead-only")
+  // Search-first funnel: narrow with search, then Explore, then Plan, then
+  // Oracle as a second opinion — optimized for lowest cost.
+  expect(balancedDigest).toContain("Funnel unknowns cheapest-first")
+  expect(balancedDigest).toContain("as a second opinion")
+  expect(balancedDigest).toContain("lowest cost")
+  expect(balancedDigest).toContain("The lead owns planning, implementation, and verification by default")
+  expect(balancedDigest).toContain("delegate to `General-Purpose` FREELY")
+  expect(balancedDigest).toContain("ONLY when")
 
   const cheapestDigest = buildOperatingDefaultsDigest({ profile: "cheapest" })
   expect(cheapestDigest).toContain("Cheapest launch profile")
   expect(cheapestDigest).toContain("directly")
+  expect(cheapestDigest).toContain("All roles run at a 200K context window")
 
   // `-m cheap` deliberately runs without astra even if the caller hints the
   // peer is "available" — the profile never wires it; only cheap1m does.
@@ -1270,6 +1285,51 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
     "mcp__",
   ]) {
     expect(maxDigest).not.toContain(inventoryDetail)
+  }
+})
+
+test("balanced directive funnels unknowns search-first with no Advisor", () => {
+  const directive = buildOperatingDefaultsDirective({ profile: "balanced" })
+  expect(directive).toContain("Balanced launch profile")
+  // No Advisor surface in balanced: neither the sounding-board sentence nor
+  // the advisor-scoped Oracle comparison may appear.
+  expect(directive).not.toContain("Advisor")
+  expect(directive).not.toContain("`advisor`")
+  expect(directive).not.toContain("transcript-aware sounding board")
+  expect(directive).not.toContain("preferred over advisor")
+  // Search-first GATHER + Oracle second-opinion framing + cost line.
+  expect(directive).toContain("narrow scope first with `code_search`")
+  expect(directive).toContain("consult `mcp__peers__oracle` on unresolved trade-offs")
+  expect(directive).toContain("a second opinion for precise, self-contained architectural/spec trade-offs")
+  expect(directive).toContain("lowest cost")
+  // Reviewer → Explore edge is documented in the delegation graph.
+  expect(directive).toContain("`reviewer` may invoke `Explore` for targeted discovery")
+  // Lead owns by default: Plan/Reviewer gated behind genuine need, GP free.
+  expect(directive).toContain("lead owns planning")
+  expect(directive).toContain("Delegate to `Plan` ONLY when")
+  expect(directive).toContain("Delegate to `General-Purpose` FREELY")
+  expect(directive).toContain("lead owns verification")
+  expect(directive).toContain("Invoke `reviewer` ONLY when")
+})
+
+test("200K profiles name targeted reads; fast/standard/max do not", () => {
+  for (const profile of ["cheapest", "balanced"] as const) {
+    const directive = buildOperatingDefaultsDirective({ profile })
+    expect(directive).toContain("All roles run at a 200K context window")
+    const digest = buildOperatingDefaultsDigest({ profile })
+    expect(digest).toContain("All roles run at a 200K context window")
+  }
+  for (const profile of ["cheap", "cheap1m"] as const) {
+    const directive = buildOperatingDefaultsDirective({ profile })
+    expect(directive).toContain("every subagent runs at 200K")
+    const digest = buildOperatingDefaultsDigest({ profile })
+    expect(digest).toContain("every subagent runs at 200K")
+  }
+  for (const profile of ["fast", "standard", "max"] as const) {
+    const directive = buildOperatingDefaultsDirective({ profile })
+    expect(directive).not.toContain("200K context window")
+    const digest = buildOperatingDefaultsDigest({ profile })
+    expect(digest).not.toContain("200K context window")
   }
 })
 

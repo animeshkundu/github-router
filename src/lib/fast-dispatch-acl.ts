@@ -12,6 +12,7 @@ import {
   FAST_PROFILE_NATIVE_AGENT_NAMES,
   type FastProfileNativeAgentName,
 } from "./fast-profile-contract"
+import { BALANCED_PROFILE_DELEGATION_GRAPH } from "./balanced-profile-contract"
 
 export const FAST_BROWSE_DISPATCH_AGENT = "worker-browse" as const
 
@@ -37,6 +38,25 @@ export const FAST_DISPATCH_GRAPH: Readonly<
   "worker-browse": new Set<FastDispatchTargetName>([]),
 })
 
+/**
+ * Balanced authority graph: identical shape to the fast graph except the
+ * balanced `reviewer` may invoke `Explore` for targeted discovery (the
+ * Gemini-backed reviewer narrows scope with search first, then delegates
+ * scoped evidence questions). Selected per launch via the `graph` option;
+ * every other pinned profile keeps the fast graph.
+ */
+export const BALANCED_DISPATCH_GRAPH: Readonly<
+  Record<FastDispatchCallerName, ReadonlySet<FastDispatchTargetName>>
+> = Object.freeze({
+  Explore: new Set<FastDispatchTargetName>(BALANCED_PROFILE_DELEGATION_GRAPH.Explore),
+  Plan: new Set<FastDispatchTargetName>(BALANCED_PROFILE_DELEGATION_GRAPH.Plan),
+  "General-Purpose": new Set<FastDispatchTargetName>(
+    BALANCED_PROFILE_DELEGATION_GRAPH["General-Purpose"],
+  ),
+  reviewer: new Set<FastDispatchTargetName>(BALANCED_PROFILE_DELEGATION_GRAPH.reviewer),
+  "worker-browse": new Set<FastDispatchTargetName>([]),
+})
+
 /** The hook matcher is intentionally limited to native dispatch tool names. */
 export const FAST_DISPATCH_TOOL_MATCHER = "^(Task|Agent)$"
 
@@ -56,6 +76,9 @@ export interface FastDispatchGuardOptions {
   allowedTargets?: ReadonlySet<string> | ReadonlyArray<string>
   /** Whether worker-browse is permitted as a target for the lead. */
   allowBrowse?: boolean
+  /** Authority graph variant. Defaults to "fast"; "balanced" additionally
+   * permits reviewer → Explore for targeted discovery. */
+  graph?: "fast" | "balanced"
 }
 
 export interface FastDispatchGuardResult {
@@ -263,7 +286,8 @@ export function decideFastDispatchGuard(
     return deny(`fast dispatch denied: unknown caller role ${JSON.stringify(callerTypeValue)}`, target)
   }
   const caller = callerTypeValue as FastDispatchCallerName
-  const allowedTargets = FAST_DISPATCH_GRAPH[caller] ?? new Set<FastDispatchTargetName>()
+  const graph = opts?.graph === "balanced" ? BALANCED_DISPATCH_GRAPH : FAST_DISPATCH_GRAPH
+  const allowedTargets = graph[caller] ?? new Set<FastDispatchTargetName>()
   if (!allowedTargets.has(target)) {
     return deny(`fast dispatch denied: ${caller} cannot invoke ${target}`, target, caller)
   }

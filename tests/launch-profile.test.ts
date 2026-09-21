@@ -57,6 +57,7 @@ import {
 import {
   BALANCED_PROFILE_NATIVE_EFFORTS,
   BALANCED_PROFILE_MODELS,
+  BALANCED_PROFILE_DELEGATION_GRAPH,
 } from "../src/lib/balanced-profile-contract"
 import { FAST_PROFILE_DELEGATION_GRAPH } from "../src/lib/fast-profile-contract"
 
@@ -186,8 +187,8 @@ describe("cheap-family subagent aliases", () => {
   const balancedRows = [
     [BALANCED_EXPLORE_ALIAS_ID, BALANCED_PROFILE_MODELS.explore, "high"],
     [BALANCED_PLAN_ALIAS_ID, BALANCED_PROFILE_MODELS.plan, "high"],
-    [BALANCED_GENERAL_PURPOSE_ALIAS_ID, BALANCED_PROFILE_MODELS["General-Purpose"], "high"],
-    [BALANCED_REVIEWER_ALIAS_ID, BALANCED_PROFILE_MODELS.reviewer, "max"],
+    [BALANCED_GENERAL_PURPOSE_ALIAS_ID, BALANCED_PROFILE_MODELS["General-Purpose"], "max"],
+    [BALANCED_REVIEWER_ALIAS_ID, BALANCED_PROFILE_MODELS.reviewer, "high"],
   ] as const
 
   test("resolve and canonicalize (bare and bracketed) to the contract real id", () => {
@@ -419,14 +420,21 @@ describe("cheap-family startup prerequisites", () => {
 
   test("each pinned profile owns its delegation graph with the four-agent shape", () => {
     // Every pinned profile owns its own graph literal (a shared alias would
-    // silently retune every roster at once); all four share the same shape.
+    // silently retune every roster at once); fast and cheap share the same
+    // shape, while balanced intentionally diverges: its reviewer may invoke
+    // Explore for targeted discovery.
     expect(CHEAP_PROFILE_DELEGATION_GRAPH).not.toBe(FAST_PROFILE_DELEGATION_GRAPH)
-    for (const graph of [FAST_PROFILE_DELEGATION_GRAPH, CHEAP_PROFILE_DELEGATION_GRAPH]) {
+    expect(BALANCED_PROFILE_DELEGATION_GRAPH).not.toBe(FAST_PROFILE_DELEGATION_GRAPH)
+    for (const graph of [FAST_PROFILE_DELEGATION_GRAPH, CHEAP_PROFILE_DELEGATION_GRAPH, BALANCED_PROFILE_DELEGATION_GRAPH]) {
       expect(Object.keys(graph).sort()).toEqual(
         ["Explore", "General-Purpose", "Plan", "reviewer"],
       )
     }
     expect(CHEAP_PROFILE_DELEGATION_GRAPH).toEqual(FAST_PROFILE_DELEGATION_GRAPH)
+    expect(BALANCED_PROFILE_DELEGATION_GRAPH).toEqual({
+      ...FAST_PROFILE_DELEGATION_GRAPH,
+      reviewer: ["Explore"],
+    })
   })
 
   test("rejects the oracle when context metadata is unusable", () => {    const noPrompt = cheapCatalog()
@@ -462,7 +470,7 @@ describe("balanced startup prerequisites", () => {
   test("reports every missing role and the rollback command", () => {
     const result = validateBalancedProfilePrerequisites({ object: "list", data: [] } as never)
     expect(result.ok).toBe(false)
-    expect(result.missing).toHaveLength(4)
+    expect(result.missing).toHaveLength(5)
     const message = formatBalancedPrerequisiteFailure(result.missing)
     expect(message).toContain("gpt-5.6-sol")
     expect(message).toContain("gpt-5.6-luna")

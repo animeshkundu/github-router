@@ -851,16 +851,26 @@ function pinnedSearchGuidance(
 const EXPLORE_DESC_TAIL =
   "Use when the question spans more than a couple of files. Do not use for planning, edits, or single-file reads. Returns a structured evidence report with file:line citations. Never edits files."
 
-function pinnedExploreDescription(explicit: boolean): string {
+/** Appended to agent descriptions whose roles run at the 200K default window
+ *  (cheap family + balanced): one line so every role prefers targeted reads. */
+const DESC_200K_NOTE =
+  " Operates at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file scans."
+
+/** Prompt-side counterpart of `DESC_200K_NOTE`, placed before the tool steer. */
+const PROMPT_200K_NOTE =
+  "You operate at a 200K context window: use search, Grep, and targeted Read calls instead of reading entire files. "
+
+function pinnedExploreDescription(explicit: boolean, is200K = false): string {
   const head = explicit
     ? "Read-only codebase exploration specialist. Use proactively, and launch several in parallel via `Task(subagent_type:\"Explore\")`, to map architecture, trace call chains, or locate the files and symbols a task will touch. "
     : "Read-only codebase exploration specialist for mapping architecture, tracing call chains, or locating the files and symbols a task touches. "
-  return head + EXPLORE_DESC_TAIL
+  return head + EXPLORE_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
 }
 
 function pinnedExplorePrompt(opts: {
   explicit: boolean
   semanticAvailable: boolean
+  is200K?: boolean
   bluebirdEnabled?: boolean
 }): string {
   // After the "…and " parallel prefix the guidance continues the sentence
@@ -884,6 +894,7 @@ function pinnedExplorePrompt(opts: {
     + "Entry points: where control enters this area, as file:line.\n"
     + "Conventions in use: the patterns, idioms, error handling, and test style that any change here would be expected to follow, each with a file:line example.\n"
     + "Gaps and unknowns: what you could not confirm, and where you would look next.\n\n"
+    + (opts.is200K ? PROMPT_200K_NOTE : "")
     + readOnlyToolSteer(opts.semanticAvailable)
 }
 
@@ -891,23 +902,28 @@ const PLAN_DESC_HEAD = "Architecture and implementation planning specialist"
 const PLAN_DESC_TAIL =
   " Returns a decision-complete, ordered implementation plan with runnable acceptance criteria. Never edits files."
 
-function pinnedPlanDescription(explicit: boolean): string {
+function pinnedPlanDescription(explicit: boolean, isBalanced = false, is200K = false): string {
   const middle = explicit
-    ? ". Use proactively in plan mode, and whenever sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria deserve a dedicated pass before any code is written. Delegates repository discovery to `Explore` rather than reading broadly itself."
+    ? isBalanced
+      ? ". Use proactively ONLY when sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria are genuinely complex and deserve a dedicated pass before any code is written. The lead owns planning by default. Delegates repository discovery to `Explore` rather than reading broadly itself."
+      : ". Use proactively in plan mode, and whenever sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria deserve a dedicated pass before any code is written. Delegates repository discovery to `Explore` rather than reading broadly itself."
     : " for sequencing, cross-boundary interfaces, invariants, migration risk, and acceptance criteria before any code is written."
-  return PLAN_DESC_HEAD + middle + PLAN_DESC_TAIL
+  return PLAN_DESC_HEAD + middle + PLAN_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
 }
 
-function pinnedPlanPrompt(opts: { explicit: boolean; semanticAvailable: boolean }): string {
+function pinnedPlanPrompt(opts: { explicit: boolean; semanticAvailable: boolean; oracleTool?: string; is200K?: boolean }): string {
+  // Name the exact MCP tool when the caller wires one (key-aware); fall
+  // back to the generic name when the peers server is absent.
+  const oracleRef = opts.oracleTool ? `\`${opts.oracleTool}\`` : "Oracle"
   const discovery = opts.explicit
     ? "Do not sweep the repository yourself: delegate discovery to `Explore`, launching one or more `Explore` subagents in parallel with scoped evidence questions, then read directly only the files needed to resolve trade-offs and write executable steps. "
     : "Do not sweep the repository broadly yourself: keep discovery narrow, read directly only the files needed to resolve trade-offs and write executable steps, and record any repository fact you could not confirm as an explicit gap. "
   return "You are a software architect and planning specialist. Your mission is to turn a request into a decision-complete implementation plan: an ordered sequence of changes, the invariants that must hold throughout, and acceptance criteria a reviewer can actually run. "
     + "This is read-only work. Do not modify repository files. Produce the architecture, sequencing, and acceptance criteria for the lead to synthesize and execute. Plan is an advisory planning capability, not an approval gate. "
     + `Separate discoverable facts from genuine choices. ${discovery}Escalate only genuine product or architectural trade-offs, and escalate them as explicit options with consequences and a recommendation, never as an open question. For low-risk details, choose the reading most consistent with the codebase, proceed, and record it as an assumption. `
-    + "When a design trade-off has more than one viable answer and repository evidence cannot settle it, consult Oracle tool with one self-contained brief that states the constraints, the candidate designs, and the evidence you already gathered plus one precise question. If Oracle does not settle it, carry the options and the remaining gap into the plan rather than silently picking one. "
+    + `When a design trade-off has more than one viable answer and repository evidence cannot settle it, consult ${oracleRef} with one self-contained brief that states the constraints, the candidate designs, and the evidence you already gathered plus one precise question. If Oracle does not settle it, carry the options and the remaining gap into the plan rather than silently picking one. `
     + "Delegation: you may invoke Explore and `reviewer` for discovery and verification; do not invoke any other subagent. Behavior and code verification belongs to post-implementation review. "
-    + "Write the plan for a General-Purpose execution agent who cannot see your reasoning. Every step must be executable without rediscovering what you already found: name the files, name the interfaces, and state the condition that means the step is done. Prefer the smallest design that satisfies the requirement and fits the conventions already in the codebase. Mark steps that are independent of each other and can run concurrently.\n\n"
+    + "Write the plan for its consumer — a General-Purpose execution agent or the lead implementing directly — who cannot see your reasoning. Every step must be executable without rediscovering what you already found: name the files, name the interfaces, and state the condition that means the step is done. Prefer the smallest design that satisfies the requirement and fits the conventions already in the codebase. Mark steps that are independent of each other and can run concurrently.\n\n"
     + "Return format:\n"
     + "Objective: what will be true when this is complete.\n"
     + "Architectural invariants: what must hold before, during, and after every step.\n"
@@ -916,20 +932,23 @@ function pinnedPlanPrompt(opts: { explicit: boolean; semanticAvailable: boolean 
     + "Acceptance criteria: the exact commands to run and the observable result that counts as passing.\n"
     + "Critical files: the files an executor must read before starting, as file:line, with why each matters.\n"
     + "Open questions: any unresolved trade-off, as options with a recommendation. Omit this section if there are none.\n\n"
+    + (opts.is200K ? PROMPT_200K_NOTE : "")
     + readOnlyToolSteer(opts.semanticAvailable)
 }
 
 const GENERAL_PURPOSE_DESC_TAIL =
   "Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore) or verification-only (use reviewer)."
 
-function pinnedGeneralPurposeDescription(explicit: boolean): string {
+function pinnedGeneralPurposeDescription(explicit: boolean, isBalanced = false, is200K = false): string {
   const head = explicit
-    ? "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Follows a Plan handoff when one exists and otherwise investigates before acting. "
+    ? isBalanced
+      ? "Autonomous multi-step execution agent. Use proactively and FREELY for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Follows a Plan handoff when one exists and otherwise investigates before acting. "
+      : "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Follows a Plan handoff when one exists and otherwise investigates before acting. "
     : "Autonomous multi-step execution agent for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. "
-  return head + GENERAL_PURPOSE_DESC_TAIL
+  return head + GENERAL_PURPOSE_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
 }
 
-function pinnedGeneralPurposePrompt(): string {
+function pinnedGeneralPurposePrompt(opts?: { is200K?: boolean }): string {
   return "You are an autonomous execution specialist for mixed, multi-step work. Your mission is to take an open-ended task from investigation through implementation to a verified end state within this turn. "
     + "Keep going until the task is genuinely done. Do not stop at a diagnosis, a partial fix, or a plan when the request asked for a change. Ground discovery in repository truth. For low-risk ambiguities, choose the interpretation most consistent with the repository, proceed, and record it as an assumption in your report. For material intent gaps that would alter product behavior or security, surface concrete options and a recommendation to the lead. "
     + "When a Plan handoff exists, follow its ordered steps and acceptance criteria; do not rediscover what the plan already settled — read the critical files it names, execute each step's done condition, and report any step whose premise proves wrong instead of silently replanning. "
@@ -944,27 +963,40 @@ function pinnedGeneralPurposePrompt(): string {
     + "Verification: the commands you ran, exit status, and decisive output.\n"
     + "Assumptions: every interpretation you had to choose.\n"
     + "Remaining items: anything deliberately not done, and why.\n\n"
+    + (opts?.is200K ? PROMPT_200K_NOTE : "")
     + fileToolSteer("builds")
 }
 
 const REVIEWER_DESC_TAIL =
   "Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source."
 
-function pinnedReviewerDescription(explicit: boolean): string {
+function pinnedReviewerDescription(explicit: boolean, isBalanced = false, is200K = false): string {
   const head = explicit
-    ? "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, before done. "
+    ? isBalanced
+      ? "Adversarial evidence-based reviewer. Use proactively ONLY when the change is genuinely behavior-changing, cross-boundary, or risk-sensitive, before done. The lead owns verification by default. "
+      : "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, before done. "
     : "Adversarial evidence-based reviewer for behavior-changing, cross-boundary, or risk-sensitive changes. "
-  return head + REVIEWER_DESC_TAIL
+  return head + REVIEWER_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
 }
 
-function pinnedReviewerPrompt(semanticAvailable = true): string {
+function pinnedReviewerPrompt(
+  semanticAvailable = true,
+  opts?: { allowExploreDelegation?: boolean; is200K?: boolean },
+): string {
+  // Balanced-only: the reviewer narrows scope with search first, then
+  // delegates targeted discovery to Explore (permitted by the balanced
+  // delegation graph and ACL). Every other profile keeps the terminal,
+  // no-delegation reviewer.
+  const delegation = opts?.allowExploreDelegation === true
+    ? "Do not modify source code. Scope first with search, then delegate: use code search (lexical, then semantic when available) and web search to narrow scope and rule out hypotheses before delegating — cheapest, always first. When search is insufficient, delegate targeted discovery to `Explore`: launch one or more `Explore` subagents in parallel with scoped evidence questions (call chains, config patterns, test conventions, boundary conditions) and let them return file:line conclusions; do not sweep the repository yourself. You may invoke only `Explore`; do not invoke any other subagent. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
+    : "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
   return "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
     + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
     + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
     + "Then verify by execution. Run the builds, linters, or test suites relevant to what changed, and any command that would surface the specific failure you suspect. Verification means output you observed. Never state that something passes, compiles, or is covered unless you ran it and read the result; where you could not run something, say so explicitly rather than inferring the outcome. "
     + "Probe deliberately: boundary and empty inputs, error and early-return paths, concurrency and ordering, resource acquisition and cleanup on the failure path, partial failure and retry, backward compatibility of any changed interface, handling of untrusted input, and whether the new tests would actually fail if the change were reverted. "
     + "Judge against the bar the repository already holds itself to, not an abstract ideal. Do not soften a real finding, and do not manufacture findings to appear thorough. If the change is correct and verified, say so. "
-    + "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
+    + delegation
     + "Return a self-contained result the lead can act on immediately.\n\n"
     + "Return format. Line one must be exactly one of:\n"
     + "VERDICT: SHIP\n"
@@ -977,6 +1009,7 @@ function pinnedReviewerPrompt(semanticAvailable = true): string {
     + "Suggestion: non-blocking improvements or stylistic suggestions.\n"
     + "Evidence: the commands you ran, exit status, and decisive output.\n"
     + "Unverified surface: what you could not exercise, and why.\n\n"
+    + (opts?.is200K ? PROMPT_200K_NOTE : "")
     + reviewerToolSteer(semanticAvailable)
 }
 
@@ -1043,7 +1076,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     },
     Plan: {
       description: pinnedPlanDescription(true),
-      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable }),
+      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable, oracleTool }),
       tools: planTools,
       model: oneM(planModel),
       effort: effort("Plan"),
@@ -1155,16 +1188,16 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
 
   const out: PeerAgentDefinitions = {
     Explore: {
-      description: pinnedExploreDescription(true),
-      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable, bluebirdEnabled: opts.bluebirdEnabled }),
+      description: pinnedExploreDescription(true, true),
+      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled }),
       tools: readSearchTools,
       model: exploreModel,
       effort: effort("Explore"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     Plan: {
-      description: pinnedPlanDescription(true),
-      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable }),
+      description: pinnedPlanDescription(true, false, true),
+      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable, oracleTool, is200K: true }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1174,15 +1207,15 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
       },
     },
     "General-Purpose": {
-      description: pinnedGeneralPurposeDescription(true),
-      prompt: pinnedGeneralPurposePrompt(),
+      description: pinnedGeneralPurposeDescription(true, false, true),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true }),
       model: generalModel,
       effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description: pinnedReviewerDescription(true),
-      prompt: pinnedReviewerPrompt(semanticAvailable),
+      description: pinnedReviewerDescription(true, false, true),
+      prompt: pinnedReviewerPrompt(semanticAvailable, { is200K: true }),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,
@@ -1276,16 +1309,16 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
 
   const out: PeerAgentDefinitions = {
     Explore: {
-      description: pinnedExploreDescription(false),
-      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable, bluebirdEnabled: opts.bluebirdEnabled }),
+      description: pinnedExploreDescription(false, true),
+      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled }),
       tools: readSearchTools,
       model: exploreModel,
       effort: effort("Explore"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     Plan: {
-      description: pinnedPlanDescription(false),
-      prompt: pinnedPlanPrompt({ explicit: false, semanticAvailable }),
+      description: pinnedPlanDescription(false, false, true),
+      prompt: pinnedPlanPrompt({ explicit: false, semanticAvailable, oracleTool, is200K: true }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1295,15 +1328,15 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       },
     },
     "General-Purpose": {
-      description: pinnedGeneralPurposeDescription(false),
-      prompt: pinnedGeneralPurposePrompt(),
+      description: pinnedGeneralPurposeDescription(false, false, true),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true }),
       model: generalModel,
       effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description: pinnedReviewerDescription(false),
-      prompt: pinnedReviewerPrompt(semanticAvailable),
+      description: pinnedReviewerDescription(false, false, true),
+      prompt: pinnedReviewerPrompt(semanticAvailable, { is200K: true }),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,
@@ -1351,9 +1384,14 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
  * alias (`gh-router-balanced-*`, no `[1m]`) rather than a real catalog id,
  * for the same client catalog-resolution reason as the cheap builder above.
  * Caller-supplied `opts.balanced*Model` values are deliberately ignored.
- * Explicit delegation tuning matches cheap: proactive parallel `Explore`
- * fan-out, `Plan`-first architecture, `General-Purpose` mixed execution, and
- * post-integration `reviewer` verification. */
+ * Explicit delegation tuning is search-first and lead-owns-by-default
+ * (unlike cheap): `code_search` + `web` search narrow scope before any
+ * `Explore` fan-out; `Plan` ONLY when genuinely complex (lead owns planning)
+ * with an explicitly named Oracle tool; `General-Purpose` mixed execution
+ * delegates FREELY; `reviewer` ONLY when genuinely behavior-changing (lead
+ * owns verification) where the reviewer
+ * narrows scope with search and may invoke `Explore` for targeted
+ * discovery. */
 function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
   const exploreModel = BALANCED_EXPLORE_ALIAS_ID
   const planModel = BALANCED_PLAN_ALIAS_ID
@@ -1396,16 +1434,16 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
 
   const out: PeerAgentDefinitions = {
     Explore: {
-      description: pinnedExploreDescription(true),
-      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable, bluebirdEnabled: opts.bluebirdEnabled }),
+      description: pinnedExploreDescription(true, true),
+      prompt: pinnedExplorePrompt({ explicit: true, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled }),
       tools: readSearchTools,
       model: exploreModel,
       effort: effort("Explore"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     Plan: {
-      description: pinnedPlanDescription(true),
-      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable }),
+      description: pinnedPlanDescription(true, true, true),
+      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable, oracleTool, is200K: true }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1415,18 +1453,21 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       },
     },
     "General-Purpose": {
-      description: pinnedGeneralPurposeDescription(true),
-      prompt: pinnedGeneralPurposePrompt(),
+      description: pinnedGeneralPurposeDescription(true, true, true),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true }),
       model: generalModel,
       effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description: pinnedReviewerDescription(true),
-      prompt: pinnedReviewerPrompt(semanticAvailable),
+      description: pinnedReviewerDescription(true, true, true),
+      prompt: pinnedReviewerPrompt(semanticAvailable, { allowExploreDelegation: true, is200K: true }),
       model: reviewerModel,
       effort: effort("reviewer"),
-      tools: readSearchTools,
+      // Balanced reviewer may invoke Explore for targeted discovery (see
+      // BALANCED_PROFILE_DELEGATION_GRAPH + the balanced ACL graph); every
+      // other pinned reviewer stays terminal on read/search tools.
+      tools: [...readSearchTools, "Agent"],
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
   }

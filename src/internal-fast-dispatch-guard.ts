@@ -41,15 +41,22 @@ export const internalFastDispatchGuard = defineCommand({
       type: "string",
       description: "Comma-separated list of allowed target subagents.",
     },
+    graph: {
+      type: "string",
+      description: "Authority graph variant: fast (default) or balanced (reviewer may invoke Explore).",
+      default: "fast",
+    },
   },
   run({ args }) {
     const allowedTargets = args.allowedTargets
       ? args.allowedTargets.split(",").map((s) => s.trim()).filter(Boolean)
       : undefined
     const allowBrowse = args.allowBrowse === true || (allowedTargets ? allowedTargets.includes("worker-browse") : false)
+    const graph = args.graph === "balanced" ? "balanced" as const : "fast" as const
     const decision = decideFastDispatchGuard(readStdinSync(), {
       allowedTargets,
       allowBrowse,
+      graph,
     })
     if (!decision.allowed && decision.reason) {
       process.stdout.write(fastDispatchDenyOutput(decision.reason))
@@ -65,13 +72,14 @@ export const internalFastDispatchGuard = defineCommand({
 /** Build the persisted command for the fast-profile PreToolUse hook. */
 export function buildFastDispatchGuardHookCommand(
   invocation: SelfInvocation,
-  opts?: { allowBrowse?: boolean; allowedTargets?: ReadonlyArray<string> },
+  opts?: { allowBrowse?: boolean; allowedTargets?: ReadonlyArray<string>; graph?: "fast" | "balanced" },
 ): string {
   const flags: string[] = []
   if (opts?.allowBrowse) flags.push("--allowBrowse")
   if (opts?.allowedTargets && opts.allowedTargets.length > 0) {
     flags.push(`--allowedTargets "${opts.allowedTargets.join(",")}"`)
   }
+  if (opts?.graph === "balanced") flags.push(`--graph balanced`)
   const args = ["internal-fast-dispatch-guard", ...flags].join(" ")
   return buildSelfCommand(invocation, args)
 }

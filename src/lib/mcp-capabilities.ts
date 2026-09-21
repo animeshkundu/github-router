@@ -583,7 +583,7 @@ export function cheapReviewerModel(): string | undefined {
   return CHEAP_PROFILE_MODELS.reviewer
 }
 
-/** Gemini/high Advisor for the cheapest profile at the 200K default window. */
+/** Sol/medium Advisor for the cheapest profile at the 200K default window. */
 export function cheapestAdvisorModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === CHEAPEST_PROFILE_ADVISOR_MODEL)
   if (!found) return undefined
@@ -591,7 +591,7 @@ export function cheapestAdvisorModel(): string | undefined {
   if (found.capabilities?.supports?.tool_calls !== true) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST_PROFILE_ADVISOR_EFFORT)) return undefined
-  if (fastEndpointForModel(found) !== "chat") return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
   return CHEAPEST_PROFILE_ADVISOR_MODEL
 }
 
@@ -657,7 +657,7 @@ export function balancedOracleModel(): string | undefined {
   return BALANCED_PROFILE_ORACLE_MODEL
 }
 
-/** Luna/max reviewer for the balanced profile at the 200K default window. */
+/** Gemini/high reviewer for the balanced profile at the 200K default window. */
 export function balancedReviewerModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === BALANCED_PROFILE_MODELS.reviewer)
   if (!found) return undefined
@@ -665,7 +665,7 @@ export function balancedReviewerModel(): string | undefined {
   if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(BALANCED_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
-  if (fastEndpointForModel(found) !== "responses") return undefined
+  if (fastEndpointForModel(found) !== "chat") return undefined
   return BALANCED_PROFILE_MODELS.reviewer
 }
 
