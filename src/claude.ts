@@ -166,7 +166,6 @@ import {
   cheapestAdvisorModel,
   cheapestOracleModel,
   cheapestReviewerModel,
-  balancedAdvisorModel,
   balancedOracleModel,
   balancedReviewerModel,
 } from "./lib/mcp-capabilities"
@@ -1198,13 +1197,13 @@ export const claude = defineCommand({
               : isCheapProfile
                 ? cheapOracleModel()
                 : fastOracleModel()) == null
-            || (launchProfileId === "cheapest"
-              ? cheapestAdvisorModel()
-              : launchProfileId === "balanced"
-                ? balancedAdvisorModel()
+            || (launchProfileId === "balanced"
+              ? false
+              : (launchProfileId === "cheapest"
+                ? cheapestAdvisorModel()
                 : isCheapProfile
                   ? cheapAdvisorModel()
-                  : fastAdvisorModel()) == null
+                  : fastAdvisorModel()) == null)
             || nativeAgentModels.reviewer == null)
         ) {
           if (launchProfileId === "cheapest") {
@@ -1214,7 +1213,7 @@ export const claude = defineCommand({
           }
           if (launchProfileId === "balanced") {
             throw new Error(
-              "balanced profile prerequisite drift: exact reviewer, oracle (grok-4.6), or advisor (gpt-5.6-sol) model no longer resolves",
+              "balanced profile prerequisite drift: exact reviewer or oracle (grok-4.6) model no longer resolves",
             )
           }
           if (isCheapProfile) {

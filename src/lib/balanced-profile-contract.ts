@@ -3,10 +3,11 @@
  *
  * The most-complex-tasks tier: a `gpt-5.6-sol`/medium LEAD at Claude Code's
  * DEFAULT (bare-slug) 200K window, every subagent at the same 200K default,
- * a `gpt-5.6-sol`/medium Advisor (bare slug), and a `grok-4.6`/medium primary
- * Oracle. Oracle-only peer set (no `astra`) and the same four-agent surface
- * as the cheap family minus `implementer`, except the `reviewer` may invoke
- * `Explore` for targeted discovery (search-first, then delegate).
+ * and a `grok-4.6`/medium primary Oracle. Advisor-free by design: no Advisor
+ * model, tool, or prose is wired for this profile. Oracle-only peer set
+ * (no `astra`) and the same four-agent surface as the cheap family minus
+ * `implementer`, except the `reviewer` may invoke `Explore` for targeted
+ * discovery (search-first, then delegate).
  *
  * Delegation policy is lead-owns-by-default: the lead plans, implements,
  * and verifies itself, delegating FREELY to the Luna-powered `Explore` and
@@ -25,7 +26,6 @@ export const BALANCED_PROFILE_MODELS = Object.freeze({
   plan: "gpt-5.6-sol",
   "General-Purpose": "gpt-5.6-luna",
   reviewer: "gemini-3.8-flash",
-  advisor: "gpt-5.6-sol",
   oracle: "grok-4.6",
   astra: "gpt-6-astra",
 } as const)
@@ -69,20 +69,7 @@ export const BALANCED_PROFILE_LEAD_CONTEXT_TOKENS = 200_000 as const
  */
 export const BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS = 200_000 as const
 
-export const BALANCED_PROFILE_ADVISOR_MODEL = BALANCED_PROFILE_MODELS.advisor
-/**
- * Client-visible Advisor identity for balanced mode. The BARE Sol slug
- * (no `[1m]` bracket): Claude Code budgets the Advisor tool as a 200K-model
- * and forwards no more than ~200K of the lead's transcript, and the proxy
- * mirrors that with `BALANCED_PROFILE_ADVISOR_CONTEXT_TOKENS`.
- */
-export const BALANCED_PROFILE_ADVISOR_CLIENT_MODEL =
-  BALANCED_PROFILE_MODELS.advisor
-/** Advisor context window for balanced mode (tokens). */
-export const BALANCED_PROFILE_ADVISOR_CONTEXT_TOKENS =
-  BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS
 export const BALANCED_PROFILE_LEAD_EFFORT = "medium" as const
-export const BALANCED_PROFILE_ADVISOR_EFFORT = "medium" as const
 export const BALANCED_PROFILE_ORACLE_MODEL = BALANCED_PROFILE_MODELS.oracle
 export const BALANCED_PROFILE_ORACLE_EFFORT = "medium" as const
 

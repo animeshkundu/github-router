@@ -457,21 +457,22 @@ export async function handleCompletion(c: Context) {
   const maxLeadAdvisor = maxProfileRequest && !maxSubagentRequest
   const cheapLeadAdvisor = cheapProfileRequest && !cheapSubagentRequest
   const cheapestLeadAdvisor = cheapestProfileRequest && !cheapestSubagentRequest
-  const balancedLeadAdvisor = balancedProfileRequest && !balancedSubagentRequest
+  // Balanced is advisor-free by design: the lead never gets the Advisor tool,
+  // even when the client sends the advisor beta (enforced by the
+  // `balancedProfileRequest ? false` branch in `advisorBehaviorEnabled`).
   const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest && !cheapSubagentRequest && !cheapestSubagentRequest && !balancedSubagentRequest
   const fastAdvisorEnabled = fastLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const maxAdvisorEnabled = maxLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const cheapAdvisorEnabled = cheapLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const cheapestAdvisorEnabled = cheapestLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
-  const balancedAdvisorEnabled = balancedLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
-  const advisorBehaviorEnabled = fastLeadAdvisor
-    ? fastAdvisorEnabled
-    : cheapLeadAdvisor
-      ? cheapAdvisorEnabled
-      : cheapestLeadAdvisor
-        ? cheapestAdvisorEnabled
-        : balancedLeadAdvisor
-          ? balancedAdvisorEnabled
+  const advisorBehaviorEnabled = balancedProfileRequest
+    ? false
+    : fastLeadAdvisor
+      ? fastAdvisorEnabled
+      : cheapLeadAdvisor
+        ? cheapAdvisorEnabled
+        : cheapestLeadAdvisor
+          ? cheapestAdvisorEnabled
           : maxLeadAdvisor
             ? maxAdvisorEnabled
             : advisorEnabled
@@ -528,13 +529,13 @@ export async function handleCompletion(c: Context) {
       )
     }
   }
-  if (cheapAdvisorEnabled || balancedAdvisorEnabled) {
-    // Same fixed Sol advisor model as fast; the cheap family (and balanced)
-    // differs only in the client-side BARE pin (no `[1m]`) and the 200K
-    // transcript cap applied at dispatch. fastAdvisorMetadataMismatch accepts
-    // either bracket spelling.
+  if (cheapAdvisorEnabled) {
+    // Same fixed Sol advisor model as fast; the cheap family differs only in
+    // the client-side BARE pin (no `[1m]`) and the 200K transcript cap applied
+    // at dispatch. fastAdvisorMetadataMismatch accepts either bracket spelling.
+    // (Balanced is advisor-free and never reaches this block.)
     const mismatch = fastAdvisorMetadataMismatch(rawBody)
-    const relaunchProfile = identity.launch?.profileId === "cheap1m" ? "cheap1m" : identity.launch?.profileId === "balanced" ? "balanced" : "cheap"
+    const relaunchProfile = identity.launch?.profileId === "cheap1m" ? "cheap1m" : "cheap"
 
     if (mismatch) {
       return c.json(
@@ -772,7 +773,7 @@ export async function handleCompletion(c: Context) {
     const wantsStream = parsedBase?.stream === true
 
     if (
-      (fastAdvisorEnabled || cheapAdvisorEnabled || cheapestAdvisorEnabled || balancedAdvisorEnabled || maxAdvisorEnabled)
+      (fastAdvisorEnabled || cheapAdvisorEnabled || cheapestAdvisorEnabled || maxAdvisorEnabled)
       && wantsStream
     ) {
       const initialConversation = Array.isArray(parsedBase!.messages)
@@ -812,13 +813,12 @@ export async function handleCompletion(c: Context) {
             escalated: false,
             fastProfile: false,
           }
-        : cheapAdvisorEnabled || cheapestAdvisorEnabled || balancedAdvisorEnabled
+        : cheapAdvisorEnabled || cheapestAdvisorEnabled
           ? {
               // Cheap shares fast's fixed Sol identity/effort and cheapest its
-              // fixed Gemini identity/effort (balanced shares cheap's Sol
-              // identity); the distinctions (bare client pin, 200K transcript
-              // cap) are carried by `advisorCheapProfile` below and the
-              // client's own pinned tool.
+              // fixed Gemini identity/effort; the distinctions (bare client
+              // pin, 200K transcript cap) are carried by `advisorCheapProfile`
+              // below and the client's own pinned tool.
               model: fastAdvisorChoice!.model,
               effort: resolveAdvisorEffort(rawBody, fastAdvisorChoice!.model, true),
               escalated: fastAdvisorChoice!.escalated,
@@ -845,7 +845,7 @@ export async function handleCompletion(c: Context) {
           // retaining their independent model, effort, and transport policies.
           advisorFastProfile: advisorChoice.fastProfile,
           advisorMaxProfile: maxAdvisorEnabled,
-          advisorCheapProfile: cheapAdvisorEnabled || cheapestAdvisorEnabled || balancedAdvisorEnabled,
+          advisorCheapProfile: cheapAdvisorEnabled || cheapestAdvisorEnabled,
           advisorEffort: advisorChoice.effort,
           externalAborter: translatedAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {
@@ -1115,15 +1115,15 @@ export async function handleCompletion(c: Context) {
           requestHeaders,
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          advisorFastProfile: fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor || balancedLeadAdvisor,
+          advisorFastProfile: fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor,
           advisorMaxProfile: maxAdvisorEnabled,
-          advisorCheapProfile: cheapLeadAdvisor || cheapestLeadAdvisor || balancedLeadAdvisor,
+          advisorCheapProfile: cheapLeadAdvisor || cheapestLeadAdvisor,
           advisorEffort: maxAdvisorChoice
             ? maxAdvisorChoice.effort
             : resolveAdvisorEffort(
                 rawBody,
                 advisorChoice.model,
-                fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor || balancedLeadAdvisor,
+                fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor,
               ),
           externalAborter: advisorAborter,
         }),
