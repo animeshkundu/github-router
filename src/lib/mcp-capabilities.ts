@@ -56,8 +56,6 @@ import {
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
 } from "./cheapest-profile-contract"
 import {
-  BALANCED_PROFILE_ADVISOR_EFFORT,
-  BALANCED_PROFILE_ADVISOR_MODEL,
   BALANCED_PROFILE_MODELS,
   BALANCED_PROFILE_NATIVE_EFFORTS,
   BALANCED_PROFILE_ORACLE_EFFORT,
@@ -631,18 +629,6 @@ export function cheapAstraModel(): string | undefined {
   if (!Array.isArray(efforts) || !efforts.includes(CHEAP_PROFILE_ASTRA_EFFORT)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
   return CHEAP_PROFILE_ASTRA_MODEL
-}
-
-/** Sol/high Advisor for the balanced profile at the 200K default window. */
-export function balancedAdvisorModel(): string | undefined {
-  const found = state.models?.data.find((m) => m.id === BALANCED_PROFILE_ADVISOR_MODEL)
-  if (!found) return undefined
-  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
-  if (found.capabilities?.supports?.tool_calls !== true) return undefined
-  const efforts = found.capabilities?.supports?.reasoning_effort
-  if (!Array.isArray(efforts) || !efforts.includes(BALANCED_PROFILE_ADVISOR_EFFORT)) return undefined
-  if (fastEndpointForModel(found) !== "responses") return undefined
-  return BALANCED_PROFILE_ADVISOR_MODEL
 }
 
 /** Exact Grok 4.6 only: the balanced Oracle at 200K/medium, like cheap. */

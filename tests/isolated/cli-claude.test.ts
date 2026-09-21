@@ -282,7 +282,6 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // Balanced-profile resolvers (only exercised under `-m balanced`); stubbed
   // for the same static-import-graph reason as the cheap entries above.
   balancedOracleModel: mock(() => "grok-4.6"),
-  balancedAdvisorModel: mock(() => "gpt-5.6-sol"),
   balancedReviewerModel: mock(() => "gemini-3.8-flash"),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
