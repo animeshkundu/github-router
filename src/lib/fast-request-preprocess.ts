@@ -1,3 +1,4 @@
+import { BALANCED_PROFILE_LEAD_EFFORT } from "./balanced-profile-contract"
 import {
   canonicalizeAliasModel,
   isMaxModelAlias,
@@ -52,7 +53,8 @@ function explicitEffortOf(value: unknown): FastFixedEffort | undefined {
  * Note the reviewer differs: fast reviews on Sonnet 5/xhigh while cheap
  * reviews on Luna/max, cheapest reviews on Gemini/high, and balanced reviews
  * on Gemini/high — all rows exist here, so each profile's reviewer resolves to
- * its fixed effort.
+ * its fixed effort. The balanced LEAD is the other exception: bare Sol leads
+ * at medium (`BALANCED_PROFILE_LEAD_EFFORT`), not the shared high.
  *
  * Pinned-profile isolation (fast/cheap/cheap1m/cheapest/balanced): only
  * router-provided models are accepted (anything else is `rejectedModel`).
@@ -104,7 +106,12 @@ export function preprocessFastRequest(
   } else if (bare === "gpt-5.6-luna") {
     fixedEffort = "max"
   } else if (bare === "gpt-5.6-sol") {
-    fixedEffort = "high"
+    // Balanced leads at medium by contract (`BALANCED_PROFILE_LEAD_EFFORT`);
+    // every other Sol caller (Plan subagent alias traffic aside, which carries
+    // its own absent-effort default) stays high.
+    fixedEffort = profileId === "balanced" && !subagentRequest
+      ? BALANCED_PROFILE_LEAD_EFFORT
+      : "high"
   } else if (bare === "grok-4.6") {
     fixedEffort = "medium"
   } else if (bare === "gemini-3.8-flash") {

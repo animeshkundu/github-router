@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 
 import { preprocessFastRequest } from "../src/lib/fast-request-preprocess"
 import {
+  BALANCED_GENERAL_PURPOSE_ALIAS_ID,
+  BALANCED_REVIEWER_ALIAS_ID,
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
   CHEAPEST_PLAN_ALIAS_ID,
@@ -41,6 +43,12 @@ const cheapestLaunch: LaunchRegistryEntry = {
   ...fastLaunch,
   launchId: "cheapest",
   profileId: "cheapest",
+}
+
+const balancedLaunch: LaunchRegistryEntry = {
+  ...fastLaunch,
+  launchId: "balanced",
+  profileId: "balanced",
 }
 
 function body(model: string, extra: Record<string, unknown> = {}): string {
@@ -348,6 +356,58 @@ describe("fast request preprocessing", () => {
           const sub = preprocessFastRequest(
             body(wire, { output_config: { effort: "low" } }),
             cheapestLaunch,
+            true,
+          )
+          expect(sub.rejectedAlias).toBeUndefined()
+          const parsed = JSON.parse(sub.body)
+          expect(parsed.model).toBe(real)
+          expect(parsed.output_config.effort).toBe(effort)
+        }
+      }
+    })
+  })
+
+  describe("balanced profile (Sol lead at medium; swapped GP/reviewer aliases)", () => {
+    test("balanced lead defaults bare Sol to medium, other models keep the shared mapping", () => {
+      for (const [model, effort] of [
+        ["gpt-5.6-sol", "medium"],
+        ["gpt-5.6-luna", "max"],
+        ["grok-4.6", "medium"],
+        ["gemini-3.8-flash", "high"],
+      ] as const) {
+        const parsed = JSON.parse(preprocessFastRequest(body(model), balancedLaunch).body)
+        expect(parsed.model).toBe(model)
+        expect(parsed.output_config.effort).toBe(effort)
+      }
+    })
+
+    test("balanced lead keeps an explicit picker effort; bare-Sol subagents stay high", () => {
+      const lead = JSON.parse(
+        preprocessFastRequest(
+          body("gpt-5.6-sol", { output_config: { effort: "low" } }),
+          balancedLaunch,
+        ).body,
+      )
+      expect(lead.output_config.effort).toBe("low")
+      const sub = JSON.parse(
+        preprocessFastRequest(
+          body("gpt-5.6-sol", { output_config: { effort: "low" } }),
+          balancedLaunch,
+          true,
+        ).body,
+      )
+      expect(sub.output_config.effort).toBe("high")
+    })
+
+    test("balanced GP/reviewer aliases canonicalize bare with alias effort on subagents", () => {
+      for (const [alias, real, effort] of [
+        [BALANCED_GENERAL_PURPOSE_ALIAS_ID, "gpt-5.6-luna", "max"],
+        [BALANCED_REVIEWER_ALIAS_ID, "gemini-3.8-flash", "high"],
+      ] as const) {
+        for (const wire of [alias, `${alias}[1m]`]) {
+          const sub = preprocessFastRequest(
+            body(wire, { output_config: { effort: "low" } }),
+            balancedLaunch,
             true,
           )
           expect(sub.rejectedAlias).toBeUndefined()
