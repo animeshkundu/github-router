@@ -3,9 +3,11 @@ import { afterEach, describe, expect, test } from "bun:test"
 import {
   BluebirdClientManager,
   BluebirdMcpClient,
+  bluebirdScopeSummary,
   type BluebirdScope,
   type ResolvedBluebirdProvision,
 } from "../src/lib/bluebird-client"
+import { state } from "../src/lib/state"
 
 const originalFetch = globalThis.fetch
 const originalBluebirdToken = process.env.BLUEBIRD_TOKEN
@@ -693,5 +695,140 @@ describe("BluebirdMcpClient lifecycle, concurrency, and cancellation", () => {
     await disposal
     expect(initializeSignal?.aborted).toBe(true)
     expect(disposeCalls).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe("BluebirdMcpClient upstream path guard", () => {
+  test("drops directory-traversal, drive-letter, and NUL paths while keeping legit hits", async () => {
+    installServer(
+      [tool("code_search", { method: {}, query: {} })],
+      [
+        { file: "../evil.ts", line: 1, snippet: "escape" },
+        { file: "C:\\Windows\\secret.ts", line: 2, snippet: "drive" },
+        { file: "src/ne\0w.ts", line: 3, snippet: "nul" },
+        { file: "src//nested/../ok.ts", line: 4, snippet: "dotdot" },
+        { file: "src/legit.ts", line: 5, snippet: "legit" },
+      ],
+    )
+    const client = new BluebirdMcpClient(scope, "test-token", "https://example.test/mcp")
+
+    const rows = await client.searchFileContent("traversal")
+    expect(rows.map((row) => row.file)).toEqual(["src/legit.ts"])
+  })
+
+  test("relativizes server-absolute paths instead of letting them escape the workspace", async () => {
+    installServer(
+      [tool("code_search", { method: {}, query: {} })],
+      [{ file: "/etc/passwd", line: 1, snippet: "absolute" }],
+    )
+    const client = new BluebirdMcpClient(scope, "test-token", "https://example.test/mcp")
+
+    const rows = await client.searchFileContent("absolute")
+    // Leading slashes are stripped so downstream workspace resolution stays
+    // contained; the row is repo-relative, never host-absolute.
+    expect(rows.map((row) => row.file)).toEqual(["etc/passwd"])
+  })
+
+  test("an all-traversal array surfaces a clean error instead of empty results", async () => {
+    installServer(
+      [tool("code_search", { method: {}, query: {} })],
+      [{ file: "../../escape.ts", line: 1, snippet: "escape" }],
+    )
+    const client = new BluebirdMcpClient(scope, "test-token", "https://example.test/mcp")
+
+    await expect(client.searchFileContent("traversal")).rejects.toThrow(
+      "no parseable code hits",
+    )
+  })
+})
+
+describe("BluebirdMcpClient Retry-After handling", () => {
+  function installFlakyServer(retryAfter: string | null): { calls: () => number } {
+    let calls = 0
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as Record<string, unknown>
+      if (request.method === "initialize") {
+        return jsonResponse({ jsonrpc: "2.0", id: request.id, result: {} })
+      }
+      if (request.method === "notifications/initialized") {
+        return new Response(null, { status: 204 })
+      }
+      if (request.method === "tools/list") {
+        return jsonResponse({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { tools: [tool("code_search", { method: {}, query: {} })] },
+        })
+      }
+      calls++
+      if (calls === 1) {
+        return new Response("rate limited", {
+          status: 429,
+          ...(retryAfter === null ? {} : { headers: { "retry-after": retryAfter } }),
+        })
+      }
+      return jsonResponse({
+        jsonrpc: "2.0",
+        id: request.id,
+        result: [{ file: "src/a.ts", line: 1, snippet: "a" }],
+      })
+    }) as typeof fetch
+    return { calls: () => calls }
+  }
+
+  test("honors Retry-After: 0 and retries the call", async () => {
+    const counter = installFlakyServer("0")
+    const client = new BluebirdMcpClient(scope, "test-token", "https://example.test/mcp")
+
+    const rows = await client.doVectorSearch("retry me")
+    expect(counter.calls()).toBe(2)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].file).toBe("src/a.ts")
+  })
+
+  test("falls back to default backoff on a garbage Retry-After header", async () => {
+    const counter = installFlakyServer("not-a-date")
+    const client = new BluebirdMcpClient(scope, "test-token", "https://example.test/mcp")
+
+    const rows = await client.doVectorSearch("retry me")
+    expect(counter.calls()).toBe(2)
+    expect(rows).toHaveLength(1)
+  })
+})
+
+describe("bluebirdScopeSummary", () => {
+  const saved = {
+    organization: state.bluebirdOrganization,
+    project: state.bluebirdProject,
+    repositories: state.bluebirdRepositories,
+    branch: state.bluebirdBranch,
+  }
+  afterEach(() => {
+    state.bluebirdOrganization = saved.organization
+    state.bluebirdProject = saved.project
+    state.bluebirdRepositories = saved.repositories
+    state.bluebirdBranch = saved.branch
+  })
+
+  test("returns null when unprovisioned", () => {
+    state.bluebirdOrganization = null
+    state.bluebirdProject = null
+    expect(bluebirdScopeSummary()).toBeNull()
+  })
+
+  test("formats org/project, repos, and branch", () => {
+    state.bluebirdOrganization = "contoso"
+    state.bluebirdProject = "webApp"
+    state.bluebirdRepositories = ["portal", "admin"]
+    state.bluebirdBranch = "main"
+    expect(bluebirdScopeSummary()).toBe("contoso/webApp [portal,admin] @ main")
+  })
+
+  test("omits the branch suffix when no branch is set", () => {
+    state.bluebirdOrganization = "contoso"
+    state.bluebirdProject = "webApp"
+    state.bluebirdRepositories = ["portal"]
+    state.bluebirdBranch = null
+    expect(bluebirdScopeSummary()).toBe("contoso/webApp [portal]")
   })
 })
