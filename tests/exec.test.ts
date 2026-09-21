@@ -64,11 +64,16 @@ describe("buildExecInvocation", () => {
     // Windows always sets SystemRoot, but this suite also runs on
     // Linux/macOS CI, so simulate the Windows host explicitly — otherwise
     // the assertion below depends on ambient env and fails off-Windows.
+    //
+    // NOTE: process.env keys are case-INSENSITIVE on Windows (Node merges
+    // `SystemRoot`/`SYSTEMROOT`), so never `delete` one casing while
+    // relying on the other to survive — set both casings to the same
+    // value instead. Deletion is only safe when absence is the goal.
     const savedSystemRoot = process.env.SystemRoot
     const savedSystemRootUpper = process.env.SYSTEMROOT
     const savedComSpec = process.env.ComSpec
     process.env.SystemRoot = "C:\\Windows"
-    delete process.env.SYSTEMROOT
+    process.env.SYSTEMROOT = "C:\\Windows"
     delete process.env.ComSpec
     try {
       const executable = "C:\\Program Files (x86)\\nodejs\\npm.cmd"
@@ -97,8 +102,11 @@ describe("buildExecInvocation", () => {
     const savedSystemRoot = process.env.SystemRoot
     const savedSystemRootUpper = process.env.SYSTEMROOT
     const savedComSpec = process.env.ComSpec
+    const savedComSpecUpper = process.env.COMSPEC
     const executable = "C:\\Program Files\\nodejs\\npm.cmd"
     try {
+      // Absence is the goal here, so deleting BOTH casings is correct
+      // under either merge semantics (see the note above).
       delete process.env.SystemRoot
       delete process.env.SYSTEMROOT
       process.env.ComSpec = "D:\\Tools\\cmd.exe"
@@ -107,6 +115,7 @@ describe("buildExecInvocation", () => {
       ).toBe("D:\\Tools\\cmd.exe")
 
       delete process.env.ComSpec
+      delete process.env.COMSPEC
       expect(
         buildExecInvocation([executable, "view"], "win32").command,
       ).toBe("cmd.exe")
@@ -117,6 +126,8 @@ describe("buildExecInvocation", () => {
       else process.env.SYSTEMROOT = savedSystemRootUpper
       if (savedComSpec === undefined) delete process.env.ComSpec
       else process.env.ComSpec = savedComSpec
+      if (savedComSpecUpper === undefined) delete process.env.COMSPEC
+      else process.env.COMSPEC = savedComSpecUpper
     }
   })
 
