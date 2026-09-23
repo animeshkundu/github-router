@@ -18,10 +18,13 @@ import type { Model } from "~/services/copilot/get-models"
 
 /** Exact catalog ids the probe measures unconditionally. */
 export const EXACT_CACHE_PROBE_TARGETS: ReadonlyArray<string> = [
-  "claude-opus-5",
+  "claude-opus-5.5",
+  "claude-opus-5.5",
   "claude-haiku-4.5",
+  "gpt-6-sol",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
+  "gpt-6-luna",
   "gpt-5.6-luna",
   "gemini-3.8-flash",
 ]
@@ -109,7 +112,7 @@ export function selectCacheProbeTargets(
 export type CacheOracleClass = "strict" | "provider-managed"
 
 /**
- * "strict" — native Claude (`claude-*`) and the gpt-5.6 family: these are
+ * "strict" — native Claude (`claude-*`) and the gpt-5.6/gpt-6 families: these are
  * expected to report cache usage reliably through Copilot, so an absent OR
  * a present-but-zero warm `cache_read_input_tokens` is a FAIL (a regression
  * signal, not an unknown).
@@ -121,7 +124,7 @@ export type CacheOracleClass = "strict" | "provider-managed"
  * so a partial read is measurable behavior rather than a router regression.
  */
 export function cacheOracleClassFor(catalogId: string): CacheOracleClass {
-  if (catalogId.startsWith("claude-") || catalogId.startsWith("gpt-5.6")) return "strict"
+  if (catalogId.startsWith("claude-") || catalogId.startsWith("gpt-5.6") || catalogId.startsWith("gpt-6")) return "strict"
   return "provider-managed"
 }
 
@@ -315,7 +318,7 @@ export function computeCacheProbeVerdict(
           verdict: "FAIL",
           reason:
             "cache usage fields (cache_read_input_tokens/cache_creation_input_tokens) were absent "
-            + "from a native-Claude/gpt-5.6 usage payload",
+            + "from a native-Claude/gpt-5.6/gpt-6 usage payload",
           coldTotalInputTokens,
         }
       : {
@@ -437,7 +440,7 @@ export function computeGrowingHistoryVerdict(
     return oracleClass === "strict"
       ? {
           verdict: "FAIL",
-          reason: "cache usage fields were absent from a native-Claude/gpt-5.6 usage payload",
+          reason: "cache usage fields were absent from a native-Claude/gpt-5.6/gpt-6 usage payload",
           coldTotalInputTokens,
         }
       : {
@@ -606,9 +609,9 @@ export function buildSaltedSystemPrefix(targetChars: number, salt: string): stri
  * generation cached nothing at a 6,000-char prefix but cached cleanly once
  * the prefix reached ~40,000 chars. That result is carried forward as a
  * conservative 3.8 baseline, not claimed as a fresh 3.8 measurement. Native
- * Claude and gpt-5.6 cached at the smaller size. Grok's floor is unmeasured;
+ * Claude and gpt-5.6/gpt-6 cached at the smaller size. Grok's floor is unmeasured;
  * it is grouped with Gemini's larger size as the conservative (over- rather
- * than under-sized) choice rather than assumed to match Claude/gpt-5.6.
+ * than under-sized) choice rather than assumed to match Claude/gpt-5.6/gpt-6.
  */
 export const DEFAULT_SYSTEM_PREFIX_CHARS = 6_000
 

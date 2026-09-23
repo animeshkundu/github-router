@@ -34,7 +34,7 @@ export function assertMaxDispatchGuardInstalled(
   }
 }
 
-const MAX_ALLOWED_MODEL_BASES = new Set(["gpt-5.6-luna", "gemini-3.8-flash", "grok-4.6"])
+const MAX_ALLOWED_MODEL_BASES = new Set(["gpt-6-luna", "gpt-5.6-luna", "gemini-3.8-flash", "grok-4.6"])
 
 /**
  * Claude Code's public Agent schema currently requires one of these built-in
@@ -105,11 +105,11 @@ export function normalizeMaxDispatchEffort(
 ): Effort | undefined {
   if (effort === undefined || effort === null) return undefined
   if (typeof effort !== "string") return undefined
-  const allowed: ReadonlyArray<Effort> = model === "gpt-5.6-sol"
+  const allowed: ReadonlyArray<Effort> = model === "gpt-6-sol" || model === "gpt-6-sol"
     ? ["high", "xhigh", "max"]
-    : model === "gpt-5.6-luna"
+    : model === "gpt-6-luna"
       ? ["none", "low", "medium", "high", "xhigh", "max"]
-      : model === "claude-sonnet-5" || model === "claude-opus-5"
+      : model === "claude-sonnet-5" || model === "claude-opus-5.5" || model === "claude-opus-5.5"
         ? ["low", "medium", "high", "xhigh", "max"]
         : model === "grok-4.6" || model === "gemini-3.8-flash"
           ? ["low", "medium", "high"]
@@ -168,7 +168,7 @@ export function decideMaxDispatchGuard(
     : nativeTarget === MAX_BROWSE_DISPATCH_AGENT
       // Keep this aligned with BROWSE_DEFAULT_MODEL. Importing worker-agent/engine
       // here would pull the worker runtime into the small hook bundle.
-      ? "gpt-5.6-luna"
+      ? "gpt-6-luna"
       : nativeTarget === "reviewer" && opts.reviewerModel
         ? baseModel(opts.reviewerModel)
         : MAX_PROFILE_NATIVE_MODELS[nativeTarget]

@@ -95,7 +95,7 @@ export function isClaudeModel(
  * raised. Closing that needs a change in `src/routes/messages/handler.ts`,
  * which this seam does not own. It is strictly narrower than the defect fixed
  * in `resolveEndpointForModelId`: no such model is reachable as a Claude Code
- * `/v1/messages` target today, whereas the plan worker's `claude-opus-5`
+ * `/v1/messages` target today, whereas the plan worker's `claude-opus-5.5`
  * default is.
  *
  * `originalModelId` is the optional pre-resolution request id; when supplied it

@@ -30,7 +30,7 @@
  *       SSE connection (no new message_start; the original one is
  *       still open). Loop up to ADVISOR_MAX_TURNS times.
  * 4. Lead-aware model choice: route the advisor call to a different model
- *    family than the main loop (gpt-5.6-sol) so the user gets a true "second
+ *    family than the main loop (gpt-6-sol) so the user gets a true "second
  *    set of eyes" instead of Opus reviewing Opus (gemini-critic finding). When
  *    the LEAD is a lighter Claude tier the choice inverts and the advisor
  *    escalates to `ADVISOR_ESCALATION_MODEL` instead — see that constant for
@@ -121,7 +121,7 @@ export const ADVISOR_CLIENT_TOOL_NAME = "advisor"
 export const ADVISOR_MAX_TURNS = 16
 
 /** Default advisor model + reasoning effort. Per gemini-critic + user
- *  direction: hardcode to a cross-lab model (gpt-5.6-sol — Copilot's
+ *  direction: hardcode to a cross-lab model (gpt-6-sol — Copilot's
  *  /responses-only flagship). The cross-lab choice gives a true "second set
  *  of eyes" instead of the main model reviewing itself.
  *
@@ -131,7 +131,7 @@ export const ADVISOR_MAX_TURNS = 16
  *  expresses no preference — a deliberate, user-approved cost/depth trade
  *  applied uniformly across every advisor target (Sol, the Opus escalation,
  *  and the fast-profile Gemini advisor below all read this same constant). */
-export const ADVISOR_DEFAULT_MODEL = "gpt-5.6-sol"
+export const ADVISOR_DEFAULT_MODEL = "gpt-6-sol"
 export const ADVISOR_DEFAULT_EFFORT = "xhigh"
 const ADVISOR_MIN_EFFORT: Effort = "high"
 
@@ -150,9 +150,9 @@ const ADVISOR_MIN_EFFORT: Effort = "high"
  *  (`codex_critic`, `gemini_critic`, `codex_reviewer`, `gemini_reviewer`) are
  *  the decorrelation instrument and are untouched. `GH_ROUTER_ADVISOR_MODEL`
  *  keeps a cross-lab advisor one env var away for anyone who wants it back. */
-export const ADVISOR_ESCALATION_MODEL = "claude-opus-5"
+export const ADVISOR_ESCALATION_MODEL = "claude-opus-5.5"
 
-/** The Advisor model for an authenticated fast primary lead. GPT-5.6 Sol
+/** The Advisor model for an authenticated fast primary lead. GPT-6 Sol
  * is cross-lab from the Google-backed Gemini lead and is selected only when
  * its live catalog entry advertises the required Responses endpoint. Kept distinct
  * from `ADVISOR_DEFAULT_MODEL` so standard launches remain unchanged. */
@@ -169,7 +169,7 @@ function fastProfileAdvisorAvailable(): boolean {
 }
 
 /** The Advisor model for an authenticated cheapest primary lead:
- * `gpt-5.6-sol` at medium effort over its Responses endpoint, transcript
+ * `gpt-6-sol` at medium effort over its Responses endpoint, transcript
  * capped at `CHEAPEST_PROFILE_ADVISOR_CONTEXT_TOKENS` (200K). */
 export const ADVISOR_CHEAPEST_PROFILE_MODEL = CHEAPEST_PROFILE_ADVISOR_MODEL
 export const ADVISOR_CHEAPEST_PROFILE_EFFORT = CHEAPEST_PROFILE_ADVISOR_EFFORT
@@ -218,18 +218,18 @@ const ADVISOR_RESPONSES_ENDPOINTS: ReadonlySet<string> = new Set([
  * Catalog-first, name-regex second, and BOTH tests run against the bare id as
  * well as the given one. `pickEndpoint` is deliberately not reused: it answers
  * "chat or responses" for the two tool-calling clients and would send
- * `claude-opus-5` — which advertises `/v1/messages` AND `/chat/completions` — to
+ * `claude-opus-5.5` — which advertises `/v1/messages` AND `/chat/completions` — to
  * chat. The advisor's question is narrower: does this model serve `/responses`?
  *
  * The bare-id fallback is what makes `GH_ROUTER_ADVISOR_MODEL` safe. That pin is
  * accepted verbatim, so an operator can write a vendor-namespaced value like
- * `openai/gpt-5.6-sol`. Such an id is in no catalog and fails the start-anchored
+ * `openai/gpt-6-sol`. Such an id is in no catalog and fails the start-anchored
  * name regex, so a catalog-only fix still posted it to `/v1/messages` and 400'd
  * — exported and directly tested for that exact input, because an earlier
  * version of this function claimed to handle it and did not.
  */
 export function advisorUsesResponses(resolvedAdvisorModel: string): boolean {
-  // `openai/gpt-5.6-sol` -> `gpt-5.6-sol`. Only the last segment can be a real
+  // `openai/gpt-6-sol` -> `gpt-6-sol`. Only the last segment can be a real
   // catalog id; anything before it is a vendor namespace the catalog never uses.
   const bare = resolvedAdvisorModel.slice(
     resolvedAdvisorModel.lastIndexOf("/") + 1,
@@ -246,7 +246,7 @@ export function advisorUsesResponses(resolvedAdvisorModel: string): boolean {
 
 /** Which Copilot transport `runAdvisor` dispatches an advisor call on.
  *  Generalizes the historical two-way `useResponses` branch (added when
- *  `gpt-5.6-sol` was the only advisor candidate) to three, now that
+ *  `gpt-6-sol` was the only advisor candidate) to three, now that
  *  `resolveAdvisorModel` can also pick a `/chat/completions`-only model
  *  (`gemini-3.8-flash`, the authenticated fast profile's advisor). */
 export type AdvisorTransport = "responses" | "chat" | "messages"
@@ -255,7 +255,7 @@ export type AdvisorTransport = "responses" | "chat" | "messages"
  * Decide `advisorTransport` for a resolved advisor model id.
  *
  * Order matters: Claude identity is checked FIRST and wins even though
- * `claude-opus-5` also advertises `/chat/completions` in the live catalog —
+ * `claude-opus-5.5` also advertises `/chat/completions` in the live catalog —
  * the historical branch never sent Claude to chat, and this preserves that
  * byte-for-byte (reuses the SAME classifier `classifyMessagesRoute` uses for
  * the main `/v1/messages` shim fork, so the two surfaces cannot disagree
@@ -311,9 +311,9 @@ function advertisedEffortLadder(
  *  but the check is explicit rather than assumed.
  *
  *  The probe compares the BARE constant rather than `resolveModel`-ing it first,
- *  which is deliberate and not an oversight: `claude-opus-5` is a single-segment
- *  slug whose dashed and dotted spellings are identical, so resolution is a
- *  no-op, and `resolveModel` WARNS on an id it cannot find — routing this probe
+ *  which is deliberate and not an oversight: `claude-opus-5.5` is the dotted
+ *  Copilot id (dashed `claude-opus-5-5` normalizes to it), so resolution is a
+ *  no-op when the catalog carries it, and `resolveModel` WARNS on an id it cannot find — routing this probe
  *  through it would emit that warning on every advisor request for anyone whose
  *  catalog lacks opus-5, which is exactly the tier this returns false for.
  *  `standInToolEnabled` compares the same id the same way. */
@@ -365,8 +365,8 @@ export interface AdvisorModelChoice {
  * Map an operator pin onto the id the catalog actually carries.
  *
  * `GH_ROUTER_ADVISOR_MODEL` is free-form, and the natural thing to write is a
- * vendor-namespaced id like `openai/gpt-5.6-sol`. Copilot's catalog carries the
- * bare `gpt-5.6-sol`, so forwarding the namespaced form verbatim gets a 400
+ * vendor-namespaced id like `openai/gpt-6-sol`. Copilot's catalog carries the
+ * bare `gpt-6-sol`, so forwarding the namespaced form verbatim gets a 400
  * `model_not_supported` and the advisor silently degrades to its
  * "[Advisor unavailable: ...]" fallback — measured, not theorised: choosing the
  * transport correctly was NOT sufficient, because the id itself was still
@@ -689,7 +689,7 @@ export const ADVISOR_FALLBACK_MAX_TOKENS = 240_000
  *  budget is `max_prompt_tokens - reserve`. Generous on purpose: a 400
  *  `model_max_prompt_tokens_exceeded` degrades to a silent advisor
  *  fallback, and the window given up is marginal against either advisor
- *  model's real prompt window (`claude-opus-5` 936k, `gpt-5.6-sol` ~1M off
+ *  model's real prompt window (`claude-opus-5.5` 936k, `gpt-6-sol` ~1M off
  *  the live catalog). Sized as a fraction of the smaller of the two, not as
  *  "irrelevant next to ~1M" — that framing assumed the advisor was always
  *  the cheap side of the pair, which stopped being true once a budget lead
@@ -721,7 +721,7 @@ export function resolveAdvisorMaxTokens(advisorModel: string): number {
 /**
  * Render an Anthropic-shape conversation (messages array with
  * role/content blocks) as a single human-readable text blob. Used
- * as the input to the advisor model (gpt-5.6-sol via /v1/responses
+ * as the input to the advisor model (gpt-6-sol via /v1/responses
  * doesn't have a 1:1 mapping for Anthropic's tool_use/tool_result
  * blocks; serializing to text preserves the semantics — the advisor
  * just needs to READ the conversation, not produce more of it).
@@ -891,7 +891,7 @@ function truncateTailToUnits(
  * Routes by model family:
  *   - gpt-5.x / codex / o-series (have `/responses` in supported_endpoints):
  *     use createResponses with `reasoning.effort` set. This is the
- *     default path — gpt-5.6-sol at xhigh effort.
+ *     default path — gpt-6-sol at xhigh effort.
  *   - claude-* (no `/responses`): fall back to createMessages.
  *
  * The conversation is serialized to text via renderConversationAsText
@@ -960,7 +960,7 @@ async function runAdvisor(
   // Budget the rendered transcript against the advisor model's REAL
   // prompt-token window using its exact tokenizer, not a chars/token
   // approximation. Both advisor-eligible families declare o200k_base
-  // (`gpt-5.6-sol` and `claude-opus-5` were each read off the live catalog when
+  // (`gpt-6-sol` and `claude-opus-5.5` were each read off the live catalog when
   // the Anthropic escalation was added), so `getTokenizerFromModel` agrees with
   // the default — but the value is read per model rather than assumed, because
   // counting a transcript with the wrong tokenizer under-counts silently and
@@ -1120,7 +1120,7 @@ async function runAdvisor(
   )
   const limits = advisorEntry?.capabilities?.limits
   // `stream: false` below, so size from the NON-streaming limit (16000 on
-  // claude-opus-5, against a 64000 streaming ceiling). Copilot does NOT actually
+  // claude-opus-5.5, against a 64000 streaming ceiling). Copilot does NOT actually
   // enforce this — probe `advisor_claude_streaming_cap_accepted` measured a 200
   // at 64000 with stream:false — so this is staying inside the advertised
   // contract by choice rather than working around a rejection. 16000 is ample

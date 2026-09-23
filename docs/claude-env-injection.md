@@ -18,7 +18,7 @@ This closes the failure observed on 2026-08-26: a top-level (`isSidechain:false`
 
 | Env var | Feature |
 |---|---|
-| `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL` | Transcript-aware Advisor (standard selection is unchanged; `-m fast` fixes both the client identity and proxy dispatch to GPT-5.6 Sol 1M/high; see [`unsupported-features.md`](unsupported-features.md) ADVISOR section) |
+| `CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL` | Transcript-aware Advisor (standard selection is unchanged; `-m fast` fixes both the client identity and proxy dispatch to GPT-6 Sol 1M/high; see [`unsupported-features.md`](unsupported-features.md) ADVISOR section) |
 | `CLAUDE_CODE_FORK_SUBAGENT` | Forked subagents inherit the full conversation context (vs starting fresh). **Headless mode (`claude --print`) silently no-ops the fork** (`Z8()` precondition in the binary) — don't expect forked context in `-p` runs |
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `TeamCreate` + inter-teammate `SendMessage` primitives. **Requires the CLAUDE_CONFIG_DIR snapshot mirror** — see [`auth-isolation.md`](auth-isolation.md). The teammate-spawn allowlist drops `ANTHROPIC_AUTH_TOKEN`, so spawned teammates can only authenticate by reading a credential from disk in a CONFIG_DIR they inherit. |
 | `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` | Tool inputs stream as the model generates them. Anthropic explicitly recommends this for proxy users at [code.claude.com/docs/en/env-vars](https://code.claude.com/docs/en/env-vars): "Set to `1` to force on when routing through a proxy via `ANTHROPIC_BASE_URL`" |
@@ -54,9 +54,9 @@ child starts, the launcher atomically adds this object to the mirror's
   "modelPicker": {
     "options": [
       {
-        "model": "gpt-5.6-sol[1m]",
-        "label": "GPT-5.6 Sol",
-        "behavesAs": "claude-opus-5"
+        "model": "gpt-6-sol[1m]",
+        "label": "GPT-6 Sol",
+        "behavesAs": "claude-opus-5.5"
       }
     ],
     "replaceBuiltInOptions": false
@@ -72,7 +72,7 @@ not set `CLAUDE_CODE_DISABLE_1M_CONTEXT`; Grok stays bare.
 
 Claude Code 2.1.260 filters an otherwise-unknown `modelPicker` id from `/model`
 unless its row has `behavesAs` pointing at a model this client knows. The router
-therefore maps Sol/Luna to `claude-opus-5` and Gemini/Grok to
+therefore maps Sol/Luna to `claude-opus-5.5` and Gemini/Grok to
 `claude-sonnet-5`, the closest available client-side prompt/capability/effort
 profiles. The setting changes neither the row label nor the model id sent, and
 the profile request preprocessors remain authoritative for actual upstream

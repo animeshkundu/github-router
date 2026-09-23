@@ -284,7 +284,7 @@ async function runStreamLoop(
   // refused HERE, locally, with a diagnostic naming what it actually serves.
   // Coercing it to the chat client (the old `?? "chat"` default) bought an
   // opaque upstream `unsupported_api_for_model` 400 that hid the real cause.
-  // Concrete exposure: `PLAN_DEFAULT_MODEL` is `claude-opus-5`, and Claude
+  // Concrete exposure: `PLAN_DEFAULT_MODEL` is `claude-opus-5.5`, and Claude
   // entries advertising `["/v1/messages"]`-only is a shape this repo's own
   // translate fixtures already model. An id ABSENT from the catalog is a
   // different answer and keeps the historical chat default — the catalog may

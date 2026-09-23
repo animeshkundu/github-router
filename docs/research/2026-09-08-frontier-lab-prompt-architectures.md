@@ -146,13 +146,13 @@ Gemini CLI features `codebase_investigator` for deep architecture exploration:
 
 The `github-router` fast profile runs:
 - **Lead Agent**: `gemini-3.8-flash` (1M context, high speed)
-- **Explore**: `gpt-5.6-luna` (high effort, ultra-fast tool execution)
-- **Plan**: `gpt-5.6-sol` (high effort, architectural rigor)
-- **general-purpose**: `gpt-5.6-luna` (max effort, execution speed)
+- **Explore**: `gpt-6-luna` (high effort, ultra-fast tool execution)
+- **Plan**: `gpt-6-sol` (high effort, architectural rigor)
+- **general-purpose**: `gpt-6-luna` (max effort, execution speed)
 - **implementer**: `gemini-3.8-flash` (high effort, fast surgical coding)
 - **reviewer**: `claude-sonnet-5` (1M context, xhigh effort, deep adversarial verification)
-- **Advisor**: `gpt-5.6-sol` (1M context, high effort, lead-only trajectory guidance)
-- **Oracle**: `claude-opus-5` (1M context, high effort, architectural trade-off consultant)
+- **Advisor**: `gpt-6-sol` (1M context, high effort, lead-only trajectory guidance)
+- **Oracle**: `claude-opus-5.5` (1M context, high effort, architectural trade-off consultant)
 - **Astra**: `gpt-6-astra` (200K context, high effort, terminal escalation)
 
 ### Specific Improvements Derived from Frontier Labs:
@@ -163,12 +163,12 @@ The `github-router` fast profile runs:
    - Adopt Anthropic's **Anti-Goldplating** and **Zero-Unnecessary-Comments** rules to prevent Gemini models from over-commenting or adding premature abstractions.
    - Adopt Gemini's **Post-Edit Rule**: summarize the diff and state the immediate verification command.
 
-2. **For Explore (`gpt-5.6-luna`)**:
+2. **For Explore (`gpt-6-luna`)**:
    - Adopt Anthropic's strict **Read-Only / No File Modifications** prohibition framing (`=== CRITICAL: READ-ONLY MODE ===`).
    - Adopt Codex's tool preference (`rg` and parallel tool batches).
    - Adopt Gemini's **Context Efficiency**: search with context lines to reduce subsequent read operations.
 
-3. **For Plan (`gpt-5.6-sol`)**:
+3. **For Plan (`gpt-6-sol`)**:
    - Adopt Codex's **Two Kinds of Unknowns** principle: discoverable facts must be explored from repo truth; only preferences/trade-offs should be escalated with options.
    - Adopt Anthropic's **40-line plan budget**: eliminate prose fluff, focus on critical files (3-5), interfaces, execution steps, and a single concrete verification command.
    - Adopt Codex's **Decision-Complete Specification**: the plan must leave zero ambiguity for the implementer.

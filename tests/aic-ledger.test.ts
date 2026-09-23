@@ -20,8 +20,8 @@ import { extractCopilotUsage } from "~/lib/aic-usage"
 const USAGE_A = {
   total_nano_aiu: 820000,
   token_details: [
-    { batch_size: 1000000, cost_per_batch: 20000000000, model: "gpt-5.6-luna", token_count: 11, token_type: "input" },
-    { batch_size: 1000000, cost_per_batch: 120000000000, model: "gpt-5.6-luna", token_count: 5, token_type: "output" },
+    { batch_size: 1000000, cost_per_batch: 20000000000, model: "gpt-6-luna", token_count: 11, token_type: "input" },
+    { batch_size: 1000000, cost_per_batch: 120000000000, model: "gpt-6-luna", token_count: 5, token_type: "output" },
   ],
 }
 
@@ -50,19 +50,19 @@ describe("aic ledger", () => {
   })
 
   test("record accumulates totals, per-model, and per-type + persists", () => {
-    recordAic("gpt-5.6-luna", extractCopilotUsage(USAGE_A))
-    recordAic("gpt-5.6-luna", extractCopilotUsage(USAGE_A))
+    recordAic("gpt-6-luna", extractCopilotUsage(USAGE_A))
+    recordAic("gpt-6-luna", extractCopilotUsage(USAGE_A))
     recordAic("claude-haiku-4.5", extractCopilotUsage({ total_nano_aiu: 3200000, token_details: [] }))
     const snap = aicSnapshot()
     expect(snap.requests).toBe(3)
     expect(snap.totalNanoAiu).toBe(820000 * 2 + 3200000)
-    expect(snap.perModel["gpt-5.6-luna"]).toEqual({ nanoAiu: 1640000, requests: 2 })
+    expect(snap.perModel["gpt-6-luna"]).toEqual({ nanoAiu: 1640000, requests: 2 })
     expect(snap.perModel["claude-haiku-4.5"]).toEqual({ nanoAiu: 3200000, requests: 1 })
     // Reconstructed per-type nano: 11×20e9/1e6=220000 input, 5×120e9/1e6=600000 output, ×2.
     expect(snap.perTokenType.input).toBe(440000)
     expect(snap.perTokenType.output).toBe(1200000)
     // Raw token counts retained per model per type (11 in + 5 out, ×2).
-    expect(snap.tokensByModel["gpt-5.6-luna"]).toEqual({
+    expect(snap.tokensByModel["gpt-6-luna"]).toEqual({
       input: 22,
       cache_read: 0,
       cache_write: 0,
@@ -103,7 +103,7 @@ describe("aic ledger", () => {
   })
 
   test("extractAndRecordAic reads .copilot_usage and returns nano", () => {
-    const nano = extractAndRecordAic("gpt-5.6-luna", { copilot_usage: USAGE_A, usage: {} })
+    const nano = extractAndRecordAic("gpt-6-luna", { copilot_usage: USAGE_A, usage: {} })
     expect(nano).toBe(820000)
     expect(aicSnapshot().requests).toBe(1)
     expect(extractAndRecordAic("m", { usage: {} })).toBeUndefined()
@@ -126,7 +126,7 @@ describe("aic ledger", () => {
   })
 
   test("extractAndRecordPricedAic records the first priced reading", () => {
-    const nano = extractAndRecordPricedAic("gpt-5.6-luna", { copilot_usage: USAGE_A })
+    const nano = extractAndRecordPricedAic("gpt-6-luna", { copilot_usage: USAGE_A })
     expect(nano).toBe(820000)
     expect(aicSnapshot().requests).toBe(1)
     expect(aicSnapshot().totalNanoAiu).toBe(820000)
@@ -139,13 +139,13 @@ describe("aic ledger", () => {
   })
 
   test("formatAicExitSummary totals always, breakdown only when verbose", () => {
-    recordAic("gpt-5.6-luna", extractCopilotUsage(USAGE_A))
+    recordAic("gpt-6-luna", extractCopilotUsage(USAGE_A))
     const terse = formatAicExitSummary(aicSnapshot())
     expect(terse).toContain("AIC consumed this session:")
     expect(terse).toContain("across 1 request")
-    expect(terse).not.toContain("gpt-5.6-luna")
+    expect(terse).not.toContain("gpt-6-luna")
     const verbose = formatAicExitSummary(aicSnapshot(), { verbose: true })
-    expect(verbose).toContain("gpt-5.6-luna")
+    expect(verbose).toContain("gpt-6-luna")
     expect(verbose).toContain("by type:")
   })
 
@@ -168,7 +168,7 @@ describe("aic ledger", () => {
       JSON.stringify({
         totalNanoAiu: 820000,
         requests: 1,
-        perModel: { "gpt-5.6-luna": { nanoAiu: 820000, requests: 1 } },
+        perModel: { "gpt-6-luna": { nanoAiu: 820000, requests: 1 } },
         perTokenType: { input: 220000 },
       }),
     )

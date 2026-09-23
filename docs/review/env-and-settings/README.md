@@ -21,9 +21,9 @@ The dominant mechanism is a **presence-based guard**: inject the default only wh
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` | yes (`=0`) | yes — teams + SendMessage (needs config mirror) | [feature gates](claude-code-feature-gates.md) |
 | `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` | `1` | yes (`=0`) | yes — vendor-recommended for proxies | [feature gates](claude-code-feature-gates.md) |
 | `CLAUDE_CODE_ENABLE_TASKS` | `1` | yes (`=0`) | yes — task tracking in `-p` | [feature gates](claude-code-feature-gates.md) |
-| `ANTHROPIC_MODEL` | `claude-opus-5[1m]` (enterprise, cap-aware) | `-m <model>` pin | yes — flagship + cap-aware 1M | [model defaults](model-defaults-and-picker-seeds.md) |
+| `ANTHROPIC_MODEL` | `claude-opus-5.5[1m]` (enterprise, cap-aware) | `-m <model>` pin | yes — flagship + cap-aware 1M | [model defaults](model-defaults-and-picker-seeds.md) |
 | `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | yes | yes — newer + cheaper than Sonnet 4.6 | [model defaults](model-defaults-and-picker-seeds.md) |
-| `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` | `claude-sonnet-5` / `claude-sonnet-5` / `claude-opus-5` | yes | yes — cheap tier lands on Sonnet 5 | [model defaults](model-defaults-and-picker-seeds.md) |
+| `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` | `claude-sonnet-5` / `claude-sonnet-5` / `claude-opus-5.5` | yes | yes — cheap tier lands on Sonnet 5 | [model defaults](model-defaults-and-picker-seeds.md) |
 | `MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` | `22_500_000` ms (6h15m) | yes (`GH_ROUTER_MCP_TOOL_TIMEOUT_MS`) | yes — unblocks long MCP/worker calls past #50289 | [mcp timeout](mcp-tool-timeout.md) |
 | `modelPicker` setting | additive, profile-specific live-catalog rows | existing user value wins wholesale | yes — adds non-Claude picker rows, no tier nerf | [picker migration](gateway-model-cache-seed.md) |
 | `CLAUDE_CODE_PLAN_V2_AGENT_COUNT` | `7` | yes | yes — 7 planning agents vs tier-natural 3 | [plan agent count](plan-mode-agent-count.md) |
@@ -54,7 +54,7 @@ runs that refresh regardless and curated rows now come from `modelPicker`.
 
 ### 2. The base model slugs are hardcoded and only fall BACKWARD — slow floor-erosion vs the live catalog
 
-`ANTHROPIC_MODEL`'s base slug (`DEFAULT_CLAUDE_MODEL = "claude-opus-5"`), the Sonnet-5
+`ANTHROPIC_MODEL`'s base slug (`DEFAULT_CLAUDE_MODEL = "claude-opus-5.5"`), the Sonnet-5
 small/fast + tier literals, and the profile picker declarations in
 `model-picker-settings.ts` are all hardcoded constants. The `[1m]` DECORATION is live-catalog-driven (dual-signal detection, self-heals), but
 the base slug CHOICE is not. The implicit-default path walks `DEFAULT_CLAUDE_MODEL_FALLBACKS`

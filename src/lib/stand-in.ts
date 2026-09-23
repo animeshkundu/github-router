@@ -1,7 +1,7 @@
 /**
  * stand_in: 3-lab away-mode advisor.
  *
- * Polls gpt-5.6-sol xhigh (OpenAI) + claude-opus-5 xhigh (Anthropic) +
+ * Polls gpt-6-sol xhigh (OpenAI) + claude-opus-5.5 xhigh (Anthropic) +
  * a third-lab model across two structured voting rounds and returns a
  * ranked-choice verdict. Standard uses the preferred Gemini review model/high;
  * max uses Grok 4.6/high when available, otherwise Gemini 3.8 Flash 1M/high.
@@ -57,8 +57,8 @@ export interface StandInInput {
 }
 
 export type ModelKey =
-  | "gpt-5.6-sol"
-  | "claude-opus-5"
+  | "gpt-6-sol"
+  | "claude-opus-5.5"
   | "gemini-3.1-pro-preview"
   | "gemini-3.8-flash"
   | "grok-4.6"
@@ -133,8 +133,8 @@ interface ModelConfig {
  * Flash/high; neither max branch can select Gemini 3.1 Pro.
  */
 const STAND_IN_MODELS_BASE: ReadonlyArray<ModelConfig> = Object.freeze([
-  { key: "gpt-5.6-sol",            model: "gpt-5.6-sol",            endpoint: "/v1/responses",        effort: "xhigh" },
-  { key: "claude-opus-5",          model: "claude-opus-5",          endpoint: "/v1/messages",         effort: "xhigh" },
+  { key: "gpt-6-sol",            model: "gpt-6-sol",            endpoint: "/v1/responses",        effort: "xhigh" },
+  { key: "claude-opus-5.5",          model: "claude-opus-5.5",          endpoint: "/v1/messages",         effort: "xhigh" },
   { key: "gemini-3.1-pro-preview", model: "gemini-3.1-pro-preview", endpoint: "/v1/chat/completions", effort: "high"  },
 ])
 
@@ -384,12 +384,12 @@ async function callAndParse(
   validIds: ReadonlySet<string>,
   signal: AbortSignal | undefined,
 ): Promise<CallResult> {
-  // The OpenAI slot's `key` is the canonical `gpt-5.6-sol`, but the actual
+  // The OpenAI slot's `key` is the canonical `gpt-6-sol`, but the actual
   // dispatched model falls back to `gpt-5.5` when sol isn't in the catalog
   // (rollout lag). Other slots dispatch their fixed model. The `key` stays
   // stable regardless so the `votes` record shape is deterministic.
   const model =
-    cfg.key === "gpt-5.6-sol" ? resolveOpenAiFrontier() ?? cfg.model : cfg.model
+    cfg.key === "gpt-6-sol" ? resolveOpenAiFrontier() ?? cfg.model : cfg.model
   let raw: string
   try {
     raw = await dispatchModelCall({

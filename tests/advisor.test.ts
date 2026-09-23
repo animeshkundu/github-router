@@ -55,10 +55,10 @@ beforeEach(() => {
     data: [
       makeClaudeModel("claude-opus-4.7"),
       makeClaudeModel("claude-haiku-4.5"),
-      // gpt-5.6-sol is the cross-lab advisor default
+      // gpt-6-sol is the cross-lab advisor default
       {
-        id: "gpt-5.6-sol",
-        name: "gpt-5.6-sol",
+        id: "gpt-6-sol",
+        name: "gpt-6-sol",
         object: "model",
         preview: false,
         vendor: "openai",
@@ -85,8 +85,8 @@ afterEach(() => {
 })
 
 describe("ADVISOR defaults (Phase I)", () => {
-  test("default model is gpt-5.6-sol (cross-lab)", () => {
-    expect(ADVISOR_DEFAULT_MODEL).toBe("gpt-5.6-sol")
+  test("default model is gpt-6-sol (cross-lab)", () => {
+    expect(ADVISOR_DEFAULT_MODEL).toBe("gpt-6-sol")
   })
   test("standard default effort remains xhigh", () => {
     expect(ADVISOR_DEFAULT_EFFORT).toBe("xhigh")
@@ -146,7 +146,7 @@ describe("injectAdvisorTool (Phase I)", () => {
 
   test("fast policy replaces a replay-injected standard description", () => {
     const body = JSON.stringify({
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       messages: [],
       tools: [
         {
@@ -406,12 +406,12 @@ describe("ADVISOR streaming integration (Phase I)", () => {
   test("when model calls __anthropic_advisor: translates to server_tool_use{advisor}, runs advisor, emits advisor_tool_result, continues", async () => {
     // First Copilot call (/v1/messages stream): returns text + tool_use{__anthropic_advisor}.
     // Second Copilot call (continuation, /v1/messages stream): returns more text + message_stop.
-    // Advisor call (gpt-5.6-sol via /responses, non-stream): returns advisor's text.
+    // Advisor call (gpt-6-sol via /responses, non-stream): returns advisor's text.
     let copilotMessagesCallCount = 0
     let advisorResponsesCallCount = 0
     let continuationRequestBody: string | undefined
     const fetchMock = mock((url: string, init?: { body?: string }) => {
-      // ADVISOR call: gpt-5.6-sol → /responses with reasoning.effort=xhigh
+      // ADVISOR call: gpt-6-sol → /responses with reasoning.effort=xhigh
       if (url.includes("/responses")) {
         const parsedBody = JSON.parse((init?.body ?? "{}") as string) as {
           model?: string
@@ -419,7 +419,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
           stream?: boolean
         }
         // Standard Advisor keeps the historical Sol/xhigh request.
-        expect(parsedBody.model).toBe("gpt-5.6-sol")
+        expect(parsedBody.model).toBe("gpt-6-sol")
         expect(parsedBody.reasoning?.effort).toBe("xhigh")
         expect(parsedBody.stream).toBe(false)
         advisorResponsesCallCount++
@@ -647,7 +647,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
         {
           batch_size: 1_000_000,
           cost_per_batch: 20_000_000_000,
-          model: "gpt-5.6-sol",
+          model: "gpt-6-sol",
           token_count: 50,
           token_type: "input",
         },
@@ -820,7 +820,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
         nanoAiu: 3_000_000,
         requests: 2,
       })
-      expect(snap.perModel["gpt-5.6-sol"]).toEqual({
+      expect(snap.perModel["gpt-6-sol"]).toEqual({
         nanoAiu: 9_000_000,
         requests: 1,
       })
@@ -1532,15 +1532,15 @@ describe("ADVISOR streaming integration (Phase I)", () => {
           },
         },
         {
-          id: "claude-opus-5",
-          name: "claude-opus-5",
+          id: "claude-opus-5.5",
+          name: "claude-opus-5.5",
           object: "model",
           preview: false,
           vendor: "anthropic",
           version: "1",
           model_picker_enabled: true,
           capabilities: {
-            family: "claude-opus-5",
+            family: "claude-opus-5.5",
             limits: {
               max_prompt_tokens: 936_000,
               max_output_tokens: 64_000,
@@ -1580,7 +1580,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
         }
         // The advisor's own call is the non-streaming one addressed to Opus;
         // the lead's turns are streaming and addressed to Sonnet.
-        if (parsed.model === "claude-opus-5" && parsed.stream === false) {
+        if (parsed.model === "claude-opus-5.5" && parsed.stream === false) {
           advisorBody = rawInit
           return new Response(
             JSON.stringify({
@@ -1652,7 +1652,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
       output_config?: { effort?: string }
       system: string
     }
-    expect(advisor.model).toBe("claude-opus-5")
+    expect(advisor.model).toBe("claude-opus-5.5")
     // The NON-streaming cap (16000), not `max_output_tokens` (64000). Copilot
     // accepts either — probe `advisor_claude_streaming_cap_accepted` measured
     // that — so this pins a deliberate choice to stay inside the advertised

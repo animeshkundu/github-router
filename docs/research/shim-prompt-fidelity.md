@@ -66,20 +66,20 @@ measurements carried forward only as conservative baselines, not newly run 3.8 r
 
 | model | task | ON first tool / ms | OFF first tool / ms |
 |---|---|---:|---:|
-| `gpt-5.6-sol` | read file | `Read` / 2300 | `Read` / 1656 |
-| `gpt-5.6-sol` | search symbol | `Grep` / 2143 | `Grep` / 3227 |
-| `gpt-5.6-sol` | replace text | `Edit` / 3124 | `Edit` / 2327 |
-| `gpt-5.6-sol` | append line | `Read` / 2494 | `Bash` file-mutation / 5274 |
-| `gpt-5.6-sol` | create file | `Write` / 1876 | `Write` / 2470 |
-| `gpt-5.6-sol` | count lines | `Bash` shell-read / 4248 | `Bash` shell-read / 2204 |
-| `gpt-5.6-sol` | legitimate Bash control | `Bash` legitimate-control / 10753 | `Bash` legitimate-control / 6721 |
-| `gpt-5.6-luna` | read file | `Read` / 5152 | `Read` / 4337 |
-| `gpt-5.6-luna` | search symbol | `Grep` / 7956 | `Grep` / 3805 |
-| `gpt-5.6-luna` | replace text | `Edit` / 4418 | `Edit` / 4955 |
-| `gpt-5.6-luna` | append line | `—` / 6060 | `Bash` invalid / 5866 |
-| `gpt-5.6-luna` | create file | `—` / 6633 | `Write` / 11953 |
-| `gpt-5.6-luna` | count lines | `—` / 5861 | `Read` / 4754 |
-| `gpt-5.6-luna` | legitimate Bash control | `—` / 6210 | `—` / 7051 |
+| `gpt-6-sol` | read file | `Read` / 2300 | `Read` / 1656 |
+| `gpt-6-sol` | search symbol | `Grep` / 2143 | `Grep` / 3227 |
+| `gpt-6-sol` | replace text | `Edit` / 3124 | `Edit` / 2327 |
+| `gpt-6-sol` | append line | `Read` / 2494 | `Bash` file-mutation / 5274 |
+| `gpt-6-sol` | create file | `Write` / 1876 | `Write` / 2470 |
+| `gpt-6-sol` | count lines | `Bash` shell-read / 4248 | `Bash` shell-read / 2204 |
+| `gpt-6-sol` | legitimate Bash control | `Bash` legitimate-control / 10753 | `Bash` legitimate-control / 6721 |
+| `gpt-6-luna` | read file | `Read` / 5152 | `Read` / 4337 |
+| `gpt-6-luna` | search symbol | `Grep` / 7956 | `Grep` / 3805 |
+| `gpt-6-luna` | replace text | `Edit` / 4418 | `Edit` / 4955 |
+| `gpt-6-luna` | append line | `—` / 6060 | `Bash` invalid / 5866 |
+| `gpt-6-luna` | create file | `—` / 6633 | `Write` / 11953 |
+| `gpt-6-luna` | count lines | `—` / 5861 | `Read` / 4754 |
+| `gpt-6-luna` | legitimate Bash control | `—` / 6210 | `—` / 7051 |
 | `gemini-3.8-flash` | read file | `Read` / 3345 | `Read` / 2940 |
 | `gemini-3.8-flash` | search symbol | `Grep` / 4078 | `Grep` / 3892 |
 | `gemini-3.8-flash` | replace text | `Edit` / 7985 | `Edit` / 5365 |
@@ -99,8 +99,8 @@ measurements carried forward only as conservative baselines, not newly run 3.8 r
 
 | model | ON valid / invalid / missing | OFF valid / invalid / missing | ON preferred | OFF preferred | ON unsafe mutation | OFF unsafe mutation |
 |---|---:|---:|---:|---:|---:|---:|
-| `gpt-5.6-sol` | 7 / 0 / 0 | 7 / 0 / 0 | 5/7 | 4/7 | 0/3 | 1/3 |
-| `gpt-5.6-luna` | 3 / 0 / 4 | 5 / 1 / 1 | 2/3 | 4/5 | 0/3 | 0/3 |
+| `gpt-6-sol` | 7 / 0 / 0 | 7 / 0 / 0 | 5/7 | 4/7 | 0/3 | 1/3 |
+| `gpt-6-luna` | 3 / 0 / 4 | 5 / 1 / 1 | 2/3 | 4/5 | 0/3 | 0/3 |
 | `gemini-3.8-flash` | 7 / 0 / 0 | 6 / 0 / 1 | 5/7 | 4/6 | 0/3 | 0/3 |
 | `grok-4.6` | 7 / 0 / 0 | 7 / 0 / 0 | 5/7 | 4/7 | 0/3 | 1/3 |
 | **aggregate** | **24 / 0 / 4** | **25 / 1 / 2** | **17/24** | **16/25** | **0/12** | **2/12** |
@@ -155,7 +155,7 @@ cells, steering on or off.
 
 Round 2, first tool called:
 
-| task | gpt-5.6-sol ON | gpt-5.6-sol OFF | gemini-3.1-pro ON | gemini-3.1-pro OFF |
+| task | gpt-6-sol ON | gpt-6-sol OFF | gemini-3.1-pro ON | gemini-3.1-pro OFF |
 |---|---|---|---|---|
 | replace a word in a file | `Read` | `Read` | `Read` | `Read` |
 | **append a line to a file** | **`Read`** | **`Bash printf … >>`** | **`Read`** | **`Bash echo … >>`** |

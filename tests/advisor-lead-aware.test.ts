@@ -25,7 +25,7 @@ import {
  * on every lead).
  *
  * Every catalog read is stubbed. A branch that depended on the live catalog
- * carrying `claude-opus-5` would be a flake vector, and this repo does not
+ * carrying `claude-opus-5.5` would be a flake vector, and this repo does not
  * tolerate one.
  */
 
@@ -94,7 +94,7 @@ function fullCatalog() {
     ]),
     model("claude-haiku-4.5", "anthropic", OPUS_EFFORTS),
     model(ADVISOR_DEFAULT_MODEL, "openai", SOL_EFFORTS, {}, ["/responses"]),
-    model("gpt-5.6-luna", "openai", SOL_EFFORTS, {}, ["/responses"]),
+    model("gpt-6-luna", "openai", SOL_EFFORTS, {}, ["/responses"]),
     model("grok-4.6", "xai", SOL_EFFORTS, {}, ["/responses"]),
     model(ADVISOR_FAST_PROFILE_MODEL, "google", GEMINI_EFFORTS, {}, [
       "/chat/completions",
@@ -120,8 +120,8 @@ describe("resolveAdvisorModel — opus lead must not move", () => {
   // point is that a future refactor introducing a frontier-model walk here
   // (which could yield gpt-5.5) fails this test instead of silently shipping.
   for (const lead of [
-    "claude-opus-5",
-    "claude-opus-5[1m]",
+    "claude-opus-5.5",
+    "claude-opus-5.5[1m]",
     "claude-opus-4.8",
     "claude-opus-4-8",
   ]) {
@@ -172,7 +172,7 @@ describe("resolveAdvisorModel — budget lead escalates", () => {
   })
 
   test("a non-Claude lead is not a budget lead", () => {
-    expect(resolveAdvisorModel("gpt-5.6-sol").escalated).toBe(false)
+    expect(resolveAdvisorModel("gpt-6-sol").escalated).toBe(false)
     expect(resolveAdvisorModel("gemini-3.1-pro-preview").escalated).toBe(false)
   })
 })
@@ -189,7 +189,7 @@ describe("resolveAdvisorModel — operator pin", () => {
 
   test("wins on an opus lead", () => {
     process.env.GH_ROUTER_ADVISOR_MODEL = "gemini-3.1-pro-preview"
-    expect(resolveAdvisorModel("claude-opus-5").model).toBe(
+    expect(resolveAdvisorModel("claude-opus-5.5").model).toBe(
       "gemini-3.1-pro-preview",
     )
   })
@@ -198,7 +198,7 @@ describe("resolveAdvisorModel — operator pin", () => {
     // The system-prompt clause keys on `escalated`, so a pin that happens to
     // name opus on an opus lead must not inject "your caller is lighter".
     process.env.GH_ROUTER_ADVISOR_MODEL = ADVISOR_ESCALATION_MODEL
-    expect(resolveAdvisorModel("claude-opus-5")).toEqual({
+    expect(resolveAdvisorModel("claude-opus-5.5")).toEqual({
       model: ADVISOR_ESCALATION_MODEL,
       escalated: false,
       fastProfile: false,
@@ -207,7 +207,7 @@ describe("resolveAdvisorModel — operator pin", () => {
 
   test("a whitespace-only pin is ignored", () => {
     process.env.GH_ROUTER_ADVISOR_MODEL = "   "
-    expect(resolveAdvisorModel("claude-opus-5").model).toBe(
+    expect(resolveAdvisorModel("claude-opus-5.5").model).toBe(
       ADVISOR_DEFAULT_MODEL,
     )
   })
@@ -215,13 +215,13 @@ describe("resolveAdvisorModel — operator pin", () => {
 
 describe("resolveAdvisorModel — authenticated fast profile", () => {
   for (const lead of [
-    "gpt-5.6-luna",
-    "gpt-5.6-luna[1m]",
-    "openai/gpt-5.6-luna",
-    "gpt-5.6-sol",
+    "gpt-6-luna",
+    "gpt-6-luna[1m]",
+    "openai/gpt-6-luna",
+    "gpt-6-sol",
     "grok-4.6",
     "gemini-3.8-flash",
-    "claude-opus-5",
+    "claude-opus-5.5",
   ]) {
     test(`${lead} picks the fast-profile Sol advisor`, () => {
       expect(resolveAdvisorModel(lead, true)).toEqual({
@@ -262,7 +262,7 @@ describe("resolveAdvisorModel — authenticated fast profile", () => {
   })
 
   test("direct Luna stays standard without authenticated fast launch policy", () => {
-    expect(resolveAdvisorModel("gpt-5.6-luna")).toEqual({
+    expect(resolveAdvisorModel("gpt-6-luna")).toEqual({
       model: ADVISOR_DEFAULT_MODEL,
       escalated: false,
       fastProfile: false,
@@ -349,7 +349,7 @@ describe("resolveAdvisorEffort — standard floor and fast fixed effort", () => 
 
 describe("resolveAdvisorEffort — clamping against the ADVISOR's ladder", () => {
   test("a ladder without the picked tier clamps down", () => {
-    // gpt-5.6-sol advertises no `max`, so a `max` pick must not be forwarded.
+    // gpt-6-sol advertises no `max`, so a `max` pick must not be forwarded.
     const body = JSON.stringify({ output_config: { effort: "max" } })
     expect(resolveAdvisorEffort(body, ADVISOR_DEFAULT_MODEL)).toBe("xhigh")
     // ...while the escalation model does advertise it.
@@ -387,11 +387,11 @@ describe("resolveAdvisorEffort — clamping against the ADVISOR's ladder", () =>
 describe("review regressions", () => {
   test("a namespaced operator pin is normalized to the catalog id AND routed to /responses", () => {
     // Found by SMOKE TEST, after two unit-test-only fixes had already "passed".
-    // Choosing the transport correctly was not sufficient: `openai/gpt-5.6-sol`
+    // Choosing the transport correctly was not sufficient: `openai/gpt-6-sol`
     // still went upstream verbatim and Copilot answered 400 model_not_supported,
     // so the advisor degraded to its "[Advisor unavailable: ...]" fallback while
     // every assertion here stayed green. Assert BOTH halves.
-    process.env.GH_ROUTER_ADVISOR_MODEL = "openai/gpt-5.6-sol"
+    process.env.GH_ROUTER_ADVISOR_MODEL = "openai/gpt-6-sol"
     const choice = resolveAdvisorModel("claude-sonnet-5")
     expect(choice).toEqual({
       model: ADVISOR_DEFAULT_MODEL,
@@ -439,12 +439,12 @@ describe("review regressions", () => {
     expect(resolveLeadSlugArg("FAST")).toBe(FAST_LEAD_MODEL)
     expect(resolveLeadSlugArg("")).not.toBe("")
     expect(resolveLeadSlugArg("   ")).not.toBe("   ")
-    expect(resolveLeadSlugArg("  claude-opus-5  ")).toBe("claude-opus-5")
+    expect(resolveLeadSlugArg("  claude-opus-5.5  ")).toBe("claude-opus-5.5")
   })
 
   test("isBudgetClaudeLead's contract: it takes a resolved slug, not a raw -m arg", () => {
     // "fast" itself is not a Claude slug, so it's false either way. Resolving
-    // it now yields `gpt-5.6-luna` (the fast Luna profile, not a Sonnet
+    // it now yields `gpt-6-luna` (the fast Luna profile, not a Sonnet
     // budget lead), which is ALSO not a Claude model — isBudgetClaudeLead
     // stays Claude-family-only and is unrelated to the fast profile.
     expect(isBudgetClaudeLead("fast")).toBe(false)

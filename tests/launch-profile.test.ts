@@ -95,8 +95,8 @@ const model = (id: string, opts: {
 const fullCatalog = {
   object: "list" as const,
   data: [
-    model("gpt-5.6-luna", { context: 1_050_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
-    model("gpt-5.6-sol", { context: 1_050_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
+    model("gpt-6-luna", { context: 1_050_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
+    model("gpt-6-sol", { context: 1_050_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
     model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["medium"], endpoints: ["/responses"] }),
     model("gemini-3.8-flash", { context: 1_000_000, efforts: ["medium", "high"], endpoints: ["/chat/completions"] }),
     {
@@ -108,9 +108,9 @@ const fullCatalog = {
       },
     },
     {
-      ...model("claude-opus-5", { context: 1_000_000, prompt: 872_000, efforts: ["high", "max"], endpoints: ["/v1/messages"] }),
+      ...model("claude-opus-5.5", { context: 1_000_000, prompt: 872_000, efforts: ["high", "max"], endpoints: ["/v1/messages"] }),
       capabilities: {
-        ...model("claude-opus-5").capabilities,
+        ...model("claude-opus-5.5").capabilities,
         limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 },
         supports: { tool_calls: true, reasoning_effort: ["high", "max"], adaptive_thinking: true },
       },
@@ -131,7 +131,7 @@ describe("launch profile selection", () => {
     expect(resolveLaunchProfile(" FAST ")).toBe("fast")
     expect(resolveLaunchProfile(undefined)).toBe("standard")
     expect(resolveLaunchProfile("")).toBe("standard")
-    expect(resolveLaunchProfile("gpt-5.6-luna")).toBe("standard")
+    expect(resolveLaunchProfile("gpt-6-luna")).toBe("standard")
     expect(resolveLaunchProfile("fast-mode")).toBe("standard")
   })
 
@@ -158,14 +158,14 @@ describe("Luna aliases", () => {
     expect(resolveModelAlias(LUNA_SONNET_ALIAS_ID)?.absentEffortDefault).toBe("xhigh")
     expect(resolveModelAlias(LUNA_HAIKU_ALIAS_ID)?.absentEffortDefault).toBe("high")
     expect(canonicalizeAliasModel(`${LUNA_SONNET_ALIAS_ID}[1m]`)).toBe(`${LUNA_REAL_MODEL_ID}[1m]`)
-    expect(canonicalizeAliasModel("gpt-5.6-sol")).toBe("gpt-5.6-sol")
+    expect(canonicalizeAliasModel("gpt-6-sol")).toBe("gpt-6-sol")
   })
 
   test("effort precedence is explicit then thinking then alias default", () => {
     expect(resolveEffortWithAliasDefault({ aliasId: LUNA_DRIVER_ALIAS_ID })).toBe("max")
     expect(resolveEffortWithAliasDefault({ aliasId: LUNA_DRIVER_ALIAS_ID, thinkingBucketedEffort: "medium" })).toBe("medium")
     expect(resolveEffortWithAliasDefault({ aliasId: LUNA_DRIVER_ALIAS_ID, thinkingBucketedEffort: "medium", explicitEffort: "low" })).toBe("low")
-    expect(resolveEffortWithAliasDefault({ aliasId: "gpt-5.6-sol" })).toBeUndefined()
+    expect(resolveEffortWithAliasDefault({ aliasId: "gpt-6-sol" })).toBeUndefined()
   })
 })
 
@@ -245,7 +245,7 @@ describe("fast startup prerequisites", () => {
     expect(result.ok).toBe(false)
     expect(result.missing).toHaveLength(5)
     const message = formatFastPrerequisiteFailure(result.missing)
-    expect(message).toContain("gpt-5.6-luna")
+    expect(message).toContain("gpt-6-luna")
     expect(message).toContain("claude-sonnet-5")
     expect(message).toContain("gemini-3.8-flash")
     expect(message).toContain("github-router claude")
@@ -260,8 +260,8 @@ function cheapCatalog(): typeof fullCatalog {
       model("gemini-3.8-flash", { context: 1_000_000, efforts: ["medium", "high"], endpoints: ["/chat/completions"] }),
       // Subagents run at the 200K default window, not the fast 1M per-role
       // windows — the whole cheap cost lever.
-      model("gpt-5.6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
-      model("gpt-5.6-sol", { context: 500_000, efforts: ["high"], endpoints: ["/responses"] }),
+      model("gpt-6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
+      model("gpt-6-sol", { context: 500_000, efforts: ["high"], endpoints: ["/responses"] }),
       // Reviewer shares the Luna entry above (Luna/max at the 200K default
       // window), so no separate reviewer row is needed here.
       model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["low", "medium"], endpoints: ["/responses"] }),
@@ -315,19 +315,19 @@ describe("cheap-family startup prerequisites", () => {
   test("rejects a subagent whose context window falls below the 200K floor", () => {
     const below = cheapCatalog()
     below.data = below.data.map((entry) =>
-      entry.id === "gpt-5.6-sol"
+      entry.id === "gpt-6-sol"
         ? { ...entry, capabilities: { ...entry.capabilities, limits: { ...entry.capabilities.limits, max_context_window_tokens: 150_000 } } }
         : entry,
     ) as typeof fullCatalog["data"]
     const cheapResult = validateCheapProfilePrerequisites(below as never)
     expect(cheapResult.ok).toBe(false)
     expect(cheapResult.missing).toEqual([
-      "gpt-5.6-sol: advertised context window is below the 200K subagent floor",
+      "gpt-6-sol: advertised context window is below the 200K subagent floor",
     ])
     const cheap1mResult = validateCheap1mProfilePrerequisites(below as never)
     expect(cheap1mResult.ok).toBe(false)
     expect(cheap1mResult.missing).toEqual([
-      "gpt-5.6-sol: advertised context window is below the 200K subagent floor",
+      "gpt-6-sol: advertised context window is below the 200K subagent floor",
     ])
   })
 
@@ -359,31 +359,31 @@ describe("cheap-family startup prerequisites", () => {
         expected: `gemini-3.8-flash: does not advertise a supported chat-completions endpoint`,
       },
       {
-        id: "gpt-5.6-luna",
+        id: "gpt-6-luna",
         mutate: (entry) => ({ ...entry, capabilities: { ...entry.capabilities, supports: { ...entry.capabilities.supports, reasoning_effort: ["max"] } } }),
-        expected: `gpt-5.6-luna: does not advertise both "high" and "max" reasoning effort`,
+        expected: `gpt-6-luna: does not advertise both "high" and "max" reasoning effort`,
       },
       {
-        id: "gpt-5.6-sol",
+        id: "gpt-6-sol",
         mutate: (entry) => ({ ...entry, supported_endpoints: ["/v1/messages"] }),
-        expected: `gpt-5.6-sol: does not advertise a supported Responses endpoint`,
+        expected: `gpt-6-sol: does not advertise a supported Responses endpoint`,
       },
       // Reviewer shares Luna's catalog entry with Explore, so a Luna
       // regression double-reports: once for Explore, once for the reviewer.
       {
-        id: "gpt-5.6-luna",
+        id: "gpt-6-luna",
         mutate: (entry) => ({ ...entry, capabilities: { ...entry.capabilities, supports: { ...entry.capabilities.supports, reasoning_effort: ["high"] } } }),
         expected: [
-          `gpt-5.6-luna: does not advertise both "high" and "max" reasoning effort`,
-          `gpt-5.6-luna: does not advertise a "max" reasoning effort`,
+          `gpt-6-luna: does not advertise both "high" and "max" reasoning effort`,
+          `gpt-6-luna: does not advertise a "max" reasoning effort`,
         ],
       },
       {
-        id: "gpt-5.6-luna",
+        id: "gpt-6-luna",
         mutate: (entry) => ({ ...entry, supported_endpoints: ["/v1/messages"] }),
         expected: [
-          "gpt-5.6-luna: does not advertise a supported Responses endpoint",
-          "gpt-5.6-luna: does not advertise a supported Responses endpoint",
+          "gpt-6-luna: does not advertise a supported Responses endpoint",
+          "gpt-6-luna: does not advertise a supported Responses endpoint",
         ],
       },
     ]
@@ -404,10 +404,10 @@ describe("cheap-family startup prerequisites", () => {
     expect(result.missing).toHaveLength(5)
     const cheapMessage = formatCheapPrerequisiteFailure(result.missing)
     expect(cheapMessage).toContain("gemini-3.8-flash")
-    expect(cheapMessage).toContain("gpt-5.6-luna")
-    expect(cheapMessage).toContain("gpt-5.6-sol")
+    expect(cheapMessage).toContain("gpt-6-luna")
+    expect(cheapMessage).toContain("gpt-6-sol")
     // Reviewer shares Luna's entry, so Luna is reported twice on an empty catalog.
-    expect(result.missing.filter((m) => m.startsWith("gpt-5.6-luna:"))).toHaveLength(2)
+    expect(result.missing.filter((m) => m.startsWith("gpt-6-luna:"))).toHaveLength(2)
     expect(cheapMessage).toContain("grok-4.6")
     expect(cheapMessage).toContain("github-router claude -m cheap")
 
@@ -456,8 +456,8 @@ describe("balanced startup prerequisites", () => {
   const balancedCatalog = () => ({
     object: "list" as const,
     data: [
-      model("gpt-5.6-sol", { context: 500_000, prompt: 372_000, efforts: ["high"], endpoints: ["/responses"] }),
-      model("gpt-5.6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
+      model("gpt-6-sol", { context: 500_000, prompt: 372_000, efforts: ["high"], endpoints: ["/responses"] }),
+      model("gpt-6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
       model("gemini-3.8-flash", { context: 500_000, efforts: ["medium", "high"], endpoints: ["/chat/completions"] }),
       model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["low", "medium"], endpoints: ["/responses"] }),
     ],
@@ -472,8 +472,8 @@ describe("balanced startup prerequisites", () => {
     expect(result.ok).toBe(false)
     expect(result.missing).toHaveLength(5)
     const message = formatBalancedPrerequisiteFailure(result.missing)
-    expect(message).toContain("gpt-5.6-sol")
-    expect(message).toContain("gpt-5.6-luna")
+    expect(message).toContain("gpt-6-sol")
+    expect(message).toContain("gpt-6-luna")
     expect(message).toContain("gemini-3.8-flash")
     expect(message).toContain("grok-4.6")
     expect(message).toContain("github-router claude -m balanced")
@@ -502,7 +502,7 @@ describe("messages launch identity", () => {
         "content-type": "application/json",
         [LAUNCH_SECRET_HEADER]: "x".repeat(64),
       },
-      body: JSON.stringify({ model: "gpt-5.6-luna", max_tokens: 16, messages: [{ role: "user", content: "hi" }] }),
+      body: JSON.stringify({ model: "gpt-6-luna", max_tokens: 16, messages: [{ role: "user", content: "hi" }] }),
     })
     expect(response.status).toBe(403)
     expect(response.status).not.toBe(401)

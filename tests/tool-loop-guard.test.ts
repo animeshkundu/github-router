@@ -67,7 +67,7 @@ function loopBody(
       ),
     )
   }
-  return { model: "claude-opus-5", messages }
+  return { model: "claude-opus-5.5", messages }
 }
 
 describe("tool loop guard — the incident", () => {

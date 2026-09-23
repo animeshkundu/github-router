@@ -136,15 +136,15 @@ declare -a PROBE_REGISTRY=(
   "smallfast_sonnet_baseline|claude-emits|claude-sonnet-5 (ANTHROPIC_SMALL_FAST_MODEL / DEFAULT_SONNET / DEFAULT_HAIKU default) resolves and returns 200 from /v1/messages"
 
   # ===== Advisor escalation to Opus (budget-lead path) =====
-  # On a lighter Claude lead the advisor escalates to claude-opus-5 and dispatches
+  # On a lighter Claude lead the advisor escalates to claude-opus-5.5 and dispatches
   # on /v1/messages instead of /responses (runAdvisor in src/services/advisor/advisor.ts).
-  # That branch was unreachable while the advisor was always gpt-5.6-sol, so the
+  # That branch was unreachable while the advisor was always gpt-6-sol, so the
   # exact body it now emits — non-streaming + thinking:{type:"adaptive"} +
   # output_config.effort + the model's max_non_streaming_output_tokens — has no
   # prior production evidence behind it. These two probes are that evidence.
-  "advisor_claude_adaptive_thinking|claude-emits|claude-opus-5 on /v1/messages accepts the escalated advisor body (stream:false + thinking:{type:'adaptive'} + output_config.effort) and returns 200"
-  "advisor_claude_nonstreaming_cap|claude-emits|claude-opus-5 on /v1/messages accepts max_tokens at the advertised max_non_streaming_output_tokens (16000) when stream:false"
-  "advisor_claude_streaming_cap_accepted|exploratory|claude-opus-5 on /v1/messages ACCEPTS max_tokens at the streaming ceiling (64000) even when stream:false — max_non_streaming_output_tokens is advertised but not enforced; the advisor stays inside it by choice, not necessity"
+  "advisor_claude_adaptive_thinking|claude-emits|claude-opus-5.5 on /v1/messages accepts the escalated advisor body (stream:false + thinking:{type:'adaptive'} + output_config.effort) and returns 200"
+  "advisor_claude_nonstreaming_cap|claude-emits|claude-opus-5.5 on /v1/messages accepts max_tokens at the advertised max_non_streaming_output_tokens (16000) when stream:false"
+  "advisor_claude_streaming_cap_accepted|exploratory|claude-opus-5.5 on /v1/messages ACCEPTS max_tokens at the streaming ceiling (64000) even when stream:false — max_non_streaming_output_tokens is advertised but not enforced; the advisor stays inside it by choice, not necessity"
   "fast_advisor_all_leads_policy|proxy-internal|authenticated fast Advisor route matrix: fixed client identity + Gemini Chat/high nested dispatch and same-lead continuation on every lead"
   "fast_advisor_beta_without_tools|proxy-internal|fast Advisor beta on tool-less compaction-style turns passes through without injection or Gemini resolution"
   "fast_advisor_endpoint_gate|proxy-internal|fixed fast Advisor fails closed when Gemini Chat is unavailable and ignores conflicting operator pins"
@@ -186,7 +186,7 @@ declare -a PROBE_REGISTRY=(
   # rejected. See docs/peer-mcp-design.md "Worker tools".
   "worker_gemini_tools_reasoning|exploratory|gemini-3.5-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (load-bearing contract for worker_explore/worker_review MCP tools + the worker-tools dual gate)"
   "worker_gpt5_responses_tools_reasoning|exploratory|gpt-5.5 on /v1/responses accepts function tools[] + reasoning:{effort:'xhigh'} (retained fallback for the worker_implement MCP tool)"
-  "worker_gpt56sol_responses_tools_reasoning|exploratory|gpt-5.6-sol on /v1/responses accepts function tools[] + reasoning:{effort:'xhigh'} (load-bearing contract for the worker_implement/implement DEFAULT model)"
+  "worker_gpt56sol_responses_tools_reasoning|exploratory|gpt-6-sol on /v1/responses accepts function tools[] + reasoning:{effort:'xhigh'} (load-bearing contract for the worker_implement/implement DEFAULT model)"
 
   # ===== Non-Claude /v1/messages translation shim (src/lib/anthropic-translate/) =====
   # These probes exercise the shim END-TO-END through the proxy: an Anthropic
@@ -222,7 +222,7 @@ declare -a PROBE_REGISTRY=(
   "shim_max_tokens_clamp_gpt55|exploratory|max_tokens:1 on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message (proves min-output clamp)"
   "shim_image_gpt55|exploratory|base64 RGB PNG image block on /v1/messages → gpt-5.5 /responses shim: 200 + well-formed Anthropic message"
   "shim_image_gemini35flash|exploratory|base64 RGB PNG image block on /v1/messages → gemini-3.5-flash /chat shim: 200 + well-formed Anthropic message"
-  "passthrough_image_claude|exploratory|base64 RGB PNG image block on /v1/messages → claude-opus-5 NATIVE passthrough (no copilot-vision-request header): 200 + well-formed Anthropic message"
+  "passthrough_image_claude|exploratory|base64 RGB PNG image block on /v1/messages → claude-opus-5.5 NATIVE passthrough (no copilot-vision-request header): 200 + well-formed Anthropic message"
   "copilot_usage_reported|exploratory|/v1/messages non-stream (claude-haiku-4-5) returns top-level copilot_usage with total_nano_aiu beside usage (verified live 2026-09-14; feeds the AIC ledger/status line/exit summary)"  "shim_image_tool_result_gpt55|exploratory|image inside a tool_result on /v1/messages → gpt-5.5 /responses shim: 200 (the shape a subagent reading a screenshot actually produces)"
   "shim_image_tool_result_gemini35flash|exploratory|image inside a tool_result on /v1/messages → gemini-3.5-flash /chat shim: 200 (same shape, chat egress)"
   "shim_image_tool_result_multi_gpt55|exploratory|parallel image tool_results in separate user messages on /v1/messages → gpt-5.5 /responses shim: 200 (outputs stay contiguous, images flush once after)"
@@ -241,17 +241,17 @@ declare -a PROBE_REGISTRY=(
   # profile surfaces and in-session dispatch ACLs are separate local policy
   # layers, but the model+endpoint+effort shapes below are ordinary
   # Copilot passthrough/shim contracts and are testable against today's proxy.
-  "fast_luna_responses_reasoning_high|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's Explore assignment)"
-  "fast_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the fast profile's general-purpose assignment; 'max' is the top of Luna's none..max ladder)"
-  "fast_sol_responses_reasoning_high|exploratory|gpt-5.6-sol on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's Plan assignment)"
-  "fast_opus5_messages_reasoning_high|exploratory|claude-opus-5 on /v1/messages accepts tools[] + adaptive thinking + high effort (the fast profile's Oracle assignment)"
+  "fast_luna_responses_reasoning_high|exploratory|gpt-6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's Explore assignment)"
+  "fast_luna_responses_reasoning_max|exploratory|gpt-6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the fast profile's general-purpose assignment; 'max' is the top of Luna's none..max ladder)"
+  "fast_sol_responses_reasoning_high|exploratory|gpt-6-sol on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the fast profile's Plan assignment)"
+  "fast_opus5_messages_reasoning_high|exploratory|claude-opus-5.5 on /v1/messages accepts tools[] + adaptive thinking + high effort (the fast profile's Oracle assignment)"
   "fast_gemini38flash_messages_reasoning_high|exploratory|gemini-3.8-flash on /v1/messages translation shim with high reasoning effort (the fast profile's native implementer path)"
   "fast_gemini38flash_messages_tool_use|exploratory|gemini-3.8-flash on /v1/messages translation shim accepts a tool-use request (the fast profile's implementer tool path)"
   "fast_gemini38flash_chat_reasoning_high|exploratory|gemini-3.8-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'high' (the fast profile's Advisor assignment and native implementer shape)"
   "fast_gemini38flash_chat_reasoning_medium|exploratory|gemini-3.8-flash on /v1/chat/completions accepts tools[] + reasoning_effort:'medium' (historical: former fast native critic assignment)"
   "fast_grok46_responses_reasoning_medium|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'medium'} (the fast profile's reviewer assignment)"
   "max_grok46_responses_reasoning_high|exploratory|grok-4.6 on /v1/responses accepts function tools[] + reasoning:{effort:'high'} (the max profile's reviewer assignment)"
-  "max_luna_responses_reasoning_max|exploratory|gpt-5.6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the max profile's reviewer fallback assignment)"
+  "max_luna_responses_reasoning_max|exploratory|gpt-6-luna on /v1/responses accepts function tools[] + reasoning:{effort:'max'} (the max profile's reviewer fallback assignment)"
   "fast_astra_responses_reasoning_high|exploratory|gpt-6-astra on /v1/responses accepts reasoning:{effort:'high'} (the fast profile's terminal Astra escalation assignment)"
   "shim_grok46_messages|exploratory|grok-4.6 on /v1/messages (→ /responses shim, generic supported_endpoints routing — no shim code change needed): 200 + well-formed Anthropic message (the translated Grok lead path)"
   "shim_grok46_messages_tool_use|exploratory|grok-4.6 on /v1/messages with forced tool_choice (→ /responses shim): 200 + tool_use block with non-empty input (the translated Grok tool path)"
@@ -432,7 +432,7 @@ probe_gpt56_explicit_cache_breakpoint() {
   local stable body
   stable="$(printf 'stable %.0s' {1..800})"
   body="$(jq -nc --arg stable "$stable" '{
-    model:"gpt-5.6-sol",
+    model:"gpt-6-sol",
     stream:false,
     max_output_tokens:16,
     prompt_cache_key:"github-router-probe-explicit-v1",
@@ -855,7 +855,7 @@ probe_smallfast_sonnet_baseline() {
 # a contributor following the breadcrumb lands on the empirical evidence.
 #
 # Why these exist: the /v1/messages advisor branch was dead code for as long as
-# ADVISOR_DEFAULT_MODEL was gpt-5.6-sol (which always matches the /responses
+# ADVISOR_DEFAULT_MODEL was gpt-6-sol (which always matches the /responses
 # regex). A budget lead makes it live, so every field in that body is newly
 # exercised against Copilot and none of it had prior production evidence.
 
@@ -865,7 +865,7 @@ probe_advisor_claude_adaptive_thinking() {
   # If Copilot ever rejects this combination the advisor silently loses its
   # reasoning effort on exactly the path the escalation exists to serve.
   do_request POST /v1/messages '{
-    "model": "claude-opus-5",
+    "model": "claude-opus-5.5",
     "max_tokens": 1024,
     "stream": false,
     "system": "You are an expert advisor.",
@@ -877,12 +877,12 @@ probe_advisor_claude_adaptive_thinking() {
 }
 
 probe_advisor_claude_nonstreaming_cap() {
-  # claude-opus-5 advertises max_output_tokens 64000 but
+  # claude-opus-5.5 advertises max_output_tokens 64000 but
   # max_non_streaming_output_tokens 16000. The advisor sets stream:false, so it
   # sizes max_tokens from the NON-streaming limit. Asserts that limit is really
   # accepted.
   do_request POST /v1/messages '{
-    "model": "claude-opus-5",
+    "model": "claude-opus-5.5",
     "max_tokens": 16000,
     "stream": false,
     "messages": [{"role": "user", "content": "Reply with the single word: ok"}]
@@ -902,7 +902,7 @@ probe_advisor_claude_streaming_cap_accepted() {
   # 400, Copilot started enforcing the advertised limit and the advisor's
   # conservative sizing is what will have kept it working.
   do_request POST /v1/messages '{
-    "model": "claude-opus-5",
+    "model": "claude-opus-5.5",
     "max_tokens": 64000,
     "stream": false,
     "messages": [{"role": "user", "content": "Reply with the single word: ok"}]
@@ -945,7 +945,7 @@ probe_worker_gemini_tools_reasoning() {
 # function-shaped tools[] array (flat {type:"function",name,description,
 # parameters}, NOT chat's nested {function:{...}}) + reasoning:{effort:"xhigh"}.
 # gpt-5.5 is now the RETAINED FALLBACK for the worker_implement MCP tool (the
-# default moved to gpt-5.6-sol — see probe_worker_gpt56sol_responses_tools_reasoning).
+# default moved to gpt-6-sol — see probe_worker_gpt56sol_responses_tools_reasoning).
 # gpt-5.5 is NOT a dual-gate input (only the gemini gate model is), so if this
 # shape regresses, implement's fallback breaks while explore/review keep working
 # — only this probe surfaces it.
@@ -962,14 +962,14 @@ probe_worker_gpt5_responses_tools_reasoning() {
 }
 
 # End-to-end live probe: the SAME load-bearing worker-implement contract shape,
-# but against gpt-5.6-sol — the CURRENT default model for the implement/test
+# but against gpt-6-sol — the CURRENT default model for the implement/test
 # worker tools + the native implementer subagent + advisor + codex_critic. Same
 # flat function tools[] + reasoning:{effort:"xhigh"} on /v1/responses. If this
 # regresses, the default implement path breaks (the gpt-5.5 fallback still
-# works). gpt-5.6-sol is 1050k context, /responses-only, same restriction tier.
+# works). gpt-6-sol is 1050k context, /responses-only, same restriction tier.
 probe_worker_gpt56sol_responses_tools_reasoning() {
   do_request POST /v1/responses '{
-    "model": "gpt-5.6-sol",
+    "model": "gpt-6-sol",
     "input": "reply with the literal string ok",
     "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
     "tool_choice": "auto",
@@ -1301,7 +1301,7 @@ probe_passthrough_image_claude() {
   # keeps it true. A 200 here plus a well-formed message means the native
   # endpoint accepted an image without the header.
   do_request POST /v1/messages '{
-    "model": "claude-opus-5",
+    "model": "claude-opus-5.5",
     "max_tokens": 128,
     "messages": [{"role":"user","content":[
       {"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"}},
@@ -1426,7 +1426,7 @@ probe_vision_multi_image_gpt() {
   # gpt-5.5 itself accepted 120 in one request, so the local gate was rejecting
   # requests Copilot would have answered — and doing it fatally, because the
   # count covered replayed history the caller could not edit. (The real ceiling
-  # is per-model and not uniform within a family: gpt-5.6-sol stops at 50 while
+  # is per-model and not uniform within a family: gpt-6-sol stops at 50 while
   # gpt-5.5 took 120, which is why nothing here hardcodes a number.) A 400 here
   # means a local count gate came back.
   do_request POST /v1/messages '{
@@ -1545,7 +1545,7 @@ probe_shim_parallel_tool_emit_gpt55() {
 # Fast-launch-profile model shapes (Luna / Gemini 3.8 Flash / Grok 4.6)
 # ===========================================================================
 # See docs/default-models.md "Fast launch profile" for the design these shapes
-# support: gpt-5.6-luna is the fast lead and backs Explore/general-purpose at
+# support: gpt-6-luna is the fast lead and backs Explore/general-purpose at
 # high/max effort respectively; gemini-3.8-flash backs the implementer and
 # Advisor at high effort; and grok-4.6 backs the reviewer at medium effort.
 # The Gemini medium-effort row below is retained as a historical shape probe. The native/MCP roster narrowing and its
@@ -1553,9 +1553,9 @@ probe_shim_parallel_tool_emit_gpt55() {
 # request shapes, which are ordinary passthrough/shim contracts today.
 
 probe_fast_opus5_messages_reasoning_high() {
-  # Claude Opus 5 backs the fast profile's stateless Oracle MCP tool.
+  # Claude Opus 5.5 backs the fast profile's stateless Oracle MCP tool.
   do_request POST /v1/messages '{
-    "model": "claude-opus-5",
+    "model": "claude-opus-5.5",
     "max_tokens": 50,
     "stream": false,
     "thinking": {"type":"adaptive"},
@@ -1591,12 +1591,12 @@ probe_fast_gemini38flash_messages_tool_use() {
 }
 
 probe_fast_luna_responses_reasoning_high() {
-  # gpt-5.6-luna at reasoning.effort:"high" — the fast profile's Explore
-  # assignment. Same flat function tools[] shape as the gpt-5.6-sol probe
+  # gpt-6-luna at reasoning.effort:"high" — the fast profile's Explore
+  # assignment. Same flat function tools[] shape as the gpt-6-sol probe
   # above; Luna is 1.05M context, /responses-capable, and advertises the full
   # none..max effort ladder (so "high" is a real mid-tier choice, not a clamp).
   do_request POST /v1/responses '{
-    "model": "gpt-5.6-luna",
+    "model": "gpt-6-luna",
     "input": "reply with the literal string ok",
     "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
     "tool_choice": "auto",
@@ -1607,9 +1607,9 @@ probe_fast_luna_responses_reasoning_high() {
 }
 
 probe_fast_sol_responses_reasoning_high() {
-  # gpt-5.6-sol is the fast profile's Plan assignment at high effort.
+  # gpt-6-sol is the fast profile's Plan assignment at high effort.
   do_request POST /v1/responses '{
-    "model": "gpt-5.6-sol",
+    "model": "gpt-6-sol",
     "input": "reply with the literal string ok",
     "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
     "tool_choice": "auto",
@@ -1620,10 +1620,10 @@ probe_fast_sol_responses_reasoning_high() {
 }
 
 probe_fast_luna_responses_reasoning_max() {
-  # gpt-5.6-luna at reasoning.effort:"max" — the fast profile's
+  # gpt-6-luna at reasoning.effort:"max" — the fast profile's
   # general-purpose assignment (the top of Luna's none..max ladder).
   do_request POST /v1/responses '{
-    "model": "gpt-5.6-luna",
+    "model": "gpt-6-luna",
     "input": "reply with the literal string ok",
     "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
     "tool_choice": "auto",
@@ -1693,10 +1693,10 @@ probe_max_grok46_responses_reasoning_high() {
 }
 
 probe_max_luna_responses_reasoning_max() {
-  # gpt-5.6-luna at reasoning.effort:"max" on /v1/responses — the max
+  # gpt-6-luna at reasoning.effort:"max" on /v1/responses — the max
   # profile's reviewer fallback assignment.
   do_request POST /v1/responses '{
-    "model": "gpt-5.6-luna",
+    "model": "gpt-6-luna",
     "input": "reply with the literal string ok",
     "tools": [{"type":"function","name":"echo","description":"echo the input","parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}],
     "tool_choice": "auto",
@@ -1722,7 +1722,7 @@ probe_fast_astra_responses_reasoning_high() {
 probe_shim_grok46_messages() {
   # grok-4.6 is a /responses-capable model per its catalog supported_endpoints,
   # so naming it on /v1/messages diverts to the SAME generic Responses shim
-  # (handleNonClaudeResponses) that already serves gpt-5.5/gpt-5.6-sol — no
+  # (handleNonClaudeResponses) that already serves gpt-5.5/gpt-6-sol — no
   # shim code change is required for this to pass. This is "the translated
   # Grok lead path": what a session running -m grok-4.6 (directly, or via the
   # replaced gateway picker's Grok row) actually sends and receives.
@@ -1757,7 +1757,7 @@ probe_signed_thinking_cache_scope_stripped() {
   local prompt first_body tool_id continuation
   prompt="Carefully derive the 20th Fibonacci number, verify it independently, then call record_result with the integer result. You must use the tool."
   do_request POST /v1/messages "{
-    \"model\":\"claude-opus-5\",
+    \"model\":\"claude-opus-5.5\",
     \"max_tokens\":4096,
     \"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},
     \"output_config\":{\"effort\":\"xhigh\"},
@@ -1775,7 +1775,7 @@ probe_signed_thinking_cache_scope_stripped() {
   tool_id="$(jq -r '.content[] | select(.type=="tool_use") | .id' "$first_body" | head -1)"
   continuation="$(
     jq -c --arg prompt "$prompt" --arg tool_id "$tool_id" '{
-      model:"claude-opus-5",
+      model:"claude-opus-5.5",
       max_tokens:512,
       thinking:{type:"adaptive",display:"summarized"},
       output_config:{effort:"xhigh"},
@@ -1810,7 +1810,7 @@ probe_signed_thinking_cache_scope_stripped() {
 
 probe_thinking_history_invalid_signature_repaired() {
   do_request POST /v1/messages '{
-    "model":"claude-opus-5",
+    "model":"claude-opus-5.5",
     "max_tokens":128,
     "thinking":{"type":"adaptive"},
     "messages":[

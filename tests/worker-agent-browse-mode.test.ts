@@ -148,7 +148,7 @@ afterEach(() => {
 
 describe("BROWSE_DEFAULT_MODEL", () => {
   test("pins the browse model to the preferred worker gate-chain entry", () => {
-    expect(BROWSE_DEFAULT_MODEL).toBe("gpt-5.6-luna")
+    expect(BROWSE_DEFAULT_MODEL).toBe("gpt-6-luna")
     expect(BROWSE_DEFAULT_MODEL).toBe(DEFAULT_MODEL_CHAIN[0])
   })
 })

@@ -69,7 +69,7 @@ describe("PERSONAS_READ", () => {
 
   test("each persona has the correct model + endpoint binding", () => {
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
-    expect(byName["codex-critic"]?.model).toBe("gpt-5.6-sol")
+    expect(byName["codex-critic"]?.model).toBe("gpt-6-sol")
     expect(byName["codex-critic"]?.endpoint).toBe("/v1/responses")
     expect(byName["codex-critic"]?.requiresHttp).toBe(false)
     expect(byName["codex-critic"]?.writeCapable).toBe(false)
@@ -90,10 +90,10 @@ describe("PERSONAS_READ", () => {
     // gemini-3.1-pro-preview; reviewer prompt vs. critic prompt).
     expect(byName["gemini-reviewer"]?.requiresGeminiCatalog).toBe(true)
 
-    expect(byName["opus-critic"]?.model).toBe("claude-opus-5")
+    expect(byName["opus-critic"]?.model).toBe("claude-opus-5.5")
     expect(byName["opus-critic"]?.endpoint).toBe("/v1/messages")
     // opus-critic must route via HTTP (codex-cli stdio bridge can't run
-    // claude-opus-5 — it speaks gpt-5/codex only)
+    // claude-opus-5.5 — it speaks gpt-5/codex only)
     expect(byName["opus-critic"]?.requiresHttp).toBe(true)
     expect(byName["opus-critic"]?.requiresGeminiCatalog).toBeUndefined()
     expect(byName["opus-critic"]?.writeCapable).toBe(false)
@@ -115,11 +115,11 @@ describe("PERSONAS_READ", () => {
 
   test("descriptions surface load-bearing routing signal (model identity)", () => {
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
-    expect(byName["codex-critic"]?.description).toContain("gpt-5.6-sol")
+    expect(byName["codex-critic"]?.description).toContain("gpt-6-sol")
     expect(byName["gemini-critic"]?.description).toContain("gemini-3.1-pro")
     expect(byName["codex-reviewer"]?.description).toContain("gpt-5.3-codex")
     expect(byName["gemini-reviewer"]?.description).toContain("gemini-3.1-pro")
-    expect(byName["opus-critic"]?.description).toContain("Opus 5")
+    expect(byName["opus-critic"]?.description).toContain("Opus 5.5")
     for (const p of PERSONAS_READ) {
       // codex-reviewer AND gemini-reviewer are framed as code-specialists /
       // "magnifying glass" line-level reviewers, not adversarial critics —
@@ -157,7 +157,7 @@ describe("PERSONAS_READ", () => {
   })
 
   test("opus-critic caps allowedEfforts at high (dynamic fallback to opus-4.6 lacks xhigh)", () => {
-    // opus_critic's EFFECTIVE model is resolved at call time to claude-opus-5
+    // opus_critic's EFFECTIVE model is resolved at call time to claude-opus-5.5
     // (which advertises xhigh) OR a claude-opus-4.6 fallback (which does not).
     // The /v1/messages dispatch does not clamp effort, so the static allowlist
     // stays capped at high — a caller-supplied xhigh rejects cleanly instead of
@@ -357,7 +357,7 @@ describe("buildAgentPrompt — codex-cli mode", () => {
     const persona = PERSONAS_READ.find((p) => p.agentName === "codex-critic")!
     const prompt = buildAgentPrompt(persona, { codexCli: true, peersKey: "peers" })
     expect(prompt).toContain("mcp__codex-cli__codex")
-    expect(prompt).toContain('"gpt-5.6-sol"')
+    expect(prompt).toContain('"gpt-6-sol"')
     expect(prompt).toContain("base-instructions")
     expect(prompt).toContain('"read-only"')
   })
@@ -475,23 +475,23 @@ describe("buildPeerAwarenessSnippet", () => {
     // repo while the critics are stateless, so that has to be stated where the
     // routing decision is actually made, not only in CLAUDE.md.
     setCatalog([
-      pricedModel("gpt-5.6-sol", 500, 3000),
+      pricedModel("gpt-6-sol", 500, 3000),
       pricedModel("gpt-5.6-terra", 200, 1200),
       pricedModel("gemini-3.1-pro-preview", 200, 1200),
-      pricedModel("gpt-5.6-luna", 20, 120),
+      pricedModel("gpt-6-luna", 20, 120),
     ])
     const summary = buildPeerAwarenessSummary({
       workerToolsAvailable: true,
       standInAvailable: true,
       browseAvailable: false,
       nativeAgentModels: {
-        implementer: "gpt-5.6-sol",
+        implementer: "gpt-6-sol",
         "implementer-fast": "gpt-5.6-terra",
         reviewer: "gemini-3.1-pro-preview",
         brainstorm: "gemini-3.1-pro-preview",
-        scout: "gpt-5.6-luna",
+        scout: "gpt-6-luna",
         scribe: "gpt-5.6-terra",
-        "general-purpose-fast": "gpt-5.6-luna",
+        "general-purpose-fast": "gpt-6-luna",
       },
     })
     for (const n of [
@@ -549,7 +549,7 @@ describe("buildPeerAwarenessSnippet", () => {
   // only building with the flags false proves the omission actually happens.
   test("the summary omits price or speed annotations with either missing figure", () => {
     setCatalog([
-      pricedModel("gpt-5.6-sol"),
+      pricedModel("gpt-6-sol"),
       {
         id: "unmeasured",
         billing: {
@@ -566,7 +566,7 @@ describe("buildPeerAwarenessSnippet", () => {
       standInAvailable: true,
       browseAvailable: false,
       nativeAgentModels: {
-        implementer: "gpt-5.6-sol",
+        implementer: "gpt-6-sol",
         reviewer: "unmeasured",
         brainstorm: "missing-price",
       },
@@ -1142,14 +1142,14 @@ describe("worker tool descriptions state their output contract", () => {
 // not there. Pin BOTH directions, since a fix to either alone re-opens the lie.
 test("the cost/speed preamble appears only when figures actually rendered", () => {
   const nativeAgentModels = {
-    implementer: "gpt-5.6-sol",
+    implementer: "gpt-6-sol",
     "implementer-fast": "gpt-5.6-terra",
     reviewer: "gemini-3.1-pro-preview",
     "reviewer-fast": "gemini-3.8-flash",
     brainstorm: "gemini-3.1-pro-preview",
-    scout: "gpt-5.6-luna",
+    scout: "gpt-6-luna",
     scribe: "gpt-5.6-terra",
-    "general-purpose-fast": "gpt-5.6-luna",
+    "general-purpose-fast": "gpt-6-luna",
   } as const
   const opts = {
     workerToolsAvailable: true,
@@ -1158,7 +1158,7 @@ test("the cost/speed preamble appears only when figures actually rendered", () =
     nativeAgentModels,
   }
 
-  setCatalog([pricedModel("gpt-5.6-sol", 500, 3000)])
+  setCatalog([pricedModel("gpt-6-sol", 500, 3000)])
   const annotated = buildPeerAwarenessSummary(opts)
   expect(annotated).toContain("Cost is per 1M tokens in/out, tok/s approximate")
   expect(annotated).toMatch(/`implementer` \d+\/\d+ ~\d+t\/s/)

@@ -103,9 +103,9 @@ export function preprocessFastRequest(
   if (alias) {
     fixedEffort = alias.absentEffortDefault
     parsed.model = canonicalizeAliasModel(originalModel)
-  } else if (bare === "gpt-5.6-luna") {
+  } else if (bare === "gpt-6-luna" || bare === "gpt-6-luna") {
     fixedEffort = "max"
-  } else if (bare === "gpt-5.6-sol") {
+  } else if (bare === "gpt-6-sol" || bare === "gpt-6-sol") {
     // Balanced leads at medium by contract (`BALANCED_PROFILE_LEAD_EFFORT`);
     // every other Sol caller (Plan subagent alias traffic aside, which carries
     // its own absent-effort default) stays high.
@@ -120,7 +120,7 @@ export function preprocessFastRequest(
     fixedEffort = "high"
   } else if (bare === "claude-sonnet-5") {
     fixedEffort = "xhigh"
-  } else if (bare === "claude-opus-5") {
+  } else if (bare === "claude-opus-5.5" || bare === "claude-opus-5-5" || bare === "claude-opus-5.5") {
     fixedEffort = "high"
   }
   if (!fixedEffort && !alias) {

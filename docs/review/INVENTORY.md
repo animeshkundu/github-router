@@ -19,7 +19,7 @@ Grouped by surface type. Each row: item · one-line function · gate/condition �
 
 | Group | Tools | What the group does | Gate | Doc |
 |---|---|---|---|---|
-| peers | codex_critic, gemini_critic, codex_reviewer, gemini_reviewer, opus_critic, codex_implementer | Cross-lab adversarial critics + reviewers (gpt-5.6-sol / gemini-3.1-pro / gpt-5.3-codex / Opus 5 with 4.6 fallback) | catalog per-model; gemini pair needs gemini catalog; codex_implementer needs `--codex-cli` | [mcp/README.md](./mcp/README.md) |
+| peers | codex_critic, gemini_critic, codex_reviewer, gemini_reviewer, opus_critic, codex_implementer | Cross-lab adversarial critics + reviewers (gpt-6-sol / gemini-3.1-pro / gpt-5.3-codex / Opus 5 with 4.6 fallback) | catalog per-model; gemini pair needs gemini catalog; codex_implementer needs `--codex-cli` | [mcp/README.md](./mcp/README.md) |
 | search | web, code | Copilot web search; semantic-first (ColBERT + lexical fallback) code search | always-on | [mcp/search/code.md](./mcp/search/code.md) |
 | workers | explore, implement, review, plan, test, browse | Autonomous Pi-runtime worker subagents (read-only / read-write / planner / test-author / browser) | `capability:"worker"` (browse: `browse_agent`) | [mcp/workers/](./mcp/workers/) |
 | orchestrate | verify_workflow, decompose, run_workflow, attest_step | Compose / verify / run / audit a typed workflow IR through the frozen kernel | verify+attest always-on; decompose+run gated `worker` | [mcp/orchestrate/](./mcp/orchestrate/) |
@@ -41,7 +41,7 @@ Full per-tool manifest with `file:line` and per-tool models in [`mcp/README.md`]
 | 4 | `SessionStart` + `SessionEnd` | Bind the session to the ai-or-die tab (side-effect); one hook registered on both events | `AIORDIE_CLAUDE_BIND` set | [session-bind](./hooks/session-bind.md) |
 | 5 | `PostToolUse` · `ExitPlanMode` | Open the finalized plan in the ai-or-die panel | `AIORDIE_SESSION_ID` set | [posttooluse-artifact-open](./hooks/posttooluse-artifact-open.md) |
 | 6 | `Stop` | Structural gate: typecheck/test/lint + gate-weakening scan; blocks stop (max 2/prompt) | per-repo consent | [stop-structural-gate](./hooks/stop-structural-gate.md) |
-| 7 | (detached, spawned by #6) | gpt-5.6-sol review of the live tree vs the user ask on a green gate → findings for next turn | `stopReviewEnabled()` + green gate + diff | [stop-review-detached](./hooks/stop-review-detached.md) |
+| 7 | (detached, spawned by #6) | gpt-6-sol review of the live tree vs the user ask on a green gate → findings for next turn | `stopReviewEnabled()` + green gate + diff | [stop-review-detached](./hooks/stop-review-detached.md) |
 
 All four non-guard hooks stand down inside any subagent/teammate context; the two PreToolUse guards are the deliberate inverse. Firing analysis in [`hooks/README.md`](./hooks/README.md).
 
@@ -63,18 +63,18 @@ Description-line (routing) review in [`skills/README.md`](./skills/README.md).
 
 | Subagent | Own model | Nature | Gate | Doc |
 |---|---|---|---|---|
-| codex-critic / codex-reviewer | inherited (Claude) | relay to gpt-5.6-sol / gpt-5.3-codex via MCP | always | [subagents/](./subagents/) |
+| codex-critic / codex-reviewer | inherited (Claude) | relay to gpt-6-sol / gpt-5.3-codex via MCP | always | [subagents/](./subagents/) |
 | gemini-critic / gemini-reviewer | inherited | relay to gemini-3.1-pro via MCP | `requiresGeminiCatalog` | [subagents/](./subagents/) |
-| opus-critic | inherited | relay to claude-opus-5 via MCP (Opus 4.6 variants fallback) | always | [opus-critic](./subagents/opus-critic.md) |
+| opus-critic | inherited | relay to claude-opus-5.5 via MCP (Opus 4.6 variants fallback) | always | [opus-critic](./subagents/opus-critic.md) |
 | codex-implementer | inherited | relay to gpt-5.3-codex writer (stdio) | `--codex-cli` | [codex-implementer](./subagents/codex-implementer.md) |
-| implementer (native) | gpt-5.6-sol → gpt-5.5, else lead | implementation, full toolset | always emitted; frontier model only when it has `tool_calls` | [implementer](./subagents/implementer.md) |
+| implementer (native) | gpt-6-sol → gpt-5.5, else lead | implementation, full toolset | always emitted; frontier model only when it has `tool_calls` | [implementer](./subagents/implementer.md) |
 | reviewer (native) | gemini-3.1-pro-preview → frontier, else lead | artifact assessment, full toolset; cross-lab from implementer by design | always emitted; preferred model only when it has `tool_calls` | [reviewer](./subagents/reviewer.md) |
 | brainstorm (native) | gemini-3.1-pro-preview → frontier, else lead | read-only divergent options | always emitted; preferred model only when it has `tool_calls` | [brainstorm](./subagents/brainstorm.md) |
-| scout (native) | gpt-5.6-luna → gemini-3.8-flash | read-only low-cost repository exploration | omitted unless a chain model has `tool_calls` and 1M context | [scout](./subagents/scout.md) |
+| scout (native) | gpt-6-luna → gemini-3.8-flash | read-only low-cost repository exploration | omitted unless a chain model has `tool_calls` and 1M context | [scout](./subagents/scout.md) |
 | scribe (native) | gpt-5.6-terra → frontier, else lead | repository-grounded documentation, full toolset | always emitted; preferred model only when it has `tool_calls` | [scribe](./subagents/scribe.md) |
 | implementer-fast (native) | gpt-5.6-terra → gemini-3.1-pro-preview | well-specified mechanical implementation, full toolset | omitted unless a chain model has `tool_calls` and 1M context | [implementer-fast](./subagents/implementer-fast.md) |
 | reviewer-fast (native) | gemini-3.8-flash only | lower-stakes cross-lab assessment, full toolset | omitted unless Gemini 3.8 Flash has `tool_calls` and 1M context | (no per-agent page yet) |
-| general-purpose-fast (native) | gpt-5.6-luna only | fastest measured, lowest-cost full-toolset catch-all | omitted unless Luna has `tool_calls` and 1M context | [general-purpose-fast](./subagents/general-purpose-fast.md) |
+| general-purpose-fast (native) | gpt-6-luna only | fastest measured, lowest-cost full-toolset catch-all | omitted unless Luna has `tool_calls` and 1M context | [general-purpose-fast](./subagents/general-purpose-fast.md) |
 | peer-review-coordinator | inherited | fans out to critics, aggregates | always | [peer-review-coordinator](./subagents/peer-review-coordinator.md) |
 | worker-explore/implement/review/plan/test/browse | inherited (dispatchers) | background non-blocking dispatch to the matching worker | worker / browse gate | [subagents/](./subagents/) |
 
@@ -101,7 +101,7 @@ Assembly and order map in [`injected-prompt/README.md`](./injected-prompt/README
 | `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` | `1` | presence-guard | [feature-gates](./env-and-settings/claude-code-feature-gates.md) |
 | `CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING` | `1` | presence-guard | [feature-gates](./env-and-settings/claude-code-feature-gates.md) |
 | `CLAUDE_CODE_ENABLE_TASKS` | `1` | presence-guard | [feature-gates](./env-and-settings/claude-code-feature-gates.md) |
-| `ANTHROPIC_MODEL` | `claude-opus-5[1m]` (enterprise, cap-aware) | `-m <model>` | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
+| `ANTHROPIC_MODEL` | `claude-opus-5.5[1m]` (enterprise, cap-aware) | `-m <model>` | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
 | `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | presence-guard | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
 | `ANTHROPIC_DEFAULT_{SONNET,HAIKU,OPUS}_MODEL` | sonnet-5 / sonnet-5 / opus-5 | presence-guard | [model-defaults](./env-and-settings/model-defaults-and-picker-seeds.md) |
 | `MCP_TIMEOUT` / `MCP_TOOL_TIMEOUT` | `22_500_000` ms (6h15m) | `GH_ROUTER_MCP_TOOL_TIMEOUT_MS` | [mcp-timeout](./env-and-settings/mcp-tool-timeout.md) |
@@ -121,7 +121,7 @@ What each launch flag / condition turns ON, so a reader can see exactly what a g
 | Condition | Turns ON |
 |---|---|
 | **default** (`github-router claude`) | peers critics (codex_critic, codex_reviewer, opus_critic; gemini pair if catalog), `search` (web, code), `orchestrate` verify+attest, five non-blocking `worker-*` dispatchers when the worker gate passes, native `implementer` / `reviewer` / `brainstorm` / `scribe` (always emitted, inheriting the lead when their preferred model chain misses), plus `scout`, `implementer-fast`, `reviewer-fast`, and `general-purpose-fast` when their respective qualifying 1M chains resolve, `peer-review-coordinator`, hooks #1/#2/#6/#7, skills gh-research/gh-orchestrate/gh-floor-keeper/gh-worker, all prompt/CLAUDE.md text blocks (toolbelt/style/artifact conditional), all env/settings above. Fast and Max replace this catalog-driven roster with their own fixed profiles. |
-| **worker-gate present** (a `DEFAULT_MODEL_CHAIN` member, `gpt-5.6-luna` → `gpt-5.4-mini`, with `tool_calls` in the catalog) | workers group (explore/implement/review/plan/test), orchestrate decompose+run, prompt-submit steer #1, worker guard #2, worker skills, worker-* dispatchers. If ABSENT: the entire worker surface + the four worker-gated skills + hook #1 drop |
+| **worker-gate present** (a `DEFAULT_MODEL_CHAIN` member, `gpt-6-luna` → `gpt-5.4-mini`, with `tool_calls` in the catalog) | workers group (explore/implement/review/plan/test), orchestrate decompose+run, prompt-submit steer #1, worker guard #2, worker skills, worker-* dispatchers. If ABSENT: the entire worker surface + the four worker-gated skills + hook #1 drop |
 | **gemini catalog** (`gemini-3.x-pro`) | gemini_critic, gemini_reviewer tools + subagents |
 | **stand_in catalog** (all 3 consensus models) | decide group (`stand_in`) |
 | **compressor available** (`gpt-5.4-mini` / sonnet-4.6 / haiku-4.5 w/ tool_calls) | browser `observe`/`extract` + `act` INTENT mode (under `--browse`) |
@@ -162,11 +162,11 @@ These share one root class: a text surface (awareness snippet, root CLAUDE.md, o
 
 ### Important — description / doc drift (the model's mental model is wrong)
 
-- **Worker + peer model defaults updated** — opus_critic now prefers Opus 5 (4.6 fallback), review stays gemini-3.1-pro-preview, explore defaults to gpt-5.6-luna/high, and plan defaults to Opus 5/xhigh. The worker model override remains a free string, with the documented sol/terra/flash 1M ladder.
+- **Worker + peer model defaults updated** — opus_critic now prefers Opus 5 (4.6 fallback), review stays gemini-3.1-pro-preview, explore defaults to gpt-6-luna/high, and plan defaults to Opus 5/xhigh. The worker model override remains a free string, with the documented sol/terra/flash 1M ladder.
 - **Descriptions naming removed / non-surfaced tools produce `-32601`** — MCP. browser `type` routes to removed `browser_fill`; `codex_implementer` is documented as a peers HTTP tool but is stdio-only (404); `web`/`implement` error strings still say the old names. Detail: [FINDINGS S6](./mcp/FINDINGS.md).
-- **`peer-mcp-design.md` model rows refreshed** — the design anchor now records Opus 5 for opus_critic and stand_in, gpt-5.6-luna/high for explore, Opus 5/xhigh for plan, and the worker override ladder.
+- **`peer-mcp-design.md` model rows refreshed** — the design anchor now records Opus 5 for opus_critic and stand_in, gpt-6-luna/high for explore, Opus 5/xhigh for plan, and the worker override ladder.
 - **worker-browse dispatcher/schema field mismatch resolved** — `dispatcherPrompt` now passes the browse tool's required `task` field, and Fast/Max reuse the corrected dispatcher path. Detail: [subagents A3 resolution](./subagents/worker-browse.md).
-- **Fast profile is a separate native/MCP surface on `-m fast`.** A Gemini 3.8 Flash-led profile drops the standard `implementer-fast`/`reviewer-fast`/`brainstorm`/`scribe`/`general-purpose-fast` roles, coordinator, core filesystem worker dispatchers, and `workers`/`orchestrate`/`decide` groups. It emits exactly `Explore` (Luna/high), `Plan` (Sol/high), `general-purpose` (Luna/max), `implementer` (Gemini 3.8 Flash/high), and `reviewer` (Claude Sonnet 5 1M/xhigh), with fixed model/effort frontmatter; capitalized `Explore` replaces fast `scout`. In Fast mode, `Plan` is an implementation planning consultant (not a mandatory gate); the balanced delegation graph allows the lead to invoke all five roles, `Plan` to invoke `reviewer` or `Explore`, and `implementer`/`general-purpose` to invoke `reviewer`. `oracle` is available exclusively to the lead and `Plan` (reviewer and other natives cannot call Oracle). In-session PreToolUse ACL hooks remove invocation-level model overrides. Fast Advisor is fixed to GPT-5.6 Sol 1M/high at both the client identity and proxy dispatch layers. The fast MCP surface keeps `search`, `oracle` (lead & Plan only), conditional `worker-browse`, `artifact` panel tools, and opt-in browser. Standard launches, including direct `-m gpt-5.6-luna`, are unchanged. See [`default-models.md`](../default-models.md) "Fast launch profile".
+- **Fast profile is a separate native/MCP surface on `-m fast`.** A Gemini 3.8 Flash-led profile drops the standard `implementer-fast`/`reviewer-fast`/`brainstorm`/`scribe`/`general-purpose-fast` roles, coordinator, core filesystem worker dispatchers, and `workers`/`orchestrate`/`decide` groups. It emits exactly `Explore` (Luna/high), `Plan` (Sol/high), `general-purpose` (Luna/max), `implementer` (Gemini 3.8 Flash/high), and `reviewer` (Claude Sonnet 5 1M/xhigh), with fixed model/effort frontmatter; capitalized `Explore` replaces fast `scout`. In Fast mode, `Plan` is an implementation planning consultant (not a mandatory gate); the balanced delegation graph allows the lead to invoke all five roles, `Plan` to invoke `reviewer` or `Explore`, and `implementer`/`general-purpose` to invoke `reviewer`. `oracle` is available exclusively to the lead and `Plan` (reviewer and other natives cannot call Oracle). In-session PreToolUse ACL hooks remove invocation-level model overrides. Fast Advisor is fixed to GPT-6 Sol 1M/high at both the client identity and proxy dispatch layers. The fast MCP surface keeps `search`, `oracle` (lead & Plan only), conditional `worker-browse`, `artifact` panel tools, and opt-in browser. Standard launches, including direct `-m gpt-6-luna`, are unchanged. See [`default-models.md`](../default-models.md) "Fast launch profile".
 
 ### Suggestion — minimality / schema-honesty
 

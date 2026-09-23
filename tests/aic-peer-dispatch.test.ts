@@ -15,7 +15,7 @@ import { dispatchModelCall } from "~/routes/mcp/handler"
 
 const USAGE = {
   token_details: [
-    { batch_size: 1000000, cost_per_batch: 20000000000, model: "gpt-5.6-sol", token_count: 11, token_type: "input" },
+    { batch_size: 1000000, cost_per_batch: 20000000000, model: "gpt-6-sol", token_count: 11, token_type: "input" },
   ],
   total_nano_aiu: 220000,
 }
@@ -87,7 +87,7 @@ describe("dispatchModelCall AIC coverage", () => {
       copilot_usage: USAGE,
     })
     const text = await dispatchModelCall({
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       endpoint: "/v1/responses",
       instructions: "review",
       userText: "is this ok?",
@@ -97,7 +97,7 @@ describe("dispatchModelCall AIC coverage", () => {
     const snap = aicSnapshot()
     expect(snap.requests).toBe(1)
     expect(snap.totalNanoAiu).toBe(220000)
-    expect(snap.perModel["gpt-5.6-sol"]?.requests).toBe(1)
+    expect(snap.perModel["gpt-6-sol"]?.requests).toBe(1)
   })
 
   test("chat persona call records once under the resolved model", async () => {

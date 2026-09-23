@@ -57,7 +57,7 @@ const gptModel = {
 
 const gptSolModel = {
   ...gptModel,
-  id: "gpt-5.6-sol",
+  id: "gpt-6-sol",
   name: "GPT 5.6 SOL",
   capabilities: {
     ...gptModel.capabilities,
@@ -702,7 +702,7 @@ describe("/v1/messages branch routing", () => {
     expect(image.image_url).toBe(`data:image/png;base64,${imageData}`)
   })
 
-  test("gpt-5.6-sol without thinking defaults Responses reasoning effort to high", async () => {
+  test("gpt-6-sol without thinking defaults Responses reasoning effort to high", async () => {
     state.models = { object: "list", data: [claudeModel, gptModel, gptSolModel] as never }
     let responsesBody: Record<string, unknown> | undefined
     globalThis.fetch =((url: string, opts?: { body?: string }) => {
@@ -717,7 +717,7 @@ describe("/v1/messages branch routing", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-5.6-sol",
+        model: "gpt-6-sol",
         max_tokens: 64,
         messages: [{ role: "user", content: "reason deeply" }],
       }),
@@ -746,7 +746,7 @@ describe("/v1/messages branch routing", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          model: "gpt-5.6-sol",
+          model: "gpt-6-sol",
           max_tokens: 64,
           messages: [{ role: "user", content: "reason normally" }],
         }),
@@ -764,7 +764,7 @@ describe("/v1/messages branch routing", () => {
     }
   })
 
-  test("gpt-5.6-sol explicit thinking budget is not overridden by the injected default", async () => {
+  test("gpt-6-sol explicit thinking budget is not overridden by the injected default", async () => {
     state.models = { object: "list", data: [claudeModel, gptModel, gptSolModel] as never }
     let responsesBody: Record<string, unknown> | undefined
     globalThis.fetch =((url: string, opts?: { body?: string }) => {
@@ -779,7 +779,7 @@ describe("/v1/messages branch routing", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-5.6-sol",
+        model: "gpt-6-sol",
         max_tokens: 64,
         thinking: { type: "enabled", budget_tokens: 1000 },
         messages: [{ role: "user", content: "think briefly" }],

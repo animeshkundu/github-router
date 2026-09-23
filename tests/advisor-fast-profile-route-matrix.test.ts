@@ -21,11 +21,11 @@ const FAST_SECRET = "f".repeat(64)
 const CHEAP_SECRET = "c".repeat(64)
 
 const LEADS = [
-  { id: "gpt-5.6-luna", transport: "responses" as const },
-  { id: "gpt-5.6-sol", transport: "responses" as const },
+  { id: "gpt-6-luna", transport: "responses" as const },
+  { id: "gpt-6-sol", transport: "responses" as const },
   { id: "grok-4.6", transport: "responses" as const },
   { id: "gemini-3.8-flash", transport: "chat" as const },
-  { id: "claude-opus-5", transport: "messages" as const },
+  { id: "claude-opus-5.5", transport: "messages" as const },
 ]
 
 function catalogModel(id: string) {
@@ -388,7 +388,7 @@ describe("authenticated fast Advisor route matrix", () => {
         "anthropic-beta": "advisor-tool-2026-03-01",
         [LAUNCH_SECRET_HEADER]: FAST_SECRET,
       },
-      body: requestBody("gpt-5.6-sol"),
+      body: requestBody("gpt-6-sol"),
     })
 
     expect(response.status).toBe(200)

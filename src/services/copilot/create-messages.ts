@@ -35,7 +35,7 @@ import {
  * We intentionally omit copilot-vision-request. VS Code only sends it when
  * images are present, and the native /v1/messages endpoint handles vision
  * without it — VERIFIED live (2026-08-03) rather than assumed: the same
- * base64 image sent to claude-opus-5 with the header omitted and with it set
+ * base64 image sent to claude-opus-5.5 with the header omitted and with it set
  * both returned 200 AND the model named the image's colour in each case, so
  * the pixels genuinely reach it either way. Probe `passthrough_image_claude`
  * in scripts/probe-copilot-compat.sh keeps that verified; if Copilot ever

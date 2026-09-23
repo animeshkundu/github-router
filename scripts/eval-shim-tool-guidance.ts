@@ -46,8 +46,8 @@ const OVER_100_CONFIRMATION = "I_UNDERSTAND_REAL_SPEND"
 
 /** The four exact default targets for the fast shim lead roster. */
 export const DEFAULT_MODELS = [
-  "gpt-5.6-sol",
-  "gpt-5.6-luna",
+  "gpt-6-sol",
+  "gpt-6-luna",
   "gemini-3.8-flash",
   "grok-4.6",
 ] as const

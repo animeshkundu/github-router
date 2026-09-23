@@ -40,8 +40,8 @@ The shim is generic across catalog-advertised Responses/Chat models. The current
 
 | Model | Served via | Notes |
 |---|---|---|
-| `gpt-5.6-sol` | `/responses` | 1.05M context on the base slug |
-| `gpt-5.6-luna` | `/responses` | 1.05M context on the base slug |
+| `gpt-6-sol` | `/responses` | 1.05M context on the base slug |
+| `gpt-6-luna` | `/responses` | 1.05M context on the base slug |
 | `gemini-3.8-flash` | `/chat/completions` | 1M context on the base slug |
 | `grok-4.6` | `/responses` | 500K total / 372K prompt; kept bare |
 
@@ -168,7 +168,7 @@ clamps down, so a guess never resolves to the most expensive tier a model offers
 When the request carries no `thinking` block at all there is no client level to
 mirror, so the shim injects `high` for every translated model. Set
 `GH_ROUTER_FRONTIER_XHIGH_DEFAULT=1` to restore the previous behavior, where the
-OpenAI-frontier models (`gpt-5.6-sol`, `gpt-5.5`) defaulted to `xhigh` instead.
+OpenAI-frontier models (`gpt-6-sol`, `gpt-5.5`) defaulted to `xhigh` instead.
 A model that advertises no `reasoning_effort` allowlist gets no default reasoning
 field, leaving the provider's own default rather than risking a 400.
 
@@ -278,10 +278,10 @@ Non-regression is **structural**, not "we were careful": the Claude path shares
 no code with the shim beyond the branch, and the classifier is guard-tested to
 keep every Claude model on the passthrough. ADVISOR (`advisor-tool` beta) plus an ordinary non-Claude model degrades by
 stripping the internal tool. An authenticated fast primary lead is the exception:
-both shim paths run the server-side Advisor loop, dispatch fixed GPT-5.6 Sol on
+both shim paths run the server-side Advisor loop, dispatch fixed GPT-6 Sol on
 Responses/high, and continue on the selected lead's original endpoint. The fast
 launcher also pins Claude Code's client-side Advisor setting to
-`gpt-5.6-sol[1m]`, so its native tool schema, UI, and JSONL no longer retain a
+`gpt-6-sol[1m]`, so its native tool schema, UI, and JSONL no longer retain a
 mirrored standard-profile Advisor id while the proxy dispatches Sol. A missing
 Sol Responses runtime invariant or a conflicting in-session Advisor model fails
 visibly rather than selecting the standard Sol/Opus path.
@@ -429,13 +429,13 @@ honestly rather than papered over:
 
 ## Phase 3: native model selection (`modelPicker` settings)
 
-> **Fast profile (shipped).** The picker inventory is exactly `gpt-5.6-sol` /
-> `gpt-5.6-luna` / `gemini-3.8-flash` / `grok-4.6`, gated on the live catalog.
+> **Fast profile (shipped).** The picker inventory is exactly `gpt-6-sol` /
+> `gpt-6-luna` / `gemini-3.8-flash` / `grok-4.6`, gated on the live catalog.
 > A literal `-m fast` launch starts on Gemini 3.8 Flash and fixes the native roster to
 > Explore (Luna/high), Plan (Sol/high), general-purpose (Luna/max), implementer
 > (Gemini/high), and reviewer (Sonnet 5 1M/xhigh), plus gated worker-browse. Its optional
-> primary-lead-only Advisor stays on GPT-5.6 Sol 1M/high after `/model` switches to
-> any fixed fast row. Standard launches, including direct `-m gpt-5.6-luna`,
+> primary-lead-only Advisor stays on GPT-6 Sol 1M/high after `/model` switches to
+> any fixed fast row. Standard launches, including direct `-m gpt-6-luna`,
 > retain their standard surface and catalog-derived routing.
 
 Phase 3 now lives in `src/lib/model-picker-settings.ts`. It adds ordered rows to
@@ -466,7 +466,7 @@ when the exact catalog entry advertises at least 1M and the user has not set
 `CLAUDE_CODE_DISABLE_1M_CONTEXT`; `label` stays undecorated. Grok remains bare
 because its real window is 500K and the client has no 500K declaration.
 Claude Code 2.1.260 filters an otherwise-unknown row unless `behavesAs` maps it
-to a model this client knows. Sol/Luna therefore use `claude-opus-5`, while
+to a model this client knows. Sol/Luna therefore use `claude-opus-5.5`, while
 Gemini/Grok use `claude-sonnet-5`, the closest client-side prompt/capability and
 effort profiles. The mapping changes neither label nor selected model id; profile
 request preprocessing remains authoritative for upstream effort. The selected

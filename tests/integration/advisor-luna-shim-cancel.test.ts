@@ -48,9 +48,9 @@ let savedAdvisorModel: string | undefined
 let listener: ReturnType<typeof Bun.serve> | undefined
 let baseUrl = ""
 
-const LUNA_MODEL = "gpt-5.6-luna"
+const LUNA_MODEL = "gpt-6-luna"
 const LUNA_DRIVER_ALIAS = "gh-router-luna-driver-max[1m]"
-const FAST_ADVISOR_MODEL = "gpt-5.6-sol"
+const FAST_ADVISOR_MODEL = "gpt-6-sol"
 const FAST_SECRET = "f".repeat(64)
 
 function resetState() {
@@ -66,7 +66,7 @@ function resetState() {
     data: [
       {
         id: LUNA_MODEL,
-        name: "GPT-5.6 Luna",
+        name: "GPT-6 Luna",
         vendor: "OpenAI",
         version: "1",
         preview: false,
@@ -101,8 +101,8 @@ function resetState() {
         supported_endpoints: ["/chat/completions"],
       },
       {
-        id: "gpt-5.6-sol",
-        name: "GPT-5.6 Sol",
+        id: "gpt-6-sol",
+        name: "GPT-6 Sol",
         vendor: "OpenAI",
         version: "1",
         preview: false,

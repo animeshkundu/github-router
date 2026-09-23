@@ -79,7 +79,7 @@ describe("worker session defaults", () => {
 
     expect(ordinary.model).toBe("same-lab-override")
     expect(ordinary.thinking).toBe("low")
-    expect(workflow.model).toBe("gpt-5.6-sol")
+    expect(workflow.model).toBe("gpt-6-sol")
     expect(workflow.thinking).toBe("high")
   })
 
@@ -95,8 +95,8 @@ describe("worker session defaults", () => {
     setWorkerSessionDefault("explore", { model: "override" })
     resetWorkerSessionDefault("explore")
     expect(resolveModeDefaults("explore")).toEqual(builtIn)
-    expect(DEFAULT_MODEL_CHAIN).toEqual(["gpt-5.6-luna", "gpt-5.4-mini"])
-    expect(EXPLORE_DEFAULT_MODEL).toBe("gpt-5.6-luna")
+    expect(DEFAULT_MODEL_CHAIN).toEqual(["gpt-6-luna", "gpt-5.6-luna", "gpt-5.4-mini"])
+    expect(EXPLORE_DEFAULT_MODEL).toBe("gpt-6-luna")
   })
 
   test("gate and unmatched fallback accept Luna-only and mini-only catalogs", () => {
@@ -121,11 +121,11 @@ describe("worker session defaults", () => {
       object: "list",
       data: [
         model("gpt-5.4-mini", ["low", "high"]),
-        model("gpt-5.6-luna", ["low", "high"]),
+        model("gpt-6-luna", ["low", "high"]),
       ] as NonNullable<typeof state.models>["data"],
     }
     try {
-      expect(resolveDefaultModel()).toBe("gpt-5.6-luna")
+      expect(resolveDefaultModel()).toBe("gpt-6-luna")
     } finally {
       state.models = original
     }
@@ -143,7 +143,7 @@ describe("worker session defaults", () => {
     try {
       const rejected = await tool.handler({ mode: "review", model: "missing" })
       expect(rejected.isError).toBe(true)
-      expect(rejected.content[0]?.text).toContain("Available models with tool_calls: gpt-5.6-luna, valid")
+      expect(rejected.content[0]?.text).toContain("Available models with tool_calls: gpt-6-luna, valid")
 
       const invalidClearAll = await tool.handler({ clearAll: true, clear: false })
       expect(invalidClearAll.isError).toBe(true)

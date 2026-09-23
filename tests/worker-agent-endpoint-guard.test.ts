@@ -9,7 +9,7 @@
  * `unsupported_api_for_model`.
  *
  * This is not hypothetical for the plan worker: `PLAN_DEFAULT_MODEL` is
- * `claude-opus-5`, and this repo's own translate fixtures model Claude entries
+ * `claude-opus-5.5`, and this repo's own translate fixtures model Claude entries
  * as `["/v1/messages"]`-only. If Copilot ever ships that shape, the coercion
  * would hide the reason the plan worker broke.
  *

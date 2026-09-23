@@ -171,7 +171,7 @@ async function executeThroughPi(
 beforeEach(() => {
   state.models = {
     object: "list",
-    data: [fakeModel(MODEL), fakeModel("gpt-5.6-sol"), fakeModel("gpt-5.3-codex")],
+    data: [fakeModel(MODEL), fakeModel("gpt-6-sol"), fakeModel("gpt-5.3-codex")],
   } as typeof state.models
   state.copilotToken = "test-token"
   state.githubToken = "ghu_test"

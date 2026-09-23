@@ -127,7 +127,7 @@ beforeEach(() => {
         reasoning_effort: ["low", "medium", "high"],
       }),
       // worker explore + browse default and preferred gate/fallback model
-      fakeModel("gpt-5.6-luna", {
+      fakeModel("gpt-6-luna", {
         tool_calls: true,
         reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
       }),
@@ -137,7 +137,7 @@ beforeEach(() => {
         reasoning_effort: ["minimal", "low", "medium", "high"],
       }),
       // implement default (routes to /responses via the stream-fn split)
-      fakeModel("gpt-5.6-sol", {
+      fakeModel("gpt-6-sol", {
         tool_calls: true,
         reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
       }),
@@ -413,7 +413,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     }
   })
 
-  test("explore mode sends gpt-5.6-luna upstream by default", async () => {
+  test("explore mode sends gpt-6-luna upstream by default", async () => {
     let capturedModel: string | undefined
     globalThis.fetch = mock((_input: unknown, init?: { body?: unknown }) => {
       try {
@@ -426,13 +426,13 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     )
     try {
       await runWorkerAgent({ prompt: "summarize", mode: "explore", workspace: dir })
-      expect(capturedModel).toBe("gpt-5.6-luna")
+      expect(capturedModel).toBe("gpt-6-luna")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test("implement mode sends gpt-5.6-sol upstream by default", async () => {
+  test("implement mode sends gpt-6-sol upstream by default", async () => {
     let capturedModel: string | undefined
     globalThis.fetch = mock((_input: unknown, init?: { body?: unknown }) => {
       try {
@@ -445,7 +445,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
     )
     try {
       await runWorkerAgent({ prompt: "do a thing", mode: "implement", workspace: dir })
-      expect(capturedModel).toBe("gpt-5.6-sol")
+      expect(capturedModel).toBe("gpt-6-sol")
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -487,7 +487,7 @@ describe("runWorkerAgent end-to-end (mocked Copilot)", () => {
         mode: "implement",
         // Pin a chat-endpoint model so the chat-SSE mock applies — this
         // test exercises the worktree diff-suffix mechanic, not the
-        // implement default (gpt-5.6-sol, which routes to /responses).
+        // implement default (gpt-6-sol, which routes to /responses).
         model: "gemini-3.1-pro-preview",
         workspace: repo,
         worktree: true,

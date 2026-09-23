@@ -148,7 +148,7 @@ describe("planOutboundImages", () => {
 
   test("IGNORES the catalog's max_prompt_images — it was measured wrong for 20 of 23 models", () => {
     // `one-image` publishes max_prompt_images: 1. Upstream serves gpt-5.x at 50
-    // and claude-opus-5 at 128+, so this field must not gate anything locally.
+    // and claude-opus-5.5 at 128+, so this field must not gate anything locally.
     const many = Array.from({ length: 32 }, () => png)
     expect(planOutboundImages("one-image", many).dropped).toBe(0)
   })

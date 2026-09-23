@@ -3,7 +3,7 @@
  * factors applied to the AIC ledger's billed nano-AIU.
  *
  * Background: GitHub's portal lists per-token rates, but the spend dashboard
- * bills several models well below portal (gpt-5.6-sol ≈ 0.28x, the Opus /
+ * bills several models well below portal (gpt-6-sol ≈ 0.28x, the Opus /
  * Sonnet / Codex cluster ≈ 0.6x, gemini-3.7-flash ≈ 0.29x since Sep 2026),
  * while Luna bills long-context portal tiers and Grok / 3.8-flash bill
  * portal-default exactly. No uniform per-lab factor exists (verified across
@@ -45,7 +45,9 @@ function row(factor: number, source: string): DiscountFactorRow {
  */
 export const DISCOUNT_FACTORS: Readonly<Record<string, DiscountFactorRow>> =
   Object.freeze({
+    "gpt-6-sol": row(0.28, "carried from gpt-5.6-sol; re-derive on refresh"),
     "gpt-5.6-sol": row(0.28, "0.27-0.29 across 28d/MTD/7d/pre/9-9; write-mix refuted"),
+    "claude-opus-5.5": row(0.62, "carried from opus-5; re-derive on refresh"),
     "claude-opus-5": row(0.62, "0.61-0.64 across windows; 9/7 1.02 excluded as single-day artifact"),
     "claude-sonnet-5": row(0.66, "0.62-0.71 across windows"),
     "gpt-5.3-codex": row(0.60, "0.59-0.62 across windows"),
@@ -55,6 +57,7 @@ export const DISCOUNT_FACTORS: Readonly<Record<string, DiscountFactorRow>> =
     "gemini-3.7-flash": row(0.29, "September regime; pre-Sep 1.00x — volatile"),
     // No discount: Luna's heat is long-context tiers + ~2% cache writes
     // (both already in nano); Grok / 3.8-flash bill portal-default exactly.
+    "gpt-6-luna": row(1.0, "carried from gpt-5.6-luna; re-derive on refresh"),
     "gpt-5.6-luna": row(1.0, "long-tier portal + writes, no discount"),
     "grok-4.6": row(1.0, "portal default, six windows"),
     "gemini-3.8-flash": row(1.0, "portal exact, six windows to the dollar"),

@@ -65,7 +65,7 @@ function makeBody(targetBytes: number): string {
     n += JSON.stringify(block).length
   }
   return JSON.stringify({
-    model: "claude-opus-5[1m]",
+    model: "claude-opus-5.5[1m]",
     max_tokens: 4096,
     messages: [{ role: "user", content: blocks }],
   })

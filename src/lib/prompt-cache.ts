@@ -77,8 +77,10 @@ const MIN_CACHEABLE_PREFIX_BYTES = 4096
 const CACHE_KEY_NAMESPACE = "ghr-cache-v1"
 const CACHE_DIAGNOSTIC_LIMIT = 128
 const GPT56_EXPLICIT_CACHE_MODELS = new Set([
+  "gpt-6-sol",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
+  "gpt-6-luna",
   "gpt-5.6-luna",
 ])
 const priorSignatures = new Map<string, CacheSignature>()
@@ -295,7 +297,7 @@ function responsesCacheKey(
  * addition to it — turning it on for a request marks only the bytes an
  * explicit breakpoint names, and the REST of that request's prefix (here,
  * the entire un-marked growing message history) stops receiving automatic
- * prefix-growth caching too. Measured on `gpt-5.6-sol` with explicit mode
+ * prefix-growth caching too. Measured on `gpt-6-sol` with explicit mode
  * force-enabled for conversation workloads: turn 1 (cold)
  * `input_tokens=27038, cache_write=2031, cache_read=0`; turn 2
  * `input_tokens=27054, cache_read=2031`; turn 3 `input_tokens=27071,

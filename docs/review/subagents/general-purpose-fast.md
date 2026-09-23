@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Subagent name | `general-purpose-fast` |
-| Subagent's OWN model | `gpt-5.6-luna` only, when its catalog entry advertises `tool_calls` and at least 1M context |
+| Subagent's OWN model | `gpt-6-luna` only, when its catalog entry advertises `tool_calls` and at least 1M context |
 | Gate | Conditionally emitted. It is omitted when Luna does not resolve, rather than inheriting the lead's model. |
 | Registered via | `buildPeerAgentDefinitions` in `src/lib/codex-mcp-config.ts` |
 | Resolver | `generalPurposeFastModel()` in `src/lib/mcp-capabilities.ts` |

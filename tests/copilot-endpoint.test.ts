@@ -99,8 +99,8 @@ describe("resolveEndpointForModelId", () => {
 
   test("a catalog model serving neither client endpoint is unreachable, and says what it DOES serve", () => {
     // The shape this repo's own translate fixtures already model for Claude.
-    withCatalog([named("claude-opus-5", ["/v1/messages"])])
-    expect(resolveEndpointForModelId("claude-opus-5")).toEqual({
+    withCatalog([named("claude-opus-5.5", ["/v1/messages"])])
+    expect(resolveEndpointForModelId("claude-opus-5.5")).toEqual({
       kind: "unreachable",
       endpoints: ["/v1/messages"],
     })

@@ -76,9 +76,9 @@ function assistantText(text: string, usageTotal?: number): AgentMessage {
 }
 
 const MODEL_WINDOW_FIXTURES = [
-  { id: "claude-opus-5", windowTokens: 1_000_000 },
+  { id: "claude-opus-5.5", windowTokens: 1_000_000 },
   { id: "gemini-3.6-flash", windowTokens: 1_000_000 },
-  { id: "gpt-5.6-sol", windowTokens: 1_050_000 },
+  { id: "gpt-6-sol", windowTokens: 1_050_000 },
   { id: "gpt-5.4-mini", windowTokens: 400_000 },
   { id: "gpt-5.3-codex", windowTokens: 272_000 },
   { id: "small-window-canary", windowTokens: 128_000 },

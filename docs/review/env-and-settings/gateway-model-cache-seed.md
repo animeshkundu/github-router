@@ -46,7 +46,7 @@ non-object settings file is never clobbered.
 
 `replaceBuiltInOptions: false` retains Claude Code's built-in rows. Claude Code
 2.1.260 does not offer an unknown model-catalog row until `behavesAs` maps it to
-a model the client knows. Sol/Luna map to `claude-opus-5`; Gemini/Grok map to
+a model the client knows. Sol/Luna map to `claude-opus-5.5`; Gemini/Grok map to
 `claude-sonnet-5`. These are client-side prompt/capability and effort profiles,
 not wire aliases: the row label and selected model id stay unchanged, and the
 proxy's request preprocessor enforces actual upstream effort. `[1m]` remains the

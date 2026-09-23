@@ -200,7 +200,7 @@ describe("anthropic-translate request mapping", () => {
     // `prompt_cache_breakpoint`, `instructions` untouched — relying entirely
     // on Copilot's own provider-managed automatic caching instead.
     const stable = "stable ".repeat(800)
-    const { payload } = buildFor("gpt-5.6-sol", {
+    const { payload } = buildFor("gpt-6-sol", {
       system: stable,
       messages: [{ role: "user", content: "dynamic" }],
     })
@@ -226,7 +226,7 @@ describe("anthropic-translate request mapping", () => {
         ],
         messages: [{ role: "user", content: "question" }],
       },
-      "gpt-5.6-sol",
+      "gpt-6-sol",
     )
     const payload = parsedToResponsesPayload(parsed)
     // instructions carries the stable prefix untouched (no explicit-cache
@@ -1305,12 +1305,12 @@ describe("anthropic-translate file-tool steering", () => {
     const longSystem = "You are Claude Code. ".repeat(300)
     const search = "[Web Search Results]\nresult\n[End Web Search Results]"
 
-    const without = buildFor("gpt-5.6-sol", {
+    const without = buildFor("gpt-6-sol", {
       system: longSystem,
       messages: [{ role: "user", content: "hi" }],
       tools: [editTool],
     })
-    const withSearch = buildFor("gpt-5.6-sol", {
+    const withSearch = buildFor("gpt-6-sol", {
       system: [
         { type: "text", text: longSystem },
         { type: "text", text: search },

@@ -248,15 +248,15 @@ test("keeps a zero live price and does not require cache_price", () => {
 
 test("includes approximate tps only for models in the measured table", () => {
   setCatalog([
-    model({ id: "gpt-5.6-luna" }),
+    model({ id: "gpt-6-luna" }),
     model({ id: "unmeasured" }),
   ])
 
-  const luna = INDICATIVE_TOKENS_PER_SECOND["gpt-5.6-luna"]
-  expect(indicativeTokensPerSecond("gpt-5.6-luna")).toBe(luna)
+  const luna = INDICATIVE_TOKENS_PER_SECOND["gpt-6-luna"]
+  expect(indicativeTokensPerSecond("gpt-6-luna")).toBe(luna)
   expect(indicativeTokensPerSecond("unmeasured")).toBeUndefined()
   expect(buildCatalogView()).toContainEqual(expect.objectContaining({
-    id: "gpt-5.6-luna",
+    id: "gpt-6-luna",
     tps: luna,
   }))
   expect(buildCatalogView().find((row) => row.id === "unmeasured")).not.toHaveProperty("tps")
@@ -301,7 +301,7 @@ test("covers every model the native agents and worker modes route to", () => {
 // edit that inverts this relation invalidates a shipped roster decision and
 // must fail loudly rather than silently.
 test("preserves the measured ordering the roster and explore decisions depend on", () => {
-  const luna = indicativeTokensPerSecond("gpt-5.6-luna")!
+  const luna = indicativeTokensPerSecond("gpt-6-luna")!
   expect(luna).toBeGreaterThan(indicativeTokensPerSecond("gemini-3.6-flash")!)
   expect(luna).toBeGreaterThan(indicativeTokensPerSecond("gemini-3.5-flash")!)
 })
@@ -332,13 +332,13 @@ test("survives an absent catalog", () => {
 // id in neither source must stay undefined rather than being guessed.
 test("falls back to recorded prices only when the live catalog cannot answer", () => {
   setCatalog([])
-  expect(catalogTokenPrices("gpt-5.6-luna")).toEqual(
-    FALLBACK_TOKEN_PRICES["gpt-5.6-luna"],
+  expect(catalogTokenPrices("gpt-6-luna")).toEqual(
+    FALLBACK_TOKEN_PRICES["gpt-6-luna"],
   )
   // Pin the current live Sol price literally. Referring only to the fallback
   // table here would let a stale table prove itself correct on the exact
   // degraded path this test exists to protect.
-  expect(catalogTokenPrices("gpt-5.6-sol")).toEqual({ in: 400, out: 2000 })
+  expect(catalogTokenPrices("gpt-6-sol")).toEqual({ in: 400, out: 2000 })
   // Not in the catalog AND not in the fallback table: still undefined. The
   // fallback covers models actually recorded, never every id.
   expect(catalogTokenPrices("no-such-model")).toBeUndefined()
@@ -347,7 +347,7 @@ test("falls back to recorded prices only when the live catalog cannot answer", (
   // rather than waiting for someone to edit the table.
   setCatalog([
     model({
-      id: "gpt-5.6-luna",
+      id: "gpt-6-luna",
       billing: {
         token_prices: {
           batch_size: 1_000_000,
@@ -357,7 +357,7 @@ test("falls back to recorded prices only when the live catalog cannot answer", (
       },
     }),
   ])
-  expect(catalogTokenPrices("gpt-5.6-luna")).toEqual({ in: 999, out: 120 })
+  expect(catalogTokenPrices("gpt-6-luna")).toEqual({ in: 999, out: 120 })
 })
 
 // A stale fallback is only ever READ on the degraded path, where nobody is
@@ -374,7 +374,7 @@ test("drift check warns when a recorded price disagrees with the live catalog", 
   try {
     setCatalog([
       model({
-        id: "gpt-5.6-luna",
+        id: "gpt-6-luna",
         billing: {
           token_prices: {
             batch_size: 1_000_000,
@@ -385,13 +385,13 @@ test("drift check warns when a recorded price disagrees with the live catalog", 
       }),
     ])
     warnOnTokenPriceDrift()
-    expect(warnings.some((w) => w.includes("gpt-5.6-luna") && w.includes("999"))).toBe(true)
+    expect(warnings.some((w) => w.includes("gpt-6-luna") && w.includes("999"))).toBe(true)
 
     // Agreement must be silent, or the warning becomes noise nobody reads.
     warnings.length = 0
     setCatalog([
       model({
-        id: "gpt-5.6-luna",
+        id: "gpt-6-luna",
         billing: {
           token_prices: {
             batch_size: 1_000_000,

@@ -9,11 +9,11 @@ live catalog?
 
 | Setting | Value injected | Where set | Opt-out |
 |---|---|---|---|
-| `ANTHROPIC_MODEL` | `chosenSlug` — `claude-opus-5` or `claude-opus-5[1m]` (enterprise, cap-aware) | `src/claude.ts` + `getClaudeCodeEnvVars` | `-m <model>` explicit pin; stripped from parent by `STRIPPED_PARENT_ENV_KEYS` so a shell export can't leak |
+| `ANTHROPIC_MODEL` | `chosenSlug` — `claude-opus-5.5` or `claude-opus-5.5[1m]` (enterprise, cap-aware) | `src/claude.ts` + `getClaudeCodeEnvVars` | `-m <model>` explicit pin; stripped from parent by `STRIPPED_PARENT_ENV_KEYS` so a shell export can't leak |
 | `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | `getClaudeCodeEnvVars` in `src/lib/server-setup.ts` | set in parent shell (presence-guarded); NOT stripped from parent |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `claude-sonnet-5` | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claude-sonnet-5` (NOT a Haiku slug) | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5` (catalog-gated `[1m]`) | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5.5` (catalog-gated `[1m]`) | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
 | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | catalog-derived decimal integer, every profile | `applyAutoCompactWindow` in `src/lib/server-setup.ts` | parent value wins; omitted when catalog limits are unusable |
 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | never set | n/a | deliberately unset; see note below |
 | Design doc | `docs/default-models.md` | | |
@@ -21,7 +21,7 @@ live catalog?
 ## 2. What they do + behavior effect
 
 - **`ANTHROPIC_MODEL`** is the active default. It carries the Anthropic-published DASHED
-  slug `claude-opus-5`, which is also an exact Copilot catalog-id match because Opus 5
+  slug `claude-opus-5.5`, which is also an exact Copilot catalog-id match because Opus 5
   uses a single-segment slug. Claude Code's `/model` UI recognizes the Anthropic slug,
   while the proxy's `resolveModel` (`src/lib/utils.ts`) strips any `[1m]` bracket before
   the exact catalog lookup (`docs/default-models.md:12-16`).
@@ -59,7 +59,7 @@ live catalog?
 
 ## 3. Raise-the-floor assessment
 
-**Expands / picks the strongest.** `claude-opus-5` is the flagship; `[1m]` is added
+**Expands / picks the strongest.** `claude-opus-5.5` is the flagship; `[1m]` is added
 only when the backend can actually serve 1M, so the local accounting matches the wire —
 this is "the right amount," not over-claiming. `claude-sonnet-5` for the small/fast and
 Sonnet/Haiku tier rows strictly dominates the prior Sonnet-4.6 / Haiku-4.5 defaults on
@@ -75,7 +75,7 @@ both recency and price. Every default is the floor-raising choice.
   substitution is a deliberate, justified floor-raise (cheap tier lands on a better model).
 
 **Drift risk.** This is the one surface where the defaults are HARDCODED string constants
-(`DEFAULT_CLAUDE_MODEL = "claude-opus-5"` in `src/lib/port.ts:23`, the Sonnet-5 literals
+(`DEFAULT_CLAUDE_MODEL = "claude-opus-5.5"` in `src/lib/port.ts:23`, the Sonnet-5 literals
 in `server-setup.ts`). When Copilot ships Opus 4.9 or Sonnet 6, these do NOT auto-advance:
 
 - `ANTHROPIC_MODEL` has a safety net — the implicit-default path walks

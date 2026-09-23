@@ -624,7 +624,7 @@ export const claude = defineCommand({
     // override an explicit family request with the next-older Opus.
     //
     // `-m fast` now selects the explicit Luna profile. Profile selection uses the
-    // RAW alias below, while lead resolution maps it to gpt-5.6-luna; a direct
+    // RAW alias below, while lead resolution maps it to gpt-6-luna; a direct
     // Luna pin remains a standard-surface launch.
     // Trimmed, and it must stay in lockstep with `resolveLeadSlugArg`'s own
     // trim: that helper treats `-m "   "` as absent and returns the default, so
@@ -635,7 +635,7 @@ export const claude = defineCommand({
     const requestedSlug = resolveLeadSlugArg(args.model)
     // Resolved from the RAW `-m` argument, never the resolved lead slug —
     // see `resolveLaunchProfile`'s doc for why: only the literal "fast"
-    // alias narrows the surface, so a direct `-m gpt-5.6-luna` pin stays a
+    // alias narrows the surface, so a direct `-m gpt-6-luna` pin stays a
     // standard-surface launch even though it drives the same model.
     const launchProfileId = resolveLaunchProfile(args.model)
     if (launchProfileId === "fast") {
@@ -836,7 +836,7 @@ export const claude = defineCommand({
       // The Luna row is intentionally decorated (selectable 1M opt-in);
       // anything else bracketed here is a seeding bug.
       const suspectPicker = (pickerModels ?? []).filter(
-        (id) => /\[1m\]/i.test(id) && id.replace(/(?:\[1m\])+$/i, "") !== "gpt-5.6-luna",
+        (id) => /\[1m\]/i.test(id) && id.replace(/(?:\[1m\])+$/i, "") !== "gpt-6-luna",
       )
       if (suspectKeys.length > 0 || suspectPicker.length > 0) {
         consola.warn(
@@ -1208,7 +1208,7 @@ export const claude = defineCommand({
         ) {
           if (launchProfileId === "cheapest") {
             throw new Error(
-              "cheapest profile prerequisite drift: exact reviewer, oracle (gpt-5.6-sol), or advisor (gpt-5.6-sol) model no longer resolves",
+              "cheapest profile prerequisite drift: exact reviewer, oracle (gpt-6-sol), or advisor (gpt-6-sol) model no longer resolves",
             )
           }
           if (launchProfileId === "balanced") {
@@ -1217,7 +1217,7 @@ export const claude = defineCommand({
             )
           }
           if (isCheapProfile) {
-            // Cheap oracle (grok-4.6) and advisor (gpt-5.6-sol) are fixed
+            // Cheap oracle (grok-4.6) and advisor (gpt-6-sol) are fixed
             // constants; the cheap drift surface is reviewer + oracle.
             throw new Error(
               "cheap profile prerequisite drift: exact reviewer or oracle (grok-4.6) model no longer resolves",
@@ -1553,7 +1553,7 @@ export const claude = defineCommand({
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const cmd = buildPromptSubmitHookCommand(selfInvocation)
             // Raise the host hook timeout to 45s (default 30s): the V2 path may
-            // make one gpt-5.6-luna scope call + grounding code search. The hook's
+            // make one gpt-6-luna scope call + grounding code search. The hook's
             // own enrichment is bounded well under this (≈22s) and fails open,
             // so 45s is headroom, not a tax the user routinely pays.
             await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 45)

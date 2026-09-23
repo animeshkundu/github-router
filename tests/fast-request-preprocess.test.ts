@@ -70,7 +70,7 @@ describe("fast request preprocessing", () => {
       fastLaunch,
     )
     const leadParsed = JSON.parse(lead.body)
-    expect(leadParsed.model).toBe("gpt-5.6-luna[1m]")
+    expect(leadParsed.model).toBe("gpt-6-luna[1m]")
     expect(leadParsed.output_config.effort).toBe("max")
     expect(leadParsed.thinking).toEqual({ type: "adaptive" })
     const sub = JSON.parse(
@@ -83,7 +83,7 @@ describe("fast request preprocessing", () => {
         true,
       ).body,
     )
-    expect(sub.model).toBe("gpt-5.6-luna[1m]")
+    expect(sub.model).toBe("gpt-6-luna[1m]")
     expect(sub.output_config.effort).toBe("high")
     expect(sub.thinking).toEqual({ type: "adaptive" })
   })
@@ -99,12 +99,12 @@ describe("fast request preprocessing", () => {
 
   test("forces bare fast role models and rejects every other model", () => {
     for (const [model, effort] of [
-      ["gpt-5.6-luna", "max"],
-      ["gpt-5.6-sol[1m]", "high"],
+      ["gpt-6-luna", "max"],
+      ["gpt-6-sol[1m]", "high"],
       ["grok-4.6", "medium"],
       ["gemini-3.8-flash", "high"],
       ["claude-sonnet-5[1m]", "xhigh"],
-      ["claude-opus-5[1m]", "high"],
+      ["claude-opus-5.5[1m]", "high"],
     ] as const) {
       const parsed = JSON.parse(preprocessFastRequest(body(model), fastLaunch).body)
       expect(parsed.output_config.effort).toBe(effort)
@@ -114,11 +114,11 @@ describe("fast request preprocessing", () => {
 
   test("accepts repeated 1M suffixes on fixed fast model ids", () => {
     for (const [model, effort] of [
-      ["gpt-5.6-luna[1m][1M]", "max"],
-      ["gpt-5.6-sol[1m][1m]", "high"],
+      ["gpt-6-luna[1m][1M]", "max"],
+      ["gpt-6-sol[1m][1m]", "high"],
       ["gemini-3.8-flash[1m][1m]", "high"],
       ["claude-sonnet-5[1m][1m]", "xhigh"],
-      ["claude-opus-5[1m][1m]", "high"],
+      ["claude-opus-5.5[1m][1m]", "high"],
     ] as const) {
       const result = preprocessFastRequest(body(model), fastLaunch)
       expect(result.rejectedModel).toBeUndefined()
@@ -138,12 +138,12 @@ describe("fast request preprocessing", () => {
   describe("cheap profile (shared fast effort mapping at 200K; reviewer is Luna/max, not Sonnet/xhigh)", () => {
     test("forces the same role efforts as fast", () => {
       for (const [model, effort] of [
-        ["gpt-5.6-luna", "max"],
-        ["gpt-5.6-sol", "high"],
+        ["gpt-6-luna", "max"],
+        ["gpt-6-sol", "high"],
         ["grok-4.6", "medium"],
         ["gemini-3.8-flash[1m]", "high"],
         ["claude-sonnet-5", "xhigh"],
-        ["claude-opus-5", "high"],
+        ["claude-opus-5.5", "high"],
       ] as const) {
         // Lead traffic without an explicit effort falls back to the fixed mapping.
         const parsed = JSON.parse(preprocessFastRequest(body(model), cheapLaunch).body)
@@ -157,7 +157,7 @@ describe("fast request preprocessing", () => {
     })
 
     test("strips [1m] to the 200K default on cheap lead and subagent traffic", () => {
-      for (const model of ["gemini-3.8-flash[1m]", "gpt-5.6-sol[1m]", "gpt-5.6-luna[1m]"] as const) {
+      for (const model of ["gemini-3.8-flash[1m]", "gpt-6-sol[1m]", "gpt-6-luna[1m]"] as const) {
         expect(JSON.parse(preprocessFastRequest(body(model), cheapLaunch).body).model).toBe(
           model.replace(/\[1m\]$/i, ""),
         )
@@ -195,7 +195,7 @@ describe("fast request preprocessing", () => {
       )
       expect(lead.rejectedAlias).toBeUndefined()
       const leadParsed = JSON.parse(lead.body)
-      expect(leadParsed.model).toBe("gpt-5.6-luna")
+      expect(leadParsed.model).toBe("gpt-6-luna")
       expect(leadParsed.output_config.effort).toBe("max")
       // Subagent: same alias resolves bare with its fixed absent-effort default.
       const sub = preprocessFastRequest(
@@ -205,7 +205,7 @@ describe("fast request preprocessing", () => {
       )
       expect(sub.rejectedAlias).toBeUndefined()
       const subParsed = JSON.parse(sub.body)
-      expect(subParsed.model).toBe("gpt-5.6-luna")
+      expect(subParsed.model).toBe("gpt-6-luna")
       expect(subParsed.output_config.effort).toBe("high")
     })
 
@@ -223,10 +223,10 @@ describe("fast request preprocessing", () => {
       // explicit effort — and a client-added [1m] is stripped after
       // canonicalization, so the wire id is the bare real model.
       for (const [alias, real, effort] of [
-        [CHEAP_EXPLORE_ALIAS_ID, "gpt-5.6-luna", "high"],
-        [CHEAP_PLAN_ALIAS_ID, "gpt-5.6-sol", "high"],
+        [CHEAP_EXPLORE_ALIAS_ID, "gpt-6-luna", "high"],
+        [CHEAP_PLAN_ALIAS_ID, "gpt-6-sol", "high"],
         [CHEAP_IMPLEMENTER_ALIAS_ID, "gemini-3.8-flash", "max"],
-        [CHEAP_REVIEWER_ALIAS_ID, "gpt-5.6-luna", "max"],
+        [CHEAP_REVIEWER_ALIAS_ID, "gpt-6-luna", "max"],
       ] as const) {
         for (const wire of [alias, `${alias}[1m]`]) {
           const sub = preprocessFastRequest(
@@ -247,7 +247,7 @@ describe("fast request preprocessing", () => {
           cheapLaunch,
         ).body,
       )
-      expect(lead.model).toBe("gpt-5.6-sol")
+      expect(lead.model).toBe("gpt-6-sol")
       expect(lead.output_config.effort).toBe("low")
     })
 
@@ -262,7 +262,7 @@ describe("fast request preprocessing", () => {
 
     test("cheap1m keeps 1M on the lead, strips subagents, and isolates effort", () => {
       for (const [model, effort] of [
-        ["gpt-5.6-luna", "max"],
+        ["gpt-6-luna", "max"],
         ["grok-4.6", "medium"],
         ["gemini-3.8-flash[1m]", "high"],
         ["claude-sonnet-5", "xhigh"],
@@ -302,7 +302,7 @@ describe("fast request preprocessing", () => {
         cheap1mLaunch,
       )
       expect(lead.rejectedAlias).toBeUndefined()
-      expect(JSON.parse(lead.body).model).toBe("gpt-5.6-luna[1m]")
+      expect(JSON.parse(lead.body).model).toBe("gpt-6-luna[1m]")
       expect(JSON.parse(lead.body).output_config.effort).toBe("max")
       const sub = preprocessFastRequest(
         body("gh-router-luna-scout-high[1m]", { output_config: { effort: "max" } }),
@@ -310,7 +310,7 @@ describe("fast request preprocessing", () => {
         true,
       )
       expect(sub.rejectedAlias).toBeUndefined()
-      expect(JSON.parse(sub.body).model).toBe("gpt-5.6-luna")
+      expect(JSON.parse(sub.body).model).toBe("gpt-6-luna")
       expect(JSON.parse(sub.body).output_config.effort).toBe("high")
       // And out-of-set models are refused identically.
       expect(preprocessFastRequest(body("gpt-5.5"), cheap1mLaunch).rejectedModel).toBe("gpt-5.5")
@@ -320,36 +320,36 @@ describe("fast request preprocessing", () => {
 
   describe("cheapest profile (all-200K Luna lead; same isolation as cheap)", () => {
     test("strips [1m] and defaults lead effort from the fixed mapping", () => {
-      const parsed = JSON.parse(preprocessFastRequest(body("gpt-5.6-luna[1m]"), cheapestLaunch).body)
-      expect(parsed.model).toBe("gpt-5.6-luna")
+      const parsed = JSON.parse(preprocessFastRequest(body("gpt-6-luna[1m]"), cheapestLaunch).body)
+      expect(parsed.model).toBe("gpt-6-luna")
       expect(parsed.output_config.effort).toBe("max")
     })
 
     test("cheapest lead keeps an explicit picker effort; subagents stay pinned", () => {
       const lead = JSON.parse(
         preprocessFastRequest(
-          body("gpt-5.6-luna[1m]", { output_config: { effort: "low" } }),
+          body("gpt-6-luna[1m]", { output_config: { effort: "low" } }),
           cheapestLaunch,
         ).body,
       )
-      expect(lead.model).toBe("gpt-5.6-luna")
+      expect(lead.model).toBe("gpt-6-luna")
       expect(lead.output_config.effort).toBe("low")
       const sub = JSON.parse(
         preprocessFastRequest(
-          body("gpt-5.6-sol", { output_config: { effort: "low" } }),
+          body("gpt-6-sol", { output_config: { effort: "low" } }),
           cheapestLaunch,
           true,
         ).body,
       )
-      expect(sub.model).toBe("gpt-5.6-sol")
+      expect(sub.model).toBe("gpt-6-sol")
       expect(sub.output_config.effort).toBe("high")
     })
 
     test("cheapest role aliases canonicalize bare with alias effort on subagents", () => {
       for (const [alias, real, effort] of [
-        [CHEAPEST_EXPLORE_ALIAS_ID, "gpt-5.6-luna", "high"],
-        [CHEAPEST_PLAN_ALIAS_ID, "gpt-5.6-sol", "high"],
-        [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, "gpt-5.6-luna", "max"],
+        [CHEAPEST_EXPLORE_ALIAS_ID, "gpt-6-luna", "high"],
+        [CHEAPEST_PLAN_ALIAS_ID, "gpt-6-sol", "high"],
+        [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, "gpt-6-luna", "max"],
         [CHEAPEST_REVIEWER_ALIAS_ID, "gemini-3.8-flash", "high"],
       ] as const) {
         for (const wire of [alias, `${alias}[1m]`]) {
@@ -370,8 +370,8 @@ describe("fast request preprocessing", () => {
   describe("balanced profile (Sol lead at medium; swapped GP/reviewer aliases)", () => {
     test("balanced lead defaults bare Sol to medium, other models keep the shared mapping", () => {
       for (const [model, effort] of [
-        ["gpt-5.6-sol", "medium"],
-        ["gpt-5.6-luna", "max"],
+        ["gpt-6-sol", "medium"],
+        ["gpt-6-luna", "max"],
         ["grok-4.6", "medium"],
         ["gemini-3.8-flash", "high"],
       ] as const) {
@@ -384,14 +384,14 @@ describe("fast request preprocessing", () => {
     test("balanced lead keeps an explicit picker effort; bare-Sol subagents stay high", () => {
       const lead = JSON.parse(
         preprocessFastRequest(
-          body("gpt-5.6-sol", { output_config: { effort: "low" } }),
+          body("gpt-6-sol", { output_config: { effort: "low" } }),
           balancedLaunch,
         ).body,
       )
       expect(lead.output_config.effort).toBe("low")
       const sub = JSON.parse(
         preprocessFastRequest(
-          body("gpt-5.6-sol", { output_config: { effort: "low" } }),
+          body("gpt-6-sol", { output_config: { effort: "low" } }),
           balancedLaunch,
           true,
         ).body,
@@ -401,7 +401,7 @@ describe("fast request preprocessing", () => {
 
     test("balanced GP/reviewer aliases canonicalize bare with alias effort on subagents", () => {
       for (const [alias, real, effort] of [
-        [BALANCED_GENERAL_PURPOSE_ALIAS_ID, "gpt-5.6-luna", "max"],
+        [BALANCED_GENERAL_PURPOSE_ALIAS_ID, "gpt-6-luna", "max"],
         [BALANCED_REVIEWER_ALIAS_ID, "gemini-3.8-flash", "high"],
       ] as const) {
         for (const wire of [alias, `${alias}[1m]`]) {
