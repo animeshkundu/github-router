@@ -81,7 +81,7 @@ const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
 ])
 
 const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
-  // Cheapest roster is Luna (lead/GP) + Sol (Plan/reviewer/Advisor/Oracle) —
+  // Cheapest roster is Luna (lead/GP) + Sol (reviewer/Advisor/Oracle) —
   // rows are Sol and Luna only. Luna is exempt from the pin so its 1M
   // row stays an explicit opt-in; the default lead rows stay bare 200K.
   {
@@ -100,7 +100,7 @@ const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
 
 const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   // Balanced reuses cheap's 200K pinning (`neverOneM`) with Sol leading:
-  // rows are Sol (lead/Plan/reviewer), Luna (Explore/General-Purpose), and
+  // rows are Sol (lead/reviewer), Luna (Explore/General-Purpose), and
   // Grok 4.6 (Oracle). Luna is exempt from the pin so
   // its 1M row stays an explicit opt-in; the default lead rows stay bare
   // 200K (bare lead strip + bare subagent aliases still apply).

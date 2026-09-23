@@ -1,6 +1,14 @@
 import type { InjectedSkill } from "./index"
+import type { PlanSkillProfile } from "./plan-skill"
 
-export function buildSwePipelineSkill(_searchEnabled?: boolean): InjectedSkill {
+export function buildSwePipelineSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
+  // Profiles without a Plan role (cheapest, balanced): the lead plans
+  // directly, so stage wording names lead planning, not Plan dispatches.
+  const leadPlansDirectly = profile === "cheapest" || profile === "balanced"
+  const roster = leadPlansDirectly
+    ? "Explore, General-Purpose, reviewer"
+    : "Explore, Plan, General-Purpose, reviewer, implementer where provided"
+  const planDispatches = leadPlansDirectly ? "lead planning" : "Plan subagents"
   return {
   name: "gh-swe-pipeline",
   md: `---
@@ -16,8 +24,7 @@ change. It coordinates the three pipeline stages in STRICT SEQUENCE. No two
 stages ever overlap: each stage runs to completion, its subagents are all
 finished or explicitly superseded, and its completion artifact exists before
 the next stage starts. Every stage dispatches ONLY native subagents present on
-the profile roster (Explore, Plan, General-Purpose, reviewer, implementer
-where provided) via the Agent tool, never worker-* MCP dispatchers.
+the profile roster (${roster}) via the Agent tool, never worker-* MCP dispatchers.
 
 All work runs at the 200K default window with bare slugs (no 1M accounting).
 Advisory budgets (the Task tool enforces no wall-clock): gather ~3 minutes
@@ -47,7 +54,7 @@ exists to prevent.
 ## Stage 1: gather context (to completion)
 
 1. Invoke the gh-gather-context skill and WAIT for its full return. Do not
-   plan, sketch tasks, or dispatch Plan subagents while it runs.
+   plan, sketch tasks, or dispatch ${planDispatches} while it runs.
 2. Its completion artifact is
    .github-router/context/<slug>/context.md plus context.compact.md and a
    .complete marker. If the marker is missing, the stage is NOT complete:
@@ -68,8 +75,7 @@ exists to prevent.
    recorded as superseded. If either is false, do not invoke planning. Fix
    stage 1 first.
 2. Invoke the gh-plan skill and WAIT for its full return. For non-trivial
-   work gh-plan dispatches the native Plan subagent with an
-   implementation-ready brief; do not dispatch implementation subagents,
+   work gh-plan ${leadPlansDirectly ? "has the lead produce an implementation-ready plan" : "dispatches the native Plan subagent with an implementation-ready brief"}; do not dispatch implementation subagents,
    sketch diffs, or edit implementation files while it runs. Plan mode means
    plan and acceptance criteria only.
 3. Trivial exit: if gh-plan returns a trivial verdict (no plan.md, no
@@ -89,7 +95,7 @@ exists to prevent.
 1. Precondition check BEFORE invoking gh-implement: plan.md exists, its
    .complete marker exists, and run.md records explicit user approval. If
    any is missing, do not invoke implementation. Fix stage 2 first.
-2. Record any lingering Plan dispatches (Explore follow-ups) as superseded
+2. Record any lingering ${leadPlansDirectly ? "planning work" : "Plan dispatches"} (Explore follow-ups) as superseded
    before the first implement dispatch.
 3. Invoke the gh-implement skill and WAIT for its full return: unified diff,
    implementation report, test/typecheck/lint results, and review summary

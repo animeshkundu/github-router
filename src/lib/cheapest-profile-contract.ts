@@ -4,19 +4,19 @@
  * The cheapest all-200K tier: a `gpt-6-luna`/max LEAD at Claude Code's
  * DEFAULT (bare-slug) 200K window, every subagent at the same 200K default,
  * a `gpt-6-sol`/medium Advisor (bare slug), and a `gpt-6-sol`/high
- * primary Oracle. Oracle-only peer set (no `astra`), same exact four-agent
- * surface and authority structure as the cheap family.
+ * primary Oracle. Oracle-only peer set (no `astra`) and a three-agent
+ * surface (`Explore`/`General-Purpose`/`reviewer` — no `Plan`): the lead
+ * plans directly and reviews the final plan with the Advisor (advisory)
+ * before presenting it.
  *
  * This module is deliberately dependency-free, including its own delegation
- * graph literal: cheapest shares the cheap family's authority shape today,
- * but each pinned profile owns its graph so tuning one roster cannot silently
- * retune another.
+ * graph literal: each pinned profile owns its graph so tuning one roster
+ * cannot silently retune another.
  */
 
 export const CHEAPEST_PROFILE_MODELS = Object.freeze({
   lead: "gpt-6-luna",
   explore: "gpt-6-luna",
-  plan: "gpt-6-sol",
   "General-Purpose": "gpt-6-luna",
   reviewer: "gpt-6-sol",
   advisor: "gpt-6-sol",
@@ -25,7 +25,6 @@ export const CHEAPEST_PROFILE_MODELS = Object.freeze({
 
 export const CHEAPEST_PROFILE_NATIVE_AGENT_NAMES = [
   "Explore",
-  "Plan",
   "General-Purpose",
   "reviewer",
 ] as const
@@ -37,14 +36,12 @@ export const CHEAPEST_PROFILE_NATIVE_MODELS: Readonly<
   Record<CheapestProfileNativeAgentName, string>
 > = Object.freeze({
   Explore: CHEAPEST_PROFILE_MODELS.explore,
-  Plan: CHEAPEST_PROFILE_MODELS.plan,
   "General-Purpose": CHEAPEST_PROFILE_MODELS["General-Purpose"],
   reviewer: CHEAPEST_PROFILE_MODELS.reviewer,
 })
 
 export const CHEAPEST_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Explore: "high",
-  Plan: "high",
   "General-Purpose": "max",
   reviewer: "high",
 } as const)
@@ -87,12 +84,12 @@ export type CheapestProfileSynthesizedPeer =
   (typeof CHEAPEST_PROFILE_SYNTHESIZED_PEERS)[number]
 
 /** Each native role's permitted native-agent targets. The lead gets the roster.
- *  `Plan` may invoke `Explore` and `reviewer`; the cheapest planner's heavy
+ *  There is no `Plan` role: the lead plans directly (reviewing the final plan
+ *  with the Advisor before presenting it) and the cheapest planner's heavy
  *  use of `Explore` and `General-Purpose` is prompt-level guidance in its
  *  agent definition, not a graph change. */
 export const CHEAPEST_PROFILE_DELEGATION_GRAPH = Object.freeze({
   Explore: Object.freeze([]),
-  Plan: Object.freeze(["Explore", "reviewer"]),
   "General-Purpose": Object.freeze(["reviewer"]),
   reviewer: Object.freeze([]),
 } as const satisfies Record<

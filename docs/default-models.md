@@ -201,11 +201,11 @@ As the recovery half of the fix, the proxy maps an upstream overflow onto Claude
 
 The user-facing role is Advisor. In an authenticated fast launch it remains available only to the primary lead across every fixed `/model` selection (Luna, Sol, Grok 4.6, Gemini 3.8 Flash, or Opus 5), uses GPT-6 Sol via Responses at fixed high effort, and sees the lead's bounded recent transcript. The launcher passes `--advisor gpt-6-sol[1m]`, overriding a mirrored standard Advisor preference only for this session, so Claude Code's native tool schema, UI label, and JSONL identify the same model the proxy actually dispatches. Fast selection is fixed: `GH_ROUTER_ADVISOR_MODEL` and forwarded `--advisor` values cannot change it, and a missing/wrong-endpoint Sol runtime invariant fails visibly rather than silently falling back. An in-session `/advisor` mismatch is rejected with a restoration command. In a cheap or cheap1m launch the same fixed Sol Advisory runs at the 200K cost class: the launcher pins the **bare** `gpt-6-sol` slug (no `[1m]`), and the proxy caps the transcript at 200K tokens while keeping the original user ask pinned through seat-backward truncation. Standard launches retain operator pins and fallback behavior unchanged. Fast and cheap Task subagents have all Advisor tool forms stripped; their narrower transcripts are not the session context Advisor exists to assess. Advisor is optional, non-binding consultation for consequential unresolved uncertainty, conflicting evidence, a genuinely non-converging approach, materially changed assumptions, or an explicit request for a fresh perspective. It is not used for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. The lead retains decision ownership and may consult again when materially new evidence creates a different question. Non-Claude continuations reuse the selected lead's translation shim/endpoint and existing SSE lifecycle.
 
-Oracle remains separate and stateless. It is available to the lead and `Plan` as a last resort for one focused unresolved question, and remains unavailable to `reviewer`, `implementer`, `Explore`, and `general-purpose`. Fast launches keep the proxy MCP servers out of the shared mirrored config: the lead receives them through its launch-only MCP config, while `Plan` receives its role-scoped inline servers. This prevents other natives from inheriting Oracle.
+Oracle remains separate and stateless. It is available to the lead and `Plan` as a last resort for one focused unresolved question on profiles with a `Plan` role (fast, cheap, cheap1m); on cheapest and balanced — which have no `Plan` role — it is lead-only. It remains unavailable to `reviewer`, `implementer`, `Explore`, and `general-purpose`. Fast launches keep the proxy MCP servers out of the shared mirrored config: the lead receives them through its launch-only MCP config, while `Plan` receives its role-scoped inline servers. This prevents other natives from inheriting Oracle.
 
 Standard Advisor behavior is unchanged: Sol/xhigh (high floor) on the normal Opus path and Opus escalation for lighter Claude leads.
 
-In a cheapest launch the Advisor is `gpt-6-sol` at medium effort via Responses, pinned to the bare slug at the 200K cost class like cheap (transcript capped at 200K with the original ask pinned).
+In a cheapest launch the Advisor is `gpt-6-sol` at medium effort via Responses, pinned to the bare slug at the 200K cost class like cheap (transcript capped at 200K with the original ask pinned). Cheapest has no `Plan` subagent: the lead plans directly and reviews the final plan with the Advisor (advisory, non-binding — the lead retains decision ownership) before presenting it to the user; the lead prompt carries this as an injected directive.
 
 ## Cheap launch profiles (`-m cheap`, `-m cheap1m`)
 
@@ -254,13 +254,12 @@ The lead is `gemini-3.8-flash[1m]`, decorated only when the live catalog serves 
 
 ## Balanced launch profile (`-m balanced`)
 
-The literal raw alias `balanced` selects the Sol-led 200K tier: a `gpt-6-sol`/medium lead at the bare 200K default window, the same four-agent surface as cheap minus `implementer`, and an Oracle-only peer set (no `astra`, no Advisor surface).
+The literal raw alias `balanced` selects the Sol-led 200K tier: a `gpt-6-sol`/medium lead at the bare 200K default window, a three-agent surface (`Explore`/`General-Purpose`/`reviewer` — no `Plan`: the lead owns planning directly), and an Oracle-only peer set (no `astra`, no Advisor surface).
 
 | Surface | Model | Effort | Window |
 |---|---|---|---|
 | Lead | `gpt-6-sol` | medium | 200K |
 | `Explore` | `gpt-6-luna` | high | 200K |
-| `Plan` | `gpt-6-sol` | high | 200K |
 | `General-Purpose` | `gpt-6-luna` | max | 200K |
 | `reviewer` | `gemini-3.8-flash` | high | 200K |
 | `oracle` | `grok-4.6` | medium | 200K |
@@ -268,8 +267,8 @@ The literal raw alias `balanced` selects the Sol-led 200K tier: a `gpt-6-sol`/me
 Two deliberate divergences from the fast/cheap delegation graph:
 
 - **`reviewer` may invoke `Explore`** for targeted discovery (the only graph edge no other pinned profile has). The reviewer narrows scope with `code` + `web` search first, then delegates scoped evidence questions; the in-session ACL enforces this via a balanced graph variant selected by the persisted hook command.
-- **Search-first funnel, no Advisor.** Unknowns funnel cheapest-first: `code_search` + `web` search narrow scope and rule out hypotheses first, `Explore` only when search is insufficient, `Plan` only when genuinely complex, `oracle` as a second opinion for precise, self-contained trade-offs that search, `Explore`, and (where consulted) `Plan` cannot settle. Oracle is a second opinion on a framed question, never a discovery tool. The awareness snippet, summary, directive, and digest name no Advisor for this profile.
-- **Lead owns by default.** The lead plans, implements, and verifies itself: it delegates FREELY to the Luna-powered `Explore` (targeted breadth) and `General-Purpose` (multi-step execution), and to `Plan`/`reviewer` ONLY when genuinely needed (complex sequencing / behavior-changing review). Enforcement is soft — the ACL graph permits all four edges and the directive, descriptions, and roster clauses carry the policy.
+- **Search-first funnel, no Advisor.** Unknowns funnel cheapest-first: `code_search` + `web` search narrow scope and rule out hypotheses first, `Explore` only when search is insufficient, `oracle` as a second opinion for precise, self-contained trade-offs that search and `Explore` cannot settle. Oracle is a second opinion on a framed question, never a discovery tool. The awareness snippet, summary, directive, and digest name no Advisor for this profile.
+- **Lead owns by default.** The lead plans, implements, and verifies itself: it delegates FREELY to the Luna-powered `Explore` (targeted breadth) and `General-Purpose` (multi-step execution), and to `reviewer` ONLY when genuinely needed (behavior-changing review). Enforcement is soft — the ACL graph permits all three edges and the directive, descriptions, and roster clauses carry the policy.
 
 ## 200K context efficiency
 

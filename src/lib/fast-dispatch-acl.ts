@@ -42,14 +42,18 @@ export const FAST_DISPATCH_GRAPH: Readonly<
  * Balanced authority graph: identical shape to the fast graph except the
  * balanced `reviewer` may invoke `Explore` for targeted discovery (the
  * Sol-backed reviewer narrows scope with search first, then delegates
- * scoped evidence questions). Selected per launch via the `graph` option;
+ * scoped evidence questions) and there is no `Plan` role (the lead owns
+ * planning directly). Selected per launch via the `graph` option;
  * every other pinned profile keeps the fast graph.
  */
 export const BALANCED_DISPATCH_GRAPH: Readonly<
   Record<FastDispatchCallerName, ReadonlySet<FastDispatchTargetName>>
 > = Object.freeze({
   Explore: new Set<FastDispatchTargetName>(BALANCED_PROFILE_DELEGATION_GRAPH.Explore),
-  Plan: new Set<FastDispatchTargetName>(BALANCED_PROFILE_DELEGATION_GRAPH.Plan),
+  // No `Plan` role on balanced (the lead owns planning directly): the key
+  // stays only to satisfy the shared caller type, with an empty target set
+  // so a stale `Plan` caller identity can invoke nothing.
+  Plan: new Set<FastDispatchTargetName>([]),
   "General-Purpose": new Set<FastDispatchTargetName>(
     BALANCED_PROFILE_DELEGATION_GRAPH["General-Purpose"],
   ),
