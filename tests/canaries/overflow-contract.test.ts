@@ -72,6 +72,10 @@ const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
     "JCe=1e5,kBe=1e6",
     "kte(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,JCe,kBe);if(N.status!==\"invalid\"){let F=Math.max(JCe,N.effective)",
   ],
+  [
+    "NVe=1e5,_ot=1e6",
+    "kPe(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,NVe,_ot);if(j.status!==\"invalid\"){let he=Math.max(NVe,j.effective)",
+  ],
 ]
 
 describe("client overflow-contract canary", () => {

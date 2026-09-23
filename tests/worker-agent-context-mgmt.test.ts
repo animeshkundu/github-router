@@ -151,6 +151,35 @@ describe("makeContextBudget", () => {
     expect(tokensFromBytes(300)).toBe(100)
     expect(tokensFromBytes(0)).toBe(0)
   })
+
+  test("200K and 1M budgets are independent per-run value objects", () => {
+    const budget200k = makeContextBudget(200_000)
+    const budget1m = makeContextBudget(1_000_000)
+    expect(budget200k).not.toBe(budget1m)
+    expect(budget200k.windowTokens).toBe(200_000)
+    expect(budget1m.windowTokens).toBe(1_000_000)
+    expect(budget200k.compactTriggerTokens).toBeLessThan(budget1m.compactTriggerTokens)
+    expect(budget200k.hardLimitTokens).toBeLessThan(budget1m.hardLimitTokens)
+    expect(budget200k.perResultCapBytes).toBeLessThanOrEqual(budget1m.perResultCapBytes)
+
+    const obs200k: { windowTokens: number } = { windowTokens: budget200k.windowTokens }
+    const obs1m: { hardLimitTokens: number } = { hardLimitTokens: budget1m.hardLimitTokens }
+    obs200k.windowTokens = 1
+    obs1m.hardLimitTokens = 1
+    expect(budget200k.windowTokens).toBe(200_000)
+    expect(budget1m.windowTokens).toBe(1_000_000)
+    expect(budget200k.hardLimitTokens).not.toBe(1)
+    expect(budget1m.hardLimitTokens).not.toBe(1)
+
+    const out200k = compactWorkerContext(overTriggerTranscript(budget200k), budget200k)
+    const out1m = compactWorkerContext(overTriggerTranscript(budget1m), budget1m)
+    expect(budget200k.windowTokens).toBe(200_000)
+    expect(budget1m.windowTokens).toBe(1_000_000)
+    expect(out200k).toHaveLength(overTriggerTranscript(budget200k).length)
+    expect(out1m).toHaveLength(overTriggerTranscript(budget1m).length)
+    assertToolPairing(out200k)
+    assertToolPairing(out1m)
+  })
 })
 
 describe("cross-model structural compaction", () => {

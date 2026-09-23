@@ -11,17 +11,29 @@ import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
  * changes model alone". Current builds still admit a string model on
  * agent.spawn while pinning identity fields, so a PreToolUse hook may still
  * return updatedInput that changes model alone.
+ *
+ * 2.1.280 split Advisor tag definition from tool construction. Each of the
+ * two entries below still accepts the older combined marker so prior
+ * installs pass; a 2.1.280+ bundle must contain both semantic seams.
  */
 const REQUIRED_MARKERS = [
   "--advisor <model>",
   "advisorModel",
-  'type:"advisor_20260301",name:"advisor",model:',
+  [
+    'type:"advisor_20260301",name:"advisor",model:',
+    'var Fit="advisor_20260301",$it="advisor_20260301".replace(/\\d+$/,"");',
+  ],
+  [
+    'type:"advisor_20260301",name:"advisor",model:',
+    "_m.push({type:Fit,name:Sce,model:rs,...Ro&&{defer_loading:!0}})",
+  ],
   "Advising",
   " using ",
   "updatedInput",
-  // 2.1.273: Et; 2.1.266+: it; 2.1.260: ut;
+  // 2.1.280: ot; 2.1.273: Et; 2.1.266+: it; 2.1.260: ut;
   // 2.1.258-: "a rewrite changes model alone"
   [
+    'check:x((e)=>ot(e,"{ model }",(t)=>typeof t.model==="string"))',
     'check:_((e)=>Et(e,"{ model }",(t)=>typeof t.model==="string"))',
     'check:A((e)=>it(e,"{ model }",(t)=>typeof t.model==="string"))',
     'check:_((e)=>ut(e,"{ model }",(t)=>typeof t.model==="string"))',

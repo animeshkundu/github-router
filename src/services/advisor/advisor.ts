@@ -1519,12 +1519,15 @@ export function buildAdvisorStream(opts: {
             pendingMessageDelta.stopSequence = delta.stop_sequence
           }
         }
+        // Latest lead-turn snapshot, not a sum across internal turns.
+        // Replace the whole map so omitted keys cannot linger.
+        const nextUsage: Record<string, number> = {}
         for (const [key, value] of Object.entries(usage)) {
           if (typeof value === "number" && Number.isFinite(value)) {
-            pendingMessageDelta.usage[key] =
-              (pendingMessageDelta.usage[key] ?? 0) + value
+            nextUsage[key] = value
           }
         }
+        pendingMessageDelta.usage = nextUsage
         const turnAic = extractCopilotUsage(payload.copilot_usage)
         if (!turnAic || turnAic.totalNanoAiu <= 0) return
         if (aicRecordedThisTurn) return
@@ -1824,7 +1827,8 @@ export function buildAdvisorStream(opts: {
             case "message_delta": {
               // One client-visible response may span several internal Copilot
               // turns. Keep intermediate stop reasons private and emit one
-              // terminal delta with accumulated usage when the loop finishes.
+              // terminal delta with the latest lead turn's usage snapshot
+              // when the loop finishes.
               captureMessageDelta(payload)
               continue
             }
