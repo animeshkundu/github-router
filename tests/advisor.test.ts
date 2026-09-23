@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
+import { __resetAicLedgerForTests, aicSnapshot } from "~/lib/aic-ledger"
 import { state } from "../src/lib/state"
 import { server } from "../src/server"
 import {
@@ -531,7 +532,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     expect(messageStopEventCount).toBe(1)
     expect((text.match(/^event: message_delta$/gm) ?? [])).toHaveLength(1)
     expect(text).toContain('"stop_reason":"end_turn"')
-    expect(text).toContain('"output_tokens":15')
+    expect(text).toContain('"output_tokens":5')
 
     // Verify the advisor model was called once via /responses with high
     expect(advisorResponsesCallCount).toBe(1)
@@ -603,6 +604,230 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     // Anthropic spec (cryptographic verification).
     expect(thinkingBlock!.signature).toBe("abcdef0123456789")
 
+  })
+
+  test("terminal usage is the latest lead turn snapshot, AIC stays cumulative per priced lead turn", async () => {
+    __resetAicLedgerForTests()
+    const turn1Usage = {
+      input_tokens: 111,
+      cache_read_input_tokens: 222,
+      output_tokens: 10,
+    }
+    const turn2Usage = {
+      input_tokens: 333,
+      output_tokens: 8,
+    }
+    const turn1Copilot = {
+      total_nano_aiu: 1_000_000,
+      token_details: [
+        {
+          batch_size: 1_000_000,
+          cost_per_batch: 1_000_000_000,
+          model: "claude-opus-4.7",
+          token_count: 111,
+          token_type: "input",
+        },
+      ],
+    }
+    const turn2Copilot = {
+      total_nano_aiu: 2_000_000,
+      token_details: [
+        {
+          batch_size: 1_000_000,
+          cost_per_batch: 1_000_000_000,
+          model: "claude-opus-4.7",
+          token_count: 333,
+          token_type: "input",
+        },
+      ],
+    }
+    const advisorCopilot = {
+      total_nano_aiu: 9_000_000,
+      token_details: [
+        {
+          batch_size: 1_000_000,
+          cost_per_batch: 20_000_000_000,
+          model: "gpt-5.6-sol",
+          token_count: 50,
+          token_type: "input",
+        },
+      ],
+    }
+    let copilotMessagesCallCount = 0
+    const fetchMock = mock((url: string) => {
+      if (url.includes("/responses")) {
+        return new Response(
+          JSON.stringify({
+            id: "advisor_resp",
+            object: "response",
+            status: "completed",
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                content: [
+                  { type: "output_text", text: "Advisor snapshot check." },
+                ],
+              },
+            ],
+            usage: { input_tokens: 50, output_tokens: 10 },
+            copilot_usage: advisorCopilot,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      if (url.includes("/v1/messages")) {
+        copilotMessagesCallCount++
+        if (copilotMessagesCallCount === 1) {
+          return new Response(
+            buildSseStream([
+              {
+                event: "message_start",
+                data: {
+                  type: "message_start",
+                  message: {
+                    id: "m1",
+                    usage: {
+                      input_tokens: 9999,
+                      cache_read_input_tokens: 9999,
+                      output_tokens: 9999,
+                    },
+                  },
+                },
+              },
+              {
+                event: "content_block_start",
+                data: {
+                  type: "content_block_start",
+                  index: 0,
+                  content_block: {
+                    type: "tool_use",
+                    id: "toolu_advisor_snap",
+                    name: ADVISOR_INTERNAL_TOOL_NAME,
+                    input: {},
+                  },
+                },
+              },
+              {
+                event: "content_block_stop",
+                data: { type: "content_block_stop", index: 0 },
+              },
+              {
+                event: "message_delta",
+                data: {
+                  type: "message_delta",
+                  delta: { stop_reason: "tool_use", stop_sequence: null },
+                  usage: turn1Usage,
+                  copilot_usage: turn1Copilot,
+                },
+              },
+              { event: "message_stop", data: { type: "message_stop" } },
+            ]),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          )
+        }
+        return new Response(
+          buildSseStream([
+            {
+              event: "message_start",
+              data: {
+                type: "message_start",
+                message: {
+                  id: "m2",
+                  usage: { input_tokens: 8888, output_tokens: 8888 },
+                },
+              },
+            },
+            {
+              event: "content_block_start",
+              data: {
+                type: "content_block_start",
+                index: 0,
+                content_block: { type: "text", text: "" },
+              },
+            },
+            {
+              event: "content_block_delta",
+              data: {
+                type: "content_block_delta",
+                index: 0,
+                delta: { type: "text_delta", text: "done" },
+              },
+            },
+            {
+              event: "content_block_stop",
+              data: { type: "content_block_stop", index: 0 },
+            },
+            {
+              event: "message_delta",
+              data: {
+                type: "message_delta",
+                delta: { stop_reason: "end_turn", stop_sequence: null },
+                usage: turn2Usage,
+                copilot_usage: turn2Copilot,
+              },
+            },
+            { event: "message_stop", data: { type: "message_stop" } },
+          ]),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        )
+      }
+      throw new Error(`Unexpected URL ${url}`)
+    })
+    // @ts-expect-error - override
+    globalThis.fetch = fetchMock
+
+    try {
+      const response = await server.request("/v1/messages", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "text/event-stream",
+          "anthropic-beta": "advisor-tool-2026-03-01",
+        },
+        body: JSON.stringify({
+          model: "claude-opus-4.7",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+        }),
+      })
+      expect(response.status).toBe(200)
+      const text = await streamToString(response.body!)
+      expect((text.match(/^event: message_delta$/gm) ?? [])).toHaveLength(1)
+      const deltaMatch = text.match(
+        /^event: message_delta\ndata: (\{.*\})\n\n/m,
+      )
+      expect(deltaMatch).not.toBeNull()
+      const terminal = JSON.parse(deltaMatch![1]!) as {
+        usage: Record<string, number>
+        copilot_usage?: {
+          total_nano_aiu: number
+          token_details: Array<{ token_count: number }>
+        }
+      }
+      expect(terminal.usage).toEqual(turn2Usage)
+      expect(terminal.usage).not.toHaveProperty("cache_read_input_tokens")
+      expect(terminal.usage.input_tokens).not.toBe(9999)
+      expect(terminal.usage.output_tokens).not.toBe(50)
+      expect(terminal.copilot_usage?.total_nano_aiu).toBe(3_000_000)
+      expect(terminal.copilot_usage?.token_details.map((d) => d.token_count)).toEqual(
+        [111, 333],
+      )
+
+      const snap = aicSnapshot()
+      expect(snap.perModel["claude-opus-4.7"]).toEqual({
+        nanoAiu: 3_000_000,
+        requests: 2,
+      })
+      expect(snap.perModel["gpt-5.6-sol"]).toEqual({
+        nanoAiu: 9_000_000,
+        requests: 1,
+      })
+      expect(snap.requests).toBe(3)
+    } finally {
+      __resetAicLedgerForTests()
+    }
   })
 
   test("parallel advisor calls emit and replay one matching result per tool_use", async () => {
@@ -1009,7 +1234,7 @@ describe("ADVISOR streaming integration (Phase I)", () => {
     expect(text).toContain("Advisor loop exceeded")
     expect((text.match(/^event: message_delta$/gm) ?? [])).toHaveLength(1)
     expect(text).toContain('"stop_reason":"end_turn"')
-    expect(text).toContain('"output_tokens":16')
+    expect(text).toContain('"output_tokens":1')
     expect((text.match(/^event: message_stop$/gm) ?? [])).toHaveLength(1)
   })
 

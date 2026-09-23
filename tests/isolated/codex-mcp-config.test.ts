@@ -1249,9 +1249,11 @@ describe("buildPeerAgentDefinitions", () => {
         nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
         includeCoordinator: false,
       })
+      const countNeedle = (haystack: string, needle: string): number =>
+        haystack.split(needle).length - 1
       for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
-        expect(cheapestAgents[name]!.description).toContain("200K context window")
-        expect(cheapestAgents[name]!.prompt).toContain("You operate at a 200K context window")
+        expect(countNeedle(cheapestAgents[name]!.description, "200K context window")).toBe(1)
+        expect(countNeedle(cheapestAgents[name]!.prompt, "You operate at a 200K context window")).toBe(1)
       }
       const fastAgents = buildPeerAgentDefinitions({
         codexCli: false,
@@ -1275,8 +1277,8 @@ describe("buildPeerAgentDefinitions", () => {
 
       const balancedAgents = buildBalancedAgents()
       for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
-        expect(balancedAgents[name]!.description).toContain("200K context window")
-        expect(balancedAgents[name]!.prompt).toContain("You operate at a 200K context window")
+        expect(countNeedle(balancedAgents[name]!.description, "200K context window")).toBe(1)
+        expect(countNeedle(balancedAgents[name]!.prompt, "You operate at a 200K context window")).toBe(1)
       }
       const cheapAgents = buildPeerAgentDefinitions({
         codexCli: false,
@@ -1290,8 +1292,8 @@ describe("buildPeerAgentDefinitions", () => {
         includeCoordinator: false,
       })
       for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
-        expect(cheapAgents[name]!.description).toContain("200K context window")
-        expect(cheapAgents[name]!.prompt).toContain("You operate at a 200K context window")
+        expect(countNeedle(cheapAgents[name]!.description, "200K context window")).toBe(1)
+        expect(countNeedle(cheapAgents[name]!.prompt, "You operate at a 200K context window")).toBe(1)
       }
     })
 
@@ -1299,6 +1301,80 @@ describe("buildPeerAgentDefinitions", () => {
       const agents = buildBalancedAgents({ nativeRoster: ["Plan"] })
       expect(Object.keys(agents)).toEqual(["Plan"])
     })
+  })
+
+  test("emitted tools allowlists contain no duplicate entries", () => {
+    const common = {
+      codexCli: false,
+      geminiAvailable: true,
+      groupKeys: { peers: "peers", search: "search", workers: "workers" },
+      nonce: NONCE,
+      codexHome: "/tmp/codex",
+      serverUrl: URL,
+    }
+    const roster = ["Explore", "Plan", "General-Purpose", "reviewer"]
+    const catalogs = [
+      buildPeerAgentDefinitions({
+        ...common,
+        workerToolsAvailable: true,
+        browseAvailable: true,
+        nativeSubagentModel: "gpt-5.5",
+        reviewerModel: "gemini-3.1-pro-preview",
+        brainstormModel: "gemini-3.1-pro-preview",
+        scoutModel: "gemini-3.6-flash",
+        scribeModel: "gpt-5.6-terra",
+        implementerFastModel: "gpt-5.6-terra",
+        generalPurposeFastModel: "gpt-5.6-luna",
+        reviewerFastModel: "gemini-3.8-flash",
+      }),
+      buildPeerAgentDefinitions({
+        ...common,
+        fastProfile: true,
+        nativeRoster: roster,
+        includeCoordinator: false,
+        browseAvailable: true,
+        fastExploreModel: "gpt-5.6-luna",
+        fastPlanModel: "gpt-5.6-sol",
+        fastGeneralPurposeModel: "gemini-3.8-flash",
+        fastReviewerModel: "claude-sonnet-5",
+      }),
+      buildPeerAgentDefinitions({
+        ...common,
+        cheapProfile: true,
+        nativeRoster: roster,
+        includeCoordinator: false,
+        browseAvailable: true,
+        cheapExploreModel: "gpt-5.6-luna",
+        cheapPlanModel: "gpt-5.6-sol",
+        cheapGeneralPurposeModel: "gemini-3.8-flash",
+        cheapReviewerModel: "gpt-5.6-luna",
+      }),
+      buildPeerAgentDefinitions({
+        ...common,
+        cheapestProfile: true,
+        nativeRoster: roster,
+        includeCoordinator: false,
+        browseAvailable: true,
+        cheapestExploreModel: "gpt-5.6-luna",
+        cheapestPlanModel: "gpt-5.6-sol",
+        cheapestGeneralPurposeModel: "gpt-5.6-luna",
+        cheapestReviewerModel: "gemini-3.8-flash",
+      }),
+      buildPeerAgentDefinitions({
+        ...common,
+        balancedProfile: true,
+        nativeRoster: roster,
+        includeCoordinator: false,
+        browseAvailable: true,
+      }),
+    ]
+    for (const agents of catalogs) {
+      for (const [name, def] of Object.entries(agents)) {
+        const tools = def.tools
+        if (tools === undefined) continue
+        expect({ [name]: tools }).toEqual({ [name]: [...new Set(tools)] })
+      }
+    }
   })
 })
 

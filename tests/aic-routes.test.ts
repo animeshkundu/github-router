@@ -66,9 +66,30 @@ function catalogEntry(id: string, family: string) {
   }
 }
 
-function installFetchMock(handler: () => Response): void {
+function requestUrl(input: unknown): string {
+  if (typeof input === "string") return input
+  if (input instanceof URL) return String(input)
+  if (input && typeof input === "object" && "url" in input) {
+    return String((input as { url: unknown }).url)
+  }
+  return String(input)
+}
+
+function assertExpectedFetchUrl(url: string, allowed: ReadonlyArray<string>): void {
+  if (!allowed.some((part) => url.includes(part))) {
+    throw new Error(`unexpected fetch URL: ${url}`)
+  }
+}
+
+function installFetchMock(
+  handler: () => Response,
+  allowed: ReadonlyArray<string> = ["/v1/messages", "/chat/completions", "/responses"],
+): void {
   globalThis.fetch = Object.assign(
-    mock((): Promise<Response> => Promise.resolve(handler())),
+    mock((input: unknown): Promise<Response> => {
+      assertExpectedFetchUrl(requestUrl(input), allowed)
+      return Promise.resolve(handler())
+    }),
     { preconnect: () => {} },
   )
 }
@@ -188,6 +209,108 @@ describe("/v1/messages native", () => {
     const snap = aicSnapshot()
     expect(snap.requests).toBe(1)
     expect(snap.totalNanoAiu).toBe(820000)
+  })
+
+  test("independent main and subagent requests record separately (no aggregation)", async () => {
+    const mainUsage = {
+      token_details: [
+        { batch_size: 1000000, cost_per_batch: 20000000000, model: "claude-haiku-4.5", token_count: 5, token_type: "input" },
+      ],
+      total_nano_aiu: 100000,
+    }
+    const subagentUsage = {
+      token_details: [
+        { batch_size: 1000000, cost_per_batch: 20000000000, model: "claude-sonnet-4.6", token_count: 13, token_type: "input" },
+      ],
+      total_nano_aiu: 260000,
+    }
+    state.models = {
+      object: "list",
+      data: [
+        catalogEntry("claude-haiku-4.5", "claude"),
+        catalogEntry("claude-sonnet-4.6", "claude"),
+      ] as unknown as NonNullable<typeof state.models>["data"],
+    }
+    globalThis.fetch = Object.assign(
+      mock((input: unknown, init?: RequestInit): Promise<Response> => {
+        const url = requestUrl(input)
+        assertExpectedFetchUrl(url, ["/v1/messages"])
+        const body = typeof init?.body === "string" ? init.body : ""
+        if (body.includes('"model":"claude-sonnet-4.6"')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: "msg_sub",
+                type: "message",
+                role: "assistant",
+                model: "claude-sonnet-4.6",
+                content: [{ type: "text", text: "sub" }],
+                stop_reason: "end_turn",
+                stop_sequence: null,
+                usage: { input_tokens: 13, output_tokens: 2 },
+                copilot_usage: subagentUsage,
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          )
+        }
+        if (body.includes('"model":"claude-haiku-4.5"')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: "msg_main",
+                type: "message",
+                role: "assistant",
+                model: "claude-haiku-4.5",
+                content: [{ type: "text", text: "main" }],
+                stop_reason: "end_turn",
+                stop_sequence: null,
+                usage: { input_tokens: 5, output_tokens: 1 },
+                copilot_usage: mainUsage,
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            ),
+          )
+        }
+        throw new Error(`unexpected /v1/messages body: ${body.slice(0, 200)}`)
+      }),
+      { preconnect: () => {} },
+    )
+
+    const mainRes = await server.request("/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-haiku-4.5",
+        max_tokens: 5,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(mainRes.status).toBe(200)
+    expect(((await mainRes.json()) as { copilot_usage: unknown }).copilot_usage).toEqual(mainUsage)
+
+    const subRes = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-claude-code-agent-id": "implementer",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4.6",
+        max_tokens: 5,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    })
+    expect(subRes.status).toBe(200)
+    expect(((await subRes.json()) as { copilot_usage: unknown }).copilot_usage).toEqual(subagentUsage)
+
+    const snap = aicSnapshot()
+    expect(snap.requests).toBe(2)
+    expect(snap.totalNanoAiu).toBe(360000)
+    expect(snap.perModel["claude-haiku-4.5"]?.requests).toBe(1)
+    expect(snap.perModel["claude-haiku-4.5"]?.nanoAiu).toBe(100000)
+    expect(snap.perModel["claude-sonnet-4.6"]?.requests).toBe(1)
+    expect(snap.perModel["claude-sonnet-4.6"]?.nanoAiu).toBe(260000)
   })
 })
 
@@ -378,6 +501,7 @@ describe("translation shim egress", () => {
     expect(msg.usage.output_tokens).toBe(5)
     // Client-visible usage stays the 4-key Anthropic shape (no copilot_usage leak).
     expect("copilot_usage" in msg).toBe(false)
+    expect(aicSnapshot().requests).toBe(1)
     expect(aicSnapshot().perModel["gpt-5.6-luna"]?.nanoAiu).toBe(820000)
   })
 
@@ -411,6 +535,7 @@ describe("translation shim egress", () => {
       "gemini-3.5-flash",
     )
     expect(msg.stop_reason).toBe("end_turn")
+    expect(aicSnapshot().requests).toBe(1)
     expect(aicSnapshot().perModel["gemini-3.5-flash"]?.nanoAiu).toBe(820000)
   })
 
@@ -633,8 +758,12 @@ describe("/v1/responses/compact", () => {
   test("synthetic-compaction fallback records AIC under the compact model", async () => {
     globalThis.fetch = Object.assign(
       mock(async (url: unknown): Promise<Response> => {
-        if (String(url).endsWith("/responses/compact")) {
+        const href = requestUrl(url)
+        if (href.endsWith("/responses/compact") || href.includes("/responses/compact")) {
           return new Response("not found", { status: 404 })
+        }
+        if (!href.includes("/responses")) {
+          throw new Error(`unexpected fetch URL: ${href}`)
         }
         return new Response(
           JSON.stringify({
