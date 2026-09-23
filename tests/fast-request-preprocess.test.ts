@@ -350,7 +350,7 @@ describe("fast request preprocessing", () => {
         [CHEAPEST_EXPLORE_ALIAS_ID, "gpt-6-luna", "high"],
         [CHEAPEST_PLAN_ALIAS_ID, "gpt-6-sol", "high"],
         [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, "gpt-6-luna", "max"],
-        [CHEAPEST_REVIEWER_ALIAS_ID, "gemini-3.8-flash", "high"],
+        [CHEAPEST_REVIEWER_ALIAS_ID, "gpt-6-sol", "high"],
       ] as const) {
         for (const wire of [alias, `${alias}[1m]`]) {
           const sub = preprocessFastRequest(
@@ -402,7 +402,7 @@ describe("fast request preprocessing", () => {
     test("balanced GP/reviewer aliases canonicalize bare with alias effort on subagents", () => {
       for (const [alias, real, effort] of [
         [BALANCED_GENERAL_PURPOSE_ALIAS_ID, "gpt-6-luna", "max"],
-        [BALANCED_REVIEWER_ALIAS_ID, "gemini-3.8-flash", "high"],
+        [BALANCED_REVIEWER_ALIAS_ID, "gpt-6-sol", "high"],
       ] as const) {
         for (const wire of [alias, `${alias}[1m]`]) {
           const sub = preprocessFastRequest(

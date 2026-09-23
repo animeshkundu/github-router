@@ -41,7 +41,7 @@ export const FAST_DISPATCH_GRAPH: Readonly<
 /**
  * Balanced authority graph: identical shape to the fast graph except the
  * balanced `reviewer` may invoke `Explore` for targeted discovery (the
- * Gemini-backed reviewer narrows scope with search first, then delegates
+ * Sol-backed reviewer narrows scope with search first, then delegates
  * scoped evidence questions). Selected per launch via the `graph` option;
  * every other pinned profile keeps the fast graph.
  */

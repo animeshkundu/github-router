@@ -51,8 +51,8 @@ function explicitEffortOf(value: unknown): FastFixedEffort | undefined {
  * balanced) shares fast's effort mapping (same model-to-effort rows, just
  * bare subagent slugs at the wiring layer), so this preprocess is shared.
  * Note the reviewer differs: fast reviews on Sonnet 5/xhigh while cheap
- * reviews on Luna/max, cheapest reviews on Gemini/high, and balanced reviews
- * on Gemini/high — all rows exist here, so each profile's reviewer resolves to
+ * reviews on Luna/max, cheapest reviews on Sol/high, and balanced reviews
+ * on Sol/high — all rows exist here, so each profile's reviewer resolves to
  * its fixed effort. The balanced LEAD is the other exception: bare Sol leads
  * at medium (`BALANCED_PROFILE_LEAD_EFFORT`), not the shared high.
  *

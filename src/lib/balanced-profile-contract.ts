@@ -25,7 +25,7 @@ export const BALANCED_PROFILE_MODELS = Object.freeze({
   explore: "gpt-6-luna",
   plan: "gpt-6-sol",
   "General-Purpose": "gpt-6-luna",
-  reviewer: "gemini-3.8-flash",
+  reviewer: "gpt-6-sol",
   oracle: "grok-4.6",
   astra: "gpt-6-astra",
 } as const)
@@ -83,7 +83,7 @@ export type BalancedProfileSynthesizedPeer =
 
 /** Each native role's permitted native-agent targets. The lead gets the roster.
  * Unlike the fast/cheap graphs, the balanced `reviewer` may invoke `Explore`
- * for targeted discovery: the Gemini-backed reviewer narrows scope with
+ * for targeted discovery: the Sol-backed reviewer narrows scope with
  * search first, then delegates scoped evidence questions rather than
  * sweeping the repository itself. */
 export const BALANCED_PROFILE_DELEGATION_GRAPH = Object.freeze({

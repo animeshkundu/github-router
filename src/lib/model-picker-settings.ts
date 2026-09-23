@@ -81,9 +81,8 @@ const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
 ])
 
 const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
-  // Cheapest reuses cheap's 200K pinning (`neverOneM`) but drops Grok (not in
-  // the cheapest roster) — rows are Luna (lead/GP), Sol (Plan + Oracle), and
-  // Gemini Flash (reviewer + Advisor). Luna is exempt from the pin so its 1M
+  // Cheapest roster is Luna (lead/GP) + Sol (Plan/reviewer/Advisor/Oracle) —
+  // rows are Sol and Luna only. Luna is exempt from the pin so its 1M
   // row stays an explicit opt-in; the default lead rows stay bare 200K.
   {
     id: "gpt-6-sol",
@@ -97,18 +96,12 @@ const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
     behavesAs: "claude-opus-5.5",
     neverOneM: false,
   },
-  {
-    id: "gemini-3.8-flash",
-    label: "Gemini 3.8 Flash",
-    behavesAs: "claude-sonnet-5",
-    neverOneM: true,
-  },
 ])
 
 const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   // Balanced reuses cheap's 200K pinning (`neverOneM`) with Sol leading:
-  // rows are Sol (lead/Plan/Advisor), Luna (Explore/General-Purpose), Gemini
-  // Flash (reviewer), and Grok 4.6 (Oracle). Luna is exempt from the pin so
+  // rows are Sol (lead/Plan/reviewer), Luna (Explore/General-Purpose), and
+  // Grok 4.6 (Oracle). Luna is exempt from the pin so
   // its 1M row stays an explicit opt-in; the default lead rows stay bare
   // 200K (bare lead strip + bare subagent aliases still apply).
   {
@@ -122,12 +115,6 @@ const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
     label: "GPT-6 Luna",
     behavesAs: "claude-opus-5.5",
     neverOneM: false,
-  },
-  {
-    id: "gemini-3.8-flash",
-    label: "Gemini 3.8 Flash",
-    behavesAs: "claude-sonnet-5",
-    neverOneM: true,
   },
   {
     id: "grok-4.6",
