@@ -4,6 +4,7 @@ import {
   BALANCED_EXPLORE_ALIAS_ID,
   BALANCED_GENERAL_PURPOSE_ALIAS_ID,
   BALANCED_REVIEWER_ALIAS_ID,
+  BROWSE_LOW_ALIAS_ID,
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
   CHEAPEST_IMPLEMENTER_ALIAS_ID,
@@ -23,6 +24,7 @@ import {
   formatCheap1mPrerequisiteFailure,
   formatCheapPrerequisiteFailure,
   formatFastPrerequisiteFailure,
+  isMaxModelAlias,
   isRetiredFastModelAlias,
   profileDescriptor,
   resolveEffortWithAliasDefault,
@@ -218,6 +220,16 @@ describe("cheap-family subagent aliases", () => {
     expect(resolveModelAlias(CHEAP_PLAN_ALIAS_ID)?.realModel).toBe(CHEAP_PROFILE_MODELS.plan)
     expect(resolveModelAlias(CHEAPEST_EXPLORE_ALIAS_ID)?.realModel).toBe(CHEAPEST_PROFILE_MODELS.explore)
     expect(resolveModelAlias(CHEAPEST_REVIEWER_ALIAS_ID)?.realModel).toBe(CHEAPEST_PROFILE_MODELS.reviewer)
+  })
+
+  test("shared browse alias resolves Luna at low effort for every pinned non-max profile", () => {
+    expect(resolveModelAlias(BROWSE_LOW_ALIAS_ID)?.realModel).toBe(LUNA_REAL_MODEL_ID)
+    expect(resolveModelAlias(BROWSE_LOW_ALIAS_ID)?.absentEffortDefault).toBe("low")
+    expect(resolveModelAlias(`${BROWSE_LOW_ALIAS_ID}[1m]`)?.realModel).toBe(LUNA_REAL_MODEL_ID)
+    expect(canonicalizeAliasModel(BROWSE_LOW_ALIAS_ID)).toBe(LUNA_REAL_MODEL_ID)
+    expect(canonicalizeAliasModel(`${BROWSE_LOW_ALIAS_ID}[1m]`)).toBe(`${LUNA_REAL_MODEL_ID}[1m]`)
+    expect(isRetiredFastModelAlias(BROWSE_LOW_ALIAS_ID)).toBe(false)
+    expect(isMaxModelAlias(BROWSE_LOW_ALIAS_ID)).toBe(false)
   })
 })
 

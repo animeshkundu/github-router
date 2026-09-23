@@ -18,6 +18,7 @@ import {
 import { PEER_AGENT_MD_FILENAME } from "../../src/lib/paths"
 import { MCP_GROUPS } from "../../src/lib/peer-mcp-personas"
 import {
+  BROWSE_LOW_ALIAS_ID,
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
   CHEAPEST_REVIEWER_ALIAS_ID,
@@ -887,8 +888,8 @@ describe("buildPeerAgentDefinitions", () => {
       const agents = buildFastAgents({ browseAvailable: true })
       expect(agents["worker-browse"]).toBeDefined()
       expect(agents["worker-browse"]!.tools).toEqual(["mcp__workers__*"])
-      expect(agents["worker-browse"]!.model).toBe("gpt-6-luna[1m]")
-      expect(agents["worker-browse"]!.effort).toBe("high")
+      expect(agents["worker-browse"]!.model).toBe(BROWSE_LOW_ALIAS_ID)
+      expect(agents["worker-browse"]!.effort).toBe("low")
     })
 
     test("effort round-trips through markdown frontmatter", () => {
@@ -1003,8 +1004,8 @@ describe("buildPeerAgentDefinitions", () => {
       const agents = buildCheapAgents({ browseAvailable: true })
       expect(agents["worker-browse"]).toBeDefined()
       expect(agents["worker-browse"]!.tools).toEqual(["mcp__workers__*"])
-      expect(agents["worker-browse"]!.model).toBe(CHEAP_EXPLORE_ALIAS_ID)
-      expect(agents["worker-browse"]!.effort).toBe("high")
+      expect(agents["worker-browse"]!.model).toBe(BROWSE_LOW_ALIAS_ID)
+      expect(agents["worker-browse"]!.effort).toBe("low")
     })
 
     test("nativeRoster remains a hard filter on the cheap definitions", () => {
@@ -1082,8 +1083,8 @@ describe("buildPeerAgentDefinitions", () => {
       const agents = buildCheapestAgents({ browseAvailable: true })
       expect(agents["worker-browse"]).toBeDefined()
       expect(agents["worker-browse"]!.tools).toEqual(["mcp__workers__*"])
-      expect(agents["worker-browse"]!.model).toBe(CHEAPEST_EXPLORE_ALIAS_ID)
-      expect(agents["worker-browse"]!.effort).toBe("high")
+      expect(agents["worker-browse"]!.model).toBe(BROWSE_LOW_ALIAS_ID)
+      expect(agents["worker-browse"]!.effort).toBe("low")
     })
 
     test("nativeRoster remains a hard filter on the cheapest definitions", () => {
@@ -1195,8 +1196,8 @@ describe("buildPeerAgentDefinitions", () => {
       const agents = buildBalancedAgents({ browseAvailable: true })
       expect(agents["worker-browse"]).toBeDefined()
       expect(agents["worker-browse"]!.tools).toEqual(["mcp__workers__*"])
-      expect(agents["worker-browse"]!.model).toBe(BALANCED_EXPLORE_ALIAS_ID)
-      expect(agents["worker-browse"]!.effort).toBe("high")
+      expect(agents["worker-browse"]!.model).toBe(BROWSE_LOW_ALIAS_ID)
+      expect(agents["worker-browse"]!.effort).toBe("low")
     })
 
     test("balanced reviewer narrows with search then delegates to Explore", () => {

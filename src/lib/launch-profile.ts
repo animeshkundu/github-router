@@ -310,6 +310,17 @@ export const BALANCED_REVIEWER_ALIAS_ID = "gh-router-balanced-reviewer-high"
 export const LUNA_SONNET_ALIAS_ID = "gh-router-luna-sonnet-xhigh"
 
 /**
+ * Shared browse-dispatcher alias (every pinned profile except max): the
+ * `worker-browse` native is an identical thin dispatcher on fast, cheap,
+ * cheap1m, cheapest, and balanced, so one router-owned, non-catalog identity
+ * serves all five (precedent: the shared `SKILL_*` aliases). Carries the
+ * fixed `low` effort until the authenticated request boundary. Emitted BARE
+ * (no `[1m]`) by every pinned `build*ProfileAgentDefinitions` worker-browse
+ * block, so the dispatcher's own turns run at the 200K default window.
+ */
+export const BROWSE_LOW_ALIAS_ID = "gh-router-browse-low"
+
+/**
  * Router-owned alias id for the fast profile's Haiku-tier row
  * (`ANTHROPIC_DEFAULT_HAIKU_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL`).
  */
@@ -320,6 +331,10 @@ export const LUNA_HAIKU_ALIAS_ID = "gh-router-luna-haiku-high"
  * boundary and are never valid on standard or fast launches. */
 export const MAX_LUNA_HIGH_ALIAS_ID = "gh-router-max-luna-high"
 export const MAX_LUNA_MAX_ALIAS_ID = "gh-router-max-luna-max"
+/** Max-profile browse-dispatcher alias: same `low`-effort, bare-200K browse
+ *  as the shared alias above, but max-isolated (the max preprocessor never
+ *  consults the shared alias table, so a shared id would be rejected there). */
+export const MAX_BROWSE_LOW_ALIAS_ID = "gh-router-max-browse-low"
 
 /**
  * Pipeline skill aliases (`/gh-gather-context`, `/gh-plan`, `/gh-implement`).
@@ -346,6 +361,7 @@ export const SKILL_SOL_REAL_MODEL_ID = FAST_PROFILE_MODELS.plan
 const MAX_ALIAS_IDS = new Set([
   MAX_LUNA_HIGH_ALIAS_ID,
   MAX_LUNA_MAX_ALIAS_ID,
+  MAX_BROWSE_LOW_ALIAS_ID,
 ])
 
 export function isMaxModelAlias(id: string): boolean {
@@ -356,6 +372,7 @@ export function maxAliasEffort(id: string): Effort | undefined {
   const base = stripTrailingOneMSuffix(id).base
   if (base === MAX_LUNA_HIGH_ALIAS_ID) return "high"
   if (base === MAX_LUNA_MAX_ALIAS_ID) return "max"
+  if (base === MAX_BROWSE_LOW_ALIAS_ID) return "low"
   return undefined
 }
 
@@ -425,6 +442,10 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   [
     LUNA_HAIKU_ALIAS_ID,
     { aliasId: LUNA_HAIKU_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "high" },
+  ],
+  [
+    BROWSE_LOW_ALIAS_ID,
+    { aliasId: BROWSE_LOW_ALIAS_ID, realModel: LUNA_REAL_MODEL_ID, absentEffortDefault: "low" },
   ],
   [
     CHEAP_EXPLORE_ALIAS_ID,

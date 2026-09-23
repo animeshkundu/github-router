@@ -26,6 +26,7 @@ import {
   BALANCED_EXPLORE_ALIAS_ID,
   BALANCED_GENERAL_PURPOSE_ALIAS_ID,
   BALANCED_REVIEWER_ALIAS_ID,
+  BROWSE_LOW_ALIAS_ID,
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
   CHEAPEST_REVIEWER_ALIAS_ID,
@@ -34,6 +35,7 @@ import {
   CHEAP_PLAN_ALIAS_ID,
   CHEAP_REVIEWER_ALIAS_ID,
   LUNA_SCOUT_ALIAS_ID,
+  MAX_BROWSE_LOW_ALIAS_ID,
 } from "./launch-profile"
 
 import { type SelfInvocation } from "./hook-launcher/self-invocation"
@@ -770,8 +772,11 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
     out["worker-browse"] = {
       description: dispatcherDescription("browse"),
       prompt: dispatcherPrompt("browse", workersKey),
-      model: oneM(MAX_PROFILE_MODELS.luna),
-      effort: "high",
+      // Bare max-isolated browse alias (Luna/low at the 200K default window):
+      // browsing is page-driving, not reasoning-heavy, and the dispatcher is
+      // a thin relay whose own turns need no more context.
+      model: MAX_BROWSE_LOW_ALIAS_ID,
+      effort: "low",
       tools: dispatcherTools("browse", workersKey),
       ...(opts.serverUrl
         ? {
@@ -1101,8 +1106,11 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     out["worker-browse"] = {
       description: dispatcherDescription("browse"),
       prompt: dispatcherPrompt("browse", workersKey),
-      model: oneM(FAST_PROFILE_MODELS.luna),
-      effort: "high",
+      // Bare shared browse alias (Luna/low at the 200K default window):
+      // browsing is page-driving, not reasoning-heavy, and the dispatcher is
+      // a thin relay whose own turns need no more context.
+      model: BROWSE_LOW_ALIAS_ID,
+      effort: "low",
       tools: dispatcherTools("browse", workersKey),
       ...(opts.serverUrl
         ? {
@@ -1222,8 +1230,8 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
     out["worker-browse"] = {
       description: dispatcherDescription("browse"),
       prompt: dispatcherPrompt("browse", workersKey),
-      model: exploreModel,
-      effort: "high",
+      model: BROWSE_LOW_ALIAS_ID,
+      effort: "low",
       tools: dispatcherTools("browse", workersKey),
       ...(opts.serverUrl
         ? {
@@ -1317,8 +1325,8 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     out["worker-browse"] = {
       description: dispatcherDescription("browse"),
       prompt: dispatcherPrompt("browse", workersKey),
-      model: exploreModel,
-      effort: "high",
+      model: BROWSE_LOW_ALIAS_ID,
+      effort: "low",
       tools: dispatcherTools("browse", workersKey),
       ...(opts.serverUrl
         ? {
@@ -1416,8 +1424,8 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     out["worker-browse"] = {
       description: dispatcherDescription("browse"),
       prompt: dispatcherPrompt("browse", workersKey),
-      model: exploreModel,
-      effort: "high",
+      model: BROWSE_LOW_ALIAS_ID,
+      effort: "low",
       tools: dispatcherTools("browse", workersKey),
       ...(opts.serverUrl
         ? {

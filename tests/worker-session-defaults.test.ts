@@ -90,6 +90,20 @@ describe("worker session defaults", () => {
     expect(resolveModeDefaults("review").thinking).toBe("xhigh")
   })
 
+  test("browse defaults to Luna at low thinking but stays overridable", () => {
+    expect(resolveModeDefaults("browse")).toMatchObject({
+      model: "gpt-6-luna",
+      thinking: "low",
+      modelSource: "built-in",
+      thinkingSource: "built-in",
+    })
+    // Per-call and session layers still outrank the built-in.
+    setWorkerSessionDefault("browse", { thinking: "high" })
+    expect(resolveModeDefaults("browse").thinking).toBe("high")
+    const concrete = resolveWorkerRunOpts({ prompt: "x", mode: "browse", workspace: "C:/workspace" })
+    expect(concrete.thinking).toBe("high")
+  })
+
   test("reset restores built-ins and never mutates the gate chain", () => {
     const builtIn = resolveModeDefaults("explore")
     setWorkerSessionDefault("explore", { model: "override" })

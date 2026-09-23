@@ -4,9 +4,13 @@ import os from "node:os"
 import path from "node:path"
 
 import {
+  MAX_BROWSE_LOW_ALIAS_ID,
   MAX_LUNA_HIGH_ALIAS_ID,
   MAX_LUNA_MAX_ALIAS_ID,
   canonicalizeAliasModel,
+  isMaxModelAlias,
+  maxAliasEffort,
+  maxAliasModel,
   resolveModelAlias,
   resolveLaunchProfile,
 } from "../src/lib/launch-profile"
@@ -103,6 +107,17 @@ describe("max profile contract", () => {
     expect(resolveModelAlias(MAX_LUNA_HIGH_ALIAS_ID)?.absentEffortDefault).toBe("high")
     expect(resolveModelAlias(MAX_LUNA_MAX_ALIAS_ID)?.absentEffortDefault).toBe("max")
     expect(canonicalizeAliasModel(`${MAX_LUNA_MAX_ALIAS_ID}[1m]`)).toBe("gpt-6-luna[1m]")
+  })
+
+  test("max browse alias resolves Luna at low effort and stays max-isolated", () => {
+    expect(isMaxModelAlias(MAX_BROWSE_LOW_ALIAS_ID)).toBe(true)
+    expect(isMaxModelAlias(`${MAX_BROWSE_LOW_ALIAS_ID}[1m]`)).toBe(true)
+    expect(maxAliasEffort(MAX_BROWSE_LOW_ALIAS_ID)).toBe("low")
+    expect(maxAliasModel(MAX_BROWSE_LOW_ALIAS_ID)).toBe("gpt-6-luna")
+    // Max aliases live outside the shared table (the max preprocessor handles
+    // them separately), so the shared resolvers must not claim this id.
+    expect(resolveModelAlias(MAX_BROWSE_LOW_ALIAS_ID)).toBeUndefined()
+    expect(canonicalizeAliasModel(MAX_BROWSE_LOW_ALIAS_ID)).toBe(MAX_BROWSE_LOW_ALIAS_ID)
   })
 
   test("validates mandatory models and actionable failure text", () => {
@@ -221,7 +236,7 @@ describe("max profile contract", () => {
     }
   })
 
-  test("pins the retained browse dispatcher to Luna high", () => {
+  test("pins the retained browse dispatcher to Luna low at the 200K default", () => {
     const agents = buildPeerAgentDefinitions({
       codexCli: false,
       geminiAvailable: true,
@@ -231,8 +246,8 @@ describe("max profile contract", () => {
       nonce: "0".repeat(64),
       codexHome: "/tmp/codex",
     })
-    expect(agents["worker-browse"]?.model).toBe("gpt-6-luna[1m]")
-    expect(agents["worker-browse"]?.effort).toBe("high")
+    expect(agents["worker-browse"]?.model).toBe(MAX_BROWSE_LOW_ALIAS_ID)
+    expect(agents["worker-browse"]?.effort).toBe("low")
     expect(agents["worker-browse"]?.tools).toEqual(["mcp__workers__*"])
   })
 
@@ -367,6 +382,15 @@ describe("max profile contract", () => {
     expect(aliasReq.modified).toBe(true)
     expect(JSON.parse(aliasReq.body).model).toBe("gpt-6-luna")
     expect(JSON.parse(aliasReq.body).output_config.effort).toBe("high")
+
+    const browseAliasReq = preprocessMaxRequest(
+      JSON.stringify({ model: MAX_BROWSE_LOW_ALIAS_ID, messages: [] }),
+      launch,
+      true,
+    )
+    expect(browseAliasReq.modified).toBe(true)
+    expect(JSON.parse(browseAliasReq.body).model).toBe("gpt-6-luna")
+    expect(JSON.parse(browseAliasReq.body).output_config.effort).toBe("low")
 
     const allowedLead = preprocessMaxRequest(
       JSON.stringify({ model: "gpt-6-sol[1m]", messages: [] }),

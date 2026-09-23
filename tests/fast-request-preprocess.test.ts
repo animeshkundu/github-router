@@ -4,6 +4,7 @@ import { preprocessFastRequest } from "../src/lib/fast-request-preprocess"
 import {
   BALANCED_GENERAL_PURPOSE_ALIAS_ID,
   BALANCED_REVIEWER_ALIAS_ID,
+  BROWSE_LOW_ALIAS_ID,
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
   CHEAPEST_REVIEWER_ALIAS_ID,
@@ -361,6 +362,34 @@ describe("fast request preprocessing", () => {
           expect(parsed.model).toBe(real)
           expect(parsed.output_config.effort).toBe(effort)
         }
+      }
+    })
+
+    test("shared browse alias resolves Luna at low effort on every pinned non-max launch", () => {
+      for (const launch of [fastLaunch, cheapLaunch, cheap1mLaunch, cheapestLaunch, balancedLaunch]) {
+        const sub = preprocessFastRequest(body(BROWSE_LOW_ALIAS_ID), launch, true)
+        expect(sub.rejectedAlias).toBeUndefined()
+        expect(sub.rejectedModel).toBeUndefined()
+        const parsed = JSON.parse(sub.body)
+        expect(parsed.model).toBe("gpt-6-luna")
+        expect(parsed.output_config.effort).toBe("low")
+      }
+      // A stray [1m] bracket survives only where 1M accounting is legal
+      // for that caller (fast subagents); cheap1m strips it on subagent
+      // traffic (lead-only 1M) and the 200K profiles always strip it.
+      {
+        const parsed = JSON.parse(
+          preprocessFastRequest(body(`${BROWSE_LOW_ALIAS_ID}[1m]`), fastLaunch, true).body,
+        )
+        expect(parsed.model).toBe("gpt-6-luna[1m]")
+        expect(parsed.output_config.effort).toBe("low")
+      }
+      for (const launch of [cheapLaunch, cheap1mLaunch, cheapestLaunch, balancedLaunch]) {
+        const parsed = JSON.parse(
+          preprocessFastRequest(body(`${BROWSE_LOW_ALIAS_ID}[1m]`), launch, true).body,
+        )
+        expect(parsed.model).toBe("gpt-6-luna")
+        expect(parsed.output_config.effort).toBe("low")
       }
     })
   })
