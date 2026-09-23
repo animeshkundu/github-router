@@ -101,7 +101,7 @@ mock.module("~/lib/server-setup", () => ({
 // so a family-ignoring stub reports the default slug for every fallback
 // and silently inverts what these tests appear to prove.
 let pickClaudeDefaultImpl: (family?: string) => string = (family) =>
-  `claude-opus-${family ?? "5"}`
+  `claude-opus-${(family ?? "5.5").replace(/\./g, "-")}`
 let pickClaudeDefaultCalls: Array<string | undefined> = []
 
 // Stands in for `withOneMSuffixForLead`, which the real `resolveLeadSlugArg`
@@ -113,10 +113,10 @@ let leadOneMDecorateImpl: (slug: string) => string = (slug) => slug
 
 mock.module("~/lib/port", () => ({
   // Anthropic-published dashed slug (per plan §14) — Claude Code's `/model`
-  // UI registry expects this, and the proxy's resolver preserves the
-  // single-segment `claude-opus-5.5` catalog id at request time.
-  DEFAULT_CLAUDE_MODEL: "claude-opus-5.5",
-  DEFAULT_CLAUDE_MODEL_FALLBACKS: ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"],
+  // UI registry expects this, and the proxy's resolver normalizes it to
+  // the dotted `claude-opus-5.5` catalog id at request time.
+  DEFAULT_CLAUDE_MODEL: "claude-opus-5-5",
+  DEFAULT_CLAUDE_MODEL_FALLBACKS: ["claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"],
   // Delegates to the closure-captured impl so tests can swap behavior
   // per-case (cap-aware-default tests set this to return "...[1m]").
   // Records every call's `family` arg so shorthand-routing tests can
@@ -128,7 +128,7 @@ mock.module("~/lib/port", () => ({
   // launch.ts imports DEFAULT_CODEX_MODEL transitively via claude.ts → launchChild;
   // re-export it so the module mock doesn't break sibling imports.
   DEFAULT_CODEX_MODEL: "gpt-6-sol",
-  DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
+  DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
   DEFAULT_PORT: 8787,
   // The worker-agent surface (registered via peer-mcp-personas → tools.ts →
   // create-responses.ts) statically imports these from ~/lib/port. The
@@ -544,7 +544,8 @@ beforeEach(() => {
   // asked for; tests that exercise the 1M-detection path rebind this to
   // return a "[1m]"-suffixed slug. Reset the call recorder so per-test
   // assertions see a clean slate.
-  pickClaudeDefaultImpl = (family) => `claude-opus-${family ?? "5"}`
+  pickClaudeDefaultImpl = (family) =>
+    `claude-opus-${(family ?? "5.5").replace(/\./g, "-")}`
   pickClaudeDefaultCalls = []
   leadOneMDecorateImpl = (slug) => slug
 })
@@ -631,11 +632,11 @@ describe("claude command", () => {
     await run({ args: {} })
 
     // No --model and no model cache → claude.ts uses DEFAULT_CLAUDE_MODEL
-    // ("claude-opus-5.5"); resolver is a no-op without a cache, so the
+    // ("claude-opus-5-5"); resolver is a no-op without a cache, so the
     // Anthropic slug flows through unchanged.
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      "claude-opus-5.5",
+      "claude-opus-5-5",
       "standard",
       [],
     )
@@ -679,7 +680,7 @@ describe("claude command", () => {
 
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      "claude-opus-5.5",
+      "claude-opus-5-5",
       "standard",
       ["custom-low-ceiling[1m]"],
     )
@@ -1129,7 +1130,7 @@ describe("claude command", () => {
       await run({ args: { model: "   " } })
       const [, , options] = spawnMock.mock.calls[0]
       expect(options.env.ANTHROPIC_MODEL).toBe("claude-opus-4-8")
-      expect(options.env.ANTHROPIC_MODEL).not.toBe("claude-opus-5.5")
+      expect(options.env.ANTHROPIC_MODEL).not.toBe("claude-opus-5-5")
     } finally {
       state.models = undefined
     }
@@ -1140,7 +1141,7 @@ describe("claude command", () => {
     // pickClaudeDefault returns the bracketed slug so Claude Code accounts
     // for the full context locally, while resolveModel strips the bracket
     // before forwarding the exact single-segment catalog id upstream.
-    pickClaudeDefaultImpl = () => "claude-opus-5.5[1m]"
+    pickClaudeDefaultImpl = () => "claude-opus-5-5[1m]"
     state.models = {
       data: [
         { id: "claude-opus-5.5" },
@@ -1153,7 +1154,7 @@ describe("claude command", () => {
       await run({ args: {} })
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
-        "claude-opus-5.5[1m]",
+        "claude-opus-5-5[1m]",
         "standard",
         [],
       )
@@ -1166,7 +1167,8 @@ describe("claude command", () => {
     // Pro tier: only the 200K variant is available. pickClaudeDefault
     // returns the bare DEFAULT_CLAUDE_MODEL (no [1m] suffix), so Claude Code's
     // local context accounting matches the upstream behavior. The fallback
-    // chain doesn't fire because claude-opus-5.5 IS in cache.
+    // chain doesn't fire because claude-opus-5.5 IS in cache (dashed default
+    // matches the dotted catalog id via normalization).
     state.models = {
       data: [
         { id: "claude-opus-5.5" },
@@ -1179,7 +1181,7 @@ describe("claude command", () => {
       await run({ args: {} })
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
-        "claude-opus-5.5",
+        "claude-opus-5-5",
         "standard",
         [],
       )
@@ -1225,7 +1227,7 @@ describe("claude command", () => {
       object: "list",
     }
     pickClaudeDefaultImpl = (family) =>
-      family === "4-8" ? "claude-opus-4-8[1m]" : `claude-opus-${family ?? "5"}`
+      family === "4-8" ? "claude-opus-4-8[1m]" : `claude-opus-${(family ?? "5.5").replace(/\./g, "-")}`
     try {
       const run = getRunFn()
       await run({ args: {} })
@@ -1261,7 +1263,7 @@ describe("claude command", () => {
       await run({ args: {} })
       expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
         "http://127.0.0.1:12345",
-        "claude-opus-5.5",
+        "claude-opus-5-5",
         "standard",
         [],
       )
