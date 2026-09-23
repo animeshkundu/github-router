@@ -76,9 +76,9 @@ export const REVIEW_FAST_DEFAULT_MODEL = "gemini-3.8-flash"
  *
  * Returns true iff Copilot's live catalog (`state.models?.data`) contains
  * ALL THREE peer models the consensus protocol needs:
- *   - an OpenAI frontier model (`gpt-5.6-sol`, else `gpt-5.5` — see
+ *   - an OpenAI frontier model (`gpt-6-sol`, else `gpt-6-sol`, else `gpt-5.5` — see
  *     `resolveOpenAiFrontier`)
- *   - `claude-opus-5`       (stand_in's Anthropic slot)
+ *   - `claude-opus-5.5` (stand_in's Anthropic slot)
  *   - standard/BYO: the preferred Gemini reviewer model
  *     (`gemini-3.1-pro-preview`, falling back to `gemini-3.8-flash`)
  *   - max: Grok 4.6/high when usable, otherwise Gemini 3.8 Flash 1M/high
@@ -87,7 +87,7 @@ export const REVIEW_FAST_DEFAULT_MODEL = "gemini-3.8-flash"
  * fails `tools/call` with -32601 (mirroring the `worker` capability's
  * defense-in-depth pattern — the gated tool is functionally invisible).
  *
- * `claude-opus-5` is a single-segment slug (dotted == dashed), so the
+ * `claude-opus-5.5` is the dotted Copilot id (dashed `claude-opus-5-5` resolves via `resolveModel`), so the
  * catalog probe matches Copilot's actual id shape directly.
  */
 /**
@@ -143,7 +143,7 @@ export function geminiAvailable(source: Pick<State, "models"> = state): boolean 
 }
 
 /**
- * OpenAI frontier reasoning models in preference order. `gpt-5.6-sol` is the
+ * OpenAI frontier reasoning models in preference order. `gpt-6-sol` is the
  * current default; `gpt-5.5` is retained as a fallback. Both share the same
  * `pro_plus/business/enterprise/max` restriction tier, so the fallback only
  * matters during a rollout-lag window where the newer slug hasn't yet appeared
@@ -197,7 +197,7 @@ export function firstPresentInCatalog(
 
 /**
  * First available OpenAI frontier model in the live catalog (prefer
- * `gpt-5.6-sol`, fall back to `gpt-5.5`). Returns undefined when neither is
+ * `gpt-6-sol`, fall back to `gpt-6-sol`, then `gpt-5.5`). Returns undefined when neither is
  * present. With `requireToolCalls`, only returns a model whose catalog entry
  * advertises `tool_calls`.
  */
@@ -211,7 +211,7 @@ export function standInToolEnabled(opts: { maxProfile?: boolean } = {}): boolean
   const models = state.models?.data
   if (!models) return false
   const hasOpenAi = resolveOpenAiFrontier() != null
-  const hasOpus = models.some((m) => m.id === "claude-opus-5")
+  const hasOpus = models.some((m) => m.id === "claude-opus-5.5" || m.id === "claude-opus-5")
   const hasThirdLab = opts.maxProfile
     ? maxProReplacementModel() != null
     : geminiAvailable()
@@ -219,11 +219,11 @@ export function standInToolEnabled(opts: { maxProfile?: boolean } = {}): boolean
 }
 
 /** Model for the native subagent that wants the OpenAI frontier coder
- *  (`implementer`) iff it is live with tool calls. Prefers `gpt-5.6-sol`, falls
+ *  (`implementer`) iff it is live with tool calls. Prefers `gpt-6-sol`, falls
  *  back to `gpt-5.5`. Absent → the agent omits its `model:` line and inherits
  *  the lead's model.
  *
- *  Public web benchmarks put `gpt-5.6-sol` ahead of both `gpt-5.6-terra` and
+ *  Public web benchmarks put `gpt-6-sol` (and previously `gpt-6-sol`) ahead of both `gpt-5.6-terra` and
  *  `gpt-5.3-codex` on coding (Terminal-Bench 2.1 88.8 vs 87.1; SWE-bench
  *  Verified 96.2 vs ~80 for 5.3-codex, which also trails gpt-5.5 on SWE-bench
  *  Pro). Terra is the cheaper tier at ~98% of the capability, so it is the right
@@ -311,7 +311,7 @@ export function scribeModel(): string | undefined {
  * (same behavior as before `scout` existed) rather than to an expensive
  * impostor wearing the cheap agent's name.
  *
- * `gpt-5.6-luna` leads because it is the cheapest 1M-context model in the
+ * `gpt-6-luna` leads because it is the cheapest 1M-context model in the
  * catalog; `gemini-3.8-flash` remains the cross-vendor fallback so an OpenAI-side
  * outage does not remove the scout. Both entries must continue advertising at
  * least 1M context so Claude Code's `[1m]` accounting remains honest if an
@@ -330,6 +330,7 @@ export function scribeModel(): string | undefined {
  * dropped rather than inheriting the lead or presenting a narrower-context agent.
  */
 export const SCOUT_MODEL_CHAIN = Object.freeze([
+  "gpt-6-luna",
   "gpt-5.6-luna",
   "gemini-3.8-flash",
 ] as const)
@@ -358,7 +359,7 @@ export function scoutModel(): string | undefined {
 /** Model for `implementer-fast` — the cheaper implementation tier. Absent →
  *  the agent is dropped.
  *
- *  `gpt-5.6-sol` is deliberately NOT in this chain: changes needing frontier
+ *  `gpt-6-sol` is deliberately NOT in this chain: changes needing frontier
  *  judgment already belong to `implementer`, while this agent handles
  *  well-specified, mechanical changes at a lower tier. Both entries are 1M+;
  *  their different speed and effort properties stay out of shared claims. */
@@ -383,14 +384,14 @@ export function reviewerFastModel(): string | undefined {
 /** Model for `general-purpose-fast` — the fast, cheapest catch-all. Absent →
  *  dropped.
  *
- *  Single-entry by design. `gpt-5.6-luna` is the cheapest model in the live
+ *  Single-entry by design. `gpt-6-luna` is the cheapest model in the live
  *  catalog and measured fastest among the catch-all candidates, while carrying
  *  1.05M context and the full `none..max` effort ladder. No
  *  `-mini`/`-lite`/`-haiku` model in the catalog serves 1M, which is why this
- *  catch-all uses a `gpt-5.6-*` slug rather than a mini one. */
+ *  catch-all uses a `gpt-6-*` slug rather than a mini one. */
 export function generalPurposeFastModel(): string | undefined {
   return firstPresentInCatalog(
-    ["gpt-5.6-luna"],
+    ["gpt-6-luna", "gpt-5.6-luna"],
     { requireToolCalls: true, minContextTokens: ONE_M_TOKENS },
   )
 }
@@ -500,7 +501,7 @@ export function fastReviewerModel(): string | undefined {
   return FAST_REVIEWER_MODEL
 }
 
-/** Dedicated GPT-5.6 Sol Advisor check. */
+/** Dedicated GPT-6 Sol Advisor check. */
 export function fastAdvisorModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === FAST_ADVISOR_MODEL)
   if (!found) return undefined
@@ -669,7 +670,7 @@ export const fastReviewerFastModel = fastReviewerModel
  *
  * Returns true iff BOTH:
  *   1. Copilot's live catalog (`state.models?.data`) contains any model in the
- *      ordered worker gate chain (`gpt-5.6-luna` → `gpt-5.4-mini`) and that
+ *      ordered worker gate chain (`gpt-6-luna` → `gpt-6-luna` → `gpt-5.4-mini`) and that
  *      entry advertises `capabilities.supports.tool_calls === true`. Luna leads
  *      on qualifying tiers; mini preserves the worker surface on individual
  *      trial and education catalogs. The catalog is the entitlement signal.
@@ -816,7 +817,7 @@ export function artifactToolsEnabled(): boolean {
  *      browser is on disk. The browse agent drives the SAME Chrome/Edge
  *      bridge as the raw `browser_*` tools, so it can't be useful without
  *      that surface enabled.
- *   2. The browse default model (`BROWSE_DEFAULT_MODEL`, `gpt-5.6-luna`)
+ *   2. The browse default model (`BROWSE_DEFAULT_MODEL`, `gpt-6-luna`)
  *      is in Copilot's live catalog AND `pickEndpoint()` resolves a
  *      reachable endpoint for it. Unlike `workerToolsEnabled()` (which
  *      checks `tool_calls` on the shared gate sentinel), the browse default is

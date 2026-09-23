@@ -14,22 +14,26 @@ export const DEFAULT_PORT = 8787
 
 /**
  * Default model for `github-router claude`. The Anthropic-published dashed
- * slug (`claude-opus-5`) — NOT the Copilot-internal slug — because
+ * slug (`claude-opus-5-5`) — NOT the Copilot-internal dotted slug
+ * (`claude-opus-5.5`) — because
  * Claude Code's `/model` UI is backed by a hardcoded registry of Anthropic
  * slugs, and an unrecognized slug causes the menu to highlight "Opus 4"
  * with a "Newer version available" hint instead of selecting the newest
  * Opus entry.
  *
  * The proxy's `resolveModel` (`src/lib/utils.ts`) resolves this to
- * Copilot's `claude-opus-5` at request time (an exact catalog-id match —
- * opus-5 is a single-segment slug, so no dotted/dashed translation is needed).
+ * Copilot's `claude-opus-5.5` at request time (via exact, case-insensitive,
+ * or dotted/dashed-normalized match —
+ * 5.5 is a major.minor slug, so the dotted Copilot form differs from the
+ * dashed Anthropic form).
  *
  * `DEFAULT_CLAUDE_MODEL_FALLBACKS` covers major.minor regressions only;
  * 1M↔200K downgrade is handled inside the resolver, so we don't need
  * separate `-1m` entries here.
  */
-export const DEFAULT_CLAUDE_MODEL = "claude-opus-5"
+export const DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
 export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
+  "claude-opus-5",
   "claude-opus-4-8",
   "claude-opus-4-7",
   "claude-opus-4-6",
@@ -54,7 +58,7 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  *      the base `opus-${family}` slug advertises
  *      `capabilities.limits.max_context_window_tokens >= 1_000_000`. This
  *      is how 4.8 and 5 ship — there is no `-1m` sibling; the single
- *      `claude-opus-4.8` / `claude-opus-5` id is itself the 1M variant.
+ *      `claude-opus-4.8` / `claude-opus-5.5` id is itself the 1M variant.
  * Either signal flips on the `[1m]` decoration. Both signals together
  * also flip it on (no double-counting). The breadcrumb log names which
  * signal fired so users can spot catalog shape changes.
@@ -95,7 +99,7 @@ export const DEFAULT_CLAUDE_MODEL_FALLBACKS = [
  * can't tell the difference between "no catalog yet" and "no 1M
  * variant" — defaulting safe-side preserves the pre-change behavior).
  */
-const DEFAULT_OPUS_FAMILY = "5"
+const DEFAULT_OPUS_FAMILY = "5.5"
 
 /**
  * The lead `-m fast` selects. `gemini-3.8-flash` [1m] at high effort — a fast
@@ -130,7 +134,7 @@ export const BALANCED_LEAD_MODEL = BALANCED_PROFILE_MODELS.lead
  *  `SLUG` is the Anthropic-published DASHED form and is what goes into
  *  `ANTHROPIC_SMALL_FAST_MODEL` / `ANTHROPIC_DEFAULT_HAIKU_MODEL`: Claude Code's
  *  `/model` registry is keyed on Anthropic slugs, and seeding Copilot's dotted
- *  id there reproduces the documented `claude-opus-5` failure where the picker
+ *  id there reproduces the documented `claude-opus-5.5` failure where the picker
  *  silently falls back to an older model. `CATALOG_ID` is Copilot's DOTTED id
  *  and is what the presence probe must test, because that is the id the catalog
  *  actually carries. `resolveModel` bridges the two at request time. */
@@ -166,7 +170,7 @@ export const BUDGET_SMALL_FAST_CATALOG_ID = "claude-haiku-4.5"
  * `resolveLaunchProfile` (`./launch-profile`) is keyed off the SAME raw
  * argument this function receives, so the two can never disagree about
  * which launches are "fast". `isBudgetClaudeLead` (below) stays
- * Claude-family-only and is UNRELATED to the fast profile: `gpt-5.6-luna`
+ * Claude-family-only and is UNRELATED to the fast profile: `gpt-6-luna`
  * is not a Claude model, so `isBudgetClaudeLead(resolveLeadSlugArg("fast"))`
  * is false — the old Sonnet "budget lead" surfaces (advisor escalation,
  * delegation prose, small/fast Haiku tier) simply don't engage for `-m
@@ -304,14 +308,16 @@ export function pickClaudeDefault(opusFamily: string = DEFAULT_OPUS_FAMILY): str
 }
 
 /**
- * Default model for `github-router codex`. `gpt-5.6-sol` is the flagship
- * `/responses` model; the fallback chain (led by `gpt-5.5`) handles older
- * Copilot tiers or a rollout-lag window where sol hasn't appeared yet.
+ * Default model for `github-router codex`. `gpt-6-sol` is the flagship
+ * `/responses` model; the fallback chain (led by `gpt-6-sol` then `gpt-5.5`)
+ * handles older Copilot tiers or a rollout-lag window where sol hasn't
+ * appeared yet.
  * `resolveCodexModel` provides a final "best available `/responses` model"
  * safety net beyond this list.
  */
-export const DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+export const DEFAULT_CODEX_MODEL = "gpt-6-sol"
 export const DEFAULT_CODEX_MODEL_FALLBACKS = [
+  "gpt-5.6-sol",
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.3-codex",

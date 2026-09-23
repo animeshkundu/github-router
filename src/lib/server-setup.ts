@@ -767,7 +767,7 @@ export function parseSharedArgs(args: Record<string, unknown>): {
  * upstream Copilot returns 401. See `src/routes/messages/handler.ts`.
  */
 /**
- * Decorate a Luna-alias id with `[1m]` based on the REAL `gpt-5.6-luna`
+ * Decorate a Luna-alias id with `[1m]` based on the REAL `gpt-6-luna`
  * catalog entry's advertised window, never on the alias string itself
  * (which is never a catalog entry — `catalogAdvertises1M`/`resolveModel`
  * would find nothing and silently leave it bare). Shared by every
@@ -919,7 +919,7 @@ export function getClaudeCodeEnvVars(
         : "claude-sonnet-5"
   if (process.env.ANTHROPIC_SMALL_FAST_MODEL === undefined || routerWinsTiers) {
     // The fast profile's small/fast tier is the Haiku Luna alias, decorated
-    // with `[1m]` off the REAL `gpt-5.6-luna` catalog entry's advertised
+    // with `[1m]` off the REAL `gpt-6-luna` catalog entry's advertised
     // window — `withOneMSuffixForLead`/`withOneMSuffix` can't be used
     // directly here because they resolve/exact-match the id itself, and
     // the alias id is never a catalog entry. `canonicalizeAliasModel`
@@ -1034,7 +1034,7 @@ export function getClaudeCodeEnvVars(
     if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION === undefined) {
       vars.ANTHROPIC_CUSTOM_MODEL_OPTION = oneMSuffixForMaxModel(MAX_PROFILE_MODELS.sol)
       if (process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
-        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-5.6 Sol"
+        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-6 Sol"
       }
     }
   } else if (isCheapProfile) {
@@ -1042,14 +1042,14 @@ export function getClaudeCodeEnvVars(
       "ANTHROPIC_DEFAULT_SONNET_MODEL",
       "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
       LUNA_SONNET_ALIAS_ID,
-      "GPT-5.6 Luna (xhigh)",
+      "GPT-6 Luna (xhigh)",
       routerWinsTiers,
     )
     seedCheapAliasTierRow(
       "ANTHROPIC_DEFAULT_HAIKU_MODEL",
       "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
       LUNA_HAIKU_ALIAS_ID,
-      "GPT-5.6 Luna (high)",
+      "GPT-6 Luna (high)",
       routerWinsTiers,
     )
     const cheapAliasCapabilities =
@@ -1063,7 +1063,7 @@ export function getClaudeCodeEnvVars(
     if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION === undefined) {
       vars.ANTHROPIC_CUSTOM_MODEL_OPTION = LUNA_DRIVER_ALIAS_ID
       if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
-        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-5.6 Luna (max)"
+        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-6 Luna (max)"
       }
       if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES === undefined) {
         vars.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES = cheapAliasCapabilities
@@ -1074,14 +1074,14 @@ export function getClaudeCodeEnvVars(
       "ANTHROPIC_DEFAULT_SONNET_MODEL",
       "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
       LUNA_SONNET_ALIAS_ID,
-      "GPT-5.6 Luna (xhigh)",
+      "GPT-6 Luna (xhigh)",
       routerWinsTiers,
     )
     seedFastAliasTierRow(
       "ANTHROPIC_DEFAULT_HAIKU_MODEL",
       "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
       LUNA_HAIKU_ALIAS_ID,
-      "GPT-5.6 Luna (high)",
+      "GPT-6 Luna (high)",
       routerWinsTiers,
     )
     // Claude Code cannot infer capabilities from the router-owned alias ids.
@@ -1099,7 +1099,7 @@ export function getClaudeCodeEnvVars(
     if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION === undefined) {
       vars.ANTHROPIC_CUSTOM_MODEL_OPTION = oneMSuffixForAlias(LUNA_DRIVER_ALIAS_ID)
       if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME === undefined) {
-        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-5.6 Luna (max)"
+        vars.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "GPT-6 Luna (max)"
       }
       if (routerWinsTiers || process.env.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES === undefined) {
         vars.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES = fastAliasCapabilities
@@ -1121,7 +1121,7 @@ export function getClaudeCodeEnvVars(
     seedTierRow(
       "ANTHROPIC_DEFAULT_OPUS_MODEL",
       "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
-      "claude-opus-5",
+      "claude-opus-5.5",
     )
   }
 

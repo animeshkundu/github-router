@@ -12,8 +12,8 @@ import { state } from "../src/lib/state"
 const standardRows = () => selectableModelsInCatalog("standard")
 
 const SEED_TARGET_IDS = [
-  "gpt-5.6-sol",
-  "gpt-5.6-luna",
+  "gpt-6-sol",
+  "gpt-6-luna",
   "gemini-3.8-flash",
   "grok-4.6",
 ] as const
@@ -62,7 +62,7 @@ function setCatalogWithWindows(entries: Record<string, number>) {
   state.models = {
     object: "list",
     data: Object.entries(entries).map(([id, ctx]) =>
-      catalogModel(id, ctx, id === "gpt-5.6-luna" ? 922_000 : 900_000, 128_000)) as never,
+      catalogModel(id, ctx, id === "gpt-6-luna" ? 922_000 : 900_000, 128_000)) as never,
   }
 }
 
@@ -70,8 +70,8 @@ function setCatalogWithWindows(entries: Record<string, number>) {
  *  live window is 500K total (372K max prompt) and is deliberately NEVER
  *  decorated regardless of what a catalog fixture claims here. */
 const LIVE_WINDOWS: Record<string, number> = {
-  "gpt-5.6-sol": 1_050_000,
-  "gpt-5.6-luna": 1_050_000,
+  "gpt-6-sol": 1_050_000,
+  "gpt-6-luna": 1_050_000,
   "gemini-3.8-flash": 1_000_000,
   "grok-4.6": 500_000,
 }
@@ -113,11 +113,11 @@ describe("selectableModelsInCatalog standard rows", () => {
   })
 
   test("returns only the target models present in the catalog (graceful per-tier gating)", () => {
-    // Simulate a lower tier where only gpt-5.6-luna is licensed.
-    setCatalog(["claude-opus-4.8", "gpt-5.6-luna"])
+    // Simulate a lower tier where only gpt-6-luna is licensed.
+    setCatalog(["claude-opus-4.8", "gpt-6-luna"])
     const got = standardRows()
-    expect(got.map((m) => m.model)).toEqual(["gpt-5.6-luna"])
-    expect(got[0].label).toBe("GPT-5.6 Luna")
+    expect(got.map((m) => m.model)).toEqual(["gpt-6-luna"])
+    expect(got[0].label).toBe("GPT-6 Luna")
   })
 
   test("returns exactly the four rows, in order, when all are catalogued", () => {
@@ -147,8 +147,8 @@ describe("selectableModelsInCatalog — [1m] context accounting", () => {
   test("brackets only the ids whose catalog window is >=1M, and NEVER grok-4.6", () => {
     setCatalogWithWindows(LIVE_WINDOWS)
     expect(standardRows().map((m) => m.model)).toEqual([
-      "gpt-5.6-sol[1m]",
-      "gpt-5.6-luna[1m]",
+      "gpt-6-sol[1m]",
+      "gpt-6-luna[1m]",
       "gemini-3.8-flash[1m]",
       // 500K total / 372K max-prompt — deliberately bare, and deliberately
       // never decorated even if the catalog advertised >=1M for it (see the
@@ -169,8 +169,8 @@ describe("selectableModelsInCatalog — [1m] context accounting", () => {
     setCatalogWithWindows(LIVE_WINDOWS)
     const got = standardRows()
     expect(got.map((m) => m.label)).toEqual([
-      "GPT-5.6 Sol",
-      "GPT-5.6 Luna",
+      "GPT-6 Sol",
+      "GPT-6 Luna",
       "Gemini 3.8 Flash",
       "Grok 4.6",
     ])
@@ -185,10 +185,10 @@ describe("selectableModelsInCatalog — [1m] context accounting", () => {
   })
 
   test("a window just under 1M stays bare (threshold is inclusive at 1M)", () => {
-    setCatalogWithWindows({ "gpt-5.6-luna": 999_999, "gpt-5.6-sol": 1_000_000 })
+    setCatalogWithWindows({ "gpt-6-luna": 999_999, "gpt-6-sol": 1_000_000 })
     expect(standardRows().map((m) => m.model)).toEqual([
-      "gpt-5.6-sol[1m]",
-      "gpt-5.6-luna",
+      "gpt-6-sol[1m]",
+      "gpt-6-luna",
     ])
   })
 
@@ -215,7 +215,7 @@ describe("selectableModelsInCatalog — [1m] context accounting", () => {
     setCatalogWithWindows(LIVE_WINDOWS)
     process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = ""
     expect(standardRows().map((m) => m.model)).toContain(
-      "gpt-5.6-sol[1m]",
+      "gpt-6-sol[1m]",
     )
   })
 })
@@ -229,12 +229,12 @@ describe("getClaudeCodeEnvVars — native model selection compatibility", () => 
 
   test("modelPicker migration does not disturb tier defaults or the active model", () => {
     setCatalog([...SEED_TARGET_IDS])
-    const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5[1m]")
-    expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5")
+    const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5.5[1m]")
+    expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5.5")
     expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("claude-sonnet-5")
     expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-sonnet-5")
     expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-5")
-    expect(vars.ANTHROPIC_MODEL).toBe("claude-opus-5[1m]")
+    expect(vars.ANTHROPIC_MODEL).toBe("claude-opus-5.5[1m]")
   })
 
   test("includes selectable picker rows in the launch-global compaction bound", () => {

@@ -441,10 +441,10 @@ export function buildOperatingDefaultsDirective(
     const isBalanced = opts.profile === "balanced"
     const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
     const oracleDescriptor = isCheapest
-      ? "GPT-5.6 Sol (200K/high)"
+      ? "GPT-6 Sol (200K/high)"
       : isCheap || isBalanced
         ? "Grok 4.6 (200K/medium)"
-        : "exact Opus 5 (1M/high)"
+        : "exact Opus 5.5 (1M/high)"
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
     const searchGuidance = opts.bluebirdEnabled === true
       ? "Search strategy: use Bluebird `code` search in `lexical` mode for indexed keyword queries and `semantic` mode for intent/concept questions. Bluebird failures remain visible and never fall back locally; `exact`, `regex`, and `ast` stay on the local live tree. `Explore` subagents read the narrowed files and return file:line conclusions; expensive models (Plan, reviewer, Oracle) see only the synthesized subset, never raw search output. "
@@ -617,7 +617,7 @@ export function buildOperatingDefaultsDigest(
     const isBalanced = opts.profile === "balanced"
     const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
     const oracleDescriptor = isCheapest
-      ? "(GPT-5.6 Sol 200K/high, lead and Plan)"
+      ? "(GPT-6 Sol 200K/high, lead and Plan)"
       : isCheap || isBalanced
         ? "(Grok 4.6 200K/medium, lead and Plan)"
         : "(Opus 5 1M/high, lead and Plan)"

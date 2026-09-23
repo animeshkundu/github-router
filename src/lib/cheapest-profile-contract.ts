@@ -1,9 +1,9 @@
 /**
  * Fixed identities for the literal `github-router claude -m cheapest` profile.
  *
- * The cheapest all-200K tier: a `gpt-5.6-luna`/max LEAD at Claude Code's
+ * The cheapest all-200K tier: a `gpt-6-luna`/max LEAD at Claude Code's
  * DEFAULT (bare-slug) 200K window, every subagent at the same 200K default,
- * a `gpt-5.6-sol`/medium Advisor (bare slug), and a `gpt-5.6-sol`/high
+ * a `gpt-6-sol`/medium Advisor (bare slug), and a `gpt-6-sol`/high
  * primary Oracle. Oracle-only peer set (no `astra`), same exact four-agent
  * surface and authority structure as the cheap family.
  *
@@ -14,13 +14,13 @@
  */
 
 export const CHEAPEST_PROFILE_MODELS = Object.freeze({
-  lead: "gpt-5.6-luna",
-  explore: "gpt-5.6-luna",
-  plan: "gpt-5.6-sol",
-  "General-Purpose": "gpt-5.6-luna",
+  lead: "gpt-6-luna",
+  explore: "gpt-6-luna",
+  plan: "gpt-6-sol",
+  "General-Purpose": "gpt-6-luna",
   reviewer: "gemini-3.8-flash",
-  advisor: "gpt-5.6-sol",
-  oracle: "gpt-5.6-sol",
+  advisor: "gpt-6-sol",
+  oracle: "gpt-6-sol",
 } as const)
 
 export const CHEAPEST_PROFILE_NATIVE_AGENT_NAMES = [

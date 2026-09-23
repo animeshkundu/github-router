@@ -127,7 +127,7 @@ describe("classifyMessagesRoute", () => {
 
   test("fast profile keeps fixed endpoint policy when a model advertises both", () => {
     const luna = model({
-      id: "gpt-5.6-luna",
+      id: "gpt-6-luna",
       vendor: "openai",
       supported_endpoints: ["/chat/completions", "/responses"],
     })
@@ -137,8 +137,8 @@ describe("classifyMessagesRoute", () => {
       supported_endpoints: ["/responses", "/chat/completions"],
     })
 
-    expect(classifyMessagesRoute("gpt-5.6-luna", luna)).toBe("chat-shim")
-    expect(classifyMessagesRoute("gpt-5.6-luna", luna, undefined, true)).toBe(
+    expect(classifyMessagesRoute("gpt-6-luna", luna)).toBe("chat-shim")
+    expect(classifyMessagesRoute("gpt-6-luna", luna, undefined, true)).toBe(
       "responses-shim",
     )
     expect(classifyMessagesRoute("gemini-3.8-flash", gemini, undefined, true)).toBe(

@@ -72,21 +72,21 @@ test("reviewer and brainstorm prefer Pro, then Flash, then OpenAI frontier", () 
   setCatalog(
     entry("gemini-3.1-pro-preview", { ctx: ONE_M }),
     entry("gemini-3.8-flash", { ctx: ONE_M }),
-    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
+    entry("gpt-6-sol", { ctx: 1_050_000 }),
   )
   expect(reviewerModel()).toBe("gemini-3.1-pro-preview")
   expect(brainstormModel()).toBe("gemini-3.1-pro-preview")
 
   setCatalog(
     entry("gemini-3.8-flash", { ctx: ONE_M }),
-    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
+    entry("gpt-6-sol", { ctx: 1_050_000 }),
   )
   expect(reviewerModel()).toBe("gemini-3.8-flash")
   expect(brainstormModel()).toBe("gemini-3.8-flash")
 
-  setCatalog(entry("gpt-5.6-sol", { ctx: 1_050_000 }))
-  expect(reviewerModel()).toBe("gpt-5.6-sol")
-  expect(brainstormModel()).toBe("gpt-5.6-sol")
+  setCatalog(entry("gpt-6-sol", { ctx: 1_050_000 }))
+  expect(reviewerModel()).toBe("gpt-6-sol")
+  expect(brainstormModel()).toBe("gpt-6-sol")
 })
 
 // Regression: an earlier draft of the deprecation fix replaced the
@@ -99,7 +99,7 @@ test("reviewer and brainstorm recognize a GA rename of the preview slug ahead of
   setCatalog(
     entry("gemini-3.1-pro", { ctx: ONE_M }),
     entry("gemini-3.8-flash", { ctx: ONE_M }),
-    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
+    entry("gpt-6-sol", { ctx: 1_050_000 }),
   )
   expect(reviewerModel()).toBe("gemini-3.1-pro")
   expect(brainstormModel()).toBe("gemini-3.1-pro")
@@ -109,7 +109,7 @@ test("reviewer and brainstorm recognize a GA rename of the preview slug ahead of
   // Without a GA rename present, Flash still wins over OpenAI as before.
   setCatalog(
     entry("gemini-3.8-flash", { ctx: ONE_M }),
-    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
+    entry("gpt-6-sol", { ctx: 1_050_000 }),
   )
   expect(resolveGeminiReviewModel()).toBe("gemini-3.8-flash")
 })
@@ -139,20 +139,20 @@ test("implementerFastModel prefers gpt-5.6-terra, falls back to gemini-3.1-pro-p
   expect(implementerFastModel()).toBe("gemini-3.1-pro-preview")
 })
 
-// gpt-5.6-sol is deliberately absent from this chain: the OpenAI frontier coder
+// gpt-6-sol is deliberately absent from this chain: the OpenAI frontier coder
 // is already `implementer`'s job, and a catch-all that quietly bills at frontier
 // rates is the opposite of what the agent is for.
 test("implementerFastModel does NOT fall through to the OpenAI frontier", () => {
   setCatalog(
-    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
+    entry("gpt-6-sol", { ctx: 1_050_000 }),
     entry("gpt-5.5", { ctx: 1_050_000 }),
   )
   expect(implementerFastModel()).toBeUndefined()
 })
 
-test("generalPurposeFastModel is single-entry: gpt-5.6-luna or nothing", () => {
-  setCatalog(entry("gpt-5.6-luna", { ctx: 1_050_000 }))
-  expect(generalPurposeFastModel()).toBe("gpt-5.6-luna")
+test("generalPurposeFastModel is single-entry: gpt-6-luna or nothing", () => {
+  setCatalog(entry("gpt-6-luna", { ctx: 1_050_000 }))
+  expect(generalPurposeFastModel()).toBe("gpt-6-luna")
 
   setCatalog(
     entry("gpt-5.6-terra", { ctx: 1_050_000 }),
@@ -189,9 +189,9 @@ test("a chain entry without tool_calls is skipped, and absent metadata fails clo
     object: "list",
     data: [
       {
-        ...entry("gpt-5.6-luna", { ctx: 1_050_000 }),
+        ...entry("gpt-6-luna", { ctx: 1_050_000 }),
         capabilities: {
-          family: "gpt-5.6-luna",
+          family: "gpt-6-luna",
           object: "model_capabilities",
           tokenizer: "o200k_base",
           type: "chat",
@@ -215,21 +215,21 @@ test("minContextTokens skips a chain entry whose window has dropped below 1M", (
   )
   expect(implementerFastModel()).toBe("gemini-3.1-pro-preview")
 
-  setCatalog(entry("gpt-5.6-luna", { ctx: 400_000 }))
+  setCatalog(entry("gpt-6-luna", { ctx: 400_000 }))
   expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 test("absent context metadata fails closed under the 1M floor", () => {
-  setCatalog(entry("gpt-5.6-luna"))
+  setCatalog(entry("gpt-6-luna"))
   expect(generalPurposeFastModel()).toBeUndefined()
 })
 
 // Scout keeps a distinct cross-vendor 1M fallback. Pin the chain shape itself:
 // referencing EXPLORE_DEFAULT_MODEL here previously let an explore retune collapse
 // both entries to Luna without a type error or failed behavior test.
-test("scout chain has two distinct literal entries", () => {
-  expect(SCOUT_MODEL_CHAIN).toEqual(["gpt-5.6-luna", "gemini-3.8-flash"])
-  expect(new Set(SCOUT_MODEL_CHAIN).size).toBe(2)
+test("scout chain has distinct literal entries", () => {
+  expect(SCOUT_MODEL_CHAIN).toEqual(["gpt-6-luna", "gpt-5.6-luna", "gemini-3.8-flash"])
+  expect(new Set(SCOUT_MODEL_CHAIN).size).toBe(3)
 })
 
 // The accepted consequence is that a catalog carrying neither Luna nor the
@@ -237,9 +237,9 @@ test("scout chain has two distinct literal entries", () => {
 test("scoutModel walks luna -> flash, enforces 1M, and otherwise drops", () => {
   setCatalog(
     entry("gemini-3.8-flash", { ctx: ONE_M }),
-    entry("gpt-5.6-luna", { ctx: 1_050_000 }),
+    entry("gpt-6-luna", { ctx: 1_050_000 }),
   )
-  expect(scoutModel()).toBe("gpt-5.6-luna")
+  expect(scoutModel()).toBe("gpt-6-luna")
 
   // Exactly 1M must remain eligible. If this floor comparison ever becomes
   // exclusive, scout silently loses its cross-vendor fallback.
@@ -247,7 +247,7 @@ test("scoutModel walks luna -> flash, enforces 1M, and otherwise drops", () => {
   expect(scoutModel()).toBe("gemini-3.8-flash")
 
   setCatalog(
-    entry("gpt-5.6-luna", { ctx: 400_000 }),
+    entry("gpt-6-luna", { ctx: 400_000 }),
     entry("gemini-3.8-flash", { ctx: 200_000 }),
     entry("gpt-5.4-mini", { ctx: 400_000 }),
   )

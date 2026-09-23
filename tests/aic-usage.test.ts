@@ -8,14 +8,14 @@ import {
   NANO_AIU_PER_CREDIT,
 } from "~/lib/aic-usage"
 
-// Verified live 2026-09-14: gpt-5.6-luna /responses non-streaming.
+// Verified live 2026-09-14: gpt-6-luna /responses non-streaming.
 const LUNA_RESPONSE = {
   copilot_usage: {
     token_details: [
-      { batch_size: 1000000, cost_per_batch: 20000000000, model: "gpt-5.6-luna", token_count: 11, token_type: "input" },
-      { batch_size: 1000000, cost_per_batch: 2000000000, model: "gpt-5.6-luna", token_count: 0, token_type: "cache_read" },
-      { batch_size: 1000000, cost_per_batch: 25000000000, model: "gpt-5.6-luna", token_count: 0, token_type: "cache_write" },
-      { batch_size: 1000000, cost_per_batch: 120000000000, model: "gpt-5.6-luna", token_count: 5, token_type: "output" },
+      { batch_size: 1000000, cost_per_batch: 20000000000, model: "gpt-6-luna", token_count: 11, token_type: "input" },
+      { batch_size: 1000000, cost_per_batch: 2000000000, model: "gpt-6-luna", token_count: 0, token_type: "cache_read" },
+      { batch_size: 1000000, cost_per_batch: 25000000000, model: "gpt-6-luna", token_count: 0, token_type: "cache_write" },
+      { batch_size: 1000000, cost_per_batch: 120000000000, model: "gpt-6-luna", token_count: 5, token_type: "output" },
     ],
     total_nano_aiu: 820000,
   },
@@ -29,7 +29,7 @@ describe("extractCopilotUsage", () => {
     expect(usage!.totalNanoAiu).toBe(820000)
     expect(usage!.tokenDetails).toHaveLength(4)
     expect(usage!.tokenDetails[0]).toEqual({
-      model: "gpt-5.6-luna",
+      model: "gpt-6-luna",
       tokenType: "input",
       tokenCount: 11,
       batchSize: 1000000,

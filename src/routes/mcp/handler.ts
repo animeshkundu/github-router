@@ -336,9 +336,9 @@ function checkAuth(
 /**
  * opus_critic's effective model, resolved against the live catalog.
  *
- * Prefers `claude-opus-5` — a single-segment slug that is natively 1M
+ * Prefers `claude-opus-5.5` — the dotted catalog id that is natively 1M
  * (no `-1m` sibling), so it takes large artifacts in one shot (the whole
- * point of pairing it with gpt-5.6-sol as the big-window peers). When opus-5
+ * point of pairing it with gpt-6-sol as the big-window peers). When opus-5.5
  * isn't in the catalog (e.g. a lesser tier), falls back to the older
  * 1M-context Opus 4.6 variant (`claude-opus-4.6-1m`, `max_prompt_tokens`
  * 936K), then to the 200K `claude-opus-4-6`. The 4.6 regex is
@@ -350,7 +350,8 @@ function checkAuth(
 const OPUS_1M_RE = /opus-4[.-]6-1m(?:$|-)/i
 function resolveOpusCriticModel(): string {
   const models = state.models?.data
-  if (models?.some((m) => m.id === "claude-opus-5")) return "claude-opus-5"
+  if (models?.some((m) => m.id === "claude-opus-5.5")) return "claude-opus-5.5"
+  if (models?.some((m) => m.id === "claude-opus-5.5")) return "claude-opus-5.5"
   const oneM = models?.find((m) => OPUS_1M_RE.test(m.id))
   return oneM ? oneM.id : "claude-opus-4-6"
 }
@@ -390,7 +391,7 @@ function activePersonas(launch?: LaunchRegistryEntry): Array<PersonaSpec> {
     if (p.toolNameHttp !== "opus_critic") return p
     const model = resolveOpusCriticModel()
     const allowedEfforts: ReadonlyArray<Effort> =
-      model === "claude-opus-5"
+      (model === "claude-opus-5.5" || model === "claude-opus-5.5")
         ? ["low", "medium", "high", "xhigh"]
         : p.allowedEfforts
     return { ...p, model, allowedEfforts }
@@ -401,7 +402,7 @@ function oracleToolEntry(isCheap = false, astraAvailable = true, oracleDescripto
   const descriptor = oracleDescriptor
     ?? (isCheap
       ? "Grok 4.6 (200K context, medium effort)"
-      : "exact Opus 5 (1M context, high effort)")
+      : "exact Opus 5.5 (1M context, high effort)")
   // Astra is not wired on every launch that serves Oracle (never on `-m
   // cheap`; also absent on fast/cheap1m when its catalog gate fails), so the
   // dead-end clause must not name a tool this session does not expose —
@@ -629,7 +630,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
     const astraAvailable = astraWired && (isCheap && !isCheapest ? cheapAstraModel() : isCheapest ? undefined : fastAstraModel()) != null
     const oracleGate = isCheapest ? cheapestOracleModel() : isBalanced ? balancedOracleModel() : isCheap ? cheapOracleModel() : fastOracleModel()
     const oracleDescriptor = isCheapest
-      ? "GPT-5.6 Sol (200K context, high effort)"
+      ? "GPT-6 Sol (200K context, high effort)"
       : undefined
     const entries: Array<ToolEntry> = []
     if (
@@ -983,9 +984,9 @@ async function predictedWindowOverflow(
   // EFFECTIVE model is actually 1M (it falls back to 200K opus-4-6 on lesser
   // tiers — hinting it there would just overflow again).
   const criticModel = resolveOpusCriticModel()
-  const criticIs1M = criticModel === "claude-opus-5" || OPUS_1M_RE.test(criticModel)
+  const criticIs1M = criticModel === "claude-opus-5.5" || criticModel === "claude-opus-5.5" || OPUS_1M_RE.test(criticModel)
   const opusHint =
-    id === "claude-opus-5" || OPUS_1M_RE.test(id) || !criticIs1M
+    id === "claude-opus-5.5" || id === "claude-opus-5.5" || OPUS_1M_RE.test(id) || !criticIs1M
       ? ""
       : " / `opus_critic` (Opus 5, 1M context ≈ 1M tokens)"
   // Report against `budget` (window minus the framing reserve), not the
@@ -999,7 +1000,7 @@ async function predictedWindowOverflow(
     + `${budget}-token budget for ${persona.model} (its ${maxPromptTokens}-token prompt window `
     + `minus a ${PEER_PROMPT_TOKEN_RESERVE}-token framing reserve). Do NOT summarize or truncate `
     + `the artifact to fit. Route the full artifact to a larger-window peer — `
-    + `\`codex_critic\` (gpt-5.6-sol ≈ 1M tokens)${opusHint} — or split it into focused `
+    + `\`codex_critic\` (gpt-6-sol ≈ 1M tokens)${opusHint} — or split it into focused `
     + `sub-calls BY CONCERN and call them in parallel, then aggregate.`
   )
 }
@@ -1498,7 +1499,7 @@ async function handleToolsCall(
     const isCheapestOracle = launch.profileId === "cheapest"
     const isBalancedOracle = launch.profileId === "balanced"
     const isCheapOracle = launch.profileId === "cheap" || launch.profileId === "cheap1m" || isCheapestOracle || isBalancedOracle
-    const oracleModel = isCheapestOracle ? CHEAPEST_PROFILE_ORACLE_MODEL : isCheapOracle ? CHEAP_PROFILE_ORACLE_MODEL : "claude-opus-5"
+    const oracleModel = isCheapestOracle ? CHEAPEST_PROFILE_ORACLE_MODEL : isCheapOracle ? CHEAP_PROFILE_ORACLE_MODEL : "claude-opus-5.5"
     const oracleEndpoint = isCheapOracle ? "/v1/responses" : "/v1/messages"
     const oracleEffort = isCheapestOracle ? CHEAPEST_PROFILE_ORACLE_EFFORT : isCheapOracle ? CHEAP_PROFILE_ORACLE_EFFORT : "high"
     if (
@@ -1528,7 +1529,7 @@ async function handleToolsCall(
       description: "Fast/cheap-profile Oracle",
       baseInstructions:
         isCheapestOracle
-          ? "You are Oracle, an expert architectural and technical consultant running on GPT-5.6 Sol. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action."
+          ? "You are Oracle, an expert architectural and technical consultant running on GPT-6 Sol. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action."
           : isCheapOracle
             ? "You are Oracle, an expert architectural and technical consultant running on Grok 4.6. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action."
             : "You are Oracle, an expert architectural and technical consultant running on Opus 5. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.",

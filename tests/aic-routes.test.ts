@@ -40,8 +40,8 @@ let routesDir = ""
 
 const COPILOT_USAGE = {
   token_details: [
-    { batch_size: 1000000, cost_per_batch: 20000000000, model: "gpt-5.6-luna", token_count: 11, token_type: "input" },
-    { batch_size: 1000000, cost_per_batch: 120000000000, model: "gpt-5.6-luna", token_count: 5, token_type: "output" },
+    { batch_size: 1000000, cost_per_batch: 20000000000, model: "gpt-6-luna", token_count: 11, token_type: "input" },
+    { batch_size: 1000000, cost_per_batch: 120000000000, model: "gpt-6-luna", token_count: 5, token_type: "output" },
   ],
   total_nano_aiu: 820000,
 }
@@ -131,7 +131,7 @@ beforeEach(async () => {
     object: "list",
     data: [
       catalogEntry("claude-haiku-4.5", "claude"),
-      catalogEntry("gpt-5.6-luna", "gpt-5"),
+      catalogEntry("gpt-6-luna", "gpt-5"),
       catalogEntry("gemini-3.5-flash", "gemini"),
     ] as unknown as NonNullable<typeof state.models>["data"],
   }
@@ -443,7 +443,7 @@ describe("/v1/responses", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-5.6-luna",
+        model: "gpt-6-luna",
         input: [{ role: "user", content: "hi" }],
         stream: false,
       }),
@@ -453,7 +453,7 @@ describe("/v1/responses", () => {
     expect(body.copilot_usage).toEqual(COPILOT_USAGE)
     const snap = aicSnapshot()
     expect(snap.requests).toBe(1)
-    expect(snap.perModel["gpt-5.6-luna"]?.nanoAiu).toBe(820000)
+    expect(snap.perModel["gpt-6-luna"]?.nanoAiu).toBe(820000)
   })
 
   test("stream: terminal response.completed recorded once", async () => {
@@ -473,7 +473,7 @@ describe("/v1/responses", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-5.6-luna",
+        model: "gpt-6-luna",
         input: [{ role: "user", content: "hi" }],
         stream: true,
       }),
@@ -496,13 +496,13 @@ describe("translation shim egress", () => {
         usage: { input_tokens: 11, output_tokens: 5, total_tokens: 16 },
         copilot_usage: COPILOT_USAGE,
       } as unknown as ResponsesApiResponse,
-      "gpt-5.6-luna",
+      "gpt-6-luna",
     )
     expect(msg.usage.output_tokens).toBe(5)
     // Client-visible usage stays the 4-key Anthropic shape (no copilot_usage leak).
     expect("copilot_usage" in msg).toBe(false)
     expect(aicSnapshot().requests).toBe(1)
-    expect(aicSnapshot().perModel["gpt-5.6-luna"]?.nanoAiu).toBe(820000)
+    expect(aicSnapshot().perModel["gpt-6-luna"]?.nanoAiu).toBe(820000)
   })
 
   test("responses stream synth records duplicate terminal events once", async () => {
@@ -517,7 +517,7 @@ describe("translation shim egress", () => {
       yield { data: completed }
     }
     const events = []
-    for await (const e of synthAnthropicFromResponses(upstream(), { modelId: "gpt-5.6-luna" })) {
+    for await (const e of synthAnthropicFromResponses(upstream(), { modelId: "gpt-6-luna" })) {
       events.push(e)
     }
     expect(events.some((e) => e.type === "message_stop")).toBe(true)
@@ -669,7 +669,7 @@ describe("/v1/messages shim non-streaming exactly-once", () => {
       object: "list",
       data: [
         {
-          ...catalogEntry("gpt-5.6-luna", "gpt-5"),
+          ...catalogEntry("gpt-6-luna", "gpt-5"),
           supported_endpoints: ["/responses"],
         },
       ] as unknown as NonNullable<typeof state.models>["data"],
@@ -692,7 +692,7 @@ describe("/v1/messages shim non-streaming exactly-once", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-5.6-luna",
+        model: "gpt-6-luna",
         max_tokens: 64,
         messages: [{ role: "user", content: "hi" }],
       }),
@@ -701,7 +701,7 @@ describe("/v1/messages shim non-streaming exactly-once", () => {
     const snap = aicSnapshot()
     expect(snap.requests).toBe(1)
     expect(snap.totalNanoAiu).toBe(820000)
-    expect(snap.perModel["gpt-5.6-luna"]?.nanoAiu).toBe(820000)
+    expect(snap.perModel["gpt-6-luna"]?.nanoAiu).toBe(820000)
   })
 
   test("chat-shim streaming (cheap-profile lead path) skips interim zero, records terminal", async () => {
@@ -783,7 +783,7 @@ describe("/v1/responses/compact", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "gpt-5.6-luna",
+        model: "gpt-6-luna",
         input: [{ role: "user", content: "hi" }],
       }),
     })
@@ -791,6 +791,6 @@ describe("/v1/responses/compact", () => {
     const snap = aicSnapshot()
     expect(snap.requests).toBe(1)
     expect(snap.totalNanoAiu).toBe(820000)
-    expect(snap.perModel["gpt-5.6-luna"]?.nanoAiu).toBe(820000)
+    expect(snap.perModel["gpt-6-luna"]?.nanoAiu).toBe(820000)
   })
 })

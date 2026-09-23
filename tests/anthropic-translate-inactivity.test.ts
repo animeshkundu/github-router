@@ -6,7 +6,7 @@
 // responses/handler.ts:139), but the shim had NO timeout of any kind. Combined
 // with `UPSTREAM_FETCH_TIMEOUT_MS` defaulting to 0 (disabled, port.ts), an
 // upstream that holds the socket open but stops emitting froze the user's main
-// agent loop FOREVER on `github-router claude -m gpt-5.6-sol`.
+// agent loop FOREVER on `github-router claude -m gpt-6-sol`.
 //
 // These tests pin the fix AND the two ways a naive `Promise.race` fix breaks:
 //   1. the abandoned `events.next()` must not surface as an unhandled rejection
@@ -62,7 +62,7 @@ function stallingGen(hooks?: {
 }): AsyncGenerator<AnthropicStreamEvent> {
   return (async function* () {
     try {
-      yield makeMessageStart("msg_stall", "gpt-5.6-sol")
+      yield makeMessageStart("msg_stall", "gpt-6-sol")
       yield makeContentBlockStart(0, { type: "text", text: "" })
       // Hang until aborted. Optionally reject later, simulating an upstream
       // socket error arriving AFTER the timeout gave up on this read.
@@ -89,7 +89,7 @@ function slowButAliveGen(
   delayMs: number,
 ): AsyncGenerator<AnthropicStreamEvent> {
   return (async function* () {
-    yield makeMessageStart("msg_slow", "gpt-5.6-sol")
+    yield makeMessageStart("msg_slow", "gpt-6-sol")
     yield makeContentBlockStart(0, { type: "text", text: "" })
     for (let i = 0; i < chunks; i++) {
       await sleep(delayMs)

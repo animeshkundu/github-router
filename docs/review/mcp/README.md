@@ -33,11 +33,11 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 ### peers — `src/lib/peer-mcp-personas.ts` (personas)  ·  gate: catalog + `--codex-cli` for implementer
 | Tool | Line | Model / endpoint | Gate |
 |---|---|---|---|
-| codex_critic | 335 | gpt-5.6-sol `/responses` | always |
+| codex_critic | 335 | gpt-6-sol `/responses` | always |
 | gemini_critic | 349 | gemini-3.1-pro-preview `/chat` | `requiresGeminiCatalog` |
 | codex_reviewer | 364 | gpt-5.3-codex `/responses` | always |
 | gemini_reviewer | 378 | gemini-3.1-pro-preview `/chat` | `requiresGeminiCatalog` |
-| opus_critic | 400 | claude-opus-5 `/messages` (4.6 fallback) | always |
+| opus_critic | 400 | claude-opus-5.5 `/messages` (4.6 fallback) | always |
 | codex_implementer | 426 | gpt-5.3-codex `/responses` (write) | `--codex-cli` |
 
 ### search — `NON_PERSONA_MCP_TOOLS`  ·  always-on
@@ -49,12 +49,12 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 ### workers — `NON_PERSONA_MCP_TOOLS`  ·  gate: `capability:"worker"` / `browse_agent`
 | Tool | Line | Default model | Gate |
 |---|---|---|---|
-| explore | 1194 | gpt-5.6-luna high | worker |
-| implement | 1276 | gpt-5.6-sol xhigh | worker |
+| explore | 1194 | gpt-6-luna high | worker |
+| implement | 1276 | gpt-6-sol xhigh | worker |
 | review | 1367 | gemini-3.1-pro-preview | worker |
-| plan | 1451 | claude-opus-5 high | worker |
-| test | 1529 | gpt-5.6-sol xhigh | worker |
-| browse | 1905 | gpt-5.6-luna high | browse_agent |
+| plan | 1451 | claude-opus-5.5 high | worker |
+| test | 1529 | gpt-6-sol xhigh | worker |
+| browse | 1905 | gpt-6-luna high | browse_agent |
 
 ### orchestrate — `NON_PERSONA_MCP_TOOLS`  ·  verify/attest always-on; decompose/run gated `worker`
 | Tool | Line |
@@ -139,7 +139,7 @@ Description source unless noted: `src/lib/peer-mcp-personas.ts`.
 
 ## Related auto-injected surfaces (not standalone MCP tools; out of the per-tool scope)
 
-- **`__anthropic_advisor`** — server-injected Anthropic tool on `/v1/messages` (Claude models only), dispatched to gpt-5.6-sol xhigh. Named in the awareness snippet.
+- **`__anthropic_advisor`** — server-injected Anthropic tool on `/v1/messages` (Claude models only), dispatched to gpt-6-sol xhigh. Named in the awareness snippet.
 - **Injected subagents** — the native `implementer`, `reviewer`, `brainstorm`, `scout`, and `scribe`; `peer-review-coordinator`; and the `worker-*` background dispatchers. `implementer`, `reviewer`, `brainstorm`, and `scribe` are always emitted, omitting `model:` to inherit the lead if their preferred chain misses. `scout` is omitted when its cheap-tier chain misses. These are agent definitions, not MCP tools.
 - **Injected skills** — `/gh-research`, `/gh-orchestrate`, `/gh-floor-keeper`, `/gh-first-mate` (`src/lib/injected-skills/`).
 

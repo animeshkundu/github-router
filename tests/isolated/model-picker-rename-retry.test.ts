@@ -43,7 +43,7 @@ function setCatalog(): void {
   state.models = {
     object: "list",
     data: [{
-      id: "gpt-5.6-sol",
+      id: "gpt-6-sol",
       capabilities: { limits: { max_context_window_tokens: 1_050_000 } },
     }] as never,
   }
@@ -66,7 +66,7 @@ describe("modelPicker settings rename retries", () => {
 
     expect(renameAttempts).toBe(3)
     const settings = JSON.parse(await fsSync.promises.readFile(settingsPath, "utf8"))
-    expect(settings.modelPicker.options[0].model).toBe("gpt-5.6-sol[1m]")
+    expect(settings.modelPicker.options[0].model).toBe("gpt-6-sol[1m]")
   })
 
   test("persistent contention is bounded and leaves no temporary file", async () => {

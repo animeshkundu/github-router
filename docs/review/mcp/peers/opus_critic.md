@@ -13,10 +13,10 @@
 | Definition | `src/lib/peer-mcp-personas.ts:398-420` |
 | Always-on? | yes (`requiresHttp: true`, no separate catalog-registration gate) |
 | Capability gate | none (`requiresGeminiCatalog` is undefined; `personasFor` never drops it) |
-| Backing model / endpoint | prefers `claude-opus-5` (native 1M), falling back to `claude-opus-4.6-1m` then `claude-opus-4-6`, via `/v1/messages` |
+| Backing model / endpoint | prefers `claude-opus-5.5` (native 1M), falling back to `claude-opus-4.6-1m` then `claude-opus-4-6`, via `/v1/messages` |
 | Write-capable | no |
 
-Model resolution is dynamic: `activePersonas()` applies `resolveOpusCriticModel()`, which exact-matches `claude-opus-5` first. If absent, it prefers the version-anchored Opus 4.6 `-1m` sibling and finally the 200K base slug. `allowedEfforts` is `["low","medium","high","xhigh"]`; `defaultEffort` stays `high` to preserve the prior latency profile while letting Opus 5 callers opt into xhigh.
+Model resolution is dynamic: `activePersonas()` applies `resolveOpusCriticModel()`, which exact-matches `claude-opus-5.5` first. If absent, it prefers the version-anchored Opus 4.6 `-1m` sibling and finally the 200K base slug. `allowedEfforts` is `["low","medium","high","xhigh"]`; `defaultEffort` stays `high` to preserve the prior latency profile while letting Opus 5 callers opt into xhigh.
 
 ## 2. Injected surfaces (verbatim)
 
@@ -37,30 +37,30 @@ Subagent `agentPrompt` is empty (`personas.ts:406`); the subagent system prompt 
 
 `buildPeerAwarenessSnippet` builds `criticList` and pushes opus_critic at `personas.ts:585`:
 
-> ``criticList.push("`opus_critic` (Opus 5)")``
+> ``criticList.push("`opus_critic` (Opus 5.5)")``
 
-Rendered clause (`personas.ts:642`): opus_critic appears inside the parenthesized critic list under ``Cross-lab peer critics under `mcp__peers__*` (…, `opus_critic` (Opus 5)) are available at your discretion for adversarial review.`` The snippet names the tool but delegates the "when to use / when not" routing to the tool's own `description` (line 642: "Each tool's description explains its scope and when it applies.").
+Rendered clause (`personas.ts:642`): opus_critic appears inside the parenthesized critic list under ``Cross-lab peer critics under `mcp__peers__*` (…, `opus_critic` (Opus 5.5)) are available at your discretion for adversarial review.`` The snippet names the tool but delegates the "when to use / when not" routing to the tool's own `description` (line 642: "Each tool's description explains its scope and when it applies.").
 
 Subagent system prompt (`OPUS_CRITIC_BASE`, `personas.ts:322-330`):
 
 > You are opus-critic, a fresh-context same-lab adversarial reviewer running on Opus 5. The lead orchestrator that just delegated to you runs Opus-family context too, but you are NOT the lead. You did not see the lead's reasoning trace. You only see the brief.
 >
-> Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-5.6-sol) and gemini-critic (gemini-3.1-pro) — same training, same lab, same RLHF priors. …
+> Your job is to spot what the lead missed because of cognitive momentum, sunk-cost on a plan, or motivated reasoning toward a particular fix. Your blind-spot diversification is LIMITED compared to codex-critic (gpt-6-sol) and gemini-critic (gemini-3.1-pro) — same training, same lab, same RLHF priors. …
 
 Followed by `COLD_START_CONTRACT` (`personas.ts:220-227`) and `CRITIC_RUBRIC` (`personas.ts:193-218`).
 
 ### 2c. CLAUDE.md (mirrored `<CLAUDE_CONFIG_DIR>/CLAUDE.md`)
 
-Covering block: **peer-awareness** (marker pair `PEER_MARKER_OPEN`/`_CLOSE`, `claude-md-injection.ts:20-22`). `appendPeerAwarenessToMirroredClaudeMd` (`claude-md-injection.ts:653-663`) writes the exact `buildPeerAwarenessSnippet` output — so the mirrored CLAUDE.md carries the identical ``opus_critic` (Opus 5)`` string from surface 2b. No separate opus_critic text; the mirror and the `--append-system-prompt` share one source.
+Covering block: **peer-awareness** (marker pair `PEER_MARKER_OPEN`/`_CLOSE`, `claude-md-injection.ts:20-22`). `appendPeerAwarenessToMirroredClaudeMd` (`claude-md-injection.ts:653-663`) writes the exact `buildPeerAwarenessSnippet` output — so the mirrored CLAUDE.md carries the identical ``opus_critic` (Opus 5.5)`` string from surface 2b. No separate opus_critic text; the mirror and the `--append-system-prompt` share one source.
 
-Checked-in root `CLAUDE.md` and the awareness snippet both identify opus_critic as Opus 5. The handler prefers the native-1M `claude-opus-5` catalog entry and retains the older 4.6-1m → 4.6 chain only as fallback behavior.
+Checked-in root `CLAUDE.md` and the awareness snippet both identify opus_critic as Opus 5. The handler prefers the native-1M `claude-opus-5.5` catalog entry and retains the older 4.6-1m → 4.6 chain only as fallback behavior.
 
 ## 3. Assessment
 
 ### 3a. Description quality
 
 - **Routing signal**: strong. "same lab as the lead, limited blind-spot diversity vs cross-lab critics" plus "Catches confabulation" gives a genuine when-to-use (same-lab confabulation catch) and an honest when-NOT (reach for cross-lab critics for genuine diversity). Differentiates cleanly from `codex_critic` ("different lab", "strongest reasoning") and `gemini_critic` ("third-lab triangulation"). This is the best-differentiated of the three critic descriptions on the diversity axis.
-- **Accuracy vs implementation**: the preferred model is `claude-opus-5`, which is natively 1M and needs no `-1m` sibling. The older `claude-opus-4.6-1m` and `claude-opus-4-6` entries are fallbacks only, matching the dynamic resolution chain.
+- **Accuracy vs implementation**: the preferred model is `claude-opus-5.5`, which is natively 1M and needs no `-1m` sibling. The older `claude-opus-4.6-1m` and `claude-opus-4-6` entries are fallbacks only, matching the dynamic resolution chain.
 - **Schema minimality**: clean. `prompt` (required), `context` (optional, actionable — extends the brief), `effort` (model-tunable, gated to real tiers). No echoed-input or diagnostic-only fields. Compliant with the ruthlessly-minimal principle.
 
 ### 3b. System-prompt coverage
@@ -71,16 +71,16 @@ Checked-in root `CLAUDE.md` and the awareness snippet both identify opus_critic 
 
 ### 3c. CLAUDE.md coverage
 
-- **Accurate / non-drifted**: the mirrored peer-awareness block inherits the preferred-model `(Opus 5)` label from 2b, matching the current resolution chain.
+- **Accurate / non-drifted**: the mirrored peer-awareness block inherits the preferred-model `(Opus 5.5)` label from 2b, matching the current resolution chain.
 - **Injected block vs checked-in root CLAUDE.md**: both identify the preferred model as Opus 5 and retain the older 4.6 variants only as fallback behavior.
 
 ### 3d. Cross-surface consistency
 
-The surfaces agree that `claude-opus-5` is the preferred, natively 1M backing model. The `claude-opus-4.6-1m` and `claude-opus-4-6` entries are fallback behavior, not a competing current identity.
+The surfaces agree that `claude-opus-5.5` is the preferred, natively 1M backing model. The `claude-opus-4.6-1m` and `claude-opus-4-6` entries are fallback behavior, not a competing current identity.
 
 ## 4. Findings
 
-- **[Resolved]** The previous Opus 4.6/4.7 drift is obsolete: the live persona now prefers `claude-opus-5`, which has a native 1M context window without a `-1m` sibling.
+- **[Resolved]** The previous Opus 4.6/4.7 drift is obsolete: the live persona now prefers `claude-opus-5.5`, which has a native 1M context window without a `-1m` sibling.
 - **[Suggestion]** `OPUS_CRITIC_BASE` names `gemini-critic` unconditionally, but that persona is catalog-gated. The reference is illustrative rather than a routing instruction, so no change is required; if tightening lesser-tier accuracy, phrase it as "the cross-lab critics" rather than naming Gemini specifically.
 
 ## 5. Verdict

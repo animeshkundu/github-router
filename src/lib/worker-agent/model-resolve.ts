@@ -213,13 +213,16 @@ const TOKENS_PER_MILLION = 1_000_000
  */
 export const FALLBACK_TOKEN_PRICES: Readonly<Record<string, CatalogTokenPrices>> =
   Object.freeze({
+    "gpt-6-luna": { in: 20, out: 120 },
     "gpt-5.6-luna": { in: 20, out: 120 },
     "gpt-5.6-terra": { in: 200, out: 1200 },
     "gpt-5.4-mini": { in: 75, out: 450 },
     "claude-sonnet-5": { in: 200, out: 1000 },
     "gpt-5.3-codex": { in: 175, out: 1400 },
     "claude-haiku-4.5": { in: 100, out: 500 },
+    "claude-opus-5.5": { in: 500, out: 2500 },
     "claude-opus-5": { in: 500, out: 2500 },
+    "gpt-6-sol": { in: 400, out: 2000 },
     "gpt-5.6-sol": { in: 400, out: 2000 },
     "grok-4.5": { in: 200, out: 600 },
     "gpt-5.5": { in: 500, out: 3000 },
@@ -293,7 +296,7 @@ export function catalogTokenPrices(modelId: string): CatalogTokenPrices | undefi
  * through this proxy. Reproduce with `bun scripts/bench-model-speed.ts` — the
  * harness is committed precisely so these numbers can be re-derived and
  * challenged instead of being trusted. Rounded coarsely on purpose: run-to-run
- * variance is large (`gpt-5.6-sol` measured 22 in an early n=1 pass and 74 at
+ * variance is large (`gpt-6-sol` measured 22 in an early n=1 pass and 74 at
  * n=3), so any digit beyond the leading one or two would be false precision.
  *
  * Wall clock includes time-to-first-token, which is why an early n=1 pass put
@@ -307,8 +310,8 @@ export function catalogTokenPrices(modelId: string): CatalogTokenPrices | undefi
  *
  * NOT the whole picture for agent work. The benchmark also measures p50 latency
  * to a trivial tool call, which is the workload an agent model actually spends
- * its turns on, and the ordering differs from raw generation: `gpt-5.6-sol`
- * generates at 75 but takes ~4.3s to reach a tool call, while `gpt-5.6-luna`
+ * its turns on, and the ordering differs from raw generation: `gpt-6-sol`
+ * generates at 75 but takes ~4.3s to reach a tool call, while `gpt-6-luna`
  * takes ~0.9s. That figure is deliberately NOT surfaced to the model, because a
  * second speed axis invites optimising a routing choice that policy already
  * settles (see the decorrelation note below).
@@ -325,13 +328,16 @@ export function catalogTokenPrices(modelId: string): CatalogTokenPrices | undefi
  * the same method.
  */
 export const INDICATIVE_TOKENS_PER_SECOND: Readonly<Record<string, number>> = Object.freeze({
+  "gpt-6-luna": 120,
   "gpt-5.6-luna": 120,
   "gpt-5.6-terra": 100,
   "gpt-5.4-mini": 100,
   "claude-sonnet-5": 100,
   "gpt-5.3-codex": 85,
   "claude-haiku-4.5": 85,
+  "claude-opus-5.5": 80,
   "claude-opus-5": 80,
+  "gpt-6-sol": 75,
   "gpt-5.6-sol": 75,
   "grok-4.5": 70,
   "gpt-5.5": 65,

@@ -54,7 +54,7 @@ const baseModels: ModelsResponse = {
     fakeModel("gpt-5.5", ["/v1/responses"]),
     fakeModel("gpt-5.3-codex", ["/v1/responses"]),
     fakeModel("gemini-3.1-pro-preview", ["/v1/chat/completions"]),
-    fakeModel("claude-opus-5", ["/v1/messages", "/v1/chat/completions"]),
+    fakeModel("claude-opus-5.5", ["/v1/messages", "/v1/chat/completions"]),
   ],
 }
 
@@ -832,7 +832,7 @@ describe("/mcp tools/call routing", () => {
         id: "msg_test",
         type: "message",
         role: "assistant",
-        model: "claude-opus-5",
+        model: "claude-opus-5.5",
         content: [{ type: "text", text }],
         stop_reason: "end_turn",
       }
@@ -844,7 +844,7 @@ describe("/mcp tools/call routing", () => {
     return captured
   }
 
-  test("codex_critic call hits /responses with model=gpt-5.6-sol and persona instructions", async () => {
+  test("codex_critic call hits /responses with model=gpt-6-sol and persona instructions", async () => {
     const captured = mockResponsesUpstream("no material objection")
     const { status, json } = await rpc({
       jsonrpc: "2.0",
@@ -863,7 +863,7 @@ describe("/mcp tools/call routing", () => {
       stream?: boolean
       reasoning?: { effort?: string }
     }
-    expect(upstream.model).toBe("gpt-5.6-sol")
+    expect(upstream.model).toBe("gpt-6-sol")
     expect(upstream.instructions).toContain("codex-critic")
     expect(upstream.instructions).toContain("1–5") // grading rubric
     expect(upstream.stream).toBe(false)
@@ -1162,7 +1162,7 @@ describe("/mcp tools/call routing", () => {
   })
 
   test("opus_critic accepts effort:'xhigh' when resolved to Opus 5 (dynamic widening)", async () => {
-    // opus_critic's effective model resolves to claude-opus-5 on this catalog,
+    // opus_critic's effective model resolves to claude-opus-5.5 on this catalog,
     // which advertises xhigh; activePersonas() widens allowedEfforts to include
     // xhigh accordingly, so the call passes validation and dispatches xhigh.
     const captured = mockMessagesUpstream("ok")
@@ -1536,9 +1536,9 @@ describe("/mcp stand_in tool", () => {
     state.models = {
       object: "list",
       data: [
-        capable("gpt-5.6-sol", 1_050_000, "/responses", "openai"),
+        capable("gpt-6-sol", 1_050_000, "/responses", "openai"),
         capable("gpt-5.3-codex", 400_000, "/responses", "openai"),
-        capable("claude-opus-5", 1_000_000, "/v1/messages", "anthropic", true),
+        capable("claude-opus-5.5", 1_000_000, "/v1/messages", "anthropic", true),
         capable("claude-sonnet-5", 1_000_000, "/v1/messages", "anthropic", true),
         capable("gemini-3.8-flash", 1_000_000, "/chat/completions", "google"),
         capable("grok-4.6", 500_000, "/responses", "xai"),
@@ -1610,15 +1610,15 @@ describe("/mcp stand_in tool", () => {
         supports: {
           tool_calls: true,
           reasoning_effort: ["medium", "high", "xhigh"],
-          ...(id === "claude-opus-5" ? { adaptive_thinking: true } : {}),
+          ...(id === "claude-opus-5.5" ? { adaptive_thinking: true } : {}),
         },
       },
     })
     state.models = {
       object: "list",
       data: [
-        capable("gpt-5.6-sol", 1_050_000, "/responses", "openai"),
-        capable("claude-opus-5", 1_000_000, "/v1/messages", "anthropic"),
+        capable("gpt-6-sol", 1_050_000, "/responses", "openai"),
+        capable("claude-opus-5.5", 1_000_000, "/v1/messages", "anthropic"),
         capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions", "google"),
         capable("gemini-3.8-flash", 1_000_000, "/chat/completions", "google"),
         capable("grok-4.6", 500_000, "/responses", "xai"),
@@ -1648,7 +1648,7 @@ describe("/mcp stand_in tool", () => {
       const vote = VOTE_A_HIGH
       if (String(url).includes("/v1/messages")) {
         return new Response(JSON.stringify({
-          id: "m", type: "message", role: "assistant", model: "claude-opus-5",
+          id: "m", type: "message", role: "assistant", model: "claude-opus-5.5",
           content: [{ type: "text", text: vote }], stop_reason: "end_turn",
         }), { status: 200, headers: { "content-type": "application/json" } })
       }
@@ -1680,10 +1680,10 @@ describe("/mcp stand_in tool", () => {
   // ──────────────────────────────────────────────────────────────────
   function mockThreePeers(queues: {
     "gpt-5.5": Array<string>
-    "claude-opus-5": Array<string>
+    "claude-opus-5.5": Array<string>
     "gemini-3.1-pro-preview": Array<string>
   }) {
-    const consumed = { "gpt-5.5": 0, "claude-opus-5": 0, "gemini-3.1-pro-preview": 0 }
+    const consumed = { "gpt-5.5": 0, "claude-opus-5.5": 0, "gemini-3.1-pro-preview": 0 }
     globalThis.fetch = mock(async (url) => {
       const u = typeof url === "string" ? url : (url as URL).toString()
       let text: string
@@ -1697,9 +1697,9 @@ describe("/mcp stand_in tool", () => {
         }), { status: 200, headers: { "content-type": "application/json" } })
       }
       if (u.includes("/v1/messages")) {
-        text = queues["claude-opus-5"][consumed["claude-opus-5"]++]
+        text = queues["claude-opus-5.5"][consumed["claude-opus-5.5"]++]
         return new Response(JSON.stringify({
-          id: "msg_test", type: "message", role: "assistant", model: "claude-opus-5",
+          id: "msg_test", type: "message", role: "assistant", model: "claude-opus-5.5",
           content: [{ type: "text", text }], stop_reason: "end_turn",
         }), { status: 200, headers: { "content-type": "application/json" } })
       }
@@ -1727,7 +1727,7 @@ describe("/mcp stand_in tool", () => {
   test("tools/call stand_in dispatches to all three peers and returns a consensus envelope", async () => {
     mockThreePeers({
       "gpt-5.5":                [VOTE_A_HIGH],
-      "claude-opus-5":          [VOTE_A_HIGH],
+      "claude-opus-5.5":          [VOTE_A_HIGH],
       "gemini-3.1-pro-preview": [VOTE_A_HIGH],
     })
     const { status, json } = await rpc({
@@ -1751,7 +1751,7 @@ describe("/mcp stand_in tool", () => {
   test("tools/call stand_in releases its in-flight slot after completion (slot count returns to 0)", async () => {
     mockThreePeers({
       "gpt-5.5":                [VOTE_A_HIGH],
-      "claude-opus-5":          [VOTE_A_HIGH],
+      "claude-opus-5.5":          [VOTE_A_HIGH],
       "gemini-3.1-pro-preview": [VOTE_A_HIGH],
     })
     expect(__getInFlightForTests()).toBe(0)
@@ -1783,7 +1783,7 @@ describe("/mcp stand_in tool", () => {
       }
       if (u.includes("/v1/messages")) {
         return new Response(JSON.stringify({
-          id: "m", type: "message", role: "assistant", model: "claude-opus-5",
+          id: "m", type: "message", role: "assistant", model: "claude-opus-5.5",
           content: [{ type: "text", text: VOTE_A_HIGH }], stop_reason: "end_turn",
         }), { status: 200, headers: { "content-type": "application/json" } })
       }
@@ -1816,7 +1816,7 @@ describe("/mcp stand_in tool", () => {
   test("JSON-path tools/call accepts stand_in context between the old 6KB and new 32KB caps", async () => {
     mockThreePeers({
       "gpt-5.5":                [VOTE_A_HIGH],
-      "claude-opus-5":        [VOTE_A_HIGH],
+      "claude-opus-5.5":        [VOTE_A_HIGH],
       "gemini-3.1-pro-preview": [VOTE_A_HIGH],
     })
 
@@ -2547,7 +2547,7 @@ function workerSseResponse(
 }
 
 describe("/mcp worker_* tools — registration + gating", () => {
-  for (const gateModel of ["gpt-5.4-mini", "gpt-5.6-luna"]) {
+  for (const gateModel of ["gpt-5.4-mini", "gpt-6-luna"]) {
     test(`tools/list includes worker tools on a ${gateModel}-only gate catalog`, async () => {
       state.models = {
         object: "list",
@@ -2614,7 +2614,7 @@ describe("/mcp worker_* tools — registration + gating", () => {
     state.models = {
       object: "list",
       data: [
-        fakeWorkerModel("gpt-5.6-luna", { tool_calls: false }),
+        fakeWorkerModel("gpt-6-luna", { tool_calls: false }),
         fakeWorkerModel("gpt-5.4-mini", { tool_calls: false }),
       ],
     }
@@ -2658,13 +2658,13 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
             ![
               "gpt-5.4-mini",
               "gpt-5.5",
-              "gpt-5.6-sol",
+              "gpt-6-sol",
               "gemini-3.1-pro-preview",
-              "gpt-5.6-luna",
+              "gpt-6-luna",
             ].includes(m.id),
         ),
         // explore + browse default and preferred worker gate/fallback model
-        fakeWorkerModel("gpt-5.6-luna", {
+        fakeWorkerModel("gpt-6-luna", {
           reasoning_effort: ["none", "low", "medium", "high", "xhigh", "max"],
         }),
         // broad-tier worker gate/fallback model
@@ -2672,7 +2672,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
           reasoning_effort: ["minimal", "low", "medium", "high"],
         }),
         // implement default (routes to /responses)
-        fakeWorkerModel("gpt-5.6-sol", {
+        fakeWorkerModel("gpt-6-sol", {
           reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
         }),
         // retained OpenAI fallback + explicit-model fixture
@@ -2720,7 +2720,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
           workspace: process.cwd(),
           // Pin a chat-endpoint model so the chat-SSE mock applies — this
           // test covers the in-place implement path, not the implement
-          // default (gpt-5.6-sol, which routes to /responses).
+          // default (gpt-6-sol, which routes to /responses).
           model: "gemini-3.1-pro-preview",
         },
       },
@@ -2748,7 +2748,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
           prompt: "fix the typo",
           worktree: true,
           workspace: process.cwd(),
-          // Chat-endpoint pin (see above) — gpt-5.6-sol default routes to
+          // Chat-endpoint pin (see above) — gpt-6-sol default routes to
           // /responses, which the chat-SSE mock doesn't serve.
           model: "gemini-3.1-pro-preview",
         },
@@ -3056,7 +3056,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
 // Prompt-window guard + opus_critic model selection
 // Window guard: reject (don't truncate) a brief that exceeds the persona
 // model's real max_prompt_tokens, counted with the exact o200k tokenizer.
-// opus_critic: prefer claude-opus-5, then a 1M opus-4.6 slug when present,
+// opus_critic: prefer claude-opus-5.5, then a 1M opus-4.6 slug when present,
 // else fall back to the 200K claude-opus-4-6.
 // ─────────────────────────────────────────────────────────────────────
 describe("/mcp peer prompt-window guard", () => {
@@ -3089,11 +3089,11 @@ describe("/mcp peer prompt-window guard", () => {
   }
 
   test("rejects a brief that exceeds the persona model's prompt window (no upstream call)", async () => {
-    // gpt-5.6-sol with a deliberately tiny 200-token window; send a brief far
+    // gpt-6-sol with a deliberately tiny 200-token window; send a brief far
     // larger so the exact o200k count busts it.
     state.models = {
       object: "list",
-      data: [modelWith("gpt-5.6-sol", 200, ["/v1/responses"])],
+      data: [modelWith("gpt-6-sol", 200, ["/v1/responses"])],
     }
     const captured = mockResponses("should-not-be-called")
     const { status, json } = await rpc({
@@ -3117,7 +3117,7 @@ describe("/mcp peer prompt-window guard", () => {
   test("allows a brief that fits the window (reaches upstream)", async () => {
     state.models = {
       object: "list",
-      data: [modelWith("gpt-5.6-sol", 900_000, ["/v1/responses"])],
+      data: [modelWith("gpt-6-sol", 900_000, ["/v1/responses"])],
     }
     const captured = mockResponses("ok")
     const { json } = await rpc({
@@ -3145,11 +3145,11 @@ describe("/mcp peer prompt-window guard", () => {
     expect(captured.called).toBe(true)
   })
 
-  test("opus_critic prefers claude-opus-5 over the 4.6-1m fallback", async () => {
+  test("opus_critic prefers claude-opus-5.5 over the 4.6-1m fallback", async () => {
     state.models = {
       object: "list",
       data: [
-        modelWith("claude-opus-5", 1_000_000, ["/v1/messages"]),
+        modelWith("claude-opus-5.5", 1_000_000, ["/v1/messages"]),
         modelWith("claude-opus-4.6", 168_000, ["/v1/messages"]),
         modelWith("claude-opus-4.6-1m", 936_000, ["/v1/messages"]),
       ],
@@ -3163,7 +3163,7 @@ describe("/mcp peer prompt-window guard", () => {
           id: "msg_test",
           type: "message",
           role: "assistant",
-          model: "claude-opus-5",
+          model: "claude-opus-5.5",
           content: [{ type: "text", text: "ok" }],
           stop_reason: "end_turn",
         }),
@@ -3177,7 +3177,7 @@ describe("/mcp peer prompt-window guard", () => {
       method: "tools/call",
       params: { name: "opus_critic", arguments: { prompt: "review this" } },
     })
-    expect((captured.lastBody as { model: string }).model).toBe("claude-opus-5")
+    expect((captured.lastBody as { model: string }).model).toBe("claude-opus-5.5")
   })
 
   test("opus_critic regex does NOT false-positive on 4.7-1m or 4.8 (version-anchored to 4.6)", async () => {
@@ -3219,7 +3219,7 @@ describe("/mcp peer prompt-window guard", () => {
   })
 
   test("opus_critic rejects effort:'xhigh' when it falls back to opus-4.6 (no opus-5 in catalog)", async () => {
-    // On a catalog without claude-opus-5, opus_critic's effective model falls
+    // On a catalog without claude-opus-5.5, opus_critic's effective model falls
     // back to opus-4.6 (which lacks xhigh). activePersonas() does NOT widen
     // allowedEfforts past high there, so a caller-supplied xhigh rejects at
     // validation with no upstream call — instead of 400ing off Copilot.
@@ -3387,8 +3387,8 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       state.models = {
         object: "list",
         data: [{
-          id: "claude-opus-5",
-          name: "claude-opus-5",
+          id: "claude-opus-5.5",
+          name: "claude-opus-5.5",
           object: "model",
           vendor: "anthropic",
           version: "1",
@@ -3396,7 +3396,7 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
           model_picker_enabled: true,
           supported_endpoints: ["/v1/messages"],
           capabilities: {
-            family: "claude-opus-5",
+            family: "claude-opus-5.5",
             object: "model_capabilities",
             tokenizer: "claude",
             type: "chat",

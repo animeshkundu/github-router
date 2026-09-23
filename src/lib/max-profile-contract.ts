@@ -23,11 +23,11 @@ function catalogModel(id: string): Model | undefined {
 
 
 export const MAX_PROFILE_MODELS = Object.freeze({
-  sol: "gpt-5.6-sol",
-  luna: "gpt-5.6-luna",
+  sol: "gpt-6-sol",
+  luna: "gpt-6-luna",
   gemini: "gemini-3.8-flash",
   grok: "grok-4.6",
-  opus: "claude-opus-5",
+  opus: "claude-opus-5.5",
   sonnet: "claude-sonnet-5",
   codex: "gpt-5.3-codex",
 } as const)

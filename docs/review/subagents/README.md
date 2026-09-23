@@ -19,33 +19,33 @@ The peer-critic descriptions are the SAME strings used as the corresponding `mcp
 
 | Subagent | Own model | Routes to / does | Gate | Doc | Verdict |
 |---|---|---|---|---|---|
-| `codex-critic` | inherited (Claude) | relays to gpt-5.6-sol critic (MCP) | always | [codex-critic.md](codex-critic.md) | Y (soft trigger) |
+| `codex-critic` | inherited (Claude) | relays to gpt-6-sol critic (MCP) | always | [codex-critic.md](codex-critic.md) | Y (soft trigger) |
 | `codex-reviewer` | inherited | relays to gpt-5.3-codex reviewer (MCP) | always | [codex-reviewer.md](codex-reviewer.md) | Y (soft trigger) |
 | `gemini-critic` | inherited | relays to gemini-3.1-pro critic (MCP) | `requiresGeminiCatalog` | [gemini-critic.md](gemini-critic.md) | Y |
 | `gemini-reviewer` | inherited | relays to gemini-3.1-pro reviewer (MCP) | `requiresGeminiCatalog` | [gemini-reviewer.md](gemini-reviewer.md) | Y |
-| `opus-critic` | inherited | relays to claude-opus-5 critic (MCP; 4.6 fallback) | always | [opus-critic.md](opus-critic.md) | Y |
+| `opus-critic` | inherited | relays to claude-opus-5.5 critic (MCP; 4.6 fallback) | always | [opus-critic.md](opus-critic.md) | Y |
 | `codex-implementer` | inherited | relays to gpt-5.3-codex writer (stdio) | `--codex-cli` | [codex-implementer.md](codex-implementer.md) | N (S3 overlap) |
-| `implementer` (native) | gpt-5.6-sol → gpt-5.5, else lead | edits files itself (full toolset) | always emitted; preferred model needs `tool_calls` | [implementer.md](implementer.md) | Y |
+| `implementer` (native) | gpt-6-sol → gpt-5.5, else lead | edits files itself (full toolset) | always emitted; preferred model needs `tool_calls` | [implementer.md](implementer.md) | Y |
 | `reviewer` (native) | gemini-3.1-pro-preview → frontier, else lead | assesses artifacts and isolates failures (full toolset) | always emitted; preferred model needs `tool_calls` | [reviewer.md](reviewer.md) | Y |
 | `brainstorm` (native) | gemini-3.1-pro-preview → frontier, else lead | read-only divergent options | always emitted; preferred model needs `tool_calls` | [brainstorm.md](brainstorm.md) | Y |
-| `scout` (native) | gpt-5.6-luna → gemini-3.8-flash | read-only low-cost repository exploration | qualifying 1M `tool_calls` model required; otherwise omitted | [scout.md](scout.md) | Y |
+| `scout` (native) | gpt-6-luna → gemini-3.8-flash | read-only low-cost repository exploration | qualifying 1M `tool_calls` model required; otherwise omitted | [scout.md](scout.md) | Y |
 | `scribe` (native) | gpt-5.6-terra → frontier, else lead | repository-grounded documentation maintenance (full toolset) | always emitted; preferred model needs `tool_calls` | [scribe.md](scribe.md) | Y |
 | `implementer-fast` (native) | gpt-5.6-terra → gemini-3.1-pro-preview | well-specified mechanical implementation (full toolset) | qualifying 1M `tool_calls` model required; otherwise omitted | [implementer-fast.md](implementer-fast.md) | Y |
 | `reviewer-fast` (native) | gemini-3.8-flash only | lower-stakes cross-lab assessment, full toolset | qualifying 1M `tool_calls` model required; otherwise omitted | (undocumented — no per-agent `.md` yet) | not yet reviewed |
-| `Explore` (native, fast & max) | gpt-5.6-luna | capitalized read-oriented repository exploration role replacing fast `scout` | exact profile prerequisite: 1M `tool_calls`, high effort, Responses endpoint | [scout.md](scout.md) | Y |
-| `Plan` (native, fast & max) | gpt-5.6-sol | implementation planning consultant role (high effort) | exact profile prerequisite: 1M `tool_calls`, high effort, Responses endpoint | [worker-plan.md](worker-plan.md) | Y |
-| `general-purpose` (native, fast & max) | gpt-5.6-luna | bounded mixed execution (max effort) | exact profile prerequisite: 1M `tool_calls`, max effort, Responses endpoint | [general-purpose-fast.md](general-purpose-fast.md) | Y |
+| `Explore` (native, fast & max) | gpt-6-luna | capitalized read-oriented repository exploration role replacing fast `scout` | exact profile prerequisite: 1M `tool_calls`, high effort, Responses endpoint | [scout.md](scout.md) | Y |
+| `Plan` (native, fast & max) | gpt-6-sol | implementation planning consultant role (high effort) | exact profile prerequisite: 1M `tool_calls`, high effort, Responses endpoint | [worker-plan.md](worker-plan.md) | Y |
+| `general-purpose` (native, fast & max) | gpt-6-luna | bounded mixed execution (max effort) | exact profile prerequisite: 1M `tool_calls`, max effort, Responses endpoint | [general-purpose-fast.md](general-purpose-fast.md) | Y |
 | `implementer` (native, fast & max) | gemini-3.8-flash | bounded settled coding changes (high effort) | exact profile prerequisite: 1M `tool_calls`, high effort, Chat endpoint | [implementer.md](implementer.md) | Y |
 | `reviewer` (native, fast & max) | claude-sonnet-5 | repository-aware verification and reproduction (xhigh effort) | exact profile prerequisite: 1M `tool_calls`, adaptive thinking, xhigh, Messages endpoint | [reviewer.md](reviewer.md) | Y |
-| `brainstorm` (native, max) | claude-opus-5 | repository-feasible divergent options (high effort) | exact Max prerequisite: 1M, adaptive thinking, high, Messages endpoint | [brainstorm.md](brainstorm.md) | Y |
+| `brainstorm` (native, max) | claude-opus-5.5 | repository-feasible divergent options (high effort) | exact Max prerequisite: 1M, adaptive thinking, high, Messages endpoint | [brainstorm.md](brainstorm.md) | Y |
 | `critic` (native, former fast role) | gemini-3.8-flash | fresh-context cross-lab challenge | retired in favor of balanced implementer/reviewer roles | [critic.md](critic.md) | retired |
-| `general-purpose-fast` (native, standard only) | gpt-5.6-luna only | fastest measured, lowest-cost full-toolset catch-all | qualifying 1M `tool_calls` model required; otherwise omitted | [general-purpose-fast.md](general-purpose-fast.md) | Y |
-| `peer-review-coordinator` | Standard: inherited; Max: gpt-5.6-luna/max | fans out to the smallest sufficient set of distinct peer lenses and preserves disagreements | Standard and Max only; Max grants only peer MCP tools | [peer-review-coordinator.md](peer-review-coordinator.md) | Y (Max contract) |
-| `worker-explore` | inherited (worker: gpt-5.6-luna high) | bg dispatch read-only research | `workerToolsAvailable` | [worker-explore.md](worker-explore.md) | Y |
-| `worker-implement` | inherited (worker: gpt-5.6-sol) | bg dispatch read/write coding | `workerToolsAvailable` | [worker-implement.md](worker-implement.md) | Y |
+| `general-purpose-fast` (native, standard only) | gpt-6-luna only | fastest measured, lowest-cost full-toolset catch-all | qualifying 1M `tool_calls` model required; otherwise omitted | [general-purpose-fast.md](general-purpose-fast.md) | Y |
+| `peer-review-coordinator` | Standard: inherited; Max: gpt-6-luna/max | fans out to the smallest sufficient set of distinct peer lenses and preserves disagreements | Standard and Max only; Max grants only peer MCP tools | [peer-review-coordinator.md](peer-review-coordinator.md) | Y (Max contract) |
+| `worker-explore` | inherited (worker: gpt-6-luna high) | bg dispatch read-only research | `workerToolsAvailable` | [worker-explore.md](worker-explore.md) | Y |
+| `worker-implement` | inherited (worker: gpt-6-sol) | bg dispatch read/write coding | `workerToolsAvailable` | [worker-implement.md](worker-implement.md) | Y |
 | `worker-review` | inherited (worker: gemini-3.1-pro) | bg dispatch self-navigating review | `workerToolsAvailable` | [worker-review.md](worker-review.md) | Y |
-| `worker-plan` | inherited (worker: claude-opus-5) | bg dispatch ordered plan | `workerToolsAvailable` | [worker-plan.md](worker-plan.md) | Y (minor gap) |
-| `worker-test` | inherited (worker: gpt-5.6-sol) | bg dispatch adversarial tests | `workerToolsAvailable` | [worker-test.md](worker-test.md) | Y |
+| `worker-plan` | inherited (worker: claude-opus-5.5) | bg dispatch ordered plan | `workerToolsAvailable` | [worker-plan.md](worker-plan.md) | Y (minor gap) |
+| `worker-test` | inherited (worker: gpt-6-sol) | bg dispatch adversarial tests | `workerToolsAvailable` | [worker-test.md](worker-test.md) | Y |
 | `worker-browse` | Luna/high in Fast and Max; inherited elsewhere | bg dispatch browser agent | `browseAvailable` | [worker-browse.md](worker-browse.md) | Y |
 
 Two shapes of subagent: RELAY shims (the peer critics, codex-implementer, and worker dispatchers) and NATIVE agents. Standard `implementer` prefers the OpenAI frontier chain; `reviewer` and `brainstorm` prefer Gemini then that frontier chain; `scribe` prefers gpt-5.6-terra then the frontier chain. When a preferred chain misses, those roles omit `model:` and inherit the lead. Conditional `scout`, `implementer-fast`, `reviewer-fast`, and `general-purpose-fast` are omitted when their qualifying chains miss. Fast replaces that catalog-driven roster with five fixed native roles and no native `critic`; Max adds fixed Opus `brainstorm` and Luna `peer-review-coordinator` roles. Worker dispatchers are pinned to `mcp__<workersKey>__*` only so they cannot recurse.
@@ -75,9 +75,9 @@ Two foreground write-capable implementation subagents coexist, with descriptions
 
 | Subagent | Model | Nature | Description scope phrase |
 |---|---|---|---|
-| `implementer` (native) | gpt-5.6-sol (gpt-5.5 fallback) | foreground, integrated, edits itself | "well-scoped coding tasks — edits, small features, fixes… integrated subagent" |
+| `implementer` (native) | gpt-6-sol (gpt-5.5 fallback) | foreground, integrated, edits itself | "well-scoped coding tasks — edits, small features, fixes… integrated subagent" |
 | `codex-implementer` | gpt-5.3-codex | foreground, integrated, `--codex-cli` only | "Targeted implementation of a self-contained coding task" |
-| `worker-implement` | gpt-5.6-sol (worker) | **background**, autonomous, worktree-isolated | "autonomous coding worker… non-blocking… completion notification" |
+| `worker-implement` | gpt-6-sol (worker) | **background**, autonomous, worktree-isolated | "autonomous coding worker… non-blocking… completion notification" |
 
 `worker-implement` differentiates cleanly (background/autonomous/worktree vs foreground/integrated). The unresolved overlap is between the two FOREGROUND writers: under `--codex-cli` a lead sees both `implementer` and `codex-implementer` with similar bounded-task framing and no signal for which to pick. The intended material distinction is Codex CLI sandboxing for `codex-implementer`. Recommendation: document that split in a routing description. Detail in [implementer.md](implementer.md) §5 and [codex-implementer.md](codex-implementer.md) §6.
 

@@ -24,8 +24,8 @@ const STANDARD_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
   // maps it onto a model the client knows. The selected id still goes out
   // unchanged. Map by the closest client-side capability/effort profile; the
   // request preprocessors remain authoritative for the actual upstream effort.
-  { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", behavesAs: "claude-opus-5" },
-  { id: "gpt-5.6-luna", label: "GPT-5.6 Luna", behavesAs: "claude-opus-5" },
+  { id: "gpt-6-sol", label: "GPT-6 Sol", behavesAs: "claude-opus-5.5" },
+  { id: "gpt-6-luna", label: "GPT-6 Luna", behavesAs: "claude-opus-5.5" },
   { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", behavesAs: "claude-sonnet-5" },
   // Grok 4.6 currently serves a 500K total window. Keep this guard even if a
   // bad catalog fixture claims 1M: a process-global window override would then
@@ -39,10 +39,10 @@ const STANDARD_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
 ])
 
 const MAX_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
-  { id: MAX_PROFILE_MODELS.sol, label: "GPT-5.6 Sol", behavesAs: "claude-opus-5" },
-  { id: MAX_PROFILE_MODELS.luna, label: "GPT-5.6 Luna", behavesAs: "claude-opus-5" },
+  { id: MAX_PROFILE_MODELS.sol, label: "GPT-6 Sol", behavesAs: "claude-opus-5.5" },
+  { id: MAX_PROFILE_MODELS.luna, label: "GPT-6 Luna", behavesAs: "claude-opus-5.5" },
   { id: MAX_PROFILE_MODELS.gemini, label: "Gemini 3.8 Flash", behavesAs: "claude-sonnet-5" },
-  { id: MAX_PROFILE_MODELS.opus, label: "Claude Opus 5", behavesAs: "claude-opus-5" },
+  { id: MAX_PROFILE_MODELS.opus, label: "Claude Opus 5.5", behavesAs: "claude-opus-5.5" },
 ])
 
 const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
@@ -55,15 +55,15 @@ const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   // preprocessor still strips `[1m]` upstream and subagents run on bare
   // aliases, and the launch compaction bound covers a switch to Luna 1M.
   {
-    id: "gpt-5.6-sol",
-    label: "GPT-5.6 Sol",
-    behavesAs: "claude-opus-5",
+    id: "gpt-6-sol",
+    label: "GPT-6 Sol",
+    behavesAs: "claude-opus-5.5",
     neverOneM: true,
   },
   {
-    id: "gpt-5.6-luna",
-    label: "GPT-5.6 Luna",
-    behavesAs: "claude-opus-5",
+    id: "gpt-6-luna",
+    label: "GPT-6 Luna",
+    behavesAs: "claude-opus-5.5",
     neverOneM: false,
   },
   {
@@ -86,15 +86,15 @@ const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
   // Gemini Flash (reviewer + Advisor). Luna is exempt from the pin so its 1M
   // row stays an explicit opt-in; the default lead rows stay bare 200K.
   {
-    id: "gpt-5.6-sol",
-    label: "GPT-5.6 Sol",
-    behavesAs: "claude-opus-5",
+    id: "gpt-6-sol",
+    label: "GPT-6 Sol",
+    behavesAs: "claude-opus-5.5",
     neverOneM: true,
   },
   {
-    id: "gpt-5.6-luna",
-    label: "GPT-5.6 Luna",
-    behavesAs: "claude-opus-5",
+    id: "gpt-6-luna",
+    label: "GPT-6 Luna",
+    behavesAs: "claude-opus-5.5",
     neverOneM: false,
   },
   {
@@ -112,15 +112,15 @@ const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
   // its 1M row stays an explicit opt-in; the default lead rows stay bare
   // 200K (bare lead strip + bare subagent aliases still apply).
   {
-    id: "gpt-5.6-sol",
-    label: "GPT-5.6 Sol",
-    behavesAs: "claude-opus-5",
+    id: "gpt-6-sol",
+    label: "GPT-6 Sol",
+    behavesAs: "claude-opus-5.5",
     neverOneM: true,
   },
   {
-    id: "gpt-5.6-luna",
-    label: "GPT-5.6 Luna",
-    behavesAs: "claude-opus-5",
+    id: "gpt-6-luna",
+    label: "GPT-6 Luna",
+    behavesAs: "claude-opus-5.5",
     neverOneM: false,
   },
   {

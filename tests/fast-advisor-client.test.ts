@@ -11,7 +11,7 @@ describe("fixed fast Advisor child arguments", () => {
     expect(withFixedFastAdvisorArg([
       "--advisor", "opus",
       "--print", "hello",
-      "--advisor=claude-opus-5",
+      "--advisor=claude-opus-5.5",
       "--",
       "--advisor", "sonnet",
       "--advisor=haiku",

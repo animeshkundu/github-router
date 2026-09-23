@@ -21,8 +21,8 @@
  * `high` — the maximum. Listing it makes the clamp resolve to `low` instead,
  * which is what "nearest supported tier" should always have meant.
  *
- * `max` is advertised by `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`,
- * `claude-opus-5` and the 4.7/4.8 Opus lines, and Claude Code's effort picker
+ * `max` is advertised by `gpt-6-sol`, `gpt-5.6-terra`, `gpt-6-luna`,
+ * `claude-opus-5.5` and the 4.7/4.8 Opus lines, and Claude Code's effort picker
  * offers it for any model whose entry allows it. Listing it lets an explicit
  * selection pass through, and lets `clampEffort` land on it for a model that
  * advertises nothing lower.

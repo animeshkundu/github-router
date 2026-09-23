@@ -6,7 +6,7 @@
 |---|---|
 | MCP-facing name | `plan` under the `workers` server |
 | Backing mode | Read-only Pi worker, `mode: "plan"` |
-| Default model | `PLAN_DEFAULT_MODEL = "claude-opus-5"` (exact live-catalog id) |
+| Default model | `PLAN_DEFAULT_MODEL = "claude-opus-5.5"` (exact live-catalog id) |
 | Default thinking | `high`; callers can request a higher tier per call or through `worker_defaults` |
 | Workspace | Optional absolute path; defaults to the proxy launch cwd |
 
@@ -25,4 +25,4 @@ The worker uses the read-only tool surface and shares the normal worker budgets,
 - **Default drift resolved.** Earlier review text still described the former `xhigh` built-in. The runtime default is now `high`, with higher effort remaining caller-selectable.
 - **Description remains honest.** The user-visible schema describes the default as high and the allowed effort enum still includes `xhigh`.
 
-**Verdict: Y.** The review now matches the live `claude-opus-5` / `high` default and its override contract.
+**Verdict: Y.** The review now matches the live `claude-opus-5.5` / `high` default and its override contract.

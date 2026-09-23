@@ -34,7 +34,7 @@ strategy from Copilot's provider-managed automatic caching, not an addition to
 it, so turning it on for a request marks only the bytes an explicit
 breakpoint names and the REST of that request's prefix — here, the entire
 un-marked growing message history — stops receiving automatic prefix-growth
-caching too. Measured on `gpt-5.6-sol` with explicit mode force-enabled for a
+caching too. Measured on `gpt-6-sol` with explicit mode force-enabled for a
 conversation workload: turn 1 (cold) `input_tokens=27038, cache_write=2031,
 cache_read=0`; turn 2 `input_tokens=27054, cache_read=2031`; turn 3
 `input_tokens=27071, cache_read=2031` — the ~2k-token system block cached once
@@ -148,8 +148,8 @@ bun run probe:cache
 
 ### What it does
 
-For `claude-opus-5`, `claude-haiku-4.5`, every GPT-5.6 tier
-(`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`), `gemini-3.8-flash`, and
+For `claude-opus-5.5`, `claude-haiku-4.5`, every GPT-5.6 tier
+(`gpt-6-sol`, `gpt-5.6-terra`, `gpt-6-luna`), `gemini-3.8-flash`, and
 the highest-context `grok-4.6*` catalog sibling (resolved from the LIVE
 Copilot catalog, never hardcoded — see `selectCacheProbeTargets` in
 `src/lib/cache-probe.ts`), sequentially (concurrency 1, no automatic

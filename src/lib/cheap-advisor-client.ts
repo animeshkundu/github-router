@@ -17,7 +17,7 @@ export function cheapAdvisorClientEnabled(
 
 /**
  * Remove every caller-supplied Advisor option and insert the fixed cheap value
- * (the BARE `gpt-5.6-sol` — 200K default window — see
+ * (the BARE `gpt-6-sol` — 200K default window — see
  * `CHEAP_PROFILE_ADVISOR_CLIENT_MODEL`). Same parser semantics as the fast
  * variant: keeps scanning after `--`, and the fixed option is inserted before
  * the first separator so Claude Code parses it as an option.

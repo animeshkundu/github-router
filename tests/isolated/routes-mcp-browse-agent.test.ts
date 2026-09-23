@@ -5,7 +5,7 @@
 // Three things this file pins:
 //   1. GATE: the `browse` tool is listed (and callable) iff
 //      browseAgentEnabled() — i.e. the `--browse` opt-in + a supported
-//      browser + the gpt-5.6-luna default reachable in the catalog. With
+//      browser + the gpt-6-luna default reachable in the catalog. With
 //      any of those missing the tool is invisible (tools/list) and rejects
 //      with -32601 (tools/call), the same defense-in-depth as the other
 //      capability tags.
@@ -108,7 +108,7 @@ const fakeModel = (id: string, endpoints: Array<string>) => ({
 
 // Catalog WITH the browse default. The real Copilot catalog reports bare
 // endpoint strings (no `/v1` prefix) — that's what `pickEndpoint` matches —
-// and gpt-5.6-luna is /responses-only.
+// and gpt-6-luna is /responses-only.
 const modelsWithBrowse: ModelsResponse = {
   object: "list",
   data: [
@@ -208,7 +208,7 @@ describe("browse tool gate (browseAgentEnabled)", () => {
     expect(names).not.toContain("browse")
   })
 
-  test("tools/list OMITS `browse` when the gpt-5.6-luna default is absent from the catalog", async () => {
+  test("tools/list OMITS `browse` when the gpt-6-luna default is absent from the catalog", async () => {
     state.models = modelsWithoutBrowse
     const names = await listToolNames()
     expect(names).not.toContain("browse")

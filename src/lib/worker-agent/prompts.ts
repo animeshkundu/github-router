@@ -155,7 +155,7 @@ function testModeNote(searchEnabled: boolean, bluebirdEnabled: boolean): string 
 //      never an instruction to the agent. Plus the browse-specific rule:
 //      never bypass access controls (login walls, paywalls, captchas).
 //   2. A TERMINATION-HARDENED behavioral contract. Independent of the
-//      gpt-5.6-luna default, the prompt names the two terminal tools and the
+//      gpt-6-luna default, the prompt names the two terminal tools and the
 //      stop-early rule explicitly to prevent loops on unobtainable data.
 //      This is role/behavioral
 //      framing (when to finish, never-fabricate), not prescriptive

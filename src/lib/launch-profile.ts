@@ -54,7 +54,7 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  set (see `./balanced-profile-contract`).
  *
  *  Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
- *  from the resolved lead model id — so `-m gpt-5.6-luna` (a direct pin of
+ *  from the resolved lead model id — so `-m gpt-6-luna` (a direct pin of
  *  the same model the fast profile drives) stays a standard-surface launch,
  *  and only the literal `fast`/`cheap`/`cheap1m`/`cheapest`/`balanced`
  *  aliases narrow the surface.
@@ -148,7 +148,7 @@ export const CHEAP_PROFILE: LaunchProfileDescriptor = Object.freeze({
 
 /**
  * The `-m cheapest` roster: the exact cheap surface and groups, but Luna-led
- * (`gpt-5.6-luna`/max at the 200K default window), a Sol/medium Advisor, a
+ * (`gpt-6-luna`/max at the 200K default window), a Sol/medium Advisor, a
  * Sol/high Oracle, and a Gemini/high reviewer. Oracle-only peer set, no
  * `astra`. Hard-denies match fast's: core workers, `orchestrate`, `decide`,
  * `fleet`, and `first-mate`.
@@ -217,7 +217,7 @@ export function profileDescriptor(id: LaunchProfileId): LaunchProfileDescriptor 
  * to `FAST_LEAD_MODEL` (`./port`) before this is of any use to a caller who
  * only has the resolved id, so callers that already resolved the lead must
  * pass the ORIGINAL `-m` value here, not the resolved one. This is what
- * keeps `-m gpt-5.6-luna` (a direct pin of the same underlying model) a
+ * keeps `-m gpt-6-luna` (a direct pin of the same underlying model) a
  * standard-surface launch — only the literal alias narrows the surface.
  */
 export function resolveLaunchProfile(modelArg: string | undefined): LaunchProfileId {

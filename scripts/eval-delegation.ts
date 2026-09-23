@@ -25,7 +25,7 @@ import path from "node:path"
 const REPO_ROOT = path.resolve(import.meta.dir, "..")
 const FIXTURE_SOURCE = path.join(REPO_ROOT, "tests", "fixtures", "delegation-repo")
 const SYNTHETIC_TRANSCRIPT = path.join(FIXTURE_SOURCE, ".eval", "synthetic-stream.jsonl")
-const MODEL = process.env.GH_ROUTER_DELEGATION_EVAL_MODEL ?? "claude-opus-5"
+const MODEL = process.env.GH_ROUTER_DELEGATION_EVAL_MODEL ?? "claude-opus-5.5"
 const BASE_URL = process.env.GH_ROUTER_DELEGATION_EVAL_BASE_URL ?? "http://127.0.0.1:8787"
 const RUN_TIMEOUT_MS = positiveInt(process.env.GH_ROUTER_DELEGATION_EVAL_TIMEOUT_MS, 120_000)
 const SEED = process.env.GH_ROUTER_DELEGATION_EVAL_SEED ?? new Date().toISOString().slice(0, 10)

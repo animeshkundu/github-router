@@ -174,8 +174,8 @@ describe("getClaudeCodeEnvVars", () => {
   test("auto-compact window is a plain decimal integer (parseInt round-trips)", () => {
     const value = withCatalog(
       [
-        catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
-        catalogModel("claude-opus-5", 1_000_000, 936_000),
+        catalogModel("gpt-6-luna", 1_050_000, 922_000),
+        catalogModel("claude-opus-5.5", 1_000_000, 936_000),
       ],
       () =>
         withoutCompactionEnv(
@@ -201,7 +201,7 @@ describe("getClaudeCodeEnvVars", () => {
    */
   test("derives the window from the tightest reachable prompt ceiling", () => {
     const lunaOnly = withCatalog(
-      [catalogModel("gpt-5.6-luna", 1_050_000, 922_000)],
+      [catalogModel("gpt-6-luna", 1_050_000, 922_000)],
       () =>
         withoutCompactionEnv(
           () =>
@@ -217,8 +217,8 @@ describe("getClaudeCodeEnvVars", () => {
 
     const withOpusRow = withCatalog(
       [
-        catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
-        catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
+        catalogModel("gpt-6-luna", 1_050_000, 922_000),
+        catalogModel("claude-opus-5.5", 1_000_000, 936_000, 64_000),
       ],
       () =>
         withoutCompactionEnv(
@@ -244,9 +244,9 @@ describe("getClaudeCodeEnvVars", () => {
     const value = withCatalog(
       [
         // 900K prompt + 20K client-capped output -> 798000
-        catalogModel("gpt-5.6-luna", 1_050_000, 900_000, 128_000),
+        catalogModel("gpt-6-luna", 1_050_000, 900_000, 128_000),
         // 905K prompt + 1K output -> 783250 (the true minimum)
-        catalogModel("claude-opus-5", 1_000_000, 905_000, 1_000),
+        catalogModel("claude-opus-5.5", 1_000_000, 905_000, 1_000),
       ],
       () =>
         withoutCompactionEnv(
@@ -267,11 +267,11 @@ describe("getClaudeCodeEnvVars", () => {
    */
   test("applies to the standard Opus 5 lead, not just the fast profile", () => {
     const value = withCatalog(
-      [catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000)],
+      [catalogModel("claude-opus-5.5", 1_000_000, 936_000, 64_000)],
       () =>
         withoutCompactionEnv(
           () =>
-            getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5[1m]")
+            getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5.5[1m]")
               .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
         ),
     )
@@ -282,15 +282,15 @@ describe("getClaudeCodeEnvVars", () => {
     const value = withCatalog(
       [
         // Standard Opus alone would derive 828600.
-        catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
+        catalogModel("claude-opus-5.5", 1_000_000, 936_000, 64_000),
         // The settings-injected Luna row is selectable through `/model` and
         // binds lower even though it has no dedicated ANTHROPIC_DEFAULT_* env.
-        catalogModel("gpt-5.6-luna", 1_050_000, 922_000, 128_000),
+        catalogModel("gpt-6-luna", 1_050_000, 922_000, 128_000),
       ],
       () =>
         withoutCompactionEnv(
           () =>
-            getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5[1m]")
+            getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5.5[1m]")
               .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
         ),
     )
@@ -300,7 +300,7 @@ describe("getClaudeCodeEnvVars", () => {
   test("uses preserved user modelPicker rows in the launch-global bound", () => {
     const value = withCatalog(
       [
-        catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
+        catalogModel("claude-opus-5.5", 1_000_000, 936_000, 64_000),
         catalogModel("custom-low-ceiling", 1_000_000, 600_000, 64_000),
       ],
       () =>
@@ -308,7 +308,7 @@ describe("getClaudeCodeEnvVars", () => {
           () =>
             getClaudeCodeEnvVars(
               "http://127.0.0.1:8787",
-              "claude-opus-5[1m]",
+              "claude-opus-5.5[1m]",
               "standard",
               ["custom-low-ceiling[1m]"],
             ).CLAUDE_CODE_AUTO_COMPACT_WINDOW,
@@ -325,7 +325,7 @@ describe("getClaudeCodeEnvVars", () => {
   test("undecorated models do not constrain the window", () => {
     const value = withCatalog(
       [
-        catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
+        catalogModel("gpt-6-luna", 1_050_000, 922_000),
         catalogModel("grok-4.6", 500_000, 372_000),
       ],
       () =>
@@ -348,8 +348,8 @@ describe("getClaudeCodeEnvVars", () => {
     // bare 200K rows via the client's Math.min.
     const value = withCatalog(
       [
-        catalogModel("gpt-5.6-sol", 1_050_000, 922_000),
-        catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
+        catalogModel("gpt-6-sol", 1_050_000, 922_000),
+        catalogModel("gpt-6-luna", 1_050_000, 922_000),
         catalogModel("gemini-3.8-flash", 1_000_000, 983_040, 65_536),
         catalogModel("grok-4.6", 500_000, 372_000),
       ],
@@ -365,7 +365,7 @@ describe("getClaudeCodeEnvVars", () => {
   test("omits the window entirely when catalog limits are unusable", () => {
     const vars = withCatalog([], () =>
       withoutCompactionEnv(() =>
-        getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5[1m]"),
+        getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5.5[1m]"),
       ),
     )
     expect(vars).not.toHaveProperty("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
@@ -376,7 +376,7 @@ describe("getClaudeCodeEnvVars", () => {
     process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = "500000"
     try {
       const vars = withCatalog(
-        [catalogModel("gpt-5.6-luna", 1_050_000, 922_000)],
+        [catalogModel("gpt-6-luna", 1_050_000, 922_000)],
         () =>
           getClaudeCodeEnvVars(
             "http://127.0.0.1:8787",
@@ -399,13 +399,13 @@ describe("getClaudeCodeEnvVars", () => {
   test("never sets CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", () => {
     for (const [lead, profile] of [
       ["gh-router-luna-driver-max", "fast"],
-      ["claude-opus-5[1m]", "standard"],
-      ["gpt-5.6-luna", "standard"],
+      ["claude-opus-5.5[1m]", "standard"],
+      ["gpt-6-luna", "standard"],
     ] as const) {
       const vars = withCatalog(
         [
-          catalogModel("gpt-5.6-luna", 1_050_000, 922_000),
-          catalogModel("claude-opus-5", 1_000_000, 936_000, 64_000),
+          catalogModel("gpt-6-luna", 1_050_000, 922_000),
+          catalogModel("claude-opus-5.5", 1_000_000, 936_000, 64_000),
         ],
         () =>
           withoutCompactionEnv(() =>
@@ -688,7 +688,7 @@ describe("getClaudeCodeEnvVars", () => {
     }
   })
 
-  test("defaults ANTHROPIC_DEFAULT_OPUS_MODEL to claude-opus-5, bare when the catalog shows no 1M signal", () => {
+  test("defaults ANTHROPIC_DEFAULT_OPUS_MODEL to claude-opus-5.5, bare when the catalog shows no 1M signal", () => {
     const prior = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
     const priorName = process.env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME
     delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
@@ -697,8 +697,8 @@ describe("getClaudeCodeEnvVars", () => {
     state.models = undefined
     try {
       const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787")
-      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5")
-      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBe("claude-opus-5")
+      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5.5")
+      expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBe("claude-opus-5.5")
     } finally {
       state.models = savedModels
       if (prior === undefined) delete process.env.ANTHROPIC_DEFAULT_OPUS_MODEL
@@ -1094,7 +1094,7 @@ describe("budget-mode lead and small/fast tier", () => {
   // advertised window cannot tell a correct "left bare" from the bug — it makes
   // every model look 200K, which is exactly why the gap below went unnoticed.
   const LIVE_SHAPED_CATALOG = [
-    ["claude-opus-5", 1_000_000],
+    ["claude-opus-5.5", 1_000_000],
     ["claude-sonnet-5", 1_000_000],
     ["claude-sonnet-4.6", 1_000_000],
     ["claude-haiku-4.5", 200_000],
@@ -1152,12 +1152,12 @@ describe("budget-mode lead and small/fast tier", () => {
   test("a full slug passes through, decorated only when the catalog backs it", () => {
     withoutOneMOptOut(() => {
       withCatalog([...LIVE_SHAPED_CATALOG], () => {
-        expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5[1m]")
+        expect(resolveLeadSlugArg("claude-opus-5.5")).toBe("claude-opus-5.5[1m]")
         // Haiku 4.5 genuinely is 200K, so it stays bare — the rule is the
         // catalog's advertised window, not a hardcoded family list.
         expect(resolveLeadSlugArg("claude-haiku-4-5")).toBe("claude-haiku-4-5")
-        expect(isBudgetClaudeLead("claude-opus-5")).toBe(false)
-        expect(isBudgetClaudeLead("claude-opus-5[1m]")).toBe(false)
+        expect(isBudgetClaudeLead("claude-opus-5.5")).toBe(false)
+        expect(isBudgetClaudeLead("claude-opus-5.5[1m]")).toBe(false)
       })
     })
   })
@@ -1181,7 +1181,7 @@ describe("budget-mode lead and small/fast tier", () => {
         expect(resolveLeadSlugArg("claude-sonnet-5[1m]")).toBe(
           "claude-sonnet-5[1m]",
         )
-        expect(resolveLeadSlugArg("claude-opus-5[1m]")).toBe("claude-opus-5[1m]")
+        expect(resolveLeadSlugArg("claude-opus-5.5[1m]")).toBe("claude-opus-5.5[1m]")
       })
     })
   })
@@ -1203,7 +1203,7 @@ describe("budget-mode lead and small/fast tier", () => {
       state.models = undefined
       try {
         expect(resolveLeadSlugArg("fast")).toBe(FAST_LEAD_MODEL)
-        expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
+        expect(resolveLeadSlugArg("claude-opus-5.5")).toBe("claude-opus-5.5")
       } finally {
         state.models = saved
       }
@@ -1228,8 +1228,8 @@ describe("budget-mode lead and small/fast tier", () => {
           expect(vars.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME).toBe(
             "claude-sonnet-5",
           )
-          expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5[1m]")
-          expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBe("claude-opus-5")
+          expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("claude-opus-5.5[1m]")
+          expect(vars.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME).toBe("claude-opus-5.5")
         })
       })
     })
@@ -1237,7 +1237,7 @@ describe("budget-mode lead and small/fast tier", () => {
 
   test("fast Luna aliases declare their live effort/thinking capabilities", () => {
     withoutOneMOptOut(() => {
-      withCatalog([["gpt-5.6-luna", 1_050_000]], () => {
+      withCatalog([["gpt-6-luna", 1_050_000]], () => {
         withoutUserOverrides(() => {
           const vars = getClaudeCodeEnvVars(
             "http://127.0.0.1:8787",
@@ -1315,7 +1315,7 @@ describe("budget-mode lead and small/fast tier", () => {
     try {
       withCatalog([...LIVE_SHAPED_CATALOG, ["gemini-3.8-flash", 1_000_000]], () => {
         expect(resolveLeadSlugArg("fast")).toBe("gemini-3.8-flash")
-        expect(resolveLeadSlugArg("claude-opus-5")).toBe("claude-opus-5")
+        expect(resolveLeadSlugArg("claude-opus-5.5")).toBe("claude-opus-5.5")
         expect(resolveLeadSlugArg("claude-sonnet-4-6")).toBe(
           "claude-sonnet-4-6",
         )
@@ -1344,11 +1344,11 @@ describe("budget-mode lead and small/fast tier", () => {
   })
 
   test("an opus lead keeps today's Sonnet small/fast tier", () => {
-    withCatalog(["claude-opus-5", "claude-haiku-4.5"], () => {
+    withCatalog(["claude-opus-5.5", "claude-haiku-4.5"], () => {
       withoutUserOverrides(() => {
         const vars = getClaudeCodeEnvVars(
           "http://127.0.0.1:8787",
-          "claude-opus-5",
+          "claude-opus-5.5",
         )
         expect(vars.ANTHROPIC_SMALL_FAST_MODEL).toBe("claude-sonnet-5")
         expect(vars.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("claude-sonnet-5")
@@ -1371,7 +1371,7 @@ describe("budget-mode lead and small/fast tier", () => {
 
   test("cheap/cheapest tier rows stay bare (200K default) even when Luna serves 1M", () => {
     withoutOneMOptOut(() => {
-      withCatalog([["gpt-5.6-luna", 1_050_000]], () => {
+      withCatalog([["gpt-6-luna", 1_050_000]], () => {
         withoutUserOverrides(() => {
           for (const profile of ["cheap", "cheapest"] as const) {
             const vars = getClaudeCodeEnvVars("http://127.0.0.1:8787", undefined, profile)
@@ -1392,7 +1392,7 @@ describe("budget-mode lead and small/fast tier", () => {
 
   test("pinned tier rows override a parent-shell override; standard preserves it", () => {
     withoutOneMOptOut(() => {
-      withCatalog([["gpt-5.6-luna", 1_050_000]], () => {
+      withCatalog([["gpt-6-luna", 1_050_000]], () => {
         const priorModel = process.env.ANTHROPIC_DEFAULT_SONNET_MODEL
         const priorCustom = process.env.ANTHROPIC_CUSTOM_MODEL_OPTION
         const priorSmall = process.env.ANTHROPIC_SMALL_FAST_MODEL

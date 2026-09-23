@@ -358,7 +358,7 @@ describe("sanitizeAnthropicBody", () => {
       signature: "signed-opaque-value",
     }
     const body = JSON.stringify({
-      model: "claude-opus-5",
+      model: "claude-opus-5.5",
       messages: [
         {
           role: "assistant",

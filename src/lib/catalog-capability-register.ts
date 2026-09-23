@@ -126,7 +126,7 @@ export const CAPABILITY_REGISTER: Readonly<Record<string, CapabilityEntry>> = {
     note:
       "The advisor's Anthropic branch sizes its `max_tokens` from this field: that call sets "
       + "`stream: false`, so the non-streaming ceiling is the contract-correct one (16000 vs 64000 on "
-      + "claude-opus-5). Copilot does NOT enforce it — probe `advisor_claude_streaming_cap_accepted` "
+      + "claude-opus-5.5). Copilot does NOT enforce it — probe `advisor_claude_streaming_cap_accepted` "
       + "measured a 200 at the streaming ceiling on a non-streaming request — so this is staying "
       + "inside the advertised limit by choice, which is also what keeps the branch working if "
       + "Copilot ever starts enforcing what it advertises.",
@@ -135,8 +135,8 @@ export const CAPABILITY_REGISTER: Readonly<Record<string, CapabilityEntry>> = {
     classification: "DISPLAY_ONLY",
     note:
       "Measured against the live API on 2026-08-10 across all 23 vision models and found "
-      + "unreliable: accurate for gemini (10, enforced), but gpt-5.6-sol advertises 1 and upstream "
-      + "serves 50, gpt-5.5 advertises 1 and accepted 120, claude-opus-5 advertises 1 and accepted "
+      + "unreliable: accurate for gemini (10, enforced), but gpt-6-sol advertises 1 and upstream "
+      + "serves 50, gpt-5.5 advertises 1 and accepted 120, claude-opus-5.5 advertises 1 and accepted "
       + "200. The real ceiling is not even uniform within a family. Enforcing it locally rejected "
       + "at 2 what upstream serves at 50, fatally — the count covered replayed history, so the "
       + "caller could not act on the error. Copilot owns this ceiling and names the real number "

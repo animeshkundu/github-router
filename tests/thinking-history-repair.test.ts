@@ -13,7 +13,7 @@ const integrityError =
 
 function brokenBody(): string {
   return JSON.stringify({
-    model: "claude-opus-5",
+    model: "claude-opus-5.5",
     thinking: { type: "adaptive" },
     messages: [
       { role: "user", content: "start" },
@@ -311,7 +311,7 @@ describe("thinking history repair with an in-array system message", () => {
   /** `[user, system, assistant]` — upstream retains only index 0 and 2. */
   function hoistedBody(): string {
     return JSON.stringify({
-      model: "claude-opus-5",
+      model: "claude-opus-5.5",
       messages: [
         { role: "user", content: "start" },
         { role: "system", content: "injected by the client" },

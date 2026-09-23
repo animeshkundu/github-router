@@ -57,7 +57,7 @@ export function oneMContextDisabled(): boolean {
  * non-Claude gateway models exactly as it does for Opus — verified against the
  * installed 2.1.222 build, where the window resolver returns `1e6` on a bracket
  * match and otherwise falls through to a 200K default. Without the bracket a
- * 1M-context model like `gpt-5.6-sol` (1,050,000) is budgeted at 200K and
+ * 1M-context model like `gpt-6-sol` (1,050,000) is budgeted at 200K and
  * auto-compacts at roughly a fifth of its real window.
  *
  * The bracket never reaches Copilot: `resolveModel` (`./utils`) strips it before
@@ -98,7 +98,7 @@ export function withOneMSuffix(id: string): string {
  * so the two paths cannot disagree about a family both can be asked about.
  *
  * Idempotent: a slug that already carries the bracket is returned unchanged, so
- * a user who pins `-m claude-opus-5[1m]` by hand does not get `[1m][1m]`. That
+ * a user who pins `-m claude-opus-5.5[1m]` by hand does not get `[1m][1m]`. That
  * early return deliberately does NOT re-validate the pin against the catalog.
  * `-m claude-haiku-4-5[1m]` therefore survives even though Haiku 4.5 is a 200K
  * model — the same as before this function existed, and `resolveModel` already

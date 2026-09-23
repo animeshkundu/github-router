@@ -486,7 +486,7 @@ export async function handleCompletion(c: Context) {
           type: "error",
           error: {
             type: "invalid_request_error",
-            message: `Invalid GH_ROUTER_ADVISOR_MODEL ${JSON.stringify(requestedAdvisor)} for max profile; must be gpt-5.6-sol or claude-opus-5.`,
+            message: `Invalid GH_ROUTER_ADVISOR_MODEL ${JSON.stringify(requestedAdvisor)} for max profile; must be gpt-6-sol or claude-opus-5.5.`,
           },
         },
         400,

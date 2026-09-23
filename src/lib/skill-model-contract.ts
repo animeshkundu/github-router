@@ -16,8 +16,8 @@
  *   - review pass 2 (major issues only): Sol, medium effort
  */
 
-export const SKILL_LUNA_MODEL_ID = "gpt-5.6-luna" as const
-export const SKILL_SOL_MODEL_ID = "gpt-5.6-sol" as const
+export const SKILL_LUNA_MODEL_ID = "gpt-6-luna" as const
+export const SKILL_SOL_MODEL_ID = "gpt-6-sol" as const
 
 export const SKILL_MODELS = Object.freeze({
   gatherContext: Object.freeze({

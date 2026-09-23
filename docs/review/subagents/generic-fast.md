@@ -4,7 +4,7 @@
 
 The preregistered comparison was run on 2026-08-11 through this proxy using a fixed prompt, three times per model. Approximate output throughput was:
 
-- `gpt-5.6-luna`: 82 tokens/s
+- `gpt-6-luna`: 82 tokens/s
 - `gemini-3.6-flash`: 34 tokens/s
 - `gemini-3.5-flash`: 24–35 tokens/s
 

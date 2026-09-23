@@ -5,8 +5,8 @@ import { assertStandardServeModel } from "~/serve"
 describe("serve model profile boundary", () => {
   test("accepts ordinary explicit model ids on the Standard serve surface", () => {
     expect(() => assertStandardServeModel(undefined)).not.toThrow()
-    expect(() => assertStandardServeModel("claude-opus-5")).not.toThrow()
-    expect(() => assertStandardServeModel("gpt-5.6-luna")).not.toThrow()
+    expect(() => assertStandardServeModel("claude-opus-5.5")).not.toThrow()
+    expect(() => assertStandardServeModel("gpt-6-luna")).not.toThrow()
   })
 
   test("rejects fast and max aliases instead of mixing profile surfaces", () => {

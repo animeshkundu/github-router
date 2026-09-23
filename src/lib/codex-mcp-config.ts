@@ -433,14 +433,14 @@ function buildCoordinatorAgent(opts: {
     "",
     "The lead's brief will include an artifact (plan, design, diff, or code) and a goal (e.g. 'review before exit-plan', 'review the commit I just made', 'cross-check codex-critic's verdict'). Pick the right peers for the artifact type:",
     "",
-    "- **Plan / design / architecture choice** → fan out to `codex-critic` (gpt-5.6-sol, strongest reasoning, cross-lab)"
+    "- **Plan / design / architecture choice** → fan out to `codex-critic` (gpt-6-sol, strongest reasoning, cross-lab)"
       + (opts.geminiAvailable ? " AND `gemini-critic` (third-lab triangulation, strong on formal reasoning) in parallel" : "")
       + ". codex-reviewer is the wrong tool for plans (it's a code-specialist, not an architecture critic).",
     "- **Concrete diff or single file** → fan out to `codex-reviewer` (gpt-5.3-codex, line-level code specialist)"
       + (opts.geminiAvailable ? " AND `gemini-reviewer` (gemini-3.1-pro, second-lab line-level review)" : "")
       + (opts.geminiAvailable ? " AND `gemini-critic` for cross-lab triangulation" : "")
       + ". For very small changes (<20 lines), one `codex-reviewer` call is enough.",
-    "- **Large artifact** → the only peers that take a large artifact WHOLE are `codex-critic` (gpt-5.6-sol, ≈1M-token input window) and `opus-critic` (Opus-4.7-1M, ≈936K-token input on enterprise catalogs; ≈168K otherwise). Route the full artifact to those for cross-lab coverage. `codex-reviewer` (≈272K) and `gemini-critic` (≈136K) have small windows — see Decomposition below: never summarize or downsize the request to squeeze a large artifact into a small-window peer.",
+    "- **Large artifact** → the only peers that take a large artifact WHOLE are `codex-critic` (gpt-6-sol, ≈1M-token input window) and `opus-critic` (Opus-4.7-1M, ≈936K-token input on enterprise catalogs; ≈168K otherwise). Route the full artifact to those for cross-lab coverage. `codex-reviewer` (≈272K) and `gemini-critic` (≈136K) have small windows — see Decomposition below: never summarize or downsize the request to squeeze a large artifact into a small-window peer.",
     "- **Formal reasoning, proofs, or invariants** → prefer `gemini-critic`"
       + (opts.geminiAvailable ? " (gemini-3.1-pro, strong on math and formally-stated properties)" : " (NOT REGISTERED in this session — gemini-3.x not in catalog)")
       + ".",
@@ -451,7 +451,7 @@ function buildCoordinatorAgent(opts: {
     "",
     "## Decomposition for large artifacts",
     "",
-    "Route by the peer's real PROMPT WINDOW (input tokens): `codex-critic` gpt-5.6-sol ≈1M · `opus-critic` Opus-4.7-1M ≈936K (enterprise catalogs; ≈168K otherwise) · `codex-reviewer` gpt-5.3-codex ≈272K · `gemini-critic` gemini-3.1-pro ≈136K. The proxy REJECTS (with an actionable message) any single call whose brief exceeds the target peer's window — it will NOT silently truncate, because dropping lines from a review artifact is worse than a clear error. So: send the full artifact only to peers whose window fits it (large artifacts → `codex-critic` and/or `opus-critic`). When a peer's window is too small (commonly `gemini-critic` at ≈136K, or `codex-reviewer` at ≈272K), do NOT summarize or downsize the request to include it — either skip that peer, or split the artifact into 2-4 logical batches BY CONCERN (not by raw size — semantic batches give better per-batch reviews) that each fit, and call in parallel. Use the big-window peers for the whole and reserve a small-window peer like gemini for the concerns it can actually hold. The proxy's MCP cap allows up to 8 in-flight calls. Aggregate findings yourself before reporting back. (Separately, on the JSON transport a per-effort `predictedTooLong` byte cap still guards the ~60s tools/call timeout for non-SSE clients; Claude Code uses SSE, which streams with heartbeats and isn't subject to that cap.)",
+    "Route by the peer's real PROMPT WINDOW (input tokens): `codex-critic` gpt-6-sol ≈1M · `opus-critic` Opus-4.7-1M ≈936K (enterprise catalogs; ≈168K otherwise) · `codex-reviewer` gpt-5.3-codex ≈272K · `gemini-critic` gemini-3.1-pro ≈136K. The proxy REJECTS (with an actionable message) any single call whose brief exceeds the target peer's window — it will NOT silently truncate, because dropping lines from a review artifact is worse than a clear error. So: send the full artifact only to peers whose window fits it (large artifacts → `codex-critic` and/or `opus-critic`). When a peer's window is too small (commonly `gemini-critic` at ≈136K, or `codex-reviewer` at ≈272K), do NOT summarize or downsize the request to include it — either skip that peer, or split the artifact into 2-4 logical batches BY CONCERN (not by raw size — semantic batches give better per-batch reviews) that each fit, and call in parallel. Use the big-window peers for the whole and reserve a small-window peer like gemini for the concerns it can actually hold. The proxy's MCP cap allows up to 8 in-flight calls. Aggregate findings yourself before reporting back. (Separately, on the JSON transport a per-effort `predictedTooLong` byte cap still guards the ~60s tools/call timeout for non-SSE clients; Claude Code uses SSE, which streams with heartbeats and isn't subject to that cap.)",
     "",
     "## Aggregation contract",
     "",
@@ -1598,7 +1598,7 @@ export function buildPeerAgentDefinitions(
   // `[1m]` decorates the FRONTMATTER value only, never the description text.
   // Claude Code budgets a subagent's context off its model id, and its detector
   // (`/\[1m\]/i`) has no vendor gate — so without the suffix an `implementer` on
-  // `gpt-5.6-sol` (1,050,000 tokens) runs against a 200K budget. `scout` is now
+  // `gpt-6-sol` (1,050,000 tokens) runs against a 200K budget. `scout` is now
   // floor-gated to 1M across both of its entries, so every emitted scout id receives
   // the suffix; a model below the floor causes the agent to be dropped instead.
   // Descriptions keep the bare id because that string is prose the lead reads.
@@ -1738,7 +1738,7 @@ export function buildPeerAgentDefinitions(
   if (implementerFastModel && rosterAllows("implementer-fast")) {
     const tierDescription = implementerFastModel === "gpt-5.6-terra"
       ? "the cheaper, faster implementation tier"
-      : implementerFastModel === "gpt-5.6-luna"
+      : implementerFastModel === "gpt-6-luna"
         ? "the fast, low-cost tier for this launch profile"
         : "a non-lead implementation model"
     const escalateClause = hasImplementer

@@ -26,15 +26,18 @@ export function maxRequestError(result: MaxRequestPreprocessResult): string | un
     return `Router-owned model alias ${JSON.stringify(result.rejectedAlias)} is valid only for an authenticated -m max launch.`
   }
   if (result.rejectedModel) {
-    return `Model ${JSON.stringify(result.rejectedModel)} is outside the fixed -m max model set (Sol, Luna, Gemini 3.8 Flash, or Opus 5).`
+    return `Model ${JSON.stringify(result.rejectedModel)} is outside the fixed -m max model set (Sol, Luna, Gemini 3.8 Flash, or Opus 5.5).`
   }
   return undefined
 }
 
 const MAX_MODEL_EFFORTS: Readonly<Record<string, Effort>> = Object.freeze({
+  "gpt-6-sol": "high",
   "gpt-5.6-sol": "high",
+  "gpt-6-luna": "high",
   "gpt-5.6-luna": "high",
   "gemini-3.8-flash": "high",
+  "claude-opus-5.5": "high",
   "claude-opus-5": "high",
 })
 
@@ -92,7 +95,7 @@ export function preprocessMaxRequest(
   // native-subagent traffic receives role-specific defaults (Sonnet xhigh,
   // Grok high, Luna max); lead traffic remains caller-controlled with a high default.
   const allowedSubagentModel = subagentRequest
-    && (base === "grok-4.6" || base === "gpt-5.6-luna" || base === "claude-sonnet-5")
+    && (base === "grok-4.6" || base === "gpt-6-luna" || base === "gpt-5.6-luna" || base === "claude-sonnet-5")
   if (!allowedModel(base) && !allowedSubagentModel) {
     return {
       body: rawBody,
@@ -103,7 +106,7 @@ export function preprocessMaxRequest(
   }
 
   const effort = allowedSubagentModel
-    ? base === "claude-sonnet-5" ? "xhigh" : base === "gpt-5.6-luna" ? "max" : "high"
+    ? base === "claude-sonnet-5" ? "xhigh" : base === "gpt-6-luna" || base === "gpt-5.6-luna" ? "max" : "high"
     : MAX_MODEL_EFFORTS[base]
   if (!effort) {
     return {

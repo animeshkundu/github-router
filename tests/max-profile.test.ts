@@ -82,11 +82,11 @@ afterEach(() => {
 const catalog = {
   object: "list" as const,
   data: [
-    model("gpt-5.6-sol", { context: 1_050_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
-    model("gpt-5.6-luna", { context: 1_050_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
+    model("gpt-6-sol", { context: 1_050_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
+    model("gpt-6-luna", { context: 1_050_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
     model("gemini-3.8-flash", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["low", "medium", "high"], endpoints: ["/chat/completions"] }),
     model("grok-4.6", { context: 500_000, prompt: 372_000, output: 16_000, efforts: ["low", "medium", "high"], endpoints: ["/responses"] }),
-    model("claude-opus-5", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh"], endpoints: ["/messages"], adaptive: true }),
+    model("claude-opus-5.5", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh"], endpoints: ["/messages"], adaptive: true }),
     model("claude-sonnet-5", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh"], endpoints: ["/messages"], adaptive: true }),
     model("gpt-5.3-codex", { context: 400_000, prompt: 272_000, output: 32_000, efforts: ["high", "xhigh"], endpoints: ["/responses"] }),
   ],
@@ -95,14 +95,14 @@ const catalog = {
 describe("max profile contract", () => {
   test("selects only the raw max alias", () => {
     expect(resolveLaunchProfile(" max ")).toBe("max")
-    expect(resolveLaunchProfile("gpt-5.6-sol")).toBe("standard")
+    expect(resolveLaunchProfile("gpt-6-sol")).toBe("standard")
     expect(resolveLaunchProfile("fast")).toBe("fast")
   })
 
   test("keeps max Luna aliases distinct and canonicalizes them", () => {
     expect(resolveModelAlias(MAX_LUNA_HIGH_ALIAS_ID)?.absentEffortDefault).toBe("high")
     expect(resolveModelAlias(MAX_LUNA_MAX_ALIAS_ID)?.absentEffortDefault).toBe("max")
-    expect(canonicalizeAliasModel(`${MAX_LUNA_MAX_ALIAS_ID}[1m]`)).toBe("gpt-5.6-luna[1m]")
+    expect(canonicalizeAliasModel(`${MAX_LUNA_MAX_ALIAS_ID}[1m]`)).toBe("gpt-6-luna[1m]")
   })
 
   test("validates mandatory models and actionable failure text", () => {
@@ -110,7 +110,7 @@ describe("max profile contract", () => {
     expect(result.ok).toBe(true)
     const failure = validateMaxProfilePrerequisites({ object: "list", data: [] } as never)
     expect(failure.ok).toBe(false)
-    expect(formatMaxPrerequisiteFailure(failure.missing)).toContain("gpt-5.6-sol")
+    expect(formatMaxPrerequisiteFailure(failure.missing)).toContain("gpt-6-sol")
   })
 
   test("resolves Max native and Codex reviewers from their required capabilities", () => {
@@ -128,13 +128,13 @@ describe("max profile contract", () => {
       nonce: "0".repeat(64),
       codexHome: "/tmp/codex",
     })
-    expect(agents.Explore?.model).toBe("gpt-5.6-luna[1m]")
-    expect(agents.Plan?.model).toBe("gpt-5.6-sol[1m]")
-    expect(agents["general-purpose"]?.model).toBe("gpt-5.6-luna[1m]")
+    expect(agents.Explore?.model).toBe("gpt-6-luna[1m]")
+    expect(agents.Plan?.model).toBe("gpt-6-sol[1m]")
+    expect(agents["general-purpose"]?.model).toBe("gpt-6-luna[1m]")
     expect(agents.implementer?.model).toBe("gemini-3.8-flash[1m]")
     expect(agents.reviewer?.model).toBe("claude-sonnet-5[1m]")
-    expect(agents.brainstorm?.model).toBe("claude-opus-5[1m]")
-    expect(agents["peer-review-coordinator"]?.model).toBe("gpt-5.6-luna[1m]")
+    expect(agents.brainstorm?.model).toBe("claude-opus-5.5[1m]")
+    expect(agents["peer-review-coordinator"]?.model).toBe("gpt-6-luna[1m]")
   })
 
   test("emits the exact max native roster and explicit model efforts", () => {
@@ -156,11 +156,11 @@ describe("max profile contract", () => {
     expect(Object.keys(agents).sort()).toEqual([
       "Explore", "Plan", "brainstorm", "general-purpose", "implementer", "peer-review-coordinator", "reviewer",
     ])
-    expect(agents.Plan?.model).toBe("gpt-5.6-sol[1m]")
+    expect(agents.Plan?.model).toBe("gpt-6-sol[1m]")
     expect(agents.Plan?.effort).toBe("high")
     expect(agents.reviewer?.model).toBe("claude-sonnet-5[1m]")
     expect(agents.reviewer?.effort).toBe("xhigh")
-    expect(agents.brainstorm?.model).toBe("claude-opus-5[1m]")
+    expect(agents.brainstorm?.model).toBe("claude-opus-5.5[1m]")
     expect(agents.brainstorm?.effort).toBe("high")
     expect(agents.implementer?.model).toBe("gemini-3.8-flash[1m]")
     expect(agents.implementer?.effort).toBe("high")
@@ -231,7 +231,7 @@ describe("max profile contract", () => {
       nonce: "0".repeat(64),
       codexHome: "/tmp/codex",
     })
-    expect(agents["worker-browse"]?.model).toBe("gpt-5.6-luna[1m]")
+    expect(agents["worker-browse"]?.model).toBe("gpt-6-luna[1m]")
     expect(agents["worker-browse"]?.effort).toBe("high")
     expect(agents["worker-browse"]?.tools).toEqual(["mcp__workers__*"])
   })
@@ -239,7 +239,7 @@ describe("max profile contract", () => {
   test("allows the retained browse dispatcher while preserving its fixed frontmatter", () => {
     // The hook bundle deliberately avoids importing the worker runtime, so pin
     // its local effective-model constant to the worker engine's SSOT here.
-    expect(BROWSE_DEFAULT_MODEL).toBe("gpt-5.6-luna")
+    expect(BROWSE_DEFAULT_MODEL).toBe("gpt-6-luna")
     for (const schemaModel of MAX_AGENT_SCHEMA_MODEL_ALIASES) {
       const decision = decideMaxDispatchGuard({
         tool_name: "Agent",
@@ -331,9 +331,9 @@ describe("max profile contract", () => {
   })
 
   test("max dispatch ACL preserves allowed catalog overrides and pins the resolved reviewer effort", () => {
-    const allowed = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-5.6-luna[1m]" } }))
+    const allowed = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-6-luna[1m]" } }))
     expect(allowed.allowed).toBe(true)
-    expect(allowed.updatedInput?.model).toBe("gpt-5.6-luna[1m]")
+    expect(allowed.updatedInput?.model).toBe("gpt-6-luna[1m]")
 
     const defaultReviewer = decideMaxDispatchGuard(
       { tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "fable" } },
@@ -348,7 +348,7 @@ describe("max profile contract", () => {
     )
     expect(pinnedReviewer.updatedInput).toEqual({ subagent_type: "reviewer", effort: "xhigh" })
 
-    const denied = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-5.6-sol[1m]" } }))
+    const denied = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-6-sol[1m]" } }))
     expect(denied.allowed).toBe(false)
   })
 
@@ -365,11 +365,11 @@ describe("max profile contract", () => {
       launch,
     )
     expect(aliasReq.modified).toBe(true)
-    expect(JSON.parse(aliasReq.body).model).toBe("gpt-5.6-luna")
+    expect(JSON.parse(aliasReq.body).model).toBe("gpt-6-luna")
     expect(JSON.parse(aliasReq.body).output_config.effort).toBe("high")
 
     const allowedLead = preprocessMaxRequest(
-      JSON.stringify({ model: "gpt-5.6-sol[1m]", messages: [] }),
+      JSON.stringify({ model: "gpt-6-sol[1m]", messages: [] }),
       launch,
     )
     expect(allowedLead.modified).toBe(true)
@@ -385,7 +385,7 @@ describe("max profile contract", () => {
     expect(JSON.parse(allowedSubagent.body).output_config.effort).toBe("high")
 
     const lunaReviewer = preprocessMaxRequest(
-      JSON.stringify({ model: "gpt-5.6-luna[1m]", messages: [] }),
+      JSON.stringify({ model: "gpt-6-luna[1m]", messages: [] }),
       launch,
       true,
     )
@@ -495,14 +495,14 @@ describe("max profile contract", () => {
   test("validates max advisor pins strictly", () => {
     expect(maxAdvisorPinIsValid(undefined)).toBe(true)
     expect(maxAdvisorPinIsValid("")).toBe(true)
-    expect(maxAdvisorPinIsValid("gpt-5.6-sol")).toBe(true)
-    expect(maxAdvisorPinIsValid("claude-opus-5")).toBe(true)
-    expect(maxAdvisorPinIsValid("gpt-5.6-sol[1m]")).toBe(true)
-    expect(maxAdvisorPinIsValid("claude-opus-5[1m]")).toBe(true)
+    expect(maxAdvisorPinIsValid("gpt-6-sol")).toBe(true)
+    expect(maxAdvisorPinIsValid("claude-opus-5.5")).toBe(true)
+    expect(maxAdvisorPinIsValid("gpt-6-sol[1m]")).toBe(true)
+    expect(maxAdvisorPinIsValid("claude-opus-5.5[1m]")).toBe(true)
     expect(maxAdvisorPinIsValid("gemini-3.8-flash")).toBe(false)
-    expect(maxAdvisorPinIsValid("gpt-5.6-luna")).toBe(false)
-    expect(maxAdvisorModelFromPin("gpt-5.6-sol", "claude-opus-5")).toBe("gpt-5.6-sol")
-    expect(maxAdvisorModelFromPin(undefined, "claude-opus-5")).toBe("claude-opus-5")
+    expect(maxAdvisorPinIsValid("gpt-6-luna")).toBe(false)
+    expect(maxAdvisorModelFromPin("gpt-6-sol", "claude-opus-5.5")).toBe("gpt-6-sol")
+    expect(maxAdvisorModelFromPin(undefined, "claude-opus-5.5")).toBe("claude-opus-5.5")
   })
 
   test("max awareness omits orchestration and core workers", () => {

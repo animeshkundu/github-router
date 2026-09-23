@@ -6,14 +6,14 @@ import {
 } from "~/lib/openai-frontier"
 
 test("OPENAI_FRONTIER_MODELS pins selection preference order", () => {
-  expect(Array.from(OPENAI_FRONTIER_MODELS)).toEqual(["gpt-5.6-sol", "gpt-5.5"])
+  expect(Array.from(OPENAI_FRONTIER_MODELS)).toEqual(["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"])
 })
 
 test("shimDefaultsToXhigh recognizes normalized frontier ids", () => {
-  expect(shimDefaultsToXhigh("gpt-5.6-sol")).toBe(true)
+  expect(shimDefaultsToXhigh("gpt-6-sol")).toBe(true)
   expect(shimDefaultsToXhigh("gpt-5.5")).toBe(true)
-  expect(shimDefaultsToXhigh("openai/gpt-5.6-sol")).toBe(true)
-  expect(shimDefaultsToXhigh("gpt-5.6-sol[1m]")).toBe(true)
+  expect(shimDefaultsToXhigh("openai/gpt-6-sol")).toBe(true)
+  expect(shimDefaultsToXhigh("gpt-6-sol[1m]")).toBe(true)
 })
 
 test("shimDefaultsToXhigh rejects non-policy models", () => {

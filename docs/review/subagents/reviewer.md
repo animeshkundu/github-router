@@ -7,7 +7,7 @@
 | Field | Value |
 |---|---|
 | Subagent name | `reviewer` |
-| Subagent's OWN model | `gpt-5.6-sol` preferred, then `gpt-5.5`, when a catalog entry advertises `tool_calls`; otherwise the `model:` frontmatter is omitted and it inherits the lead's model |
+| Subagent's OWN model | `gpt-6-sol` preferred, then `gpt-5.5`, when a catalog entry advertises `tool_calls`; otherwise the `model:` frontmatter is omitted and it inherits the lead's model |
 | Gate | Always emitted. Model resolution affects only its optional `model:` frontmatter, not whether the agent exists. |
 | Registered via | `buildPeerAgentDefinitions` in `src/lib/codex-mcp-config.ts` |
 | Description source | Inline native-agent definition in `buildPeerAgentDefinitions` |

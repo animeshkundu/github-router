@@ -146,7 +146,7 @@ describe("Responses cache policy", () => {
   test("adds an opaque GPT-5.6 key and explicit stable breakpoint (reusable-prefix only)", () => {
     const payload = applyResponsesCachePolicy(
       {
-        model: "gpt-5.6-sol",
+        model: "gpt-6-sol",
         instructions: stable,
         input: [{ role: "system", content: "dynamic" }, { role: "user", content: "hi" }],
       },
@@ -181,7 +181,7 @@ describe("Responses cache policy", () => {
     // model, or the kill switch (which only matters when explicit treatment
     // would otherwise apply).
     const bigEnoughForExplicitIfItWereReusablePrefix: ResponsesPayload = {
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       instructions: stable,
       input: [{ role: "user", content: "hi" }],
     }
@@ -211,7 +211,7 @@ describe("Responses cache policy", () => {
       ).toBe(payload)
     }
     const callerOwned: ResponsesPayload = {
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       instructions: stable,
       input: "hi",
       prompt_cache_key: "caller",
@@ -224,7 +224,7 @@ describe("Responses cache policy", () => {
   test("kill switch and short prefixes suppress explicit writes", () => {
     process.env.GH_ROUTER_DISABLE_GPT56_EXPLICIT_CACHE = "1"
     const disabled: ResponsesPayload = {
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       instructions: stable,
       input: "hi",
     }
@@ -234,7 +234,7 @@ describe("Responses cache policy", () => {
     delete process.env.GH_ROUTER_DISABLE_GPT56_EXPLICIT_CACHE
 
     const short: ResponsesPayload = {
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       instructions: "short",
       input: "hi",
     }
@@ -274,11 +274,11 @@ describe("Responses cache policy", () => {
         { model, instructions: prefix, input: "dynamic" },
         { workload: "reusable-prefix" },
       ).prompt_cache_key
-    expect(make("gpt-5.6-sol", stable)).toBe(make("gpt-5.6-sol", stable))
-    expect(make("gpt-5.6-sol", stable)).not.toBe(
-      make("gpt-5.6-sol", `${stable}changed`),
+    expect(make("gpt-6-sol", stable)).toBe(make("gpt-6-sol", stable))
+    expect(make("gpt-6-sol", stable)).not.toBe(
+      make("gpt-6-sol", `${stable}changed`),
     )
-    expect(make("gpt-5.6-sol", stable)).not.toBe(
+    expect(make("gpt-6-sol", stable)).not.toBe(
       make("gpt-5.6-terra", stable),
     )
   })
@@ -307,7 +307,7 @@ describe("Claude cache policy", () => {
     // system still qualifies its own marker even though tools don't.
     const body = applyClaudeCachePolicy(
       JSON.stringify({
-        model: "claude-opus-5",
+        model: "claude-opus-5.5",
         system: stable,
         tools: tinyTools,
         messages: [{ role: "user", content: "dynamic transcript" }],
@@ -338,7 +338,7 @@ describe("Claude cache policy", () => {
     }
     const body = applyClaudeCachePolicy(
       JSON.stringify({
-        model: "claude-opus-5",
+        model: "claude-opus-5.5",
         system: "short",
         tools: [{ name: "big_tool", input_schema: bigToolSchema }],
         messages: [{ role: "user", content: "hi" }],
@@ -360,7 +360,7 @@ describe("Claude cache policy", () => {
   test("both breakpoints mark when both tools and system independently qualify", () => {
     const body = applyClaudeCachePolicy(
       JSON.stringify({
-        model: "claude-opus-5",
+        model: "claude-opus-5.5",
         system: stable,
         tools: [
           { name: "old", input_schema: { type: "object" }, defer_loading: true },
@@ -381,7 +381,7 @@ describe("Claude cache policy", () => {
 
   test("neither breakpoint qualifies below the floor: returned byte-for-byte unchanged", () => {
     const rawBody = JSON.stringify({
-      model: "claude-opus-5",
+      model: "claude-opus-5.5",
       system: "short system",
       tools: [{ name: "read", input_schema: { type: "object" } }],
       messages: [{ role: "user", content: "hi" }],
@@ -402,7 +402,7 @@ describe("Claude cache policy", () => {
     expect(emoji.length).toBeLessThan(4096)
     const body = applyClaudeCachePolicy(
       JSON.stringify({
-        model: "claude-opus-5",
+        model: "claude-opus-5.5",
         system: emoji,
         tools: [{ name: "read", input_schema: { type: "object" } }],
         messages: [{ role: "user", content: "hi" }],
@@ -423,7 +423,7 @@ describe("Claude cache policy", () => {
     const whitespaceRun = " ".repeat(5000)
     const body = applyClaudeCachePolicy(
       JSON.stringify({
-        model: "claude-opus-5",
+        model: "claude-opus-5.5",
         system: whitespaceRun,
         tools: [{ name: "read", input_schema: { type: "object" } }],
         messages: [{ role: "user", content: "hi" }],
@@ -436,7 +436,7 @@ describe("Claude cache policy", () => {
 
   test("preserves caller-owned marker placement byte-for-byte", () => {
     const body = JSON.stringify({
-      model: "claude-opus-5",
+      model: "claude-opus-5.5",
       system: [{
         type: "text",
         text: stable,
@@ -452,7 +452,7 @@ describe("Claude cache policy", () => {
   test("a tool schema property named cache_control is not mistaken for a marker", () => {
     const body = applyClaudeCachePolicy(
       JSON.stringify({
-        model: "claude-opus-5",
+        model: "claude-opus-5.5",
         system: stable,
         tools: [{
           name: "inspect",
@@ -480,7 +480,7 @@ describe("Claude cache policy", () => {
     // now identical — this test pins that equivalence rather than a
     // message-level allocation that never ran in production.
     const rawBody = JSON.stringify({
-      model: "claude-opus-5",
+      model: "claude-opus-5.5",
       system: stable,
       tools: [{ name: "read", input_schema: { type: "object" } }],
       messages: [
@@ -555,7 +555,7 @@ describe("web-search stable-prefix placement", () => {
 
   test("Responses preserves instructions and inserts results before user input", () => {
     const payload: ResponsesPayload = {
-      model: "gpt-5.6-sol",
+      model: "gpt-6-sol",
       instructions: "stable",
       input: [{ role: "user", content: "question" }],
     }

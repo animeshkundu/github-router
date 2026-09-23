@@ -173,7 +173,7 @@ function standardMessagesResponse(): Response {
       id: "msg_1",
       type: "message",
       role: "assistant",
-      model: "claude-opus-5",
+      model: "claude-opus-5.5",
       content: [{ type: "text", text: "ok" }],
       stop_reason: "end_turn",
       stop_sequence: null,
@@ -195,11 +195,11 @@ beforeEach(() => {
   state.models = {
     object: "list",
     data: [
-      catalogModel("gpt-5.6-luna"),
-      catalogModel("gpt-5.6-sol"),
+      catalogModel("gpt-6-luna"),
+      catalogModel("gpt-6-sol"),
       catalogModel("grok-4.6"),
       catalogModel("gemini-3.8-flash"),
-      catalogModel("claude-opus-5"),
+      catalogModel("claude-opus-5.5"),
     ] as never,
   }
 })
@@ -251,7 +251,7 @@ describe("fast Advisor request policy", () => {
         "anthropic-beta": "advisor-tool-2026-03-01",
         [LAUNCH_SECRET_HEADER]: FAST_SECRET,
       },
-      body: requestBody("gpt-5.6-luna", true),
+      body: requestBody("gpt-6-luna", true),
     })
 
     expect(response.status).toBe(200)
@@ -272,8 +272,8 @@ describe("fast Advisor request policy", () => {
     state.models = {
       object: "list",
       data: [
-        catalogModel("gpt-5.6-sol"),
-        catalogModel("claude-opus-5"),
+        catalogModel("gpt-6-sol"),
+        catalogModel("claude-opus-5.5"),
       ] as never,
     }
     const forwarded: Array<string> = []
@@ -289,7 +289,7 @@ describe("fast Advisor request policy", () => {
         [LAUNCH_SECRET_HEADER]: MAX_SECRET,
         ...(agentId ? { "x-claude-code-agent-id": agentId } : {}),
       },
-      body: requestBody("claude-opus-5"),
+      body: requestBody("claude-opus-5.5"),
     })
 
     const lead = await server.request("/v1/messages", options())
@@ -317,8 +317,8 @@ describe("fast Advisor request policy", () => {
 
     for (const [agentId, model] of [
       ["Explore", LUNA_SCOUT_ALIAS_ID],
-      ["Plan", "gpt-5.6-sol"],
-      ["general-purpose", "gpt-5.6-luna"],
+      ["Plan", "gpt-6-sol"],
+      ["general-purpose", "gpt-6-luna"],
       ["implementer", "gemini-3.8-flash"],
       ["reviewer", "grok-4.6"],
     ] as const) {
@@ -465,7 +465,7 @@ describe("fast Advisor request policy", () => {
         "anthropic-beta": "advisor-tool-2026-03-01",
         [LAUNCH_SECRET_HEADER]: FAST_SECRET,
       },
-      body: requestBody("claude-opus-5", true),
+      body: requestBody("claude-opus-5.5", true),
     })
 
     expect(response.status).toBe(200)
@@ -490,7 +490,7 @@ describe("fast Advisor request policy", () => {
 
     const response = await server.request(
       "/v1/messages",
-      fastRequestOptions(requestWithoutTools("gpt-5.6-luna", true)),
+      fastRequestOptions(requestWithoutTools("gpt-6-luna", true)),
     )
 
     expect(response.status).toBe(200)
@@ -510,7 +510,7 @@ describe("fast Advisor request policy", () => {
 
     const response = await server.request(
       "/v1/messages",
-      fastRequestOptions(requestWithoutTools("claude-opus-5")),
+      fastRequestOptions(requestWithoutTools("claude-opus-5.5")),
     )
 
     expect(response.status).toBe(200)
@@ -530,7 +530,7 @@ describe("fast Advisor request policy", () => {
     const response = await server.request(
       "/v1/messages",
       fastRequestOptions(
-        requestWithTools("gpt-5.6-luna", [{
+        requestWithTools("gpt-6-luna", [{
           name: "lookup",
           description: "Look something up.",
           input_schema: { type: "object", properties: {}, required: [] },
@@ -546,15 +546,15 @@ describe("fast Advisor request policy", () => {
 
   test.each([
     ["missing model", advisorMetadataTool(), "omitted its fixed model"],
-    ["wrong model", advisorMetadataTool("gpt-5.6-sol-wrong"), "requested"],
-    ["non-Sol model", advisorMetadataTool("claude-opus-5"), "requested"],
+    ["wrong model", advisorMetadataTool("gpt-6-sol-wrong"), "requested"],
+    ["non-Sol model", advisorMetadataTool("claude-opus-5.5"), "requested"],
   ])("rejects fast native Advisor metadata with %s", async (_label, tool, detail) => {
     const fetchMock = mock(() => Promise.resolve(responsesObjectResponse()))
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
     const response = await server.request(
       "/v1/messages",
-      fastRequestOptions(requestWithTools("gpt-5.6-luna", [tool])),
+      fastRequestOptions(requestWithTools("gpt-6-luna", [tool])),
     )
 
     expect(response.status).toBe(400)
@@ -576,7 +576,7 @@ describe("fast Advisor request policy", () => {
 
     const response = await server.request(
       "/v1/messages",
-      fastRequestOptions(requestBody("gpt-5.6-luna", true, advisorModel)),
+      fastRequestOptions(requestBody("gpt-6-luna", true, advisorModel)),
     )
 
     expect(response.status).toBe(200)
@@ -586,7 +586,7 @@ describe("fast Advisor request policy", () => {
 
   test("standard injection keeps the existing mandatory policy byte-for-byte", () => {
     const body = JSON.stringify({
-      model: "claude-opus-5",
+      model: "claude-opus-5.5",
       messages: [{ role: "user", content: "hello" }],
     })
     const parsed = JSON.parse(injectAdvisorTool(body)) as {

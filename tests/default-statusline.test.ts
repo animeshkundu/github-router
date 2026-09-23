@@ -21,7 +21,7 @@ function stripAnsi(s: string): string {
 }
 
 const FULL_JSON = JSON.stringify({
-  model: { display_name: "Opus", id: "claude-opus-5" },
+  model: { display_name: "Opus", id: "claude-opus-5.5" },
   context_window: {
     used_percentage: 42,
     total_input_tokens: 15234,
@@ -51,11 +51,11 @@ describe("parseStatusInput", () => {
   test("falls back to cwd and model.id", () => {
     const in_ = parseStatusInput(
       JSON.stringify({
-        model: { id: "claude-opus-5" },
+        model: { id: "claude-opus-5.5" },
         cwd: "/tmp/x",
       }),
     )
-    expect(in_.modelName).toBe("claude-opus-5")
+    expect(in_.modelName).toBe("claude-opus-5.5")
     expect(in_.cwd).toBe("/tmp/x")
   })
 

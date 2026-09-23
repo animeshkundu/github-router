@@ -48,7 +48,7 @@ test("Claude Code 2.1.260 discovery drops non-Claude ids before replacing its ca
     object: "list",
     data: [
       fakeUpstreamModel,
-      { ...fakeUpstreamModel, id: "gpt-5.6-sol", name: "GPT-5.6 Sol", vendor: "OpenAI" },
+      { ...fakeUpstreamModel, id: "gpt-6-sol", name: "GPT-6 Sol", vendor: "OpenAI" },
       { ...fakeUpstreamModel, id: "gemini-3.8-flash", name: "Gemini 3.8 Flash", vendor: "Google" },
       { ...fakeUpstreamModel, id: "grok-4.6", name: "Grok 4.6", vendor: "xAI" },
     ],
@@ -68,7 +68,7 @@ test("Claude Code 2.1.260 discovery drops non-Claude ids before replacing its ca
 
   expect(payload.data.map((entry) => entry.id)).toEqual([
     "claude-opus-4.7",
-    "gpt-5.6-sol",
+    "gpt-6-sol",
     "gemini-3.8-flash",
     "grok-4.6",
   ])

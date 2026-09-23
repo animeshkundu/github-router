@@ -12,7 +12,7 @@
  * "copilot_usage": {
  *   "token_details": [
  *     {"batch_size":1000000,"cost_per_batch":20000000000,
- *      "model":"gpt-5.6-luna","token_count":11,"token_type":"input"},
+ *      "model":"gpt-6-luna","token_count":11,"token_type":"input"},
  *     ...
  *   ],
  *   "total_nano_aiu": 820000
