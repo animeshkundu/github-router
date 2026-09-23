@@ -46,12 +46,13 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  contract values; the three gates that differ are the lead slug, the lead
  *  prereq window, and the cheap1m-only `astra` peer. `"cheapest"` is the
  *  all-200K cheapest tier: a Luna/max lead, Luna Explore/GP roles, a Sol/high
- *  Plan, Oracle, and reviewer, and a Sol/medium Advisor —
- *  Oracle-only peer
+ *  reviewer, a Sol/medium Advisor, and a Sol/high Oracle — the lead plans
+ *  directly and reviews the final plan with the Advisor (advisory) before
+ *  presenting it. Oracle-only peer
  *  set, no `astra` (see `./cheapest-profile-contract`). `"balanced"` is the
- *  most-complex-tasks tier: a Sol/high lead at the 200K default window, the
- *  same four-agent surface as cheap, and the Grok/medium Oracle-only peer
- *  set (see `./balanced-profile-contract`).
+ *  most-complex-tasks tier: a Sol/high lead at the 200K default window, a
+ *  three-agent surface (no `Plan`: the lead owns planning), and the
+ *  Grok/medium Oracle-only peer set (see `./balanced-profile-contract`).
  *
  *  Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
  *  from the resolved lead model id — so `-m gpt-6-luna` (a direct pin of
@@ -149,7 +150,9 @@ export const CHEAP_PROFILE: LaunchProfileDescriptor = Object.freeze({
 /**
  * The `-m cheapest` roster: the exact cheap surface and groups, but Luna-led
  * (`gpt-6-luna`/max at the 200K default window), a Sol/medium Advisor, a
- * Sol/high Oracle, and a Sol/high reviewer. Oracle-only peer set, no
+ * Sol/high Oracle, and a Sol/high reviewer — and no `Plan` subagent: the lead
+ * plans directly and reviews the final plan with the Advisor (advisory)
+ * before presenting it. Oracle-only peer set, no
  * `astra`. Hard-denies match fast's: core workers, `orchestrate`, `decide`,
  * `fleet`, and `first-mate`.
  */
@@ -163,10 +166,11 @@ export const CHEAPEST_PROFILE: LaunchProfileDescriptor = Object.freeze({
 
 /**
  * The `-m balanced` roster: the most-complex-tasks tier. A Sol/high lead at
- * the 200K default window, the same four-agent surface as cheap
- * (`Explore`/`Plan`/`General-Purpose`/`Reviewer`, every role at 200K), and
- * the Grok-4.6/medium Oracle-only peer set. Hard-denies match fast's: core
- * workers, `orchestrate`, `decide`, `fleet`, and `first-mate`.
+ * the 200K default window, a three-agent surface (`Explore`/
+ * `General-Purpose`/`reviewer`, every role at 200K — no `Plan`: the lead
+ * owns planning), and the Grok-4.6/medium Oracle-only peer set. Hard-denies
+ * match fast's: core workers, `orchestrate`, `decide`, `fleet`, and
+ * `first-mate`.
  */
 export const BALANCED_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "balanced",
@@ -286,7 +290,6 @@ export const CHEAP_REVIEWER_ALIAS_ID = "gh-router-cheap-reviewer-max"
  * `buildCheapestProfileAgentDefinitions`.
  */
 export const CHEAPEST_EXPLORE_ALIAS_ID = "gh-router-cheapest-explore-high"
-export const CHEAPEST_PLAN_ALIAS_ID = "gh-router-cheapest-plan-high"
 export const CHEAPEST_GENERAL_PURPOSE_ALIAS_ID =
   "gh-router-cheapest-general-purpose-xhigh"
 export const CHEAPEST_IMPLEMENTER_ALIAS_ID = "gh-router-cheapest-implementer-max"
@@ -300,7 +303,6 @@ export const CHEAPEST_REVIEWER_ALIAS_ID = "gh-router-cheapest-reviewer-high"
  * `buildBalancedProfileAgentDefinitions`.
  */
 export const BALANCED_EXPLORE_ALIAS_ID = "gh-router-balanced-explore-high"
-export const BALANCED_PLAN_ALIAS_ID = "gh-router-balanced-plan-high"
 export const BALANCED_GENERAL_PURPOSE_ALIAS_ID =
   "gh-router-balanced-general-purpose-max"
 export const BALANCED_REVIEWER_ALIAS_ID = "gh-router-balanced-reviewer-high"
@@ -449,10 +451,6 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
     { aliasId: CHEAPEST_EXPLORE_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS.explore, absentEffortDefault: "high" },
   ],
   [
-    CHEAPEST_PLAN_ALIAS_ID,
-    { aliasId: CHEAPEST_PLAN_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS.plan, absentEffortDefault: "high" },
-  ],
-  [
     CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
     { aliasId: CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS["General-Purpose"], absentEffortDefault: "max" },
   ],
@@ -467,10 +465,6 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   [
     BALANCED_EXPLORE_ALIAS_ID,
     { aliasId: BALANCED_EXPLORE_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS.explore, absentEffortDefault: "high" },
-  ],
-  [
-    BALANCED_PLAN_ALIAS_ID,
-    { aliasId: BALANCED_PLAN_ALIAS_ID, realModel: BALANCED_PROFILE_MODELS.plan, absentEffortDefault: "high" },
   ],
   [
     BALANCED_GENERAL_PURPOSE_ALIAS_ID,
@@ -967,9 +961,10 @@ const CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS =
 
 /**
  * Validate the live Copilot catalog for `-m cheapest`: Luna lead at the 200K
- * default window, Luna Explore/GP roles, a Sol Plan, Oracle, and reviewer,
- * and a Sol/medium Advisor — all at the 200K default with
- * their fixed efforts and supported endpoints.
+ * default window, Luna Explore/GP roles, a Sol/high reviewer, a Sol/high
+ * Oracle, and a Sol/medium Advisor — all at the 200K default with
+ * their fixed efforts and supported endpoints. There is no `Plan` role: the
+ * lead plans directly.
  */
 export function validateCheapestProfilePrerequisites(
   catalog: ModelsResponse | undefined,
@@ -1002,26 +997,26 @@ export function validateCheapestProfilePrerequisites(
     }
   }
 
-  const sol = findModel(catalog, CHEAPEST_PROFILE_MODELS.plan)
-  if (!sol) {
-    missing.push(`${CHEAPEST_PROFILE_MODELS.plan}: absent from the live catalog`)
+  // Sol Oracle (same id as the reviewer role): the lead's only consultant
+  // besides the Advisor. The reviewer block below covers Sol tool-calling;
+  // this block covers the Oracle brief's prompt-metadata requirement.
+  const oracle = findModel(catalog, CHEAPEST_PROFILE_MODELS.oracle)
+  if (!oracle) {
+    missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: absent from the live catalog`)
   } else {
-    if (!hasToolCalls(sol)) {
-      missing.push(`${CHEAPEST_PROFILE_MODELS.plan}: does not advertise tool_calls`)
-    }
-    if (!hasContextAtLeast(sol, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+    if (!hasContextAtLeast(oracle, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
       missing.push(
-        `${CHEAPEST_PROFILE_MODELS.plan}: advertised context window is below the 200K subagent floor`,
+        `${CHEAPEST_PROFILE_MODELS.oracle}: advertised context window is below the 200K subagent floor`,
       )
     }
-    if (!supportsEffort(sol, "high")) {
-      missing.push(`${CHEAPEST_PROFILE_MODELS.plan}: does not advertise a "high" reasoning effort`)
+    if (!supportsEffort(oracle, "high")) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: does not advertise a "high" reasoning effort`)
     }
-    if (!supportsEndpoint(sol, "responses")) {
-      missing.push(`${CHEAPEST_PROFILE_MODELS.plan}: does not advertise a supported Responses endpoint`)
+    if (!supportsEndpoint(oracle, "responses")) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: does not advertise a supported Responses endpoint`)
     }
-    if (!hasUsablePromptMetadata(sol)) {
-      missing.push(`${CHEAPEST_PROFILE_MODELS.plan}: no usable max_prompt_tokens metadata (Oracle brief)`)
+    if (!hasUsablePromptMetadata(oracle)) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: no usable max_prompt_tokens metadata (Oracle brief)`)
     }
   }
 
@@ -1083,9 +1078,10 @@ const BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS =
 
 /**
  * Validate the live Copilot catalog for `-m balanced`: Sol lead at the 200K
- * default window, Luna Explore/General-Purpose roles, Sol Plan and reviewer,
+ * default window, Luna Explore/General-Purpose roles, a Sol/high reviewer,
  * and a Grok Oracle — all at the 200K default with their
- * fixed efforts and supported endpoints.
+ * fixed efforts and supported endpoints. There is no `Plan` role: the lead
+ * owns planning directly.
  */
 export function validateBalancedProfilePrerequisites(
   catalog: ModelsResponse | undefined,

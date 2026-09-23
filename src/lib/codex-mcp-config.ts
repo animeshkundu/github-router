@@ -25,11 +25,9 @@ import {
 import {
   BALANCED_EXPLORE_ALIAS_ID,
   BALANCED_GENERAL_PURPOSE_ALIAS_ID,
-  BALANCED_PLAN_ALIAS_ID,
   BALANCED_REVIEWER_ALIAS_ID,
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
-  CHEAPEST_PLAN_ALIAS_ID,
   CHEAPEST_REVIEWER_ALIAS_ID,
   CHEAP_EXPLORE_ALIAS_ID,
   CHEAP_GENERAL_PURPOSE_ALIAS_ID,
@@ -221,18 +219,18 @@ interface BuildOpts {
   cheapReviewerModel?: string
   /** Cheapest-profile role assignments. Same fixed surface as cheap, but
    *  Luna-led with a Sol reviewer/Advisor and Oracle — every emitted
-   *  model BARE (200K default window). */
+   *  model BARE (200K default window). No `Plan` role: the lead plans
+   *  directly. */
   cheapestProfile?: boolean
   cheapestExploreModel?: string
-  cheapestPlanModel?: string
   cheapestGeneralPurposeModel?: string
   cheapestImplementerModel?: string
   cheapestReviewerModel?: string
   /** Balanced-profile role assignments. Sol-led at the 200K default window,
-   *  same four-agent surface as cheap, Grok/medium Oracle-only peer set. */
+   *  three-agent surface (no `Plan`: the lead owns planning), Grok/medium
+   *  Oracle-only peer set. */
   balancedProfile?: boolean
   balancedExploreModel?: string
-  balancedPlanModel?: string
   balancedGeneralPurposeModel?: string
   balancedReviewerModel?: string
   /** Max-profile role assignments. */
@@ -902,22 +900,18 @@ const PLAN_DESC_HEAD = "Architecture and implementation planning specialist"
 const PLAN_DESC_TAIL =
   " Returns a decision-complete, ordered implementation plan with runnable acceptance criteria. Never edits files."
 
-function pinnedPlanDescription(explicit: boolean, isBalanced = false, is200K = false): string {
+function pinnedPlanDescription(explicit: boolean, is200K = false): string {
   const middle = explicit
-    ? isBalanced
-      ? ". Use proactively ONLY when sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria are genuinely complex and deserve a dedicated pass before any code is written. The lead owns planning by default. Delegates repository discovery to `Explore` rather than reading broadly itself."
-      : ". Use proactively in plan mode, and whenever sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria deserve a dedicated pass before any code is written. Delegates repository discovery to `Explore` rather than reading broadly itself."
+    ? ". Use proactively in plan mode, and whenever sequencing, cross-boundary interfaces, invariants, migration risk, or acceptance criteria deserve a dedicated pass before any code is written. Delegates repository discovery to `Explore` rather than reading broadly itself."
     : " for sequencing, cross-boundary interfaces, invariants, migration risk, and acceptance criteria before any code is written."
   return PLAN_DESC_HEAD + middle + PLAN_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
 }
 
-function pinnedPlanPrompt(opts: { explicit: boolean; semanticAvailable: boolean; oracleTool?: string; is200K?: boolean }): string {
+function pinnedPlanPrompt(opts: { semanticAvailable: boolean; oracleTool?: string; is200K?: boolean }): string {
   // Name the exact MCP tool when the caller wires one (key-aware); fall
   // back to the generic name when the peers server is absent.
   const oracleRef = opts.oracleTool ? `\`${opts.oracleTool}\`` : "Oracle"
-  const discovery = opts.explicit
-    ? "Do not sweep the repository yourself: delegate discovery to `Explore`, launching one or more `Explore` subagents in parallel with scoped evidence questions, then read directly only the files needed to resolve trade-offs and write executable steps. "
-    : "Do not sweep the repository broadly yourself: keep discovery narrow, read directly only the files needed to resolve trade-offs and write executable steps, and record any repository fact you could not confirm as an explicit gap. "
+  const discovery = "Do not sweep the repository yourself: delegate discovery to `Explore`, launching one or more `Explore` subagents in parallel with scoped evidence questions, then read directly only the files needed to resolve trade-offs and write executable steps. "
   return "You are a software architect and planning specialist. Your mission is to turn a request into a decision-complete implementation plan: an ordered sequence of changes, the invariants that must hold throughout, and acceptance criteria a reviewer can actually run. "
     + "This is read-only work. Do not modify repository files. Produce the architecture, sequencing, and acceptance criteria for the lead to synthesize and execute. Plan is an advisory planning capability, not an approval gate. "
     + `Separate discoverable facts from genuine choices. ${discovery}Escalate only genuine product or architectural trade-offs, and escalate them as explicit options with consequences and a recommendation, never as an open question. For low-risk details, choose the reading most consistent with the codebase, proceed, and record it as an assumption. `
@@ -1076,7 +1070,7 @@ function buildFastProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions
     },
     Plan: {
       description: pinnedPlanDescription(true),
-      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable, oracleTool }),
+      prompt: pinnedPlanPrompt({ semanticAvailable, oracleTool }),
       tools: planTools,
       model: oneM(planModel),
       effort: effort("Plan"),
@@ -1196,8 +1190,8 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     Plan: {
-      description: pinnedPlanDescription(true, false, true),
-      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable, oracleTool, is200K: true }),
+      description: pinnedPlanDescription(true, true),
+      prompt: pinnedPlanPrompt({ semanticAvailable, oracleTool, is200K: true }),
       tools: planTools,
       model: planModel,
       effort: effort("Plan"),
@@ -1257,25 +1251,26 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
   return out
 }
 
-/** Build the literal `-m cheapest` native roster. Same fixed four-agent
- * surface and roles as `-m cheap`, but Luna-led with a Sol reviewer —
- * every SUBAGENT model is a BARE router-owned alias
- * (`gh-router-cheapest-*`, no `[1m]`) rather than a real catalog id, for the
- * same client catalog-resolution reason as the cheap builder above: a bare
- * real id is upgraded to `[1m]` accounting by Claude Code whenever the entry
- * advertises >=1M. Caller-supplied `opts.cheapest*Model` values are
- * deliberately ignored. Cheapest is tuned for straightforward tasks: role
- * descriptions carry no proactive fan-out push, so the lead handles simple
- * work inline instead of paying handoff overhead. */
+/** Build the literal `-m cheapest` native roster. Three-agent surface
+ * (`Explore`, `General-Purpose`, `reviewer` — no `Plan`: the lead plans
+ * directly and reviews the final plan with the Advisor before presenting
+ * it), Luna-led with a Sol reviewer — every SUBAGENT model is a BARE
+ * router-owned alias (`gh-router-cheapest-*`, no `[1m]`) rather than a real
+ * catalog id, for the same client catalog-resolution reason as the cheap
+ * builder above: a bare real id is upgraded to `[1m]` accounting by Claude
+ * Code whenever the entry advertises >=1M. Caller-supplied
+ * `opts.cheapest*Model` values are deliberately ignored. Cheapest is tuned
+ * for straightforward tasks: role descriptions carry no proactive fan-out
+ * push, so the lead handles simple work inline instead of paying handoff
+ * overhead. Oracle is lead-only: no emitted native receives the peers
+ * server. */
 function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
   const exploreModel = CHEAPEST_EXPLORE_ALIAS_ID
-  const planModel = CHEAPEST_PLAN_ALIAS_ID
   const generalModel = CHEAPEST_GENERAL_PURPOSE_ALIAS_ID
   const reviewerModel = CHEAPEST_REVIEWER_ALIAS_ID
   const semanticAvailable = opts.semanticSearchAvailable === true
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
-  const peersKey = peersKeyOf(opts.groupKeys)
   const searchMcpServers = opts.serverUrl
     ? {
         [searchKey]: httpEntryFor(
@@ -1286,24 +1281,8 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
         ),
       }
     : undefined
-  const peersMcpServers = opts.serverUrl && opts.groupKeys.peers
-    ? {
-        [peersKey]: httpEntryFor(
-          opts.serverUrl,
-          "peers",
-          opts.nonce,
-          opts.workspaceHeaderCmd,
-        ),
-      }
-    : undefined
 
-  const oracleTool = opts.groupKeys.peers ? `mcp__${peersKey}__oracle` : undefined
   const readSearchTools = ["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", `mcp__${searchKey}__*`]
-  const planTools = [
-    ...readSearchTools,
-    ...(oracleTool ? [oracleTool] : []),
-    "Agent",
-  ]
   const effort = (name: keyof typeof CHEAPEST_PROFILE_NATIVE_EFFORTS): SubagentEffort =>
     CHEAPEST_PROFILE_NATIVE_EFFORTS[name]
 
@@ -1315,17 +1294,6 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       model: exploreModel,
       effort: effort("Explore"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
-    },
-    Plan: {
-      description: pinnedPlanDescription(false, false, true),
-      prompt: pinnedPlanPrompt({ explicit: false, semanticAvailable, oracleTool, is200K: true }),
-      tools: planTools,
-      model: planModel,
-      effort: effort("Plan"),
-      mcpServers: {
-        ...(searchMcpServers ?? {}),
-        ...(peersMcpServers ?? {}),
-      },
     },
     "General-Purpose": {
       description: pinnedGeneralPurposeDescription(false, false, true),
@@ -1378,29 +1346,27 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
   return out
 }
 
-/** Build the literal `-m balanced` native roster. Same fixed four-agent
- * surface and roles as `-m cheap`, but Sol-led at the 200K default window
- * for the most complex tasks — every SUBAGENT model is a BARE router-owned
- * alias (`gh-router-balanced-*`, no `[1m]`) rather than a real catalog id,
- * for the same client catalog-resolution reason as the cheap builder above.
+/** Build the literal `-m balanced` native roster. Three-agent surface
+ * (`Explore`, `General-Purpose`, `reviewer` — no `Plan`: the lead owns
+ * planning directly), Sol-led at the 200K default window for the most
+ * complex tasks — every SUBAGENT model is a BARE router-owned alias
+ * (`gh-router-balanced-*`, no `[1m]`) rather than a real catalog id, for the
+ * same client catalog-resolution reason as the cheap builder above.
  * Caller-supplied `opts.balanced*Model` values are deliberately ignored.
  * Explicit delegation tuning is search-first and lead-owns-by-default
  * (unlike cheap): `code_search` + `web` search narrow scope before any
- * `Explore` fan-out; `Plan` ONLY when genuinely complex (lead owns planning)
- * with an explicitly named Oracle tool; `General-Purpose` mixed execution
- * delegates FREELY; `reviewer` ONLY when genuinely behavior-changing (lead
- * owns verification) where the reviewer
- * narrows scope with search and may invoke `Explore` for targeted
- * discovery. */
+ * `Explore` fan-out; `General-Purpose` mixed execution delegates FREELY;
+ * `reviewer` ONLY when genuinely behavior-changing (lead owns verification)
+ * where the reviewer narrows scope with search and may invoke `Explore` for
+ * targeted discovery. Oracle is lead-only: no emitted native receives the
+ * peers server. */
 function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
   const exploreModel = BALANCED_EXPLORE_ALIAS_ID
-  const planModel = BALANCED_PLAN_ALIAS_ID
   const generalModel = BALANCED_GENERAL_PURPOSE_ALIAS_ID
   const reviewerModel = BALANCED_REVIEWER_ALIAS_ID
   const semanticAvailable = opts.semanticSearchAvailable === true
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
-  const peersKey = peersKeyOf(opts.groupKeys)
   const searchMcpServers = opts.serverUrl
     ? {
         [searchKey]: httpEntryFor(
@@ -1411,24 +1377,8 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
         ),
       }
     : undefined
-  const peersMcpServers = opts.serverUrl && opts.groupKeys.peers
-    ? {
-        [peersKey]: httpEntryFor(
-          opts.serverUrl,
-          "peers",
-          opts.nonce,
-          opts.workspaceHeaderCmd,
-        ),
-      }
-    : undefined
 
-  const oracleTool = opts.groupKeys.peers ? `mcp__${peersKey}__oracle` : undefined
   const readSearchTools = ["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", `mcp__${searchKey}__*`]
-  const planTools = [
-    ...readSearchTools,
-    ...(oracleTool ? [oracleTool] : []),
-    "Agent",
-  ]
   const effort = (name: keyof typeof BALANCED_PROFILE_NATIVE_EFFORTS): SubagentEffort =>
     BALANCED_PROFILE_NATIVE_EFFORTS[name]
 
@@ -1440,17 +1390,6 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       model: exploreModel,
       effort: effort("Explore"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
-    },
-    Plan: {
-      description: pinnedPlanDescription(true, true, true),
-      prompt: pinnedPlanPrompt({ explicit: true, semanticAvailable, oracleTool, is200K: true }),
-      tools: planTools,
-      model: planModel,
-      effort: effort("Plan"),
-      mcpServers: {
-        ...(searchMcpServers ?? {}),
-        ...(peersMcpServers ?? {}),
-      },
     },
     "General-Purpose": {
       description: pinnedGeneralPurposeDescription(true, true, true),
@@ -1868,14 +1807,12 @@ interface WriteOpts {
   /** Cheapest-profile role assignments, mirrored from `BuildOpts`. */
   cheapestProfile?: boolean
   cheapestExploreModel?: string
-  cheapestPlanModel?: string
   cheapestGeneralPurposeModel?: string
   cheapestImplementerModel?: string
   cheapestReviewerModel?: string
   /** Balanced-profile role assignments, mirrored from `BuildOpts`. */
   balancedProfile?: boolean
   balancedExploreModel?: string
-  balancedPlanModel?: string
   balancedGeneralPurposeModel?: string
   balancedReviewerModel?: string
   /** Whether local ColBERT semantic search or Bluebird semantic routing is
@@ -2453,12 +2390,10 @@ export async function writePeerMcpRuntimeFiles(
     cheapImplementerModel: opts.cheapImplementerModel,
     cheapReviewerModel: opts.cheapReviewerModel,
     cheapestExploreModel: opts.cheapestExploreModel,
-    cheapestPlanModel: opts.cheapestPlanModel,
     cheapestGeneralPurposeModel: opts.cheapestGeneralPurposeModel,
     cheapestImplementerModel: opts.cheapestImplementerModel,
     cheapestReviewerModel: opts.cheapestReviewerModel,
     balancedExploreModel: opts.balancedExploreModel,
-    balancedPlanModel: opts.balancedPlanModel,
     balancedGeneralPurposeModel: opts.balancedGeneralPurposeModel,
     balancedReviewerModel: opts.balancedReviewerModel,
     semanticSearchAvailable: opts.semanticSearchAvailable,

@@ -882,7 +882,7 @@ export const claude = defineCommand({
         cheapAdvisorClientEnabled(process.env),
       )
     } else if (launchProfileId === "cheapest") {
-      // Same pinning discipline as cheap, but to the BARE Gemini Advisor slug
+      // Same pinning discipline as cheap, but to the BARE Sol Advisor slug
       // (see `CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL`).
       extraArgs = withFixedCheapestAdvisorArg(
         extraArgs,
@@ -1032,14 +1032,12 @@ export const claude = defineCommand({
         : launchProfileId === "cheapest"
           ? {
               Explore: CHEAPEST_PROFILE_NATIVE_MODELS.Explore,
-              Plan: CHEAPEST_PROFILE_NATIVE_MODELS.Plan,
               "General-Purpose": CHEAPEST_PROFILE_NATIVE_MODELS["General-Purpose"],
               reviewer: cheapestReviewerModel(),
             }
         : launchProfileId === "balanced"
           ? {
               Explore: BALANCED_PROFILE_NATIVE_MODELS.Explore,
-              Plan: BALANCED_PROFILE_NATIVE_MODELS.Plan,
               "General-Purpose": BALANCED_PROFILE_NATIVE_MODELS["General-Purpose"],
               reviewer: balancedReviewerModel(),
             }
@@ -1269,7 +1267,6 @@ export const claude = defineCommand({
               ? {
                   cheapestProfile: true,
                   cheapestExploreModel: nativeAgentModels.Explore,
-                  cheapestPlanModel: nativeAgentModels.Plan,
                   cheapestGeneralPurposeModel: nativeAgentModels["General-Purpose"],
                   cheapestReviewerModel: nativeAgentModels.reviewer,
                 }
@@ -1277,7 +1274,6 @@ export const claude = defineCommand({
               ? {
                   balancedProfile: true,
                   balancedExploreModel: nativeAgentModels.Explore,
-                  balancedPlanModel: nativeAgentModels.Plan,
                   balancedGeneralPurposeModel: nativeAgentModels["General-Purpose"],
                   balancedReviewerModel: nativeAgentModels.reviewer,
                 }

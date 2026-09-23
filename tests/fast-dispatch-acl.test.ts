@@ -73,6 +73,10 @@ describe("fast native dispatch ACL", () => {
         if (caller === "reviewer" && target === "Explore") {
           expect(balancedAllowed).toBe(true)
           expect(fastAllowed).toBe(false)
+        } else if (caller === "Plan") {
+          // No Plan role on balanced (the lead owns planning directly): a
+          // stale Plan caller identity can invoke nothing.
+          expect(balancedAllowed).toBe(false)
         } else {
           expect(balancedAllowed).toBe(fastAllowed)
         }
@@ -81,6 +85,16 @@ describe("fast native dispatch ACL", () => {
     // Unknown graph values fall back to the fast graph (fail closed).
     expectDenied(dispatch("Explore", "reviewer"), { graph: "fast" })
     expectDenied(dispatch("Explore", "reviewer"))
+  })
+
+  test("Plan is not a dispatch target on the cheapest/balanced rosters", () => {
+    // The lead's target gate runs before the graph check: a 3-agent roster
+    // filter denies Plan even though the shared caller type still names it.
+    expectDenied(dispatch("Plan"), { allowedTargets: ["Explore", "General-Purpose", "reviewer"] })
+    expectDenied(dispatch("Plan", "General-Purpose"), {
+      graph: "balanced",
+      allowedTargets: ["Explore", "General-Purpose", "reviewer"],
+    })
   })
 
   test("balanced reviewer Explore still honors the allowedTargets roster filter", () => {

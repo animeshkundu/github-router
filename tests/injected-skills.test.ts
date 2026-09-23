@@ -331,6 +331,50 @@ describe("search-gated skill text (--search)", () => {
     expect(offResearch.md).not.toContain("semantically")
   })
 
+  test("cheapest/balanced pipeline skills plan lead-direct with no Plan dispatch", () => {
+    for (const profileId of ["cheapest", "balanced"] as const) {
+      const skills = injectedSkillsForLaunch({
+        profileId,
+        workerSkillsActive: false,
+        firstMateEnabled: false,
+        sweEnabled: true,
+      })
+      const plan = skills.find((s) => s.name === "gh-plan")!
+      expect(plan.md).not.toContain("subagent_type Plan")
+      expect(plan.md).toContain("the lead plans directly")
+      const implement = skills.find((s) => s.name === "gh-implement")!
+      expect(implement.md).not.toContain("Plan dispatches")
+      const pipeline = skills.find((s) => s.name === "gh-swe-pipeline")!
+      expect(pipeline.md).not.toContain("Plan subagents")
+      expect(pipeline.md).not.toContain("native Plan subagent")
+    }
+    // Cheapest reviews the final plan with the Advisor; balanced has no
+    // Advisor surface, so it must not name one.
+    const cheapestPlan = injectedSkillsForLaunch({
+      profileId: "cheapest",
+      workerSkillsActive: false,
+      firstMateEnabled: false,
+      sweEnabled: true,
+    }).find((s) => s.name === "gh-plan")!
+    expect(cheapestPlan.md).toContain("Review the final plan with the Advisor")
+    const balancedPlan = injectedSkillsForLaunch({
+      profileId: "balanced",
+      workerSkillsActive: false,
+      firstMateEnabled: false,
+      sweEnabled: true,
+    }).find((s) => s.name === "gh-plan")!
+    expect(balancedPlan.md).not.toContain("`advisor`")
+    expect(balancedPlan.md).not.toContain("Review the final plan")
+    // Fast keeps the native Plan dispatch.
+    const fastPlan = injectedSkillsForLaunch({
+      profileId: "fast",
+      workerSkillsActive: false,
+      firstMateEnabled: false,
+      sweEnabled: true,
+    }).find((s) => s.name === "gh-plan")!
+    expect(fastPlan.md).toContain("subagent_type Plan")
+  })
+
   test("injectedSkillsForLaunch preserves all four backend combinations", () => {
     const on = injectedSkillsForLaunch({
       profileId: "standard",

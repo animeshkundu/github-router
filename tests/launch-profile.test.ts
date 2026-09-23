@@ -3,12 +3,10 @@ import { afterEach, describe, expect, test } from "bun:test"
 import {
   BALANCED_EXPLORE_ALIAS_ID,
   BALANCED_GENERAL_PURPOSE_ALIAS_ID,
-  BALANCED_PLAN_ALIAS_ID,
   BALANCED_REVIEWER_ALIAS_ID,
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
   CHEAPEST_IMPLEMENTER_ALIAS_ID,
-  CHEAPEST_PLAN_ALIAS_ID,
   CHEAPEST_REVIEWER_ALIAS_ID,
   CHEAP_EXPLORE_ALIAS_ID,
   CHEAP_GENERAL_PURPOSE_ALIAS_ID,
@@ -51,6 +49,7 @@ import {
   CHEAP_PROFILE_MODELS,
 } from "../src/lib/cheap-profile-contract"
 import {
+  CHEAPEST_PROFILE_DELEGATION_GRAPH,
   CHEAPEST_PROFILE_NATIVE_EFFORTS,
   CHEAPEST_PROFILE_MODELS,
 } from "../src/lib/cheapest-profile-contract"
@@ -145,7 +144,8 @@ describe("launch profile selection", () => {
     expect([...profileDescriptor("cheap").personaAllowlist!]).toEqual(["oracle"])
     expect([...profileDescriptor("cheap1m").personaAllowlist!]).toEqual(["oracle", "astra"])
     expect([...profileDescriptor("balanced").personaAllowlist!]).toEqual(["oracle"])
-    expect([...profileDescriptor("balanced").nativeRoster!].sort()).toEqual(["Explore", "General-Purpose", "Plan", "reviewer"])
+    expect([...profileDescriptor("balanced").nativeRoster!].sort()).toEqual(["Explore", "General-Purpose", "reviewer"])
+    expect([...profileDescriptor("cheapest").nativeRoster!].sort()).toEqual(["Explore", "General-Purpose", "reviewer"])
   })
 })
 
@@ -179,14 +179,12 @@ describe("cheap-family subagent aliases", () => {
   ] as const
   const cheapestRows = [
     [CHEAPEST_EXPLORE_ALIAS_ID, CHEAPEST_PROFILE_MODELS.explore, "high"],
-    [CHEAPEST_PLAN_ALIAS_ID, CHEAPEST_PROFILE_MODELS.plan, "high"],
     [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, CHEAPEST_PROFILE_MODELS["General-Purpose"], "max"],
     [CHEAPEST_IMPLEMENTER_ALIAS_ID, CHEAPEST_PROFILE_MODELS["General-Purpose"], "max"],
     [CHEAPEST_REVIEWER_ALIAS_ID, CHEAPEST_PROFILE_MODELS.reviewer, "high"],
   ] as const
   const balancedRows = [
     [BALANCED_EXPLORE_ALIAS_ID, BALANCED_PROFILE_MODELS.explore, "high"],
-    [BALANCED_PLAN_ALIAS_ID, BALANCED_PROFILE_MODELS.plan, "high"],
     [BALANCED_GENERAL_PURPOSE_ALIAS_ID, BALANCED_PROFILE_MODELS["General-Purpose"], "max"],
     [BALANCED_REVIEWER_ALIAS_ID, BALANCED_PROFILE_MODELS.reviewer, "high"],
   ] as const
@@ -208,11 +206,9 @@ describe("cheap-family subagent aliases", () => {
     expect(resolveModelAlias(CHEAP_GENERAL_PURPOSE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS["General-Purpose"])
     expect(resolveModelAlias(CHEAP_REVIEWER_ALIAS_ID)?.absentEffortDefault).toBe(CHEAP_PROFILE_NATIVE_EFFORTS.reviewer)
     expect(resolveModelAlias(CHEAPEST_EXPLORE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.Explore)
-    expect(resolveModelAlias(CHEAPEST_PLAN_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.Plan)
     expect(resolveModelAlias(CHEAPEST_GENERAL_PURPOSE_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS["General-Purpose"])
     expect(resolveModelAlias(CHEAPEST_REVIEWER_ALIAS_ID)?.absentEffortDefault).toBe(CHEAPEST_PROFILE_NATIVE_EFFORTS.reviewer)
     expect(resolveModelAlias(BALANCED_EXPLORE_ALIAS_ID)?.absentEffortDefault).toBe(BALANCED_PROFILE_NATIVE_EFFORTS.Explore)
-    expect(resolveModelAlias(BALANCED_PLAN_ALIAS_ID)?.absentEffortDefault).toBe(BALANCED_PROFILE_NATIVE_EFFORTS.Plan)
     expect(resolveModelAlias(BALANCED_GENERAL_PURPOSE_ALIAS_ID)?.absentEffortDefault).toBe(BALANCED_PROFILE_NATIVE_EFFORTS["General-Purpose"])
     expect(resolveModelAlias(BALANCED_REVIEWER_ALIAS_ID)?.absentEffortDefault).toBe(BALANCED_PROFILE_NATIVE_EFFORTS.reviewer)
   })
@@ -221,7 +217,6 @@ describe("cheap-family subagent aliases", () => {
     expect(resolveModelAlias(CHEAP_EXPLORE_ALIAS_ID)?.realModel).toBe(CHEAP_PROFILE_MODELS.explore)
     expect(resolveModelAlias(CHEAP_PLAN_ALIAS_ID)?.realModel).toBe(CHEAP_PROFILE_MODELS.plan)
     expect(resolveModelAlias(CHEAPEST_EXPLORE_ALIAS_ID)?.realModel).toBe(CHEAPEST_PROFILE_MODELS.explore)
-    expect(resolveModelAlias(CHEAPEST_PLAN_ALIAS_ID)?.realModel).toBe(CHEAPEST_PROFILE_MODELS.plan)
     expect(resolveModelAlias(CHEAPEST_REVIEWER_ALIAS_ID)?.realModel).toBe(CHEAPEST_PROFILE_MODELS.reviewer)
   })
 })
@@ -418,21 +413,34 @@ describe("cheap-family startup prerequisites", () => {
     expect(cheap1mMessage).toContain("github-router claude -m cheap1m")
   })
 
-  test("each pinned profile owns its delegation graph with the four-agent shape", () => {
+  test("each pinned profile owns its delegation graph with the expected shape", () => {
     // Every pinned profile owns its own graph literal (a shared alias would
     // silently retune every roster at once); fast and cheap share the same
-    // shape, while balanced intentionally diverges: its reviewer may invoke
-    // Explore for targeted discovery.
+    // shape, while cheapest and balanced have no Plan role (the lead owns
+    // planning) and balanced additionally lets its reviewer invoke Explore
+    // for targeted discovery.
     expect(CHEAP_PROFILE_DELEGATION_GRAPH).not.toBe(FAST_PROFILE_DELEGATION_GRAPH)
+    expect(CHEAPEST_PROFILE_DELEGATION_GRAPH).not.toBe(FAST_PROFILE_DELEGATION_GRAPH)
     expect(BALANCED_PROFILE_DELEGATION_GRAPH).not.toBe(FAST_PROFILE_DELEGATION_GRAPH)
-    for (const graph of [FAST_PROFILE_DELEGATION_GRAPH, CHEAP_PROFILE_DELEGATION_GRAPH, BALANCED_PROFILE_DELEGATION_GRAPH]) {
+    for (const graph of [FAST_PROFILE_DELEGATION_GRAPH, CHEAP_PROFILE_DELEGATION_GRAPH]) {
       expect(Object.keys(graph).sort()).toEqual(
         ["Explore", "General-Purpose", "Plan", "reviewer"],
       )
     }
+    for (const graph of [CHEAPEST_PROFILE_DELEGATION_GRAPH, BALANCED_PROFILE_DELEGATION_GRAPH]) {
+      expect(Object.keys(graph).sort()).toEqual(
+        ["Explore", "General-Purpose", "reviewer"],
+      )
+    }
     expect(CHEAP_PROFILE_DELEGATION_GRAPH).toEqual(FAST_PROFILE_DELEGATION_GRAPH)
+    expect(CHEAPEST_PROFILE_DELEGATION_GRAPH).toEqual({
+      Explore: [],
+      "General-Purpose": ["reviewer"],
+      reviewer: [],
+    })
     expect(BALANCED_PROFILE_DELEGATION_GRAPH).toEqual({
-      ...FAST_PROFILE_DELEGATION_GRAPH,
+      Explore: [],
+      "General-Purpose": ["reviewer"],
       reviewer: ["Explore"],
     })
   })

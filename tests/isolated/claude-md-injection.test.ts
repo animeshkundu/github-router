@@ -1235,15 +1235,16 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(balancedDigest).toContain("`General-Purpose`")
   expect(balancedDigest).toContain("`reviewer`")
   expect(balancedDigest).toContain("Grok 4.6 200K/medium")
+  expect(balancedDigest).toContain("(Grok 4.6 200K/medium, lead-only)")
   expect(balancedDigest).not.toContain("`astra`")
+  expect(balancedDigest).not.toContain("`Plan`")
   // Balanced exposes Oracle but no Advisor: the digest must not name the
-  // capability ("advisory planning capability" is fine — substring only).
+  // capability.
   expect(balancedDigest).not.toContain("`advisor`")
   expect(balancedDigest).not.toContain("Advisor")
   expect(balancedDigest).not.toContain("transcript-aware")
-  expect(balancedDigest).not.toContain("lead-only")
-  // Search-first funnel: narrow with search, then Explore, then Plan, then
-  // Oracle as a second opinion — optimized for lowest cost.
+  // Search-first funnel: narrow with search, then Explore, then Oracle as a
+  // second opinion — optimized for lowest cost.
   expect(balancedDigest).toContain("Funnel unknowns cheapest-first")
   expect(balancedDigest).toContain("as a second opinion")
   expect(balancedDigest).toContain("lowest cost")
@@ -1255,6 +1256,12 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(cheapestDigest).toContain("Cheapest launch profile")
   expect(cheapestDigest).toContain("directly")
   expect(cheapestDigest).toContain("All roles run at a 200K context window")
+  expect(cheapestDigest).not.toContain("`Plan`")
+  // The lead plans directly and reviews the final plan with the Advisor
+  // (advisory) before presenting it.
+  expect(cheapestDigest).toContain("produce the plan and acceptance criteria directly")
+  expect(cheapestDigest).toContain("consult `advisor` once for a framing check")
+  expect(cheapestDigest).toContain("(Sol/medium, lead-only)")
 
   // `-m cheap` deliberately runs without astra even if the caller hints the
   // peer is "available" — the profile never wires it; only cheap1m does.
@@ -1297,19 +1304,32 @@ test("balanced directive funnels unknowns search-first with no Advisor", () => {
   expect(directive).not.toContain("`advisor`")
   expect(directive).not.toContain("transcript-aware sounding board")
   expect(directive).not.toContain("preferred over advisor")
+  // No Plan role: the lead owns planning directly.
+  expect(directive).not.toContain("`Plan`")
   // Search-first GATHER + Oracle second-opinion framing + cost line.
   expect(directive).toContain("narrow scope first with `code_search`")
-  expect(directive).toContain("consult `mcp__peers__oracle` on unresolved trade-offs")
   expect(directive).toContain("a second opinion for precise, self-contained architectural/spec trade-offs")
+  expect(directive).toContain("available to the lead; `reviewer` and other subagents cannot call Oracle")
   expect(directive).toContain("lowest cost")
   // Reviewer → Explore edge is documented in the delegation graph.
   expect(directive).toContain("`reviewer` may invoke `Explore` for targeted discovery")
-  // Lead owns by default: Plan/Reviewer gated behind genuine need, GP free.
+  expect(directive).toContain("the lead may invoke all three")
+  // Lead owns by default: reviewer gated behind genuine need, GP free.
   expect(directive).toContain("lead owns planning")
-  expect(directive).toContain("Delegate to `Plan` ONLY when")
   expect(directive).toContain("Delegate to `General-Purpose` FREELY")
   expect(directive).toContain("lead owns verification")
   expect(directive).toContain("Invoke `reviewer` ONLY when")
+})
+
+test("cheapest directive has the lead plan directly with an advisory Advisor review", () => {
+  const directive = buildOperatingDefaultsDirective({ profile: "cheapest" })
+  expect(directive).toContain("Cheapest launch profile")
+  expect(directive).not.toContain("`Plan`")
+  expect(directive).toContain("produce the plan and acceptance criteria directly and do not edit files")
+  expect(directive).toContain("consult `advisor` once for a framing check")
+  expect(directive).toContain("it is non-binding counsel and you retain decision ownership")
+  expect(directive).toContain("the lead may invoke all three")
+  expect(directive).toContain("available to the lead, preferred over advisor")
 })
 
 test("200K profiles name targeted reads; fast/standard/max do not", () => {

@@ -1,6 +1,48 @@
 import type { InjectedSkill } from "./index"
 
-export function buildPlanSkill(_searchEnabled?: boolean): InjectedSkill {
+/**
+ * Profiles without a `Plan` native (`cheapest`, `balanced`): the lead plans
+ * directly instead of dispatching a Plan subagent. Every other profile uses
+ * the native Plan dispatch.
+ */
+export type PlanSkillProfile = "cheapest" | "balanced"
+
+export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
+  const leadPlansDirectly = profile === "cheapest" || profile === "balanced"
+  const planningMeans = leadPlansDirectly
+    ? "the lead plans directly (no Plan subagent exists on the cheapest/balanced rosters)"
+    : "dispatch the native Plan subagent (subagent_type Plan) present on the profile roster where provided; profile frontmatter pins its model and effort (Sol at the 200K default window)"
+  const dispatchStep = leadPlansDirectly
+    ? `3. Compose the plan directly with that brief, then validate it against
+   the same bar: every task names files, states the change and its done
+   condition, and carries runnable acceptance commands; trade-offs appear as
+   options with a recommendation. If gaps remain, run ONE bounded self-review
+   pass naming the exact gaps (at most 2 review passes total). If still
+   underspecified, checkpoint with the gaps as residual risk instead of
+   pretending the plan is complete.`
+    : `3. Dispatch ONE Plan subagent via the Agent tool (subagent_type Plan) with
+   that brief, then WAIT for its full return. Do not plan inline in parallel
+   and do not dispatch implementation subagents while it runs.`
+  const validateStep = leadPlansDirectly
+    ? `4. Validate the composed plan. Every task must name files, state the
+   change and its done condition, and carry runnable acceptance commands;
+   trade-offs must appear as options with a recommendation.`
+    : `4. Validate the returned plan. Every task must name files, state the
+   change and its done condition, and carry runnable acceptance commands;
+   trade-offs must appear as options with a recommendation. If gaps remain,
+   send ONE bounded follow-up to the same Plan dispatch naming the exact gaps
+   (at most 2 follow-up rounds total). If still underspecified, checkpoint
+   with the gaps as residual risk instead of pretending the plan is complete.`
+  const advisorStep = profile === "cheapest"
+    ? `
+6. Review the final plan with the Advisor before presenting it to the user:
+   consult \`advisor\` once for a framing check. It is non-binding counsel;
+   you retain decision ownership.
+
+`
+    : ""
+  const persistStepNumber = leadPlansDirectly ? (profile === "cheapest" ? 7 : 6) : 5
+  const checkpointStepNumber = leadPlansDirectly ? (profile === "cheapest" ? 8 : 7) : 6
   return {
   name: "gh-plan",
   md: `---
@@ -13,19 +55,14 @@ consumes: [context.md, context.compact.md]
 excludes: [trivial changes, implementation, missing context]
 ---
 
-# gh-plan: native Plan-subagent planning
+# gh-plan: ${leadPlansDirectly ? "lead-direct planning" : "native Plan-subagent planning"}
 
 Use this skill after /gh-gather-context (or when equivalent context is already
-available) and before any implementation. For non-trivial work, dispatch the
-native Plan subagent (subagent_type Plan) present on every pipeline profile
-roster; profile frontmatter pins its model and effort (Sol at the 200K default
-window). The plan must be scoped, modular, non-overlapping, and ordered, with
+available) and before any implementation. For non-trivial work, ${planningMeans}.
+The plan must be scoped, modular, non-overlapping, and ordered, with
 enough detail for a native General-Purpose (or implementer, where the profile
 provides one) subagent to execute each task in isolation. User approval is
-mandatory before implementation. This skill dispatches ONLY the native Plan
-subagent via the Agent tool, never worker-* MCP dispatchers. Plan self-serves
-Explore follow-ups per its delegation graph; the skill does not dispatch
-Explore directly.
+mandatory before implementation. ${leadPlansDirectly ? "This skill plans directly (plus scoped Explore discovery where the delegation graph permits), never via worker-* MCP dispatchers." : "This skill dispatches ONLY the native Plan subagent via the Agent tool, never worker-* MCP dispatchers."} ${leadPlansDirectly ? "The lead self-serves Explore follow-ups per its delegation graph; the skill does not dispatch Explore directly." : "Plan self-serves Explore follow-ups per its delegation graph; the skill does not dispatch Explore directly."}
 
 ## Prerequisites
 
@@ -46,12 +83,12 @@ Explore directly.
    builds on shifting evidence and wastes both stages. Only advance once every
    Explore dispatch has returned or is recorded as superseded.
 
-## Triviality reassessment (do this AFTER gate 0, BEFORE dispatching Plan)
+## Triviality reassessment (do this AFTER gate 0, BEFORE ${leadPlansDirectly ? "planning" : "dispatching Plan"})
 
 1. Reassess with fresh context: if the ask is trivial (typo, one-line config
    read, obvious change of at most a few lines, pure explanation) or the
    context shows no multi-file, risky, uncertain, or high-impact work, STOP.
-   Do NOT dispatch Plan. Do NOT write plan.md or .complete.
+   Do NOT ${leadPlansDirectly ? "plan" : "dispatch Plan"}. Do NOT write plan.md or .complete.
 2. Return a trivial verdict: one-sentence reason, the recommended direct
    action, and an explicit statement that no downstream stage (/gh-implement,
    /gh-swe-pipeline stage 3) may run. A trivial ask must never pay planning
@@ -62,7 +99,7 @@ Explore directly.
 - Maximum tasks: 20.
 - Maximum parallel groups: 5.
 - Keep planner input well under the 200K window (target at most around 150K tokens of context) so there is headroom for reasoning and output. This is self-discipline, not an enforced cap: prefer the compact brief and read full sections only on demand.
-- Advisory budget: keep the Plan dispatch under ~5 minutes; the Task tool enforces no wall-clock. At most 2 bounded follow-up rounds to the same Plan dispatch for gaps.
+- Advisory budget: keep ${leadPlansDirectly ? "planning" : "the Plan dispatch"} under ~5 minutes; the Task tool enforces no wall-clock. At most 2 bounded ${leadPlansDirectly ? "self-review passes" : "follow-up rounds to the same Plan dispatch"} for gaps.
 
 ## Procedure (non-trivial work only)
 
@@ -71,7 +108,7 @@ Explore directly.
    - Read the evidence table and residual unknowns from context.md.
    - Identify acceptance criteria, constraints, integration seams, and forbidden changes.
 
-2. Compose the Plan dispatch brief. Include every item below; a vague brief
+2. Compose the ${leadPlansDirectly ? "plan" : "Plan dispatch brief"}. Include every item below; a vague brief
    produces a vague plan, and a vague plan fails downstream:
    - Ask summary and acceptance criteria (or candidates where ambiguous).
    - Constraints, integration seams, and forbidden changes.
@@ -87,7 +124,7 @@ Explore directly.
      context tokens).
    - Plan-mode rule: plan and acceptance criteria only, no implementation
      file edits.
-   - Permission to use Explore and reviewer per the delegation graph.
+   - Permission to use Explore ${leadPlansDirectly ? "per the lead delegation graph" : "and reviewer per the delegation graph"}.
    - Write the brief as plain directives, never reflective first-person prose:
      Gemini-run subagents may suppress tool calls when the prompt contains
      reflective text.
@@ -95,26 +132,18 @@ Explore directly.
      source blocks. Output tokens cost several times input on every profile.
    - Advisory ~5 minute budget.
 
-3. Dispatch ONE Plan subagent via the Agent tool (subagent_type Plan) with
-   that brief, then WAIT for its full return. Do not plan inline in parallel
-   and do not dispatch implementation subagents while it runs.
+${dispatchStep}
 
-4. Validate the returned plan. Every task must name files, state the change
-   and its done condition, and carry runnable acceptance commands;
-   trade-offs must appear as options with a recommendation. If gaps remain,
-   send ONE bounded follow-up to the same Plan dispatch naming the exact gaps
-   (at most 2 follow-up rounds total). If still underspecified, checkpoint
-   with the gaps as residual risk instead of pretending the plan is complete.
+${validateStep}
 
-5. Persist the validated plan to .github-router/plans/<slug>/plan.md.
+${persistStepNumber}. Persist the validated plan to .github-router/plans/<slug>/plan.md.
    - Ask summary and user-blessed acceptance criteria.
    - Blind-spot table with executable-checkable or judgment-only tags.
    - Ordered task list with ids, files, dependencies, parallel groups, acceptance criteria, verification commands, rollback concerns, and estimated context tokens.
    - Open questions and user answers.
    - Cost estimate: task count, parallel groups, and context tokens.
    - Residual risks.
-
-6. Checkpoint with the user and wait for explicit approval.
+${advisorStep}${checkpointStepNumber}. Checkpoint with the user and wait for explicit approval.
    - Present the goal, acceptance criteria, task-to-group map, per-task blind spot killed, residual risks, and cost estimate.
    - If the user rejects scope or cost, downshift to the smallest plan that kills the important blind spots.
    - Do not proceed to implementation without approval.
@@ -133,7 +162,7 @@ Return:
 
 ## Non-goals
 
-- Do not dispatch Plan for a trivial ask; exit with a trivial verdict instead.
+- Do not ${leadPlansDirectly ? "plan a trivial ask" : "dispatch Plan for a trivial ask"}; exit with a trivial verdict instead.
 - Do not edit implementation files while planning; in plan mode, produce the plan and acceptance criteria only.
 - Do not present judgment-only conclusions as executable guarantees.
 - Do not hide open unknowns because the plan looks complete.

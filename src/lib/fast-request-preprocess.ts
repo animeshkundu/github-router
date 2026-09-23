@@ -107,8 +107,7 @@ export function preprocessFastRequest(
     fixedEffort = "max"
   } else if (bare === "gpt-6-sol" || bare === "gpt-6-sol") {
     // Balanced leads at medium by contract (`BALANCED_PROFILE_LEAD_EFFORT`);
-    // every other Sol caller (Plan subagent alias traffic aside, which carries
-    // its own absent-effort default) stays high.
+    // every other Sol caller stays high.
     fixedEffort = profileId === "balanced" && !subagentRequest
       ? BALANCED_PROFILE_LEAD_EFFORT
       : "high"

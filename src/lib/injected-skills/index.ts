@@ -15,7 +15,7 @@ import { buildFloorKeeperSkill, FLOOR_KEEPER_SKILL } from "./floor-keeper-skill"
 import { buildGatherContextSkill, GATHER_CONTEXT_SKILL } from "./gather-context-skill"
 import { buildImplementSkill, IMPLEMENT_SKILL } from "./implement-skill"
 import { buildOrchestrateSkill, ORCHESTRATE_SKILL } from "./orchestrate-skill"
-import { buildPlanSkill, PLAN_SKILL } from "./plan-skill"
+import { buildPlanSkill, PLAN_SKILL, type PlanSkillProfile } from "./plan-skill"
 import { buildResearchSkill, RESEARCH_SKILL } from "./research-skill"
 import { buildSwePipelineSkill, SWE_PIPELINE_SKILL } from "./swe-pipeline-skill"
 import { buildWorkerSkill, WORKER_SKILL } from "./worker-skill"
@@ -30,7 +30,7 @@ export { buildFloorKeeperSkill, FLOOR_KEEPER_SKILL } from "./floor-keeper-skill"
 export { buildGatherContextSkill, GATHER_CONTEXT_SKILL } from "./gather-context-skill"
 export { buildImplementSkill, IMPLEMENT_SKILL } from "./implement-skill"
 export { buildOrchestrateSkill, ORCHESTRATE_SKILL } from "./orchestrate-skill"
-export { buildPlanSkill, PLAN_SKILL } from "./plan-skill"
+export { buildPlanSkill, PLAN_SKILL, type PlanSkillProfile } from "./plan-skill"
 export { buildResearchSkill, RESEARCH_SKILL } from "./research-skill"
 export { buildSwePipelineSkill, SWE_PIPELINE_SKILL } from "./swe-pipeline-skill"
 export { buildWorkerSkill, WORKER_SKILL } from "./worker-skill"
@@ -70,17 +70,20 @@ export interface InjectedSkillSelection {
  * Build the pipeline skills for `--swe` launches on pinned profiles (all
  * 200K default context). The orchestrator (`/gh-swe-pipeline`) runs the
  * other three in strict sequence; the three stages stay individually
- * invokable for users who only want one stage.
+ * invokable for users who only want one stage. Profiles without a `Plan`
+ * role (`cheapest`, `balanced`) get the lead-plans-directly `/gh-plan`
+ * variant.
  */
 export function getPipelineSkills(
   searchEnabled: boolean,
   bluebirdEnabled: boolean = false,
+  profile?: PlanSkillProfile,
 ): ReadonlyArray<InjectedSkill> {
   return [
     buildGatherContextSkill(searchEnabled, bluebirdEnabled),
-    buildPlanSkill(searchEnabled || bluebirdEnabled),
-    buildImplementSkill(searchEnabled || bluebirdEnabled),
-    buildSwePipelineSkill(searchEnabled || bluebirdEnabled),
+    buildPlanSkill(searchEnabled || bluebirdEnabled, profile),
+    buildImplementSkill(searchEnabled || bluebirdEnabled, profile),
+    buildSwePipelineSkill(searchEnabled || bluebirdEnabled, profile),
   ]
 }
 
@@ -152,7 +155,11 @@ export function injectedSkillsForLaunch(
   const searchEnabled = selection.searchEnabled === true
   const bluebirdEnabled = selection.bluebirdEnabled === true
   const allSkills = getInjectedSkills(searchEnabled, bluebirdEnabled)
-  const pipelineSkills = getPipelineSkills(searchEnabled, bluebirdEnabled)
+  const planProfile: PlanSkillProfile | undefined =
+    selection.profileId === "cheapest" || selection.profileId === "balanced"
+      ? selection.profileId
+      : undefined
+  const pipelineSkills = getPipelineSkills(searchEnabled, bluebirdEnabled, planProfile)
   // The SWE pipeline skills are opt-in via `--swe` on pinned profiles only.
   // Without the flag, pinned profiles get NO pipeline slash commands (just
   // first-mate skills on max when enabled); standard keeps the existing

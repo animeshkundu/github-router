@@ -1,6 +1,12 @@
 import type { InjectedSkill } from "./index"
+import type { PlanSkillProfile } from "./plan-skill"
 
-export function buildImplementSkill(_searchEnabled?: boolean): InjectedSkill {
+export function buildImplementSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
+  // Profiles without a Plan role (cheapest, balanced): the lead plans
+  // directly, so close-out wording names planning work, not Plan dispatches.
+  const planDispatches = profile === "cheapest" || profile === "balanced"
+    ? "planning work"
+    : "Plan dispatches"
   return {
   name: "gh-implement",
   md: `---
@@ -49,12 +55,12 @@ tool, never worker-* MCP dispatchers.
 2. Check freshness: if HEAD or the working-tree diff hash moved since the
    plan was approved, re-verify stale load-bearing assumptions before
    dispatching subagents.
-3. Close the previous stage: send no further follow-ups to any lingering Plan
-   dispatches (Explore follow-ups) and record them as superseded with the
+3. Close the previous stage: send no further follow-ups to any lingering ${planDispatches}
+   (Explore follow-ups) and record them as superseded with the
    reason. Native subagents cannot be killed mid-run: let them finish but do
    not wait on or use their output. Implementing while planning still runs
    builds on a moving target and wastes both stages. Only advance once every
-   Plan dispatch has returned or is recorded as superseded.
+   ${planDispatches === "planning work" ? "planning pass has returned" : "Plan dispatch has returned"} or is recorded as superseded.
 
 ## Procedure
 
@@ -104,7 +110,7 @@ Return:
 ## Non-goals
 
 - Do not start without a user-approved plan.md plus its .complete approval record.
-- Do not start while Plan dispatches still run; record them superseded first.
+- ${planDispatches === "planning work" ? "Do not start while planning still runs; record it superseded first." : "Do not start while Plan dispatches still run; record them superseded first."}
 - Do not dispatch a reviewer by default; self-validation plus green checks is the default path.
 - Do not serialize work that has no data dependency; independent tasks in a group run concurrently (sequentialize only in-place edits to shared files).
 - Do not nest workflow invocations: subagents must not re-invoke /gh-implement (or any /gh-* pipeline skill).

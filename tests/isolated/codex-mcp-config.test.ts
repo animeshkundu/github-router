@@ -20,7 +20,6 @@ import { MCP_GROUPS } from "../../src/lib/peer-mcp-personas"
 import {
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
-  CHEAPEST_PLAN_ALIAS_ID,
   CHEAPEST_REVIEWER_ALIAS_ID,
   CHEAP_EXPLORE_ALIAS_ID,
   CHEAP_GENERAL_PURPOSE_ALIAS_ID,
@@ -28,7 +27,6 @@ import {
   CHEAP_REVIEWER_ALIAS_ID,
   BALANCED_EXPLORE_ALIAS_ID,
   BALANCED_GENERAL_PURPOSE_ALIAS_ID,
-  BALANCED_PLAN_ALIAS_ID,
   BALANCED_REVIEWER_ALIAS_ID,
 } from "../../src/lib/launch-profile"
 import { state } from "../../src/lib/state"
@@ -1023,7 +1021,7 @@ describe("buildPeerAgentDefinitions", () => {
   })
 
   describe("cheapest launch profile", () => {
-    const CHEAPEST_ROSTER = ["Explore", "Plan", "General-Purpose", "reviewer"]
+    const CHEAPEST_ROSTER = ["Explore", "General-Purpose", "reviewer"]
 
     function buildCheapestAgents(extra?: Partial<Parameters<typeof buildPeerAgentDefinitions>[0]>) {
       return buildPeerAgentDefinitions({
@@ -1040,26 +1038,24 @@ describe("buildPeerAgentDefinitions", () => {
         // must still emit aliases (a bare real id would be catalog-resolved
         // to [1m] by the client).
         cheapestExploreModel: "gpt-6-luna",
-        cheapestPlanModel: "gpt-6-sol",
         cheapestGeneralPurposeModel: "gpt-6-luna",
         cheapestReviewerModel: "gpt-6-sol",
         ...extra,
       })
     }
 
-    test("emits exactly the same four-agent roster as cheap", () => {
+    test("emits exactly the three-agent roster (no Plan)", () => {
       const agents = buildCheapestAgents()
-      expect(Object.keys(agents).sort()).toEqual(["Explore", "General-Purpose", "Plan", "reviewer"])
+      expect(Object.keys(agents).sort()).toEqual(["Explore", "General-Purpose", "reviewer"])
       for (const absent of [
         "peer-review-coordinator", "codex-critic", "gemini-critic", "opus-critic",
-        "implementer", "implementer-fast", "reviewer-fast", "brainstorm", "scribe", "general-purpose-fast", "general-purpose", "critic", "planner",
+        "implementer", "implementer-fast", "reviewer-fast", "brainstorm", "scribe", "general-purpose-fast", "general-purpose", "critic", "planner", "Plan",
       ]) expect(agents[absent]).toBeUndefined()
     })
 
     test("pins BARE alias role models (no [1m], no catalog-resolvable id) and the fixed efforts", () => {
       const agents = buildCheapestAgents()
       expect(agents.Explore!.model).toBe(CHEAPEST_EXPLORE_ALIAS_ID)
-      expect(agents.Plan!.model).toBe(CHEAPEST_PLAN_ALIAS_ID)
       expect(agents["General-Purpose"]!.model).toBe(CHEAPEST_GENERAL_PURPOSE_ALIAS_ID)
       expect(agents.reviewer!.model).toBe(CHEAPEST_REVIEWER_ALIAS_ID)
       for (const def of Object.values(agents)) {
@@ -1068,19 +1064,17 @@ describe("buildPeerAgentDefinitions", () => {
       }
 
       expect(agents.Explore!.effort).toBe("high")
-      expect(agents.Plan!.effort).toBe("high")
       expect(agents["General-Purpose"]!.effort).toBe("max")
       expect(agents.reviewer!.effort).toBe("high")
 
       expect(agents.Explore!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
       expect(agents.reviewer!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
-      expect(agents.Plan!.tools).toContain("Agent")
-      expect(agents.Plan!.tools).toContain("mcp__peers__oracle")
-      expect(agents.Plan!.tools).toContain("mcp__search__*")
-      expect(agents.reviewer!.tools).not.toContain("mcp__peers__oracle")
-      expect(agents.reviewer!.mcpServers).not.toHaveProperty("peers")
-      expect(agents.Plan!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything(), search: expect.anything() }))
-      expect(agents.Plan!.prompt).toContain("Oracle")
+      // Oracle is lead-only: no emitted cheapest native carries the oracle
+      // tool or the peers server.
+      for (const def of Object.values(agents)) {
+        expect(def.tools ?? []).not.toContain("mcp__peers__oracle")
+        expect(def.mcpServers ?? {}).not.toHaveProperty("peers")
+      }
       expect(agents.reviewer!.prompt).not.toContain("Oracle")
     })
 
@@ -1093,8 +1087,8 @@ describe("buildPeerAgentDefinitions", () => {
     })
 
     test("nativeRoster remains a hard filter on the cheapest definitions", () => {
-      const agents = buildCheapestAgents({ nativeRoster: ["Plan"] })
-      expect(Object.keys(agents)).toEqual(["Plan"])
+      const agents = buildCheapestAgents({ nativeRoster: ["Explore"] })
+      expect(Object.keys(agents)).toEqual(["Explore"])
     })
 
     test("every cheapest agent name matches the permanent sweep allowlist", () => {
@@ -1106,7 +1100,7 @@ describe("buildPeerAgentDefinitions", () => {
   })
 
   describe("balanced launch profile", () => {
-    const BALANCED_ROSTER = ["Explore", "Plan", "General-Purpose", "reviewer"]
+    const BALANCED_ROSTER = ["Explore", "General-Purpose", "reviewer"]
 
     function buildBalancedAgents(extra?: Partial<Parameters<typeof buildPeerAgentDefinitions>[0]>) {
       return buildPeerAgentDefinitions({
@@ -1123,19 +1117,18 @@ describe("buildPeerAgentDefinitions", () => {
       })
     }
 
-    test("emits exactly the same four-agent roster as cheap", () => {
+    test("emits exactly the three-agent roster (no Plan)", () => {
       const agents = buildBalancedAgents()
-      expect(Object.keys(agents).sort()).toEqual(["Explore", "General-Purpose", "Plan", "reviewer"])
+      expect(Object.keys(agents).sort()).toEqual(["Explore", "General-Purpose", "reviewer"])
       for (const absent of [
         "peer-review-coordinator", "codex-critic", "gemini-critic", "opus-critic",
-        "implementer", "implementer-fast", "reviewer-fast", "brainstorm", "scribe", "general-purpose-fast", "general-purpose", "critic", "planner",
+        "implementer", "implementer-fast", "reviewer-fast", "brainstorm", "scribe", "general-purpose-fast", "general-purpose", "critic", "planner", "Plan",
       ]) expect(agents[absent]).toBeUndefined()
     })
 
     test("pins BARE balanced aliases with explicit delegation tuning", () => {
       const agents = buildBalancedAgents()
       expect(agents.Explore!.model).toBe(BALANCED_EXPLORE_ALIAS_ID)
-      expect(agents.Plan!.model).toBe(BALANCED_PLAN_ALIAS_ID)
       expect(agents["General-Purpose"]!.model).toBe(BALANCED_GENERAL_PURPOSE_ALIAS_ID)
       expect(agents.reviewer!.model).toBe(BALANCED_REVIEWER_ALIAS_ID)
       for (const def of Object.values(agents)) {
@@ -1144,25 +1137,26 @@ describe("buildPeerAgentDefinitions", () => {
       }
 
       expect(agents.Explore!.effort).toBe("high")
-      expect(agents.Plan!.effort).toBe("high")
       expect(agents["General-Purpose"]!.effort).toBe("max")
       expect(agents.reviewer!.effort).toBe("high")
 
       // Explicit delegation tuning (complex tasks): proactive parallel
-      // Explore, Plan-first discovery delegation, and reviewer verification.
+      // Explore and reviewer verification; the lead owns planning directly.
       expect(agents.Explore!.description).toContain("Use proactively")
-      expect(agents.Plan!.prompt).toContain("delegate discovery to `Explore`")
-      expect(agents.Plan!.prompt).toContain("General-Purpose execution agent")
       expect(agents["General-Purpose"]!.prompt).toContain("Plan handoff")
       expect(agents["General-Purpose"]!.description).not.toContain("implementer")
       expect(agents.reviewer!.description).toContain("Use proactively")
-      // Balanced: Plan/Reviewer delegate ONLY when genuinely needed (lead
+      // Balanced: reviewer delegates ONLY when genuinely needed (lead
       // owns by default); Luna-powered General-Purpose delegates freely.
-      expect(agents.Plan!.description).toContain("ONLY when")
-      expect(agents.Plan!.description).toContain("lead owns planning by default")
       expect(agents.reviewer!.description).toContain("ONLY when")
       expect(agents.reviewer!.description).toContain("lead owns verification by default")
       expect(agents["General-Purpose"]!.description).toContain("Use proactively and FREELY")
+      // Oracle is lead-only: no emitted balanced native carries the oracle
+      // tool or the peers server.
+      for (const def of Object.values(agents)) {
+        expect(def.tools ?? []).not.toContain("mcp__peers__oracle")
+        expect(def.mcpServers ?? {}).not.toHaveProperty("peers")
+      }
     })
 
     test("cheapest stays implicit while balanced stays explicit", () => {
@@ -1174,11 +1168,11 @@ describe("buildPeerAgentDefinitions", () => {
         codexHome: "/tmp/codex",
         cheapestProfile: true,
         serverUrl: URL,
-        nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
+        nativeRoster: ["Explore", "General-Purpose", "reviewer"],
         includeCoordinator: false,
       })
       expect(cheapest.Explore!.description).not.toContain("Use proactively")
-      expect(cheapest.Plan!.prompt).not.toContain("launching one or more `Explore` subagents in parallel")
+      expect(cheapest["General-Purpose"]!.description).not.toContain("Use proactively")
     })
 
     test("Explore prompt distinguishes lexical, local semantic, and Bluebird search", () => {
@@ -1215,9 +1209,6 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents.reviewer!.prompt).toContain("delegate targeted discovery to `Explore`")
       expect(agents.reviewer!.prompt).toContain("You may invoke only `Explore`")
       expect(agents.reviewer!.prompt).not.toContain("do not delegate to other agents")
-      // Plan names the exact Oracle MCP tool.
-      expect(agents.Plan!.prompt).toContain("consult `mcp__peers__oracle`")
-      expect(agents.Plan!.tools).toContain("mcp__peers__oracle")
     })
 
     test("non-balanced reviewers stay terminal with no Explore delegation", () => {
@@ -1246,12 +1237,12 @@ describe("buildPeerAgentDefinitions", () => {
         codexHome: "/tmp/codex",
         cheapestProfile: true,
         serverUrl: URL,
-        nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
+        nativeRoster: ["Explore", "General-Purpose", "reviewer"],
         includeCoordinator: false,
       })
       const countNeedle = (haystack: string, needle: string): number =>
         haystack.split(needle).length - 1
-      for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
+      for (const name of ["Explore", "General-Purpose", "reviewer"] as const) {
         expect(countNeedle(cheapestAgents[name]!.description, "200K context window")).toBe(1)
         expect(countNeedle(cheapestAgents[name]!.prompt, "You operate at a 200K context window")).toBe(1)
       }
@@ -1276,7 +1267,7 @@ describe("buildPeerAgentDefinitions", () => {
       }
 
       const balancedAgents = buildBalancedAgents()
-      for (const name of ["Explore", "Plan", "General-Purpose", "reviewer"] as const) {
+      for (const name of ["Explore", "General-Purpose", "reviewer"] as const) {
         expect(countNeedle(balancedAgents[name]!.description, "200K context window")).toBe(1)
         expect(countNeedle(balancedAgents[name]!.prompt, "You operate at a 200K context window")).toBe(1)
       }
@@ -1298,8 +1289,8 @@ describe("buildPeerAgentDefinitions", () => {
     })
 
     test("nativeRoster remains a hard filter on the balanced definitions", () => {
-      const agents = buildBalancedAgents({ nativeRoster: ["Plan"] })
-      expect(Object.keys(agents)).toEqual(["Plan"])
+      const agents = buildBalancedAgents({ nativeRoster: ["Explore"] })
+      expect(Object.keys(agents)).toEqual(["Explore"])
     })
   })
 
@@ -1313,6 +1304,7 @@ describe("buildPeerAgentDefinitions", () => {
       serverUrl: URL,
     }
     const roster = ["Explore", "Plan", "General-Purpose", "reviewer"]
+    const cheapestBalancedRoster = ["Explore", "General-Purpose", "reviewer"]
     const catalogs = [
       buildPeerAgentDefinitions({
         ...common,
@@ -1352,18 +1344,17 @@ describe("buildPeerAgentDefinitions", () => {
       buildPeerAgentDefinitions({
         ...common,
         cheapestProfile: true,
-        nativeRoster: roster,
+        nativeRoster: cheapestBalancedRoster,
         includeCoordinator: false,
         browseAvailable: true,
         cheapestExploreModel: "gpt-6-luna",
-        cheapestPlanModel: "gpt-6-sol",
         cheapestGeneralPurposeModel: "gpt-6-luna",
         cheapestReviewerModel: "gpt-6-sol",
       }),
       buildPeerAgentDefinitions({
         ...common,
         balancedProfile: true,
-        nativeRoster: roster,
+        nativeRoster: cheapestBalancedRoster,
         includeCoordinator: false,
         browseAvailable: true,
       }),

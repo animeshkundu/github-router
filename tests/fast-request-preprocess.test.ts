@@ -6,7 +6,6 @@ import {
   BALANCED_REVIEWER_ALIAS_ID,
   CHEAPEST_EXPLORE_ALIAS_ID,
   CHEAPEST_GENERAL_PURPOSE_ALIAS_ID,
-  CHEAPEST_PLAN_ALIAS_ID,
   CHEAPEST_REVIEWER_ALIAS_ID,
   CHEAP_EXPLORE_ALIAS_ID,
   CHEAP_IMPLEMENTER_ALIAS_ID,
@@ -348,7 +347,6 @@ describe("fast request preprocessing", () => {
     test("cheapest role aliases canonicalize bare with alias effort on subagents", () => {
       for (const [alias, real, effort] of [
         [CHEAPEST_EXPLORE_ALIAS_ID, "gpt-6-luna", "high"],
-        [CHEAPEST_PLAN_ALIAS_ID, "gpt-6-sol", "high"],
         [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, "gpt-6-luna", "max"],
         [CHEAPEST_REVIEWER_ALIAS_ID, "gpt-6-sol", "high"],
       ] as const) {
