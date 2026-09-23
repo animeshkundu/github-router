@@ -278,11 +278,11 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // for the same static-import-graph reason as the cheap entries above.
   cheapestOracleModel: mock(() => "gpt-6-sol"),
   cheapestAdvisorModel: mock(() => "gpt-6-sol"),
-  cheapestReviewerModel: mock(() => "gemini-3.8-flash"),
+  cheapestReviewerModel: mock(() => "gpt-6-sol"),
   // Balanced-profile resolvers (only exercised under `-m balanced`); stubbed
   // for the same static-import-graph reason as the cheap entries above.
   balancedOracleModel: mock(() => "grok-4.6"),
-  balancedReviewerModel: mock(() => "gemini-3.8-flash"),
+  balancedReviewerModel: mock(() => "gpt-6-sol"),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
   FAST_GENERAL_PURPOSE_EFFORT: "max",

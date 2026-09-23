@@ -50,6 +50,7 @@ import {
 import {
   CHEAPEST_PROFILE_ADVISOR_EFFORT,
   CHEAPEST_PROFILE_ADVISOR_MODEL,
+  CHEAPEST_PROFILE_MODELS,
   CHEAPEST_PROFILE_NATIVE_EFFORTS,
   CHEAPEST_PROFILE_ORACLE_EFFORT,
   CHEAPEST_PROFILE_ORACLE_MODEL,
@@ -606,16 +607,16 @@ export function cheapestOracleModel(): string | undefined {
   return CHEAPEST_PROFILE_ORACLE_MODEL
 }
 
-/** Gemini/high reviewer for the cheapest profile at the 200K default window. */
+/** Sol/high reviewer for the cheapest profile at the 200K default window. */
 export function cheapestReviewerModel(): string | undefined {
-  const reviewer = state.models?.data.find((m) => m.id === "gemini-3.8-flash")
+  const reviewer = state.models?.data.find((m) => m.id === CHEAPEST_PROFILE_MODELS.reviewer)
   if (!reviewer) return undefined
   if (reviewer.capabilities?.supports?.tool_calls !== true) return undefined
   if ((reviewer.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
   const efforts = reviewer.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
-  if (fastEndpointForModel(reviewer) !== "chat") return undefined
-  return "gemini-3.8-flash"
+  if (fastEndpointForModel(reviewer) !== "responses") return undefined
+  return CHEAPEST_PROFILE_MODELS.reviewer
 }
 
 /** Exact GPT-6 Astra only: cheap escalation consultant at 200K/medium. */
@@ -644,7 +645,7 @@ export function balancedOracleModel(): string | undefined {
   return BALANCED_PROFILE_ORACLE_MODEL
 }
 
-/** Gemini/high reviewer for the balanced profile at the 200K default window. */
+/** Sol/high reviewer for the balanced profile at the 200K default window. */
 export function balancedReviewerModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === BALANCED_PROFILE_MODELS.reviewer)
   if (!found) return undefined
@@ -652,7 +653,7 @@ export function balancedReviewerModel(): string | undefined {
   if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
   if (!Array.isArray(efforts) || !efforts.includes(BALANCED_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
-  if (fastEndpointForModel(found) !== "chat") return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
   return BALANCED_PROFILE_MODELS.reviewer
 }
 

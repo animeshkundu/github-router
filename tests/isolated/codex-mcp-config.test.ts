@@ -1042,7 +1042,7 @@ describe("buildPeerAgentDefinitions", () => {
         cheapestExploreModel: "gpt-6-luna",
         cheapestPlanModel: "gpt-6-sol",
         cheapestGeneralPurposeModel: "gpt-6-luna",
-        cheapestReviewerModel: "gemini-3.8-flash",
+        cheapestReviewerModel: "gpt-6-sol",
         ...extra,
       })
     }
@@ -1358,7 +1358,7 @@ describe("buildPeerAgentDefinitions", () => {
         cheapestExploreModel: "gpt-6-luna",
         cheapestPlanModel: "gpt-6-sol",
         cheapestGeneralPurposeModel: "gpt-6-luna",
-        cheapestReviewerModel: "gemini-3.8-flash",
+        cheapestReviewerModel: "gpt-6-sol",
       }),
       buildPeerAgentDefinitions({
         ...common,

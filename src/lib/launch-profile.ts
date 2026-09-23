@@ -46,7 +46,7 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  contract values; the three gates that differ are the lead slug, the lead
  *  prereq window, and the cheap1m-only `astra` peer. `"cheapest"` is the
  *  all-200K cheapest tier: a Luna/max lead, Luna Explore/GP roles, a Sol/high
- *  Plan and Oracle, a Gemini/high reviewer and a Sol/medium Advisor —
+ *  Plan, Oracle, and reviewer, and a Sol/medium Advisor —
  *  Oracle-only peer
  *  set, no `astra` (see `./cheapest-profile-contract`). `"balanced"` is the
  *  most-complex-tasks tier: a Sol/high lead at the 200K default window, the
@@ -149,7 +149,7 @@ export const CHEAP_PROFILE: LaunchProfileDescriptor = Object.freeze({
 /**
  * The `-m cheapest` roster: the exact cheap surface and groups, but Luna-led
  * (`gpt-6-luna`/max at the 200K default window), a Sol/medium Advisor, a
- * Sol/high Oracle, and a Gemini/high reviewer. Oracle-only peer set, no
+ * Sol/high Oracle, and a Sol/high reviewer. Oracle-only peer set, no
  * `astra`. Hard-denies match fast's: core workers, `orchestrate`, `decide`,
  * `fleet`, and `first-mate`.
  */
@@ -967,8 +967,8 @@ const CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS =
 
 /**
  * Validate the live Copilot catalog for `-m cheapest`: Luna lead at the 200K
- * default window, Luna Explore/GP roles, a Sol Plan and Oracle, a Gemini
- * reviewer, and a Sol/medium Advisor — all at the 200K default with
+ * default window, Luna Explore/GP roles, a Sol Plan, Oracle, and reviewer,
+ * and a Sol/medium Advisor — all at the 200K default with
  * their fixed efforts and supported endpoints.
  */
 export function validateCheapestProfilePrerequisites(
@@ -1025,24 +1025,24 @@ export function validateCheapestProfilePrerequisites(
     }
   }
 
-  const gemini = findModel(catalog, CHEAPEST_PROFILE_MODELS.reviewer)
-  if (!gemini) {
+  const reviewer = findModel(catalog, CHEAPEST_PROFILE_MODELS.reviewer)
+  if (!reviewer) {
     missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: absent from the live catalog`)
   } else {
-    if (!hasToolCalls(gemini)) {
+    if (!hasToolCalls(reviewer)) {
       missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
     }
-    if (!hasContextAtLeast(gemini, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+    if (!hasContextAtLeast(reviewer, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
       missing.push(
         `${CHEAPEST_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
       )
     }
-    if (!supportsEffort(gemini, "high")) {
+    if (!supportsEffort(reviewer, "high")) {
       missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise a "high" reasoning effort`)
     }
-    if (!supportsEndpoint(gemini, "chat")) {
+    if (!supportsEndpoint(reviewer, "responses")) {
       missing.push(
-        `${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise a supported chat-completions endpoint`,
+        `${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`,
       )
     }
   }
@@ -1083,8 +1083,8 @@ const BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS =
 
 /**
  * Validate the live Copilot catalog for `-m balanced`: Sol lead at the 200K
- * default window, Luna Explore/General-Purpose roles, Sol Plan, Gemini
- * reviewer, and a Grok Oracle — all at the 200K default with their
+ * default window, Luna Explore/General-Purpose roles, Sol Plan and reviewer,
+ * and a Grok Oracle — all at the 200K default with their
  * fixed efforts and supported endpoints.
  */
 export function validateBalancedProfilePrerequisites(
@@ -1169,9 +1169,9 @@ export function validateBalancedProfilePrerequisites(
     if (!supportsEffort(balancedReviewer, "high")) {
       missing.push(`${BALANCED_PROFILE_MODELS.reviewer}: does not advertise a "high" reasoning effort`)
     }
-    if (!supportsEndpoint(balancedReviewer, "chat")) {
+    if (!supportsEndpoint(balancedReviewer, "responses")) {
       missing.push(
-        `${BALANCED_PROFILE_MODELS.reviewer}: does not advertise a supported chat-completions endpoint`,
+        `${BALANCED_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`,
       )
     }
   }

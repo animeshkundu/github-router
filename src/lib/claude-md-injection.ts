@@ -188,7 +188,7 @@ export interface NativeAgentAvailability {
    *  restricted roster prose with the cheap family's oracle identities
    *  (`"cheap1m"` additionally wires the astra peer). `"cheapest"` selects
    *  the same restricted roster prose with the cheapest identities
-   *  (Luna lead, Gemini reviewer/Advisor, Sol Oracle; never astra).
+   *  (Luna lead, Sol reviewer/Advisor/Oracle; never astra).
    *  `"balanced"` selects the same restricted roster prose Sol-led with the
    *  Grok Oracle (never astra). When set,
    *  `buildNativeReachClauses` and

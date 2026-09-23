@@ -220,7 +220,7 @@ interface BuildOpts {
   cheapImplementerModel?: string
   cheapReviewerModel?: string
   /** Cheapest-profile role assignments. Same fixed surface as cheap, but
-   *  Luna-led with a Gemini reviewer/Advisor and Sol Oracle — every emitted
+   *  Luna-led with a Sol reviewer/Advisor and Oracle — every emitted
    *  model BARE (200K default window). */
   cheapestProfile?: boolean
   cheapestExploreModel?: string
@@ -812,7 +812,7 @@ function buildMaxProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions 
  *      to reach for semantic.
  *   3. `Explore` (budget model) — reads the narrowed files and synthesizes a
  *      file:line evidence report. Only the conclusion flows upward.
- *   4. `Plan` (Sol) / `reviewer` (Sonnet/Luna/Gemini) / `oracle` — expensive
+ *   4. `Plan` (Sol) / `reviewer` (Sonnet/Luna/Sol) / `oracle` — expensive
  *      models see ONLY the synthesized subset, never raw search output.
  *
  * Per-mode tuning:
@@ -1258,7 +1258,7 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
 }
 
 /** Build the literal `-m cheapest` native roster. Same fixed four-agent
- * surface and roles as `-m cheap`, but Luna-led with a Gemini reviewer —
+ * surface and roles as `-m cheap`, but Luna-led with a Sol reviewer —
  * every SUBAGENT model is a BARE router-owned alias
  * (`gh-router-cheapest-*`, no `[1m]`) rather than a real catalog id, for the
  * same client catalog-resolution reason as the cheap builder above: a bare

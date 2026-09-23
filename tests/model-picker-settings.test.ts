@@ -182,12 +182,10 @@ describe("selectableModelsInCatalog", () => {
     expect(ids("cheapest")).toEqual([
       "gpt-6-sol",
       "gpt-6-luna[1m]",
-      "gemini-3.8-flash",
     ])
     expect(ids("balanced")).toEqual([
       "gpt-6-sol",
       "gpt-6-luna[1m]",
-      "gemini-3.8-flash",
       "grok-4.6",
     ])
     for (const profile of ["cheapest", "balanced"] as const) {
@@ -235,8 +233,8 @@ describe("selectableModelsInCatalog", () => {
     setCatalog(WINDOWS)
     for (
       const [profile, expected] of [
-        ["cheapest", ["gpt-6-sol", "gpt-6-luna[1m]", "gemini-3.8-flash"]],
-        ["balanced", ["gpt-6-sol", "gpt-6-luna[1m]", "gemini-3.8-flash", "grok-4.6"]],
+        ["cheapest", ["gpt-6-sol", "gpt-6-luna[1m]"]],
+        ["balanced", ["gpt-6-sol", "gpt-6-luna[1m]", "grok-4.6"]],
       ] as const
     ) {
       const result = await injectModelPickerSettingsFile(settingsPath, profile)

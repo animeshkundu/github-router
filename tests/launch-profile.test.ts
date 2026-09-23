@@ -458,7 +458,6 @@ describe("balanced startup prerequisites", () => {
     data: [
       model("gpt-6-sol", { context: 500_000, prompt: 372_000, efforts: ["high"], endpoints: ["/responses"] }),
       model("gpt-6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
-      model("gemini-3.8-flash", { context: 500_000, efforts: ["medium", "high"], endpoints: ["/chat/completions"] }),
       model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["low", "medium"], endpoints: ["/responses"] }),
     ],
   })
@@ -474,7 +473,6 @@ describe("balanced startup prerequisites", () => {
     const message = formatBalancedPrerequisiteFailure(result.missing)
     expect(message).toContain("gpt-6-sol")
     expect(message).toContain("gpt-6-luna")
-    expect(message).toContain("gemini-3.8-flash")
     expect(message).toContain("grok-4.6")
     expect(message).toContain("github-router claude -m balanced")
   })
