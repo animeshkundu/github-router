@@ -209,9 +209,12 @@ const TEST_DEFAULT_THINKING: WorkerThinkingLevel = "high"
  *  between the two would ship a tool whose docs disagree with its runtime
  *  default. */
 export const BROWSE_DEFAULT_MODEL = "gpt-6-luna"
-/** Default thinking for `browse`. Higher than the page-driving workload
- *  strictly needs, but the termination discipline benefits from it. */
-const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
+/** Default thinking for `browse`. Page-driving is observation-heavy but
+ *  reasoning-light, so `low` fits the workload; callers that need deeper
+ *  judgment restore a higher tier per call via `thinking` or per session via
+ *  `worker_defaults`. Unadvertised tiers clamp fail-safe in model resolution,
+ *  so this default never rejects on a thinner catalog. */
+const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "low"
 
 /** Default model + thinking for the read-only `plan` mode. `claude-opus-5.5`
  *  at `high` favours time-to-outcome while retaining the strongest planning
