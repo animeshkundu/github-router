@@ -13,7 +13,7 @@ import { withInstallLock } from "./update-lock"
 
 export const PI_NPM_PACKAGE = "@earendil-works/pi-coding-agent"
 /** Minimum Pi version the `pi` launcher supports. */
-export const PI_MIN_VERSION = "0.80.10"
+export const PI_MIN_VERSION = "0.87.1"
 const THROTTLE_HOURS = 1
 const NPM_VIEW_TIMEOUT_MS = 5000
 const PI_VERSION_TIMEOUT_MS = 3000

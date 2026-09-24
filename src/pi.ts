@@ -95,6 +95,18 @@ export const piArgs = {
     description:
       "Wire the peer/subagent floor: native agent files, the oracle tool (plus cheapest-only advisor), the gh-oracle skill, and the pi-subagents package. Set to false (--no-peers) for a lead-only session; prereqs then validate the lead model only.",
   },
+  helpers: {
+    type: "boolean" as const,
+    default: true,
+    description:
+      "Wire the helpful bundle: pi-mcp-adapter, allowlisted pi-agent-extensions (sessions, ask_user, todos, handoff, context, files, analytics — no review/loop/footer), and pi-web-access when neither --search nor --browse is on. Set to false (--no-helpers) for pi-subagents + gh-router-pi only.",
+  },
+  ui: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Load the Claude-look UI bundle (pi-code behaviors + pi-claude-code-ui transcript). Off by default; bare launches stay minimal.",
+  },
   "memory-bridge": {
     type: "boolean" as const,
     default: true,
@@ -272,6 +284,8 @@ export const pi = defineCommand({
     // skills or prompts — only what Pi ships plus the mode identity.
     const peersEnabled = (args as Record<string, unknown>)["peers"] !== false
     const sweEnabled = (args as Record<string, unknown>)["swe"] === true
+    const helpersEnabled = (args as Record<string, unknown>)["helpers"] !== false
+    const uiEnabled = (args as Record<string, unknown>)["ui"] === true
 
     // Pin-mode prerequisites against the live catalog (fail-closed).
     // Peerless launches validate the lead only (nothing else is consumed).
@@ -317,6 +331,8 @@ export const pi = defineCommand({
           maxOutputTokens: m.capabilities?.limits?.max_output_tokens ?? 0,
           efforts: m.capabilities?.supports?.reasoning_effort ?? [],
           endpoints: m.supported_endpoints ?? [],
+          vision: m.capabilities?.supports?.vision,
+          maxImageBytes: m.capabilities?.limits?.vision?.max_prompt_image_size,
           ...(cost ? { cost } : {}),
         }
       })
@@ -342,7 +358,7 @@ export const pi = defineCommand({
       // user's entries win per-agent) so emitting our builtin disables never
       // wipes a user's own overrides — a shallow spread would replace the
       // whole object.
-      const builtSettings = buildPiSettingsJson({ profileId, searchEnabled, browseEnabled, catalog, peers: peersEnabled })
+      const builtSettings = buildPiSettingsJson({ profileId, searchEnabled, browseEnabled, catalog, peers: peersEnabled, helpers: helpersEnabled, ui: uiEnabled })
       const mergedSubagents = mergeSubagentsSettings(
         userSettings["subagents"],
         builtSettings.subagents,
@@ -540,6 +556,8 @@ export const pi = defineCommand({
     const modelIds = piProfileModelIds(profileId, { peers: peersEnabled })
     const surface = [
       `peers=${peersEnabled ? "on" : "off"}`,
+      `helpers=${helpersEnabled && peersEnabled ? "on" : "off"}`,
+      `ui=${uiEnabled ? "on" : "off"}`,
       `swe=${sweEnabled ? "on" : "off"}`,
     ].join(" ")
     process.stderr.write(
