@@ -94,6 +94,12 @@ export const piArgs = {
     description:
       "Wire the peer/subagent floor: native agent files, the oracle tool (plus cheapest-only advisor), the gh-oracle skill, and the pi-subagents package. Set to false (--no-peers) for a lead-only session; prereqs then validate the lead model only.",
   },
+  "memory-bridge": {
+    type: "boolean" as const,
+    default: true,
+    description:
+      "Bridge Copilot (.github/copilot-instructions.md, .github/instructions/*.instructions.md) and Claude (.claude/rules/, .claude/CLAUDE.md, ~/.claude/CLAUDE.md) memory into Pi. Static repo-wide slice synthesizes into the mirror AGENTS.md; path-scoped rules lazy-attach. Set to false (--no-memory-bridge) for Pi-native discovery only.",
+  },
 } satisfies ArgsDef
 
 /**
@@ -335,9 +341,51 @@ export const pi = defineCommand({
         ...buildPiSettingsJson({ profileId, searchEnabled, browseEnabled, catalog, peers: peersEnabled }),
       })
 
+      // Memory bridge collection runs BEFORE the extension build so scoped
+      // rules + stats can be embedded for lazy attach + /memory + /context.
+      // Best-effort, never fatal. Honors --no-memory-bridge,
+      // GH_ROUTER_PI_BRIDGE=0 / GH_ROUTER_DISABLE_PI_BRIDGE=1, and Pi's own
+      // --no-context-files/-nc passthrough (never fight an explicit `-nc`).
+      const bridgeDisabled =
+        (args as Record<string, unknown>)["memory-bridge"] === false
+        || process.env.GH_ROUTER_PI_BRIDGE === "0"
+        || process.env.GH_ROUTER_DISABLE_PI_BRIDGE === "1"
+      let bridgeStats: { staticFiles: number; scopedRules: number; imports: number; skipped: number } | undefined
+      let bridgeScoped: Array<{ file: string; body: string; globs: Array<string>; source: string }> = []
+      if (!bridgeDisabled) {
+        const passthrough = collectPiPassthroughArgs(rawArgs, piArgs)
+        const noContext = passthrough.includes("--no-context-files") || passthrough.includes("-nc")
+        if (!noContext) {
+          try {
+            const { collectBridgeInputs } = await import("./lib/pi-memory-bridge")
+            const collected = await collectBridgeInputs(process.cwd())
+            bridgeStats = {
+              staticFiles:
+                collected.copilotInstructions.length
+                + collected.unscopedRules.length
+                + collected.userGlobal.length,
+              scopedRules: collected.scopedRules.length,
+              imports: collected.imports.length,
+              skipped: collected.skipped.length,
+            }
+            bridgeScoped = collected.scopedRules
+            // Stash full collection for the AGENTS.md synthesis below.
+            ;(globalThis as Record<string, unknown>).__ghRouterBridgeCollected = collected
+          } catch (err) {
+            consola.debug("Pi memory bridge collection skipped:", err)
+          }
+        }
+      }
+
       await writeTextFile(
         path.join(mirror, "extensions", "gh-router-pi", "index.ts"),
-        buildPiExtensionSource({ profileId, searchEnabled, browseEnabled, peers: peersEnabled }),
+        buildPiExtensionSource({
+          profileId,
+          searchEnabled,
+          browseEnabled,
+          peers: peersEnabled,
+          bridge: bridgeStats ? { stats: bridgeStats, scopedRules: bridgeScoped } : undefined,
+        }),
       )
       // Peer floor (agents + consult skills) rides --peers; the SWE
       // pipeline (delegate/advisor skills, review prompts) rides --swe;
@@ -355,6 +403,38 @@ export const pi = defineCommand({
         await writeTextFile(path.join(mirror, "prompts", `${prompt.name}.md`), prompt.content)
       }
       await writeTextFile(path.join(mirror, "APPEND_SYSTEM.md"), buildPiAppendSystem(profileId, { peers: peersEnabled }))
+
+      // Static bridge synthesis into mirror AGENTS.md (Pi-native candidate).
+      // Uses the collection stashed above; idempotent via fenced replace.
+      try {
+        const collected = (globalThis as Record<string, unknown>).__ghRouterBridgeCollected as
+          | import("./lib/pi-memory-bridge").PiBridgeCollected
+          | undefined
+        if (collected) {
+          const { buildMirrorBridgeSection, mergeBridgeIntoAgentsMd } = await import("./lib/pi-memory-bridge")
+          const { section } = buildMirrorBridgeSection(collected, { repoRoot: process.cwd() })
+          const agentsPath = path.join(mirror, "AGENTS.md")
+          let existing: string | undefined
+          try {
+            existing = await fs.readFile(agentsPath, "utf8")
+          } catch {
+            existing = undefined
+          }
+          await writeTextFile(agentsPath, mergeBridgeIntoAgentsMd(existing, section))
+          await writeJsonFile(path.join(mirror, ".gh-router-bridge.json"), {
+            stats: bridgeStats ?? null,
+            scopedRuleFiles: bridgeScoped.map((r) => r.file),
+          })
+        }
+      } catch (err) {
+        consola.debug("Pi memory bridge synthesis skipped:", err)
+      } finally {
+        try {
+          delete (globalThis as Record<string, unknown>).__ghRouterBridgeCollected
+        } catch {
+          // ignore
+        }
+      }
     } catch (err) {
       consola.error(
         `Failed to write Pi launch files: ${err instanceof Error ? err.message : String(err)}.`,

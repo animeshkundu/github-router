@@ -262,11 +262,135 @@ export function buildPiStatuslineFooterSection(): Array<string> {
   ]
 }
 
+export interface PiBridgeExtensionInput {
+  stats: { staticFiles: number; scopedRules: number; imports: number; skipped: number }
+  scopedRules: Array<{ file: string; body: string; globs: Array<string>; source: string }>
+}
+
+/**
+ * Memory-bridge section for the generated extension: path-scoped rules
+ * lazy-attach on `read/edit/write` tool results (once per rule per
+ * session, mirroring `pi-code/claude-rules.ts`), plus `/memory` (bridge
+ * inventory + auto-memory locations, on-demand only) and `/context`
+ * (what bridged vs skipped). Fail-open: every handler is try/catch and
+ * returns undefined on any error so Pi native behavior is preserved.
+ */
+export function buildPiMemoryBridgeSection(bridge: PiBridgeExtensionInput): Array<string> {
+  // Cap embedded rule bodies so one giant rule can't bloat the mirror
+  // extension source (static slice already has its own 24KB budget).
+  const cappedRules = bridge.scopedRules.map((r) => ({
+    file: r.file,
+    body:
+      r.body.length > 8000 ? `${r.body.slice(0, 8000)}\n…[truncated by gh-router memory bridge]` : r.body,
+    globs: r.globs,
+    source: r.source,
+  }))
+  const payload = JSON.stringify({ stats: bridge.stats, scopedRules: cappedRules })
+  return [
+    `  // Memory bridge: lazy path-scoped rules + /memory + /context (on-demand only).`,
+    `  {`,
+    `    let BRIDGE = null;`,
+    `    try { BRIDGE = ${payload}; } catch { BRIDGE = null; }`,
+    `    const attached = new Set();`,
+    `    function globToRegExp(glob) {`,
+    `      let g = String(glob || "").trim().replace(/^\\.\\//, "").replace(/^\\/+/, "");`,
+    `      let re = "";`,
+    `      for (let k = 0; k < g.length;) {`,
+    `        const c = g[k];`,
+    `        if (c === "*") {`,
+    `          if (g[k + 1] === "*") {`,
+    `            if (g[k + 2] === "/") { re += "(?:.*/)?"; k += 3; }`,
+    `            else { re += ".*"; k += 2; }`,
+    `          } else { re += "[^/]*"; k += 1; }`,
+    `          continue;`,
+    `        }`,
+    `        if (c === "?") { re += "[^/]"; k += 1; continue; }`,
+    `        if ("+()|^$.{}[]\\\\".includes(c)) re += "\\\\" + c; else re += c;`,
+    `        k += 1;`,
+    `      }`,
+    `      if (!g.includes("/")) re = "(?:.*/)?" + re;`,
+    `      try { return new RegExp("^" + re + "$"); } catch { return null; }`,
+    `    }`,
+    `    function ruleMatches(rule, touchedPath, cwd) {`,
+    `      try {`,
+    `        const cands = [touchedPath];`,
+    `        const base = String(touchedPath || "").split("/").pop() || "";`,
+    `        if (base) cands.push(base);`,
+    `        let rel = touchedPath || "";`,
+    `        try {`,
+    `          if (cwd && String(touchedPath).startsWith(String(cwd))) rel = String(touchedPath).slice(String(cwd).length).replace(/^\\/+/, "");`,
+    `        } catch {}`,
+    `        if (rel) cands.push(rel);`,
+    `        for (const g of (rule.globs || [])) {`,
+    `          const re = globToRegExp(g);`,
+    `          if (!re) continue;`,
+    `          for (const c of cands) { try { if (re.test(c)) return true; } catch {} }`,
+    `        }`,
+    `      } catch {}`,
+    `      return false;`,
+    `    }`,
+    `    try {`,
+    `      pi.on("tool_result", async (event, ctx) => {`,
+    `        try {`,
+    `          if (!BRIDGE || !Array.isArray(BRIDGE.scopedRules) || BRIDGE.scopedRules.length === 0) return undefined;`,
+    `          if (event.isError) return undefined;`,
+    `          if (event.toolName !== "read" && event.toolName !== "edit" && event.toolName !== "write") return undefined;`,
+    `          const rel = event.input && event.input.path;`,
+    `          if (typeof rel !== "string" || !rel) return undefined;`,
+    `          let abs = rel;`,
+    `          try { const cwd = ctx.cwd || ""; abs = rel.startsWith("/") ? rel : (cwd ? cwd + "/" + rel : rel); } catch {}`,
+    `          const bodies = [];`,
+    `          for (const rule of BRIDGE.scopedRules) {`,
+    `            try {`,
+    `              if (attached.has(rule.file)) continue;`,
+    `              if (!ruleMatches(rule, abs, ctx.cwd || "")) continue;`,
+    `              attached.add(rule.file);`,
+    `              bodies.push(rule.body);`,
+    `            } catch {}`,
+    `          }`,
+    `          if (bodies.length === 0) return undefined;`,
+    `          return { content: [...(event.content || []), ...bodies.map((text) => ({ type: "text", text }))] };`,
+    `        } catch { return undefined; }`,
+    `      });`,
+    `    } catch {}`,
+    `    try {`,
+    `      pi.registerCommand("memory", {`,
+    `        description: "Show bridged memory inventory and auto-memory locations (on-demand; nothing auto-injected)",`,
+    `        handler: async (_args, ctx) => {`,
+    `          try {`,
+    `            const s = (BRIDGE && BRIDGE.stats) || { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0 };`,
+    `            const lines = ["Memory bridge (gh-router)", " Static files: " + s.staticFiles, " Scoped rules (lazy): " + s.scopedRules, " Imports: " + s.imports, " Skipped: " + s.skipped, " Auto-memory: ~/.claude/projects/<slug>/memory/MEMORY.md (on-demand read only)", " Pi memory: ~/.pi/agent/memory/ (your own pi-memory install, snapshotted)"];`,
+    `            try {`,
+    `              const files = (BRIDGE.scopedRules || []).map((r) => r.file);`,
+    `              if (files.length > 0) lines.push(" Scoped files:", ...files.slice(0, 20).map((f) => "  - " + f));`,
+    `            } catch {}`,
+    `            lines.push("cwd: " + (ctx.cwd || ""));`,
+    `            ctx.ui.notify(lines.join("\\n"), "info");`,
+    `          } catch {}`,
+    `        },`,
+    `      });`,
+    `    } catch {}`,
+    `    try {`,
+    `      pi.registerCommand("context", {`,
+    `        description: "Show what the gh-router memory bridge loaded",`,
+    `        handler: async (_args, ctx) => {`,
+    `          try {`,
+    `            const s = (BRIDGE && BRIDGE.stats) || { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0 };`,
+    `            ctx.ui.notify("Bridge context: " + s.staticFiles + " static, " + s.scopedRules + " scoped (attached " + attached.size + "), " + s.imports + " imports, " + s.skipped + " skipped. Native AGENTS.md/CLAUDE.md still load via Pi.", "info");`,
+    `          } catch {}`,
+    `        },`,
+    `      });`,
+    `    } catch {}`,
+    `  }`,
+  ]
+}
+
 export function buildPiExtensionSource(opts: {
   profileId: PiProfileId
   searchEnabled: boolean
   browseEnabled: boolean
   peers?: boolean
+  bridge?: PiBridgeExtensionInput
 }): string {
   const peers = opts.peers !== false
   const advisor = peers ? piAdvisorModel(opts.profileId) : undefined
@@ -396,6 +520,9 @@ export function buildPiExtensionSource(opts: {
       `    });`,
       `  }`,
     )
+  }
+  if (opts.bridge && opts.bridge.scopedRules.length + opts.bridge.stats.staticFiles > 0) {
+    lines.push(...buildPiMemoryBridgeSection(opts.bridge))
   }
   lines.push(
     // Statusline footer (always on — like Claude's operating defaults, not a

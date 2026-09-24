@@ -34,6 +34,7 @@ plus the mode identity. Each surface rides a flag:
 | `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill (tool and prose appear together or not at all) |
 | `--browse` | off | Browser tool surface when a supported browser is installed |
 | `--bluebird` | off | No Pi-side surface; reaches Bluebird server-side through `/mcp/search/code` |
+| `--memory-bridge` / `--no-memory-bridge` | **on** | Copilot (`.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` `applyTo`) + Claude (`.claude/rules/`, `.claude/CLAUDE.md`, `~/.claude/CLAUDE.md`, `~/.copilot/copilot-instructions.md`) bridge. Static repo-wide slice synthesizes into the mirror `AGENTS.md` (Pi-native candidate, 24KB budget, secrets-redacted, fenced idempotent); path-scoped rules lazy-attach on matching `read/edit/write` (once/session). Auto-memory (`~/.claude/projects/<slug>/memory/MEMORY.md`, 200-line/25KB) is on-demand via `/memory` only, never auto-injected. Honors `GH_ROUTER_PI_BRIDGE=0` / `GH_ROUTER_DISABLE_PI_BRIDGE=1` and Pi's own `--no-context-files`/`-nc` passthrough. `--no-memory-bridge` = Pi-native `AGENTS.md`/`CLAUDE.md` discovery only. |
 
 Always injected regardless of flags (like Claude's operating
 defaults): `models.json` (routing is load-bearing), minimal
@@ -157,14 +158,26 @@ runner degrades to Pi's native footer, never a broken launch.
 - `src/lib/pi-tier-windows.ts` — pinned tier thresholds, window
   derivation, price-drift guard. Unit-tested in
   `tests/pi-tier-windows.test.ts`.
-- `src/lib/pi-extension.ts` — extension source + skills + prompts.
+- `src/lib/pi-extension.ts` — extension source + skills + prompts + bridge lazy-attach (`tool_result`) + `/memory` + `/context`.
+- `src/lib/pi-memory-bridge.ts` — pure bridge builders (frontmatter scope, glob match, `@` imports, caps, redaction, mirror synthesis). Unit-tested in `tests/pi-memory-bridge.test.ts`.
 - `src/lib/pi-paths.ts` — mirror lifecycle.
 - `src/lib/pi-version-check.ts` — install/update gate.
+
+## Claude-Code look (recipe, not bundled)
+
+Bare launches stay minimal per flag policy, and the `gh-router-pi` footer is router-owned (third-party footers lose). For a familiar look, install yourself — the `~/.pi/agent` snapshot carries it into the mirror automatically:
+
+```bash
+pi install npm:pi-code            # Claude behavior: todos, /rewind, /memory, subagents, /context, /init
+pi install npm:pi-claude-code-ui  # Claude transcript: grouped rows, Shiki diffs, Ctrl+O previews
+```
+
+Alternatives: `@owlburtoe/pi-claudify` (closest `⏺`/`⎿` grammar), `cc-my-pi` (header + spinner + dark theme), `better-claude-code-ui` (6 themes + footer). Themes: `pi.dev/packages?type=theme`, `pi --theme <file>`, `/settings`.
 
 ## Verification
 
 ```bash
-bun test tests/pi-models-settings.test.ts
+bun test tests/pi-memory-bridge.test.ts tests/pi-models-settings.test.ts
 bun run typecheck && bun run lint:all && bun run build
 ```
 
