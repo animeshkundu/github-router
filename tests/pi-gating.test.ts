@@ -113,7 +113,7 @@ describe("pi --no-peers shrinks the surface", () => {
     expect(ext).not.toContain("AdvisorParams")
   })
 
-  test("settings drop pi-subagents but keep the footer package", () => {
+  test("settings drop pi-subagents but keep the built-in footer extension", () => {
     const settings = buildPiSettingsJson({
       profileId: "cheapest",
       searchEnabled: false,
@@ -125,7 +125,8 @@ describe("pi --no-peers shrinks the surface", () => {
         (p) => typeof p === "object" && p.source === "npm:pi-subagents",
       ),
     ).toBe(false)
-    expect(settings.packages).toContain("npm:pi-statusline")
+    expect(settings.packages).not.toContain("npm:pi-statusline")
+    expect(settings.packages).toContain("local:gh-router-pi")
     expect(settings.packages).toContain("local:gh-router-pi")
     expect(settings.enabledModels).toEqual(["gh-router/gpt-6-luna"])
   })

@@ -1,7 +1,10 @@
 /**
  * The internal `internal-aic-status` subcommand: the executable a spawned
  * Claude Code session's `statusLine` invokes (registered into the mirrored
- * settings.json by the launcher — see `src/lib/aic-statusline-settings.ts`).
+ * settings.json by the launcher — see `src/lib/aic-statusline-settings.ts`)
+ * AND the Pi footer in the mode's `gh-router-pi` extension invokes (command
+ * delivered via `GH_ROUTER_AIC_STATUS_COMMAND`, payload built natively —
+ * see `src/lib/pi-statusline.ts`). One runner, identical segments.
  *
  * Default-on rich status line: Claude Code's stdin JSON is rendered natively
  * (see `src/lib/default-statusline.ts`) as

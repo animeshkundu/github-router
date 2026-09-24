@@ -401,7 +401,10 @@ export interface PiSettingsJson {
  * `pi-subagents` rides `peersEnabled` and loads extensions ONLY
  * (skills/prompts filtered out — the mode's own skills/prompts cover
  * the roster, so the third-party sets never reach Ctrl+O).
- * `pi-statusline` is extension-only by manifest and always present.
+ * The statusline footer is built into `local:gh-router-pi` (no
+ * third-party statusline package: the community bridge reads only the
+ * user's real global/project settings and never sees the launch mirror,
+ * so it cannot drive a per-launch footer).
  */
 export function buildPiSettingsJson(opts: {
   profileId: PiProfileId
@@ -424,7 +427,6 @@ export function buildPiSettingsJson(opts: {
       ...(peers
         ? [{ source: "npm:pi-subagents", skills: [], prompts: [] } as PiPackageEntry]
         : []),
-      "npm:pi-statusline",
       "local:gh-router-pi",
     ],
   }
