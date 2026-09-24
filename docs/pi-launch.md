@@ -52,7 +52,7 @@ plus the mode identity. Each surface rides a flag:
 |---|---|---|
 | `--peers` / `--no-peers` | **on** | Native agent files, oracle tool (+cheapest advisor), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
 | `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: `pi-mcp-adapter`, allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `files`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
-| `--ui` / `--no-ui` | **on** | Claude-look transcript UI (`pi-claude-code-ui`: grouped rows, Shiki diffs, Ctrl+O previews). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
+| `--ui` / `--no-ui` | **on** | Claude-Code look (`pi-claude-code-ui`: grouped rows, Shiki diffs, Ctrl+O previews; fixed Claude palette via `themeAdaptive: false`; one-line tool rows via `summary`/`count` output modes). Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag. Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
 | `--swe` | off | Pipeline surface: `gh-delegate` (+cheapest `gh-advisor`) skills, `review` / `parallel-review` (+cheapest `plan-review`) prompts |
 | `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill (tool and prose appear together or not at all) |
 | `--browse` | off | Browser tool surface when a supported browser is installed |
@@ -192,7 +192,6 @@ runner degrades to Pi's native footer, never a broken launch.
 - `src/lib/pi-version-check.ts` — install/update gate.
 
 ## Claude-Code look (bundled by default)
-
 `pi-claude-code-ui` ships by default (`--no-ui` opts out): grouped rows,
 Shiki diffs, Ctrl+O previews. For the full Claude behavior set, install
 yourself — the `~/.pi/agent` snapshot carries it into the mirror automatically
@@ -205,6 +204,28 @@ pi install npm:pi-claude-code-ui  # Claude transcript: grouped rows, Shiki diffs
 ```
 
 Alternatives: `@owlburtoe/pi-claudify` (closest `⏺`/`⎿` grammar), `cc-my-pi` (header + spinner + dark theme), `better-claude-code-ui` (6 themes + footer). Themes: `pi.dev/packages?type=theme`, `pi --theme <file>`, `/settings`.
+
+### Customizing the look
+
+Yes — every display default is overridable, at three levels:
+
+1. **Your settings win for display keys.** Anything you set in
+   `~/.pi/agent/settings.json` for these keys survives the launch
+   (snapshot-carried into the mirror, applied over our defaults):
+   `hideThinkingBlock`, `themeAdaptive`, `groupToolCalls`,
+   `readOutputMode` (`summary`/`preview`/`hidden`),
+   `searchOutputMode` (`count`/`preview`/`hidden`),
+   `mcpOutputMode`, `bashOutputMode` (`summary`/`preview`/`opencode`),
+   `terminal`, `images`. Example: `"hideThinkingBlock": false` shows
+   thinking again; `"readOutputMode": "preview"` restores expanded
+   reads. Load-bearing keys (models, tools, thinking levels,
+   compaction, retry, packages) always stay router-owned — those are
+   the cost contract, not a preference.
+2. **Kill-switch:** `--no-ui` drops the whole transcript package.
+3. **Runtime toggles (this session):** `/settings` (thinking, theme),
+   `/cc-theme on|off|toggle` (Claude palette vs Pi theme),
+   `/cc-tools thinking|group|outlines` (thinking expansion, grouping,
+   chrome), `/cc-spinner` (spinner colors).
 
 ## Verification
 

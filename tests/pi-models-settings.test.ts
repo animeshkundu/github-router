@@ -6,6 +6,7 @@ import {
   buildPiSkills,
 } from "~/lib/pi-extension"
 import {
+  applyCosmeticUserOverrides,
   buildPiAgentFiles,
   buildPiAppendSystem,
   buildPiModelsJson,
@@ -334,6 +335,60 @@ describe("pi models.json vision + thinking + api parity", () => {
   })
 })
 
+describe("pi cosmetic user overrides", () => {
+  const built = () =>
+    buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: false,
+    })
+
+  test("empty user settings change nothing", () => {
+    expect(applyCosmeticUserOverrides({}, built())).toEqual({})
+    expect(applyCosmeticUserOverrides(undefined, built())).toEqual({})
+  })
+
+  test("user look wins for presentational keys", () => {
+    const overrides = applyCosmeticUserOverrides(
+      {
+        hideThinkingBlock: false,
+        readOutputMode: "preview",
+        themeAdaptive: true,
+        terminal: { showImages: false },
+      },
+      built(),
+    )
+    expect(overrides).toEqual({
+      hideThinkingBlock: false,
+      readOutputMode: "preview",
+      themeAdaptive: true,
+      terminal: { showImages: false },
+    })
+  })
+
+  test("load-bearing keys never override, unknown keys ignored", () => {
+    const overrides = applyCosmeticUserOverrides(
+      {
+        defaultModel: "gpt-6-sol",
+        defaultTools: ["read"],
+        packages: [],
+        compaction: {},
+        somethingElse: 1,
+      },
+      built(),
+    )
+    expect(overrides).toEqual({})
+  })
+
+  test("explicit undefined does not override", () => {
+    const overrides = applyCosmeticUserOverrides(
+      { hideThinkingBlock: undefined },
+      built(),
+    )
+    expect(overrides).toEqual({})
+  })
+})
+
 describe("pi settings.json", () => {
   test("narrow scope, limited tools, retry on", () => {
     const settings = buildPiSettingsJson({
@@ -427,6 +482,15 @@ describe("pi settings.json", () => {
     })
     // Presentational only (grouped rows, Shiki diffs) — zero model cost.
     expect(bare.packages).toContain("npm:pi-claude-code-ui")
+    // Claude-Code look: hidden thinking, fixed Claude palette, one-line
+    // tool rows (expandable via Ctrl+O).
+    expect(bare.hideThinkingBlock).toBe(true)
+    expect(bare.themeAdaptive).toBe(false)
+    expect(bare.groupToolCalls).toBe(true)
+    expect(bare.readOutputMode).toBe("summary")
+    expect(bare.searchOutputMode).toBe("count")
+    expect(bare.mcpOutputMode).toBe("summary")
+    expect(bare.bashOutputMode).toBe("summary")
     // pi-code behaviors would collide with router-owned /memory + /context.
     expect(bare.packages).not.toContain("npm:pi-code")
     const noUi = buildPiSettingsJson({
@@ -437,6 +501,12 @@ describe("pi settings.json", () => {
     })
     expect(noUi.packages).not.toContain("npm:pi-claude-code-ui")
     expect(noUi.packages).toContain("local:gh-router-pi")
+    // UI companion keys are inert without the package, so omitted;
+    // thinking stays hidden regardless (native Pi setting, not cc-ui).
+    expect(noUi.themeAdaptive).toBeUndefined()
+    expect(noUi.groupToolCalls).toBeUndefined()
+    expect(noUi.readOutputMode).toBeUndefined()
+    expect(noUi.hideThinkingBlock).toBe(true)
   })
 })
 

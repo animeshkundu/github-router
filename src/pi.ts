@@ -26,6 +26,7 @@ import {
   buildPiSkills,
 } from "./lib/pi-extension"
 import {
+  applyCosmeticUserOverrides,
   buildPiAgentFiles,
   buildPiAppendSystem,
   buildPiModelsJson,
@@ -363,9 +364,15 @@ export const pi = defineCommand({
         userSettings["subagents"],
         builtSettings.subagents,
       )
+      // Presentational keys stay user-customizable: a look the user set
+      // in their own settings (thinking visibility, Claude palette,
+      // one-line tool rows, terminal/images) wins over our defaults,
+      // while load-bearing keys stay built-wins (cost contract).
+      const cosmeticOverrides = applyCosmeticUserOverrides(userSettings, builtSettings)
       await writeJsonFile(settingsPath, {
         ...userSettings,
         ...builtSettings,
+        ...cosmeticOverrides,
         ...(mergedSubagents ? { subagents: mergedSubagents } : {}),
       })
 

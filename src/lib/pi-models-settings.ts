@@ -560,6 +560,31 @@ export interface PiSettingsJson {
   }
   /** Preferred transport for multi-transport providers. */
   transport?: "auto" | "sse" | "websocket" | "websocket-cached"
+  /**
+   * Hide thinking blocks in the transcript. Default-on: reasoning
+   * effort still applies, only the display is suppressed. Toggle at
+   * runtime via `/settings`; never affects cost or behavior.
+   */
+  hideThinkingBlock?: boolean
+  /**
+   * Companion config for the bundled `pi-claude-code-ui` package
+   * (which reads flat settings keys): `false` keeps its fixed
+   * Claude-style palette regardless of the active Pi theme instead of
+   * deriving chrome colors from it. Gated on the `ui` bundle — inert
+   * and therefore omitted when the package is not loaded.
+   */
+  themeAdaptive?: boolean
+  /**
+   * Claude-Code-style one-line tool rows (same companion package):
+   * `summary`/`count` collapse completed calls to a single summary
+   * line instead of multi-line previews (expandable via Ctrl+O).
+   * Gated on the `ui` bundle like `themeAdaptive`.
+   */
+  groupToolCalls?: boolean
+  readOutputMode?: "hidden" | "summary" | "preview"
+  searchOutputMode?: "hidden" | "count" | "preview"
+  mcpOutputMode?: "hidden" | "summary" | "preview"
+  bashOutputMode?: "opencode" | "summary" | "preview"
   /** Branch-summary token budget for session-tree navigation. */
   branchSummary?: {
     reserveTokens?: number
@@ -593,6 +618,54 @@ export interface PiSettingsJson {
   subagents?: {
     agentOverrides?: Record<string, { disabled?: boolean }>
   }
+}
+
+/**
+ * Presentational settings keys that stay user-customizable. When the
+ * snapshotted user settings already define one of these, the user's
+ * value wins over the built default at launch-merge time (see
+ * `applyCosmeticUserOverrides`). Everything else the builder emits —
+ * models, tools, thinking levels, compaction, retry, packages — stays
+ * built-wins: those are the cost contract, not a preference.
+ */
+export const PI_COSMETIC_SETTING_KEYS = [
+  "hideThinkingBlock",
+  "themeAdaptive",
+  "groupToolCalls",
+  "readOutputMode",
+  "searchOutputMode",
+  "mcpOutputMode",
+  "bashOutputMode",
+  "terminal",
+  "images",
+] as const
+
+export type PiCosmeticSettingKey = (typeof PI_COSMETIC_SETTING_KEYS)[number]
+
+/**
+ * Overlay user-defined presentational values onto built settings.
+ * Only keys listed in `PI_COSMETIC_SETTING_KEYS` that are actually
+ * present (not `undefined`) in `userSettings` override — so a user
+ * `~/.pi/agent/settings.json` with e.g. `"hideThinkingBlock": false`
+ * or `"readOutputMode": "preview"` keeps their look, while everyone
+ * else gets the Claude-Code-like defaults. Returns the picked
+ * overrides (empty object when the user customized nothing).
+ */
+export function applyCosmeticUserOverrides(
+  userSettings: Record<string, unknown> | undefined,
+  builtSettings: PiSettingsJson,
+): Record<string, unknown> {
+  const overrides: Record<string, unknown> = {}
+  if (!userSettings) return overrides
+  const built = builtSettings as unknown as Record<string, unknown>
+  for (const key of PI_COSMETIC_SETTING_KEYS) {
+    if (!(key in userSettings)) continue
+    const value = userSettings[key]
+    if (value === undefined) continue
+    if (!(key in built)) continue
+    overrides[key] = value
+  }
+  return overrides
 }
 
 /**
@@ -723,6 +796,17 @@ export function buildPiSettingsJson(opts: {
     terminal: { showImages: true, imageWidthCells: 60 },
     images: { autoResize: true, blockImages: false },
     transport: "auto",
+    hideThinkingBlock: true,
+    ...(ui
+      ? {
+          themeAdaptive: false,
+          groupToolCalls: true,
+          readOutputMode: "summary" as const,
+          searchOutputMode: "count" as const,
+          mcpOutputMode: "summary" as const,
+          bashOutputMode: "summary" as const,
+        }
+      : {}),
     branchSummary: { reserveTokens: 16384, skipPrompt: false },
     compaction: derivePiCompactionSettings(opts.catalog, modelIds),
     retry: { enabled: true, maxRetries: 3, provider: { maxRetries: 0 } },
