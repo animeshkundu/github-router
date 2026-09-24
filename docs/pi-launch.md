@@ -58,7 +58,13 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   row also carries `maxTokens` (catalog output cap, ≥16 floor the
   proxy enforces), `cost` (USD/1M from live billing), and its
   cheap-tier `contextWindow`. No `registerProvider` override, no
-  proxy-side translation.
+  proxy-side translation. Two Pi quirks discovered live and pinned by
+  tests: tool schemas must be TypeBox `parameters` (plain-JSON
+  `inputSchema` fails the load), `execute` is
+  `(toolCallId, params, signal)` returning `{content, details}` — and
+  a **partial** `cost` object silently rejects the entire provider as
+  `Unknown provider`, so `cost` is all-four-figures-or-absent
+  (`piUsdCostFor`), never a guessed zero.
 - **Isolated mirror.** The user's `~/.pi/agent` is snapshot-copied to a
   per-launch dir (`PI_CODING_AGENT_DIR` → mirror); `auth.json` and
   `sessions/` are never copied. The mirror is swept on shutdown (plus a

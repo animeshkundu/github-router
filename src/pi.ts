@@ -33,6 +33,7 @@ import {
   buildPiSettingsJson,
   piLeadModel,
   piProfileModelIds,
+  piUsdCostFor,
   type PiProfileId,
 } from "./lib/pi-models-settings"
 import { launchChild } from "./lib/launch"
@@ -301,25 +302,8 @@ export const pi = defineCommand({
       const searchEnabled =
         parsed.searchEnabled || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
       const browseEnabled = browserToolsEnabled()
-      // Catalog price units are billing-doc USD x 100 (verified on
-      // luna/sol/opus live-vs-doc pairs); Pi cost metadata wants USD/1M.
-      // Ratio is spike-verified against the footer math at runtime.
-      const CATALOG_UNITS_PER_USD = 100
       const catalog = state.models?.data.map((m) => {
-        const prices = m.billing?.token_prices
-        const batch = prices?.batch_size
-        // Per-1M USD for a raw catalog price, or undefined when unknown.
-        // A missing input/output price omits `cost` entirely — a $0 guess
-        // would be worse than Pi's own unknown-cost handling.
-        const usdPer1M = (v: number | undefined): number | undefined =>
-          typeof batch === "number" && Number.isSafeInteger(batch) && batch > 0
-          && typeof v === "number" && Number.isFinite(v) && v >= 0
-            ? v / 1e9 * 1e6 / batch / CATALOG_UNITS_PER_USD
-            : undefined
-        const input = usdPer1M(prices?.input_price)
-        const output = usdPer1M(prices?.output_price)
-        const cacheRead = usdPer1M(prices?.cache_read_price ?? prices?.cache_price)
-        const cacheWrite = usdPer1M(prices?.cache_write_price)
+        const cost = piUsdCostFor(m.billing?.token_prices)
         return {
           id: m.id,
           maxContextTokens: m.capabilities?.limits?.max_context_window_tokens ?? 0,
@@ -327,16 +311,7 @@ export const pi = defineCommand({
           maxOutputTokens: m.capabilities?.limits?.max_output_tokens ?? 0,
           efforts: m.capabilities?.supports?.reasoning_effort ?? [],
           endpoints: m.supported_endpoints ?? [],
-          ...(input !== undefined && output !== undefined
-            ? {
-                cost: {
-                  input,
-                  output,
-                  ...(cacheRead !== undefined ? { cacheRead } : {}),
-                  ...(cacheWrite !== undefined ? { cacheWrite } : {}),
-                },
-              }
-            : {}),
+          ...(cost ? { cost } : {}),
         }
       })
       await writeJsonFile(

@@ -25,12 +25,17 @@ export interface PiCatalogModel {
   efforts: ReadonlyArray<string>
   /** Canonical endpoint kinds, e.g. "responses" | "chat" | "messages". */
   endpoints: ReadonlyArray<string>
-  /** Per-1M USD costs (converted from catalog units by the launcher). */
+  /**
+   * Per-1M USD costs (converted from catalog units by the launcher).
+   * All-or-nothing: Pi silently rejects the whole provider when any of
+   * the four figures is missing, so the launcher emits `cost` only when
+   * input, output, cacheRead AND cacheWrite are all known.
+   */
   cost?: {
     input: number
     output: number
-    cacheRead?: number
-    cacheWrite?: number
+    cacheRead: number
+    cacheWrite: number
   }
 }
 
@@ -192,6 +197,53 @@ export interface PiModelsJson {
  * the live catalog always wins. Never below the proxy's 16-token floor.
  */
 export const PI_MAX_TOKENS_FALLBACK = 128_000 as const
+
+/** Catalog price units per USD (billing-doc USD x 100 — verified on
+ *  luna/sol/opus live-vs-doc pairs). Pi cost metadata wants USD/1M;
+ *  the ratio is spike-verified against the footer math at runtime. */
+export const PI_CATALOG_UNITS_PER_USD = 100 as const
+
+export interface PiCatalogTokenPrices {
+  batch_size?: number
+  input_price?: number
+  output_price?: number
+  cache_price?: number
+  cache_read_price?: number
+  cache_write_price?: number
+}
+
+/**
+ * Per-1M USD cost for a models.json row, or undefined when unknown.
+ *
+ * ALL-OR-NOTHING (verified live): Pi silently rejects the entire
+ * provider when any of the four figures is missing, surfacing only as
+ * `Unknown provider`. A missing figure therefore omits `cost`
+ * entirely — guessing zero would under-report real spend, and a
+ * partial object breaks the launch.
+ */
+export function piUsdCostFor(
+  prices: PiCatalogTokenPrices | undefined,
+): { input: number; output: number; cacheRead: number; cacheWrite: number } | undefined {
+  const batch = prices?.batch_size
+  const usdPer1M = (v: number | undefined): number | undefined =>
+    typeof batch === "number" && Number.isSafeInteger(batch) && batch > 0
+    && typeof v === "number" && Number.isFinite(v) && v >= 0
+      ? v / 1e9 * 1e6 / batch / PI_CATALOG_UNITS_PER_USD
+      : undefined
+  const input = usdPer1M(prices?.input_price)
+  const output = usdPer1M(prices?.output_price)
+  const cacheRead = usdPer1M(prices?.cache_read_price ?? prices?.cache_price)
+  const cacheWrite = usdPer1M(prices?.cache_write_price)
+  if (
+    input === undefined
+    || output === undefined
+    || cacheRead === undefined
+    || cacheWrite === undefined
+  ) {
+    return undefined
+  }
+  return { input, output, cacheRead, cacheWrite }
+}
 
 /**
  * Build the `models.json` provider entry pointing Pi at the running

@@ -19,6 +19,7 @@ import {
   piNativeRoles,
   piOracleModel,
   piProfileModelIds,
+  piUsdCostFor,
 } from "~/lib/pi-models-settings"
 import { EFFORT_ORDER } from "~/lib/reasoning-effort"
 
@@ -133,7 +134,7 @@ describe("pi models.json", () => {
       serverUrl: "http://127.0.0.1:8787",
       profileId: "cheapest",
       catalog: [
-        { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, maxOutputTokens: 128_000, efforts: ["max"], endpoints: ["responses"], cost: { input: 0.1, output: 0.5 } },
+        { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, maxOutputTokens: 128_000, efforts: ["max"], endpoints: ["responses"], cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 } },
         { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"] },
       ],
       apiOverrides: { "gpt-6-sol": "openai-completions" },
@@ -142,7 +143,12 @@ describe("pi models.json", () => {
       json.providers["gh-router"].models.map((m) => [m.id, m]),
     )
     expect(rows["gpt-6-luna"].maxTokens).toBe(128_000)
-    expect(rows["gpt-6-luna"].cost).toEqual({ input: 0.1, output: 0.5 })
+    expect(rows["gpt-6-luna"].cost).toEqual({
+      input: 0.1,
+      output: 0.5,
+      cacheRead: 0.01,
+      cacheWrite: 0.125,
+    })
     expect(rows["gpt-6-luna"].api).toBeUndefined()
     // No output metadata -> documented fallback (proxy floor is 16).
     expect(rows["gpt-6-sol"].maxTokens).toBe(PI_MAX_TOKENS_FALLBACK)
@@ -181,6 +187,29 @@ describe("pi models.json", () => {
         expect(m.id).not.toContain("[1m]")
       }
     }
+  })
+
+  test("cost is all-or-nothing: partial figures omit the object", () => {
+    // Pi quirk (verified live): a partial cost object silently rejects
+    // the whole provider ("Unknown provider"). Never guess zero.
+    const full = {
+      batch_size: 1_000_000,
+      input_price: 10_000_000_000,
+      output_price: 50_000_000_000,
+      cache_read_price: 1_000_000_000,
+      cache_write_price: 12_500_000_000,
+    }
+    expect(piUsdCostFor(full)).toEqual({
+      input: 0.1,
+      output: 0.5,
+      cacheRead: 0.01,
+      cacheWrite: 0.125,
+    })
+    const { cache_write_price: dropped, ...partial } = full
+    expect(dropped).toBe(12_500_000_000)
+    expect(piUsdCostFor(partial)).toBeUndefined()
+    expect(piUsdCostFor(undefined)).toBeUndefined()
+    expect(piUsdCostFor({ batch_size: 0, input_price: 1 })).toBeUndefined()
   })
 
   test("window is capped at the advertised catalog total", () => {
