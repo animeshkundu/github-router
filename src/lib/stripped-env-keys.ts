@@ -56,6 +56,12 @@ export const STRIPPED_AUTH_ROUTING_ENV_KEYS = [
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",
   "CODEX_HOME",
+  // Pi coding-agent routing/auth surface. `PI_CODING_AGENT_DIR` would
+  // redirect the session's agent dir away from the router-owned mirror;
+  // provider keys would re-route Pi off the proxy or leak real auth.
+  "PI_CODING_AGENT_DIR",
+  "PI_CODING_AGENT_SESSION_DIR",
+  "OPENCODE_API_KEY",
   // ai-or-die per-tab session-bind / artifact-review surface — must not leak
   // into a nested launch and hijack the parent tab's sidecar / bearer token.
   "AIORDIE_CLAUDE_BIND",

@@ -1347,3 +1347,25 @@ export function getCodexEnvVars(serverUrl: string): Record<string, string> {
   }
   return vars
 }
+
+/**
+ * Build environment variables for the Pi coding agent.
+ *
+ * Pi resolves its agent dir from `PI_CODING_AGENT_DIR` (else
+ * `~/.pi/agent`); pointing it at the router-owned per-launch mirror
+ * isolates the session (same role as `CLAUDE_CONFIG_DIR` for Claude
+ * Code / `CODEX_HOME` for Codex). Model routing comes from the
+ * mirror's `models.json` (gh-router provider → proxy `/v1`), so no
+ * provider API keys are passed here — and the parent env is sanitized
+ * of Pi credential keys (see `STRIPPED_PARENT_ENV_KEYS`) so a stale
+ * shell export can't re-route the session off the proxy.
+ */
+export function getPiLaunchEnvVars(mirrorDir: string): Record<string, string> {
+  const vars: Record<string, string> = {
+    PI_CODING_AGENT_DIR: mirrorDir,
+  }
+  if (toolbeltEnabled()) {
+    Object.assign(vars, toolbeltPathOverride(process.env, PATHS.TOOLBELT_BIN_DIR))
+  }
+  return vars
+}
