@@ -499,7 +499,9 @@ export function buildMirrorBridgeSection(
   let truncated = false
 
   const pushCapped = (title: string, file: string, content: string, budgetLeft: () => number): void => {
-    const body = content.trim()
+    // Strip NUL bytes: a literal U+0000 in synthesized context breaks
+    // strict downstream JSON consumers (workflow-preflight parse errors).
+    const body = content.replaceAll("\0", "").trim()
     if (!body) return
     const block = `## ${title}\n<!-- source: ${file} -->\n\n${body}\n`
     const capped = capBytes(block, Math.max(0, budgetLeft()))
@@ -538,15 +540,15 @@ export function buildMirrorBridgeSection(
       "",
     )
     for (const rule of collected.scopedRules) {
-      parts.push(`- \`${rule.file}\` → \`${rule.globs.join(", ")}\` (${rule.source})`)
+      parts.push(`- \`${rule.file.replaceAll("\0", "")}\` → \`${rule.globs.join(", ").replaceAll("\0", "")}\` (${rule.source.replaceAll("\0", "")})`)
     }
     parts.push("")
     account()
   }
 
-  if (opts.repoRoot) parts.push(`<!-- repo: ${opts.repoRoot} -->`, "")
+  if (opts.repoRoot) parts.push(`<!-- repo: ${opts.repoRoot.replaceAll("\0", "")} -->`, "")
   parts.push(PI_BRIDGE_FENCE_END, "")
-  const section = redactSecrets(parts.join("\n"))
+  const section = redactSecrets(parts.join("\n")).replaceAll("\0", "")
   return {
     section,
     stats: {

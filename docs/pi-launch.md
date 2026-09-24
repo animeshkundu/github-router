@@ -12,6 +12,18 @@ Every role runs at the bare 200K default window (no `[1m]` accounting
 anywhere) — that is the whole cost lever, same as the Claude
 `cheap`/`cheapest`/`balanced` family.
 
+Roster notes: our `reviewer`/`oracle` agent files intentionally shadow the
+same-named pi-subagents builtins (pinned models); builtin
+`scout`/`worker`/`researcher`/`evidence-auditor` are disabled via settings
+(their habitual invocations resolve through our `scout`/`worker` aliases),
+while builtin `delegate` stays enabled as the cheap append-mode path.
+`General-Purpose` may nest `reviewer`/`oracle`, balanced `reviewer` may nest
+`Explore` (ceiling raised to 3 via `PI_SUBAGENT_MAX_DEPTH`). Handoff is
+inline prose in the delegating brief — no `context.md`/`progress.md` file
+bindings, so runs write nothing into the repo. `--swe` without `--peers`
+emits no skills or prompts (no agents behind them). `/parallel-review`
+intentionally shadows the packaged prompt of the same name.
+
 ## Usage
 
 ```bash

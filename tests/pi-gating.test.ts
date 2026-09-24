@@ -201,13 +201,16 @@ describe("pi --swe owns the pipeline surface", () => {
     expect(names).toEqual(["review", "parallel-review"])
   })
 
-  test("--swe without peers still emits no advisor skill", () => {
+  test("--swe without peers emits no pipeline skills or prompts", () => {
+    // The delegate/review prose names agents + the subagent provider that a
+    // peerless launch never writes — emitting it would dangle.
     const dirs = buildPiSkills({
       profileId: "cheapest",
       peers: false,
       swe: true,
     }).map((s) => s.dir)
-    expect(dirs).toEqual(["gh-delegate"])
+    expect(dirs).toEqual([])
+    expect(buildPiPrompts({ profileId: "cheapest", swe: true, peers: false })).toEqual([])
   })
 })
 

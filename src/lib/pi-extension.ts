@@ -4,8 +4,6 @@ import {
   piAdvisorModel,
   piLeadModel,
   piLeadThinking,
-  piOracleModel,
-  piOracleThinking,
 } from "./pi-models-settings"
 import {
   AIC_STATUSLINE_DISABLE_ENV,
@@ -278,10 +276,15 @@ export interface PiBridgeExtensionInput {
 export function buildPiMemoryBridgeSection(bridge: PiBridgeExtensionInput): Array<string> {
   // Cap embedded rule bodies so one giant rule can't bloat the mirror
   // extension source (static slice already has its own 24KB budget).
+  // Strip NUL bytes: a single literal U+0000 in an embedded body breaks
+  // strict downstream JSON consumers (observed as a workflow-preflight
+  // `Unexpected character '\u0000'` parse failure).
   const cappedRules = bridge.scopedRules.map((r) => ({
-    file: r.file,
-    body:
-      r.body.length > 8000 ? `${r.body.slice(0, 8000)}\n…[truncated by gh-router memory bridge]` : r.body,
+    file: r.file.replaceAll("\0", ""),
+    body: (r.body.length > 8000 ? `${r.body.slice(0, 8000)}\n…[truncated by gh-router memory bridge]` : r.body).replaceAll(
+      "\0",
+      "",
+    ),
     globs: r.globs,
     source: r.source,
   }))
@@ -394,8 +397,6 @@ export function buildPiExtensionSource(opts: {
 }): string {
   const peers = opts.peers !== false
   const advisor = peers ? piAdvisorModel(opts.profileId) : undefined
-  const oracleModel = piOracleModel(opts.profileId)
-  const oracleThinking = piOracleThinking(opts.profileId)
   const lines: Array<string> = []
   lines.push(
     `// gh-router-pi extension (${opts.profileId} mode). Generated per launch; do not edit.`,
@@ -420,40 +421,77 @@ export function buildPiExtensionSource(opts: {
           `});`,
         ]
       : []),
-    `const CodeSearchParams = Type.Object({`,
-    `  query: Type.String({ description: "What to find" }),`,
-    `  mode: Type.Optional(Type.String({ description: "semantic (default), lexical, exact, regex, or ast" })),`,
-    `  limit: Type.Optional(Type.Number({ description: "Max results" })),`,
-    `});`,
-    `const BrowserParams = Type.Object({`,
-    `  url: Type.Optional(Type.String({ description: "URL to act on" })),`,
-    `  intent: Type.Optional(Type.String({ description: "What to do on the page" })),`,
-    `});`,
+    ...(opts.searchEnabled
+      ? [
+          `const CodeSearchParams = Type.Object({`,
+          `  query: Type.String({ description: "What to find" }),`,
+          `  mode: Type.Optional(Type.String({ description: "semantic (default), lexical, exact, regex, or ast" })),`,
+          `  limit: Type.Optional(Type.Number({ description: "Max results" })),`,
+          `  workspace: Type.Optional(Type.String({ description: "Absolute path to the project root to search. Defaults to the launch workspace." })),`,
+          `  file_glob: Type.Optional(Type.String({ description: "Optional ripgrep glob filter (e.g. src/**/*.ts)" })),`,
+          `});`,
+        ]
+      : []),
+    ...(opts.browseEnabled
+      ? [
+          `const OpenTabParams = Type.Object({`,
+          `  url: Type.String({ description: "URL to load" }),`,
+          `  reuseActive: Type.Optional(Type.Boolean({ description: "Navigate the active tab instead of opening a new one" })),`,
+          `});`,
+          `const NavigateParams = Type.Object({`,
+          `  tabId: Type.Number({ description: "Tab id from open_tab" }),`,
+          `  action: Type.String({ description: "goto, back, forward, or reload" }),`,
+          `  url: Type.Optional(Type.String({ description: "URL for action=goto" })),`,
+          `  hard: Type.Optional(Type.Boolean({ description: "Reload only: bypass cache" })),`,
+          `});`,
+          `const ScreenshotParams = Type.Object({`,
+          `  tabId: Type.Number({ description: "Tab id from open_tab" }),`,
+          `  format: Type.Optional(Type.String({ description: "png or jpeg" })),`,
+          `  quality: Type.Optional(Type.Number({ description: "JPEG quality 1-100" })),`,
+          `});`,
+          `const ActParams = Type.Object({`,
+          `  tabId: Type.Number({ description: "Tab id from open_tab" }),`,
+          `  intent: Type.Optional(Type.String({ description: "Natural-language action (INTENT mode)" })),`,
+          `  ref: Type.Optional(Type.String({ description: "Element ref for REF mode" })),`,
+          `  action: Type.Optional(Type.String({ description: "REF mode action" })),`,
+          `  value: Type.Optional(Type.String({ description: "Value for fill/type/select" })),`,
+          `});`,
+          `const ObserveParams = Type.Object({`,
+          `  tabId: Type.Number({ description: "Tab id from open_tab" }),`,
+          `  intent: Type.Optional(Type.String({ description: "Focus for the summary" })),`,
+          `});`,
+          `const ExtractParams = Type.Object({`,
+          `  tabId: Type.Number({ description: "Tab id from open_tab" }),`,
+          `  schema: Type.Any({ description: "JSON schema for the desired output shape" }),`,
+          `  instruction: Type.String({ description: "What to extract" }),`,
+          `});`,
+        ]
+      : []),
+    `function stripNul(s) { return String(s ?? "").replace(/\\0/g, ""); }`,
     `async function toolText(promise) {`,
+    // Inbound NUL strip: MCP/tool results flow into workflowScript text and
+    // strict downstream JSON consumers reject literal U+0000 (observed as a
+    // subagent-workflow validate failure). Outbound params are stripped at
+    // each call site; this covers the return path in one place.
     `  const text = await promise;`,
+    `  return { content: [{ type: "text", text: stripNul(text) }], details: undefined };`,
+    `}`,
+    `function toolErrorText(text) {`,
     `  return { content: [{ type: "text", text }], details: undefined };`,
     `}`,
     `const MCP_URL = (process.env.GH_ROUTER_HOOK_MCP_URL ?? "").replace(/\\/+$/, "");`,
     `const MCP_NONCE = process.env.GH_ROUTER_HOOK_NONCE ?? "";`,
-    ...(peers
-      ? [
-          `const ORACLE_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${oracleModel}`)};`,
-          `const ORACLE_THINKING = ${JSON.stringify(oracleThinking)};`,
-        ]
-      : []),
-    ...(advisor
-      ? [
-          `const ADVISOR_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${advisor.model}`)};`,
-          `const ADVISOR_THINKING = ${JSON.stringify(advisor.thinking)};`,
-        ]
-      : []),
+    `const PI_WORKSPACE = (process.env.GH_ROUTER_WORKSPACE ?? "").trim();`,
     `const LEAD_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${piLeadModel(opts.profileId)}`)};`,
     `const LEAD_THINKING = ${JSON.stringify(piLeadThinking(opts.profileId))};`,
+    `void LEAD_MODEL; void LEAD_THINKING;`,
     ``,
     `async function callMcp(group, tool, args, signal) {`,
+    `  const headers = { "content-type": "application/json", accept: "application/json", authorization: "Bearer " + MCP_NONCE };`,
+    `  if (PI_WORKSPACE && (group === "search" || group === "workers" || group === "orchestrate")) { headers["X-GH-Workspace"] = PI_WORKSPACE; }`,
     `  const res = await fetch(MCP_URL + "/mcp/" + group, {`,
     `    method: "POST",`,
-    `    headers: { "content-type": "application/json", accept: "application/json", authorization: "Bearer " + MCP_NONCE },`,
+    `    headers,`,
     `    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } }),`,
     `    signal,`,
     `  });`,
@@ -474,7 +512,12 @@ export function buildPiExtensionSource(opts: {
           `    description: "Second opinion before acting on a risky decision. Advisory only: challenges assumptions, never edits. Pass decision, options, and context.",`,
           `    parameters: OracleParams,`,
           `    async execute(_toolCallId, params, signal) {`,
-          `      return await toolText(callMcp("peers", "oracle", { decision: params.decision, options: params.options || "", context: params.context, model: ORACLE_MODEL, thinking: ORACLE_THINKING }, signal));`,
+          `      const query = stripNul(params.decision || "").trim();`,
+          `      const opts = stripNul(params.options || "").trim();`,
+          `      const ctx = stripNul(params.context || "").trim();`,
+          `      const context = (opts ? "Options considered:\\n" + opts + "\\n\\n" : "") + ctx;`,
+          `      if (!query || !context.trim()) return toolErrorText("oracle: decision and context are required (non-empty strings)");`,
+          `      return await toolText(callMcp("peers", "oracle", { query, context }, signal));`,
           `    },`,
           `  });`,
         ]
@@ -488,7 +531,11 @@ export function buildPiExtensionSource(opts: {
       `    description: "Advisory plan review for the lead: review the final plan before presenting it. Never executes.",`,
       `    parameters: AdvisorParams,`,
       `    async execute(_toolCallId, params, signal) {`,
-      `      return await toolText(callMcp("peers", "oracle", { decision: "Review this plan (advisory)", options: params.plan, context: params.context || "", model: ADVISOR_MODEL, thinking: ADVISOR_THINKING }, signal));`,
+      `      const plan = stripNul(params.plan || "").trim();`,
+      `      const ctx = stripNul(params.context || "").trim();`,
+      `      const context = (plan ? "Plan under review:\\n" + plan : "") + (ctx ? "\\n\\nBackground:\\n" + ctx : "");`,
+      `      if (!plan || !context.trim()) return toolErrorText("advisor: plan and context are required (non-empty strings)");`,
+      `      return await toolText(callMcp("peers", "oracle", { query: "Review this plan (advisory)", context }, signal));`,
       `    },`,
       `  });`,
     )
@@ -501,24 +548,99 @@ export function buildPiExtensionSource(opts: {
       `    description: "Semantic-first code search over the workspace index (falls back to lexical with a label). Use for finding code by meaning.",`,
       `    parameters: CodeSearchParams,`,
       `    async execute(_toolCallId, params, signal) {`,
-      `      return await toolText(callMcp("search", "code", { query: params.query, mode: params.mode || "semantic", limit: params.limit || 15 }, signal));`,
+      `      const query = stripNul(params.query || "").trim();`,
+      `      if (!query) return toolErrorText("code_search: query is required (non-empty string)");`,
+      `      const workspace = (typeof params.workspace === "string" && params.workspace.trim()) ? params.workspace.trim() : PI_WORKSPACE;`,
+      `      if (!workspace) return toolErrorText("code_search: a workspace is required. Pass the absolute project path as workspace.");`,
+      `      const args = { query, mode: params.mode || "semantic", limit: params.limit || 15, workspace };`,
+      `      if (typeof params.file_glob === "string" && params.file_glob) args.file_glob = params.file_glob;`,
+      `      return await toolText(callMcp("search", "code", args, signal));`,
       `    },`,
       `  });`,
     )
   }
   if (opts.browseEnabled) {
     lines.push(
-      `  const BROWSER_TOOLS = ["browser_open_tab", "browser_navigate", "browser_screenshot", "browser_act", "browser_observe", "browser_extract"];`,
-      `  for (const wireName of BROWSER_TOOLS) {`,
-      `    pi.registerTool({`,
-      `      name: wireName,`,
-      `      description: "Browser control (" + wireName + "). Returns install_required with setup steps when the extension is not loaded.",`,
-      `      parameters: BrowserParams,`,
-      `      async execute(_toolCallId, params, signal) {`,
-      `        return await toolText(callMcp("browser", wireName, { url: params.url || "", intent: params.intent || "" }, signal));`,
-      `      },`,
-      `    });`,
-      `  }`,
+      `  pi.registerTool({`,
+      `    name: "open_tab",`,
+      `    label: "Browser open tab",`,
+      `    description: "Open a URL in a new browser tab (MCP browser/open_tab). Returns install_required with setup steps when the extension is not loaded.",`,
+      `    parameters: OpenTabParams,`,
+      `    async execute(_toolCallId, params, signal) {`,
+      `      const url = stripNul(params.url || "").trim();`,
+      `      if (!url) return toolErrorText("open_tab: url is required");`,
+      `      const args = { url };`,
+      `      if (typeof params.reuseActive === "boolean") args.reuseActive = params.reuseActive;`,
+      `      return await toolText(callMcp("browser", "open_tab", args, signal));`,
+      `    },`,
+      `  });`,
+      `  pi.registerTool({`,
+      `    name: "navigate",`,
+      `    label: "Browser navigate",`,
+      `    description: "Navigate an existing tab (MCP browser/navigate). Requires tabId + action; url only for action=goto.",`,
+      `    parameters: NavigateParams,`,
+      `    async execute(_toolCallId, params, signal) {`,
+      `      if (typeof params.tabId !== "number") return toolErrorText("navigate: tabId is required (number from open_tab)");`,
+      `      if (!params.action) return toolErrorText("navigate: action is required (goto, back, forward, reload)");`,
+      `      const args = { tabId: params.tabId, action: params.action };`,
+      `      if (typeof params.url === "string" && params.url) args.url = params.url;`,
+      `      if (typeof params.hard === "boolean") args.hard = params.hard;`,
+      `      return await toolText(callMcp("browser", "navigate", args, signal));`,
+      `    },`,
+      `  });`,
+      `  pi.registerTool({`,
+      `    name: "screenshot",`,
+      `    label: "Browser screenshot",`,
+      `    description: "Screenshot a tab (MCP browser/screenshot). Requires tabId.",`,
+      `    parameters: ScreenshotParams,`,
+      `    async execute(_toolCallId, params, signal) {`,
+      `      if (typeof params.tabId !== "number") return toolErrorText("screenshot: tabId is required (number from open_tab)");`,
+      `      const args = { tabId: params.tabId };`,
+      `      if (typeof params.format === "string" && params.format) args.format = params.format;`,
+      `      if (typeof params.quality === "number") args.quality = params.quality;`,
+      `      return await toolText(callMcp("browser", "screenshot", args, signal));`,
+      `    },`,
+      `  });`,
+      `  pi.registerTool({`,
+      `    name: "act",`,
+      `    label: "Browser act",`,
+      `    description: "Interact with a tab (MCP browser/act). Requires tabId plus intent or ref.",`,
+      `    parameters: ActParams,`,
+      `    async execute(_toolCallId, params, signal) {`,
+      `      if (typeof params.tabId !== "number") return toolErrorText("act: tabId is required (number from open_tab)");`,
+      `      if (!params.intent && !params.ref) return toolErrorText("act: intent or ref is required");`,
+      `      const args = { tabId: params.tabId };`,
+      `      if (typeof params.intent === "string" && params.intent) args.intent = params.intent;`,
+      `      if (typeof params.ref === "string" && params.ref) args.ref = params.ref;`,
+      `      if (typeof params.action === "string" && params.action) args.action = params.action;`,
+      `      if (typeof params.value === "string") args.value = params.value;`,
+      `      return await toolText(callMcp("browser", "act", args, signal));`,
+      `    },`,
+      `  });`,
+      `  pi.registerTool({`,
+      `    name: "observe",`,
+      `    label: "Browser observe",`,
+      `    description: "Summarize a tab (MCP browser/observe). Requires tabId.",`,
+      `    parameters: ObserveParams,`,
+      `    async execute(_toolCallId, params, signal) {`,
+      `      if (typeof params.tabId !== "number") return toolErrorText("observe: tabId is required (number from open_tab)");`,
+      `      const args = { tabId: params.tabId };`,
+      `      if (typeof params.intent === "string" && params.intent) args.intent = params.intent;`,
+      `      return await toolText(callMcp("browser", "observe", args, signal));`,
+      `    },`,
+      `  });`,
+      `  pi.registerTool({`,
+      `    name: "extract",`,
+      `    label: "Browser extract",`,
+      `    description: "Extract structured data from a tab (MCP browser/extract). Requires tabId, schema, instruction.",`,
+      `    parameters: ExtractParams,`,
+      `    async execute(_toolCallId, params, signal) {`,
+      `      if (typeof params.tabId !== "number") return toolErrorText("extract: tabId is required (number from open_tab)");`,
+      `      if (!params.instruction) return toolErrorText("extract: instruction is required");`,
+      `      if (params.schema === undefined) return toolErrorText("extract: schema is required");`,
+      `      return await toolText(callMcp("browser", "extract", { tabId: params.tabId, schema: params.schema, instruction: params.instruction }, signal));`,
+      `    },`,
+      `  });`,
     )
   }
   if (opts.bridge && opts.bridge.scopedRules.length + opts.bridge.stats.staticFiles > 0) {
@@ -555,8 +677,9 @@ export interface PiSkillDoc {
  * Workflow guidance as skills (progressive disclosure, not tools).
  * Ownership mirrors the Claude launcher: peer consult prose rides
  * `--peers`, semantic-search prose rides `--search`, and the
- * delegation/review pipeline rides `--swe`. A bare launch emits NO
- * skills at all.
+ * delegation/review pipeline rides `--swe` AND `--peers` — without
+ * agents + the subagent provider its prose dangles, so peerless+swe
+ * emits none. A bare launch emits NO skills at all.
  */
 export function buildPiSkills(opts: {
   profileId: PiProfileId
@@ -580,7 +703,9 @@ export function buildPiSkills(opts: {
         "Call the `oracle` tool with the decision, the options considered, and the",
         "missing-context gaps. The oracle is cold-start: it sees only what you pass.",
         "Its verdict is advisory — verify with tests and code, never substitute votes",
-        "for verification.",
+        "for verification. (The `oracle` tool is the one-shot consult; the `oracle`",
+        "subagent is the same role for interactive follow-ups — same name, different",
+        "invocation. Prefer the tool for a single verdict.)",
       ].join("\n"),
     })
   }
@@ -602,7 +727,11 @@ export function buildPiSkills(opts: {
       ].join("\n"),
     })
   }
-  if (opts.swe === true) {
+  if (opts.swe === true && peers) {
+    // Balanced is advisor-free: the roster line must not name a consultant
+    // that has neither tool nor agent file on that profile.
+    const consults =
+      opts.profileId === "balanced" ? "`oracle` for consults" : "`oracle`/`advisor` for consults"
     skills.push({
       dir: "gh-delegate",
       content: [
@@ -613,9 +742,14 @@ export function buildPiSkills(opts: {
         "",
         "# Delegate",
         "",
-        "Recommended loop: scout (Explore) before you understand the code, worker",
-        "(General-Purpose) to implement, fresh reviewers to check, worker to apply",
-        "feedback. Keep delegated tasks scoped with file:line evidence on return.",
+        "You may delegate via the `subagent` tool to this roster only: `Explore`",
+        "for discovery, `General-Purpose` for scoped implementation, `reviewer`",
+        `for verification, ${consults}. (Builtin \`scout\` and`,
+        "`worker` are disabled in this session; their aliases resolve here.)",
+        "Recommended loop: `Explore` to map the code, paste the brief excerpts",
+        "into the `General-Purpose` brief to implement, `reviewer` to check,",
+        "`General-Purpose` to apply feedback. Keep delegated tasks",
+        "scoped with file:line evidence on return.",
         opts.profileId === "balanced"
           ? "Send work to reviewer ONLY when the change alters behavior."
           : "Send finished work to reviewer for assessment.",
@@ -649,14 +783,21 @@ export interface PiPromptDoc {
 
 /**
  * Saved workflow shortcuts as prompt templates (`/name`). The review
- * pipeline is SWE-pipeline surface: only `--swe` emits prompts, so a
- * bare launch advertises none.
+ * pipeline is SWE-pipeline surface: only `--swe` AND `--peers` emit
+ * prompts (peerless launches have no agents behind them), so a bare
+ * launch advertises none.
+ *
+ * `/parallel-review` intentionally shadows the packaged pi-subagents
+ * prompt of the same name (package prompts are filtered to `[]` in
+ * settings): ours routes to our pinned-model `reviewer`, not the
+ * default-model builtin. `/review` is novel — no packaged collision.
  */
 export function buildPiPrompts(opts: {
   profileId: PiProfileId
   swe?: boolean
+  peers?: boolean
 }): Array<PiPromptDoc> {
-  if (opts.swe !== true) return []
+  if (opts.swe !== true || opts.peers === false) return []
   const prompts: Array<PiPromptDoc> = [
     {
       name: "review",
