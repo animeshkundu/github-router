@@ -48,10 +48,17 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
 
 ## How it cooperates with Pi
 
-- **Compatible endpoint, not a provider hack.** The launcher writes a
-  `gh-router` provider into the mirror's `models.json`
-  (`api: openai-completions`, `baseUrl: <proxy>/v1`) — the documented
-  Ollama/vLLM pattern. No `registerProvider` override.
+- **Right wire endpoint, not a provider hack.** The launcher writes a
+  `gh-router` provider into the mirror's `models.json` with
+  `api: openai-responses` (per-model `api` override supported for a
+  future chat-served model), `baseUrl: <proxy>/v1`, and `authHeader`
+  for the dummy bearer — Pi POSTs `/v1/responses`, the Codex-proven
+  path. Every roster model is Responses-only on Copilot; sending them
+  to `/v1/chat/completions` is an upstream 400 (observed live). Each
+  row also carries `maxTokens` (catalog output cap, ≥16 floor the
+  proxy enforces), `cost` (USD/1M from live billing), and its
+  cheap-tier `contextWindow`. No `registerProvider` override, no
+  proxy-side translation.
 - **Isolated mirror.** The user's `~/.pi/agent` is snapshot-copied to a
   per-launch dir (`PI_CODING_AGENT_DIR` → mirror); `auth.json` and
   `sessions/` are never copied. The mirror is swept on shutdown (plus a

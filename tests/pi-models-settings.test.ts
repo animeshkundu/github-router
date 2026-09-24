@@ -11,6 +11,7 @@ import {
   buildPiModelsJson,
   buildPiSettingsJson,
   derivePiCompactionSettings,
+  PI_MAX_TOKENS_FALLBACK,
   PI_PROFILE_CONTEXT_TOKENS,
   piAdvisorModel,
   piLeadModel,
@@ -19,6 +20,7 @@ import {
   piOracleModel,
   piProfileModelIds,
 } from "~/lib/pi-models-settings"
+import { EFFORT_ORDER } from "~/lib/reasoning-effort"
 
 describe("pi cheapest profile", () => {
   test("Luna/max lead, all roles bare 200K", () => {
@@ -97,7 +99,7 @@ describe("pi balanced profile", () => {
 })
 
 describe("pi models.json", () => {
-  test("single gh-router OpenAI-compatible provider, tier windows, bare rows", () => {
+  test("Responses provider (roster is Responses-only), tier windows, bare rows", () => {
     const windows: Record<string, number> = {
       "gpt-6-luna": 272_000,
       "gpt-6-sol": 272_000,
@@ -110,11 +112,72 @@ describe("pi models.json", () => {
       })
       const provider = json.providers["gh-router"]
       expect(provider.baseUrl).toBe("http://127.0.0.1:8787/v1")
-      expect(provider.api).toBe("openai-completions")
+      // Luna/Sol/Grok serve /v1/responses only; chat completions is a
+      // Copilot 400 for them (observed live).
+      expect(provider.api).toBe("openai-responses")
+      expect(provider.apiKey).toBe("dummy")
+      expect(provider.authHeader).toBe(true)
       expect(provider.models.length).toBeGreaterThan(0)
       for (const m of provider.models) {
         expect(m.contextWindow).toBe(windows[m.id] ?? 200_000)
         expect(m.reasoning).toBe(true)
+        expect(m.id).not.toContain("[1m]")
+        expect(m.maxTokens).toBeGreaterThanOrEqual(16)
+        expect(m.api).toBeUndefined()
+      }
+    }
+  })
+
+  test("maxTokens from catalog, floored, with fallback; cost passthrough; api override", () => {
+    const json = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "cheapest",
+      catalog: [
+        { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, maxOutputTokens: 128_000, efforts: ["max"], endpoints: ["responses"], cost: { input: 0.1, output: 0.5 } },
+        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"] },
+      ],
+      apiOverrides: { "gpt-6-sol": "openai-completions" },
+    })
+    const rows = Object.fromEntries(
+      json.providers["gh-router"].models.map((m) => [m.id, m]),
+    )
+    expect(rows["gpt-6-luna"].maxTokens).toBe(128_000)
+    expect(rows["gpt-6-luna"].cost).toEqual({ input: 0.1, output: 0.5 })
+    expect(rows["gpt-6-luna"].api).toBeUndefined()
+    // No output metadata -> documented fallback (proxy floor is 16).
+    expect(rows["gpt-6-sol"].maxTokens).toBe(PI_MAX_TOKENS_FALLBACK)
+    expect(rows["gpt-6-sol"].cost).toBeUndefined()
+    expect(rows["gpt-6-sol"].api).toBe("openai-completions")
+  })
+
+  test("emitted lead triple is proxy-acceptable on /v1/responses", () => {
+    // Contract: what Pi sends for the lead (model + thinking effort +
+    // output cap) must pass the proxy's responses guards with no
+    // translation: recognized effort tier, output floor, bare slug.
+    for (const profile of ["cheapest", "balanced"] as const) {
+      const json = buildPiModelsJson({
+        serverUrl: "http://127.0.0.1:8787",
+        profileId: profile,
+        catalog: [
+          { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, maxOutputTokens: 128_000, efforts: ["max"], endpoints: ["responses"] },
+          { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, maxOutputTokens: 64_000, efforts: ["medium", "high"], endpoints: ["responses"] },
+          { id: "grok-4.6", maxContextTokens: 500_000, maxPromptTokens: 300_000, maxOutputTokens: 128_000, efforts: ["medium"], endpoints: ["responses"] },
+        ],
+      })
+      const provider = json.providers["gh-router"]
+      expect(provider.api).toBe("openai-responses")
+      for (const m of provider.models) {
+        // Effort Pi will send (modelThinkingLevels/agent thinking resolve
+        // to these) must be a recognized Copilot tier — direct
+        // /v1/responses performs no bucketing or clamping.
+        const thinking =
+          m.id === provider.models[0].id
+            ? piLeadThinking(profile)
+            : undefined
+        if (thinking !== undefined) {
+          expect(EFFORT_ORDER as ReadonlyArray<string>).toContain(thinking)
+        }
+        expect(m.maxTokens).toBeGreaterThanOrEqual(16)
         expect(m.id).not.toContain("[1m]")
       }
     }

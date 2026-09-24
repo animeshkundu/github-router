@@ -21,9 +21,17 @@ export interface PiCatalogModel {
   id: string
   maxContextTokens: number
   maxPromptTokens: number
+  maxOutputTokens?: number
   efforts: ReadonlyArray<string>
   /** Canonical endpoint kinds, e.g. "responses" | "chat" | "messages". */
   endpoints: ReadonlyArray<string>
+  /** Per-1M USD costs (converted from catalog units by the launcher). */
+  cost?: {
+    input: number
+    output: number
+    cacheRead?: number
+    cacheWrite?: number
+  }
 }
 
 /**
@@ -143,28 +151,58 @@ export function piProfileModelIds(
   return [...ids]
 }
 
+export type PiModelApi = "openai-completions" | "openai-responses"
+
 export interface PiModelsJson {
   providers: Record<
     string,
     {
       baseUrl: string
-      api: "openai-completions"
+      api: PiModelApi
       apiKey: string
+      /** Send the dummy bearer; the proxy ignores auth but Pi treats
+       *  auth-present providers as picker-usable. */
+      authHeader: true
       models: Array<{
         id: string
         name: string
         reasoning: true
         input: Array<string>
         contextWindow: number
+        /** Pi requires an output limit; the proxy 400s values < 16. */
+        maxTokens: number
+        cost?: {
+          input: number
+          output: number
+          cacheRead?: number
+          cacheWrite?: number
+        }
+        /** Per-model API override (documented Pi capability) for a
+         *  future chat-served model on this provider. Omitted when it
+         *  matches the provider default. */
+        api?: PiModelApi
       }>
     }
   >
 }
 
 /**
+ * Fallback per-request output cap when the catalog carries no
+ * max_output_tokens. Matches the documented Luna/Grok 128K ceiling;
+ * the live catalog always wins. Never below the proxy's 16-token floor.
+ */
+export const PI_MAX_TOKENS_FALLBACK = 128_000 as const
+
+/**
  * Build the `models.json` provider entry pointing Pi at the running
  * proxy as an ordinary OpenAI-compatible endpoint (the documented
  * Ollama/vLLM pattern — no provider-override extension needed).
+ *
+ * The provider speaks `openai-responses`: every roster model is
+ * Responses-only on Copilot, and Pi POSTs `{baseUrl}/responses` for
+ * that API — i.e. our `/v1/responses`, the Codex-proven path. Sending
+ * these models to `/v1/chat/completions` is a Copilot 400 (observed).
+ *
  * Every row is BARE (no `[1m]`) with its cheap-tier window from
  * `piContextWindowFor` (272K Luna/Sol, 200K Grok/unknown): Pi budgets
  * `contextWindow` per model, so each role gets its cheapest tier and
@@ -175,24 +213,38 @@ export function buildPiModelsJson(opts: {
   profileId: PiProfileId
   catalog?: ReadonlyArray<PiCatalogModel>
   peers?: boolean
+  /** Provider-level API; uniform Responses roster needs no overrides. */
+  api?: PiModelApi
+  apiOverrides?: Readonly<Record<string, PiModelApi>>
 }): PiModelsJson {
   const baseUrl = `${opts.serverUrl.replace(/\/+$/, "")}/v1`
+  const providerApi = opts.api ?? "openai-responses"
   return {
     providers: {
       [PI_PROVIDER_NAME]: {
         baseUrl,
-        api: "openai-completions",
+        api: providerApi,
         apiKey: "dummy",
-        models: piProfileModelIds(opts.profileId, { peers: opts.peers }).map((id) => ({
-          id,
-          name: id,
-          reasoning: true as const,
-          input: ["text"],
-          contextWindow: piContextWindowFor(
+        authHeader: true as const,
+        models: piProfileModelIds(opts.profileId, { peers: opts.peers }).map((id) => {
+          const entry = opts.catalog?.find((m) => m.id === id)
+          const out = entry?.maxOutputTokens
+          const maxTokens =
+            typeof out === "number" && Number.isFinite(out) && out >= 16
+              ? Math.floor(out)
+              : PI_MAX_TOKENS_FALLBACK
+          const override = opts.apiOverrides?.[id]
+          return {
             id,
-            opts.catalog?.find((m) => m.id === id)?.maxContextTokens,
-          ),
-        })),
+            name: id,
+            reasoning: true as const,
+            input: ["text"],
+            contextWindow: piContextWindowFor(id, entry?.maxContextTokens),
+            maxTokens,
+            ...(entry?.cost ? { cost: entry.cost } : {}),
+            ...(override && override !== providerApi ? { api: override } : {}),
+          }
+        }),
       },
     },
   }
