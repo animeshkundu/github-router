@@ -677,8 +677,9 @@ export interface PiSkillDoc {
  * Workflow guidance as skills (progressive disclosure, not tools).
  * Ownership mirrors the Claude launcher: peer consult prose rides
  * `--peers`, semantic-search prose rides `--search`, and the
- * delegation/review pipeline rides `--swe`. A bare launch emits NO
- * skills at all.
+ * delegation/review pipeline rides `--swe` AND `--peers` — without
+ * agents + the subagent provider its prose dangles, so peerless+swe
+ * emits none. A bare launch emits NO skills at all.
  */
 export function buildPiSkills(opts: {
   profileId: PiProfileId
@@ -726,7 +727,11 @@ export function buildPiSkills(opts: {
       ].join("\n"),
     })
   }
-  if (opts.swe === true) {
+  if (opts.swe === true && peers) {
+    // Balanced is advisor-free: the roster line must not name a consultant
+    // that has neither tool nor agent file on that profile.
+    const consults =
+      opts.profileId === "balanced" ? "`oracle` for consults" : "`oracle`/`advisor` for consults"
     skills.push({
       dir: "gh-delegate",
       content: [
@@ -739,11 +744,11 @@ export function buildPiSkills(opts: {
         "",
         "You may delegate via the `subagent` tool to this roster only: `Explore`",
         "for discovery, `General-Purpose` for scoped implementation, `reviewer`",
-        "for verification, `oracle`/`advisor` for consults. (Builtin `scout` and",
+        `for verification, ${consults}. (Builtin \`scout\` and`,
         "`worker` are disabled in this session; their aliases resolve here.)",
-        "Recommended loop: `Explore` to map the code (it records context.md),",
-        "`General-Purpose` to implement (it pre-reads context.md), `reviewer`",
-        "to check, `General-Purpose` to apply feedback. Keep delegated tasks",
+        "Recommended loop: `Explore` to map the code, paste the brief excerpts",
+        "into the `General-Purpose` brief to implement, `reviewer` to check,",
+        "`General-Purpose` to apply feedback. Keep delegated tasks",
         "scoped with file:line evidence on return.",
         opts.profileId === "balanced"
           ? "Send work to reviewer ONLY when the change alters behavior."
@@ -778,8 +783,9 @@ export interface PiPromptDoc {
 
 /**
  * Saved workflow shortcuts as prompt templates (`/name`). The review
- * pipeline is SWE-pipeline surface: only `--swe` emits prompts, so a
- * bare launch advertises none.
+ * pipeline is SWE-pipeline surface: only `--swe` AND `--peers` emit
+ * prompts (peerless launches have no agents behind them), so a bare
+ * launch advertises none.
  *
  * `/parallel-review` intentionally shadows the packaged pi-subagents
  * prompt of the same name (package prompts are filtered to `[]` in
@@ -789,8 +795,9 @@ export interface PiPromptDoc {
 export function buildPiPrompts(opts: {
   profileId: PiProfileId
   swe?: boolean
+  peers?: boolean
 }): Array<PiPromptDoc> {
-  if (opts.swe !== true) return []
+  if (opts.swe !== true || opts.peers === false) return []
   const prompts: Array<PiPromptDoc> = [
     {
       name: "review",

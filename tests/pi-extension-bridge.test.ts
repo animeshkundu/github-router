@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { buildPiExtensionSource, buildPiSkills } from "~/lib/pi-extension"
+import { buildPiExtensionSource, buildPiPrompts, buildPiSkills } from "~/lib/pi-extension"
 import { buildMirrorBridgeSection } from "~/lib/pi-memory-bridge"
 import {
   buildPiAgentFiles,
@@ -103,38 +103,55 @@ describe("pi native agent files (pi-subagents contract)", () => {
     // General-Purpose delegates to reviewer + oracle: grant required.
     expect(gp).toContain("allowNestedSubagents: true")
     expect(gp).toContain("allowedAgents: [reviewer, oracle]")
-    expect(gp).toContain("subagent")
+    expect(gp).toContain("tools: [read, grep, find, ls, bash, edit, write, subagent, contact_supervisor]")
     expect(gp).toContain("acceptanceRole: writer")
     const balancedReviewer = buildPiAgentFiles("balanced")["agents/reviewer.md"]!
     expect(balancedReviewer).toContain("allowNestedSubagents: true")
     expect(balancedReviewer).toContain("allowedAgents: [Explore]")
-    // Cheapest reviewer is a leaf: no dangling edge.
+    // The grant is inert without `subagent` in the same tools list.
+    expect(balancedReviewer).toContain("contact_supervisor, subagent]")
+    // Cheapest reviewer is a leaf: no dangling edge, no nesting tool.
     expect(cheapest["agents/reviewer.md"]!).not.toContain("allowedAgents")
+    expect(cheapest["agents/reviewer.md"]!).not.toContain("subagent]")
     expect(cheapest["agents/explore.md"]!).not.toContain("allowedAgents")
   })
 
   test("aliases absorb disabled-builtin invocations deterministically", () => {
     const files = buildPiAgentFiles("cheapest")
     expect(files["agents/explore.md"]!).toContain("aliases: [scout]")
-    expect(files["agents/general-purpose.md"]!).toContain("aliases: [worker, developer, coder]")
+    expect(files["agents/general-purpose.md"]!).toContain(
+      "aliases: [worker, developer, coder, implementer, develop]",
+    )
   })
 
-  test("reviewer carries the diff-anchored review contract", () => {
+  test("reviewer carries the diff-anchored review contract, honestly tool-scoped", () => {
     const reviewer = buildPiAgentFiles("cheapest")["agents/reviewer.md"]!
     expect(reviewer).toContain("watchdog_diff")
     expect(reviewer).toContain("contact_supervisor")
     expect(reviewer).toContain("Merge verdict")
+    // No shell on reviewer: body must not promise reproduction it can't run.
+    expect(reviewer).toContain("You have no shell")
+    expect(reviewer).not.toContain("Reproduce failures before diagnosing")
   })
 
-  test("Explore feeds the context.md handoff General-Purpose pre-reads", () => {
-    const files = buildPiAgentFiles("cheapest")
-    const explore = files["agents/explore.md"]!
-    expect(explore).toContain("output: context.md")
-    // output:/defaultProgress bindings are model-written files: Explore must
-    // carry the write tool or the run fails ("can't record context.md").
-    expect(explore).toContain("write")
-    expect(explore).toContain("only files you may write are context.md and progress.md")
-    expect(files["agents/general-purpose.md"]!).toContain("defaultReads: [context.md]")
+  test("no file bindings: handoff is inline, runs write nothing to the repo", () => {
+    // Single-shot launches resolve relative `output:` under per-run artifact
+    // dirs while `defaultReads` resolves against the child cwd and skips
+    // missing files silently — a lead-mediated file handoff never fires.
+    // `defaultProgress` additionally defaults into the repo cwd (litter).
+    // So no emitted agent carries output:/defaultReads:/defaultProgress:.
+    for (const profileId of ["cheapest", "balanced"] as const) {
+      const files = buildPiAgentFiles(profileId)
+      for (const content of Object.values(files)) {
+        expect(content).not.toContain("output:")
+        expect(content).not.toContain("defaultReads:")
+        expect(content).not.toContain("defaultProgress:")
+      }
+      // ...which restores Explore to pure read-only (the write grant existed
+      // only for the reverted bindings — observed failure otherwise).
+      expect(files["agents/explore.md"]!).toContain("tools: [read, grep, find, ls, bash]")
+      expect(files["agents/explore.md"]!).toContain("Never modify files.")
+    }
   })
 
   test("delegate skill names only canonical roster agents", () => {
@@ -144,14 +161,36 @@ describe("pi native agent files (pi-subagents contract)", () => {
     expect(delegate.content).toContain("`Explore`")
     expect(delegate.content).toContain("`General-Purpose`")
     expect(delegate.content).toContain("`reviewer`")
+    expect(delegate.content).toContain("`oracle`/`advisor`")
     expect(delegate.content).toContain("`subagent` tool")
-    expect(delegate.content).toContain("context.md")
+    // Inline handoff (paste excerpts), not the reverted file chain.
+    expect(delegate.content).toContain("paste the brief excerpts")
+    expect(delegate.content).not.toContain("context.md")
     // Old phrasing mapped builtins parenthetically ("scout (Explore)"),
     // inviting literal invocation of agents that no longer exist. The only
     // remaining builtin mentions are the explicit disabled-note.
     expect(delegate.content).not.toContain("scout (Explore)")
     expect(delegate.content).not.toContain("(General-Purpose) to implement")
     expect(delegate.content).toContain("are disabled in this session")
+  })
+
+  test("balanced delegate omits the nonexistent advisor", () => {
+    const delegate = buildPiSkills({ profileId: "balanced", peers: true, swe: true }).find(
+      (s) => s.dir === "gh-delegate",
+    )!
+    expect(delegate.content).toContain("`oracle` for consults")
+    expect(delegate.content).not.toContain("advisor")
+  })
+
+  test("peerless+swe emits no pipeline skills", () => {
+    expect(buildPiSkills({ profileId: "cheapest", peers: false, swe: true })).toEqual([])
+    expect(buildPiSkills({ profileId: "balanced", peers: false, swe: true })).toEqual([])
+  })
+
+  test("peerless+swe emits no review prompts", () => {
+    expect(buildPiPrompts({ profileId: "cheapest", swe: true, peers: false })).toEqual([])
+    // Omitted peers preserves the legacy default (emit).
+    expect(buildPiPrompts({ profileId: "cheapest", swe: true }).length).toBeGreaterThan(0)
   })
 })
 

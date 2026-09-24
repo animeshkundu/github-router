@@ -18,9 +18,11 @@ same-named pi-subagents builtins (pinned models); builtin
 (their habitual invocations resolve through our `scout`/`worker` aliases),
 while builtin `delegate` stays enabled as the cheap append-mode path.
 `General-Purpose` may nest `reviewer`/`oracle`, balanced `reviewer` may nest
-`Explore` (2-level guard); `Explore` records `context.md` for the
-`General-Purpose` handoff. `/parallel-review` intentionally shadows the
-packaged prompt of the same name.
+`Explore` (ceiling raised to 3 via `PI_SUBAGENT_MAX_DEPTH`). Handoff is
+inline prose in the delegating brief — no `context.md`/`progress.md` file
+bindings, so runs write nothing into the repo. `--swe` without `--peers`
+emits no skills or prompts (no agents behind them). `/parallel-review`
+intentionally shadows the packaged prompt of the same name.
 
 ## Usage
 

@@ -400,7 +400,9 @@ export const pi = defineCommand({
         }),
       )
       // Peer floor (agents + consult skills) rides --peers; the SWE
-      // pipeline (delegate/advisor skills, review prompts) rides --swe;
+      // pipeline (delegate/advisor skills, review prompts) rides --swe AND
+      // --peers (without agents + the subagent provider its prose dangles,
+      // so peerless+swe emits none — see the heads-up below).
       // semantic-search prose rides --search. Bare launches write none.
       if (peersEnabled) {
         const agentFiles = buildPiAgentFiles(profileId)
@@ -411,7 +413,7 @@ export const pi = defineCommand({
       for (const skill of buildPiSkills({ profileId, peers: peersEnabled, swe: sweEnabled, search: searchEnabled })) {
         await writeTextFile(path.join(mirror, "skills", skill.dir, "SKILL.md"), skill.content)
       }
-      for (const prompt of buildPiPrompts({ profileId, swe: sweEnabled })) {
+      for (const prompt of buildPiPrompts({ profileId, swe: sweEnabled, peers: peersEnabled })) {
         await writeTextFile(path.join(mirror, "prompts", `${prompt.name}.md`), prompt.content)
       }
       await writeTextFile(path.join(mirror, "APPEND_SYSTEM.md"), buildPiAppendSystem(profileId, { peers: peersEnabled }))
@@ -543,6 +545,11 @@ export const pi = defineCommand({
     process.stderr.write(
       `Server ready on ${serverUrl}, launching Pi (${profileId} lead ${lead}, models ${modelIds.length}, ${surface})...\n`,
     )
+    if (sweEnabled && !peersEnabled) {
+      process.stderr.write(
+        "Note: --swe without --peers emits no delegate/review skills or prompts (no agents behind them in a peerless launch).\n",
+      )
+    }
 
     const { disposeBluebirdClients } = await import("./lib/bluebird-client")
     launchChild(
@@ -556,6 +563,10 @@ export const pi = defineCommand({
           // X-GH-Workspace header). The proxy is long-lived; the agent is
           // not — only the launcher knows where the caller actually is.
           GH_ROUTER_WORKSPACE: process.cwd(),
+          // Balanced nests reviewer→Explore under General-Purpose, i.e.
+          // lead→General-Purpose→reviewer→Explore (3 deep); the default
+          // nesting guard is 2 and would fail the deepest edge closed.
+          PI_SUBAGENT_MAX_DEPTH: "3",
           ...(aicLedgerEnv ? { [AIC_LEDGER_ENV]: aicLedgerEnv } : {}),
           ...(aicStatusCommandEnv
             ? { [PI_STATUS_COMMAND_ENV]: aicStatusCommandEnv }

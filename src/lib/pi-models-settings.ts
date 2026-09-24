@@ -532,10 +532,18 @@ function roleDescription(
  *   is how the roster pins gh-router models/thinking for cost control.
  *   The shadowed `advisor` alias dies with the builtin oracle definition,
  *   which is why `advisor` ships as its own file on cheapest.
- * - `allowedAgents` only narrows an existing nesting grant, so every
- *   delegating agent also sets `allowNestedSubagents: true` and lists
- *   `subagent` in `tools`. Depth fits the default 2-level guard
- *   (lead → child → grandchild).
+  * - `allowedAgents` only narrows an existing nesting grant, so every
+  *   delegating agent also sets `allowNestedSubagents: true` and lists
+  *   `subagent` in `tools`. Depth reaches 3 on balanced
+  *   (lead → General-Purpose → reviewer → Explore), covered by
+  *   `PI_SUBAGENT_MAX_DEPTH=3` in the launch env (default guard is 2).
+  * - Deliberately NO `output:`/`defaultReads`/`defaultProgress` file
+  *   bindings: single-shot launches resolve relative outputs under
+  *   per-run artifact dirs while `defaultReads` resolves against the
+  *   child cwd and skips missing files silently — a lead-mediated
+  *   Explore→General-Purpose file handoff never fires. Handoff is inline
+  *   prose via the delegating brief instead. `defaultProgress` is doubly
+  *   out: its default dir is the repo cwd (untracked litter, no cleanup).
  * - `advertise: true` puts custom agents in the parent prompt catalog
  *   (default false); `aliases` catch habitual builtin invocations
  *   (`scout`, `worker`, …) deterministically since those builtins are
@@ -553,17 +561,16 @@ export function buildPiAgentFiles(
     const isReviewer = role.name === "reviewer"
     // `watchdog_diff` (diff-anchored review) and `contact_supervisor`
     // (blocked-child escalation) are provided by the pi-subagents runtime,
-    // like the delegation primitives — no extra package needed.
-    // Explore carries `write` for one purpose only: the `output: context.md`
-    // + `defaultProgress` bindings below are model-written files, so a
-    // write-less Explore cannot fulfill them and the run fails (observed:
-    // "can't record context.md under read-only constraint"). Same reason
-    // builtin scout lists `write`. The body scopes it to those artifacts.
+    // like the delegation primitives — no extra package needed. Balanced
+    // reviewer additionally lists `subagent`: it holds the roster's other
+    // nesting grant (→ Explore) and the grant is inert without it.
     const tools = isImplementer
       ? "[read, grep, find, ls, bash, edit, write, subagent, contact_supervisor]"
       : isReviewer
-        ? "[read, grep, find, ls, watchdog_diff, contact_supervisor]"
-        : "[read, grep, find, ls, bash, write]";
+        ? profileId === "balanced"
+          ? "[read, grep, find, ls, watchdog_diff, contact_supervisor, subagent]"
+          : "[read, grep, find, ls, watchdog_diff, contact_supervisor]"
+        : "[read, grep, find, ls, bash]";
     const lines = [
       "---",
       `name: ${role.name}`,
@@ -578,19 +585,18 @@ export function buildPiAgentFiles(
     ];
     if (role.name === "Explore") {
       // `scout` alias absorbs habitual builtin invocations (the builtin is
-      // disabled in settings). `output: context.md` + `defaultProgress`
-      // feed the General-Purpose `defaultReads` handoff below.
-      lines.push("aliases: [scout]", "output: context.md", "defaultProgress: true");
+      // disabled in settings). Handoff is inline prose: the lead pastes
+      // brief excerpts into the next brief (see gh-delegate skill).
+      lines.push("aliases: [scout]");
     }
     if (isImplementer) {
-      // Aliases absorb builtin `worker` (+ its `developer/coder`) traffic;
+      // Aliases absorb builtin `worker` traffic (`developer/coder` plus
+      // `implementer/develop`, all builtin-worker aliases);
       // `acceptanceRole: writer` restores the builtin worker's acceptance
       // inference that shadowing would otherwise drop.
       lines.push(
-        "aliases: [worker, developer, coder]",
+        "aliases: [worker, developer, coder, implementer, develop]",
         "acceptanceRole: writer",
-        "defaultReads: [context.md]",
-        "defaultProgress: true",
         "allowNestedSubagents: true",
         "allowedAgents: [reviewer, oracle]",
       );
@@ -601,25 +607,26 @@ export function buildPiAgentFiles(
     lines.push("---", "");
     if (role.name === "Explore") {
       lines.push(
-        "You are a read-only scout. Never modify repository files; the only files you may write are context.md and progress.md.",
+        "You are a read-only scout. Never modify files.",
         "Use bash only for non-interactive inspection.",
         "Search first, read second: return the smallest sufficient evidence — entry points,",
         "key types and functions, data flow, files likely to need changes, constraints and",
-        "open questions — with exact file paths and line ranges. Record the full brief in context.md.",
+        "open questions — with exact file paths and line ranges.",
       );
     } else if (isReviewer) {
       lines.push(
         "You are a disciplined review subagent. Inspect the actual change; verify from code,",
-        "tests, and docs — never guess. Reproduce failures before diagnosing. Cover intent match,",
-        "correctness and edge cases, test coverage, side effects, and minimality.",
+        "tests, and docs — never guess. Cover intent match, correctness and edge cases,",
+        "test coverage, side effects, and minimality.",
         "Report findings with file:line evidence ranked P0 (blocker) / P1 (should fix) / P2 (nit),",
         "ending with one of: Merge verdict: BLOCK, Merge verdict: OK, Merge verdict: OK with notes.",
+        "You have no shell: cite the test commands for the lead to run rather than executing them.",
         "Do not rewrite code outside small, clearly-marked suggestions.",
       );
     } else {
       lines.push(
         "You are the single writer thread. Execute the assigned task with narrow, coherent edits;",
-        "the lead remains the decision authority. Read provided context (context.md when present),",
+        "the lead remains the decision authority. Work from the brief's pasted context,",
         "then implement minimally and verify by running the relevant tests.",
         "If the work reveals an unapproved decision you cannot safely resolve, stop and escalate",
         "instead of guessing; never leave placeholders or TODOs.",
