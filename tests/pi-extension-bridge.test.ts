@@ -128,7 +128,12 @@ describe("pi native agent files (pi-subagents contract)", () => {
 
   test("Explore feeds the context.md handoff General-Purpose pre-reads", () => {
     const files = buildPiAgentFiles("cheapest")
-    expect(files["agents/explore.md"]!).toContain("output: context.md")
+    const explore = files["agents/explore.md"]!
+    expect(explore).toContain("output: context.md")
+    // output:/defaultProgress bindings are model-written files: Explore must
+    // carry the write tool or the run fails ("can't record context.md").
+    expect(explore).toContain("write")
+    expect(explore).toContain("only files you may write are context.md and progress.md")
     expect(files["agents/general-purpose.md"]!).toContain("defaultReads: [context.md]")
   })
 

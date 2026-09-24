@@ -554,11 +554,16 @@ export function buildPiAgentFiles(
     // `watchdog_diff` (diff-anchored review) and `contact_supervisor`
     // (blocked-child escalation) are provided by the pi-subagents runtime,
     // like the delegation primitives — no extra package needed.
+    // Explore carries `write` for one purpose only: the `output: context.md`
+    // + `defaultProgress` bindings below are model-written files, so a
+    // write-less Explore cannot fulfill them and the run fails (observed:
+    // "can't record context.md under read-only constraint"). Same reason
+    // builtin scout lists `write`. The body scopes it to those artifacts.
     const tools = isImplementer
       ? "[read, grep, find, ls, bash, edit, write, subagent, contact_supervisor]"
       : isReviewer
         ? "[read, grep, find, ls, watchdog_diff, contact_supervisor]"
-        : "[read, grep, find, ls, bash]";
+        : "[read, grep, find, ls, bash, write]";
     const lines = [
       "---",
       `name: ${role.name}`,
@@ -596,7 +601,8 @@ export function buildPiAgentFiles(
     lines.push("---", "");
     if (role.name === "Explore") {
       lines.push(
-        "You are a read-only scout. Never modify files. Use bash only for non-interactive inspection.",
+        "You are a read-only scout. Never modify repository files; the only files you may write are context.md and progress.md.",
+        "Use bash only for non-interactive inspection.",
         "Search first, read second: return the smallest sufficient evidence — entry points,",
         "key types and functions, data flow, files likely to need changes, constraints and",
         "open questions — with exact file paths and line ranges. Record the full brief in context.md.",
