@@ -9,6 +9,7 @@ import {
   runCommandCapture,
   runCommandVoid,
 } from "./exec"
+import { queueDetachedGlobalInstall } from "./self-update"
 import { withInstallLock } from "./update-lock"
 
 export const PI_NPM_PACKAGE = "@earendil-works/pi-coding-agent"
@@ -233,19 +234,87 @@ export async function checkPiVersion(opts: {
 
 /**
  * Install (or upgrade) Pi from npm under the cross-process install lock.
- * Best-effort: throws on failure; callers fall back to the installed
- * version with a visible warning rather than stranding the launch.
+ * Returns `true` when this call performed the install, `false` when
+ * another process holds the lock (caller skips — its install will land
+ * for a later launch). Best-effort: throws on failure; callers fall
+ * back to the installed version with a visible warning rather than
+ * stranding the launch.
  */
-export async function updatePi(version: string): Promise<void> {
+export function updatePi(version: string, opts: { signal?: AbortSignal } = {}): Promise<boolean> {
   const npmPath = resolveExecutable("npm")
   if (!npmPath) {
     throw new Error("npm not found on PATH; cannot install Pi automatically")
   }
-  await withInstallLock("pi-install.lock", async () => {
+  return withInstallLock("pi-install.lock", async () => {
     consola.info(`Installing ${PI_NPM_PACKAGE}@${version}...`)
     await runCommandVoid(
       [npmPath, "install", "-g", `${PI_NPM_PACKAGE}@${version}`],
-      { timeoutMs: NPM_INSTALL_TIMEOUT_MS },
+      { timeoutMs: NPM_INSTALL_TIMEOUT_MS, signal: opts.signal },
     )
+  })
+}
+
+/**
+ * Blocking fresh install for when Pi is absent entirely. Installs
+ * `@latest`, then force re-checks; throws when Pi still is not on PATH
+ * (caller exits with the install command). Only used when there is no
+ * usable Pi at all — the healthy path never blocks on npm.
+ */
+export async function ensurePiInstalled(opts: { signal?: AbortSignal } = {}): Promise<string> {
+  const acquired = await updatePi("latest", opts)
+  const retry = await checkPiVersion({ force: true })
+  if (retry.installed && retry.installedVersion) return retry.installedVersion
+  throw new Error(
+    acquired
+      ? "install did not place pi on PATH"
+      : "another Pi install is already running; retry in a moment",
+  )
+}
+
+/**
+ * Fire-and-forget freshness refresh for a healthy Pi install. Never
+ * blocks launch and never throws: on the throttled schedule it probes
+ * npm for a newer Pi and, when one exists, queues a DETACHED post-exit
+ * install (same pattern as the proxy self-update) so neither startup
+ * nor the running session nor shutdown ever waits on npm. The
+ * cross-process install lock serializes against concurrent launches;
+ * every failure degrades to a debug log.
+ *
+ * Deliberately never touches a below-floor install: the floor is
+ * enforced foreground by the launcher (fail-closed), and a background
+ * task must not change what the running session validated.
+ */
+export function refreshPiInBackground(opts: { autoUpdate: boolean }): void {
+  if (!opts.autoUpdate) return
+  void (async () => {
+    try {
+      const cache = await readCache()
+      if (!shouldCheckNow(cache)) return
+      const installedVersion = await getInstalledPiVersion()
+      if (!meetsPiMinVersion(installedVersion)) return
+      const npmPath = resolveExecutable("npm")
+      const latestVersion = await getLatestPiVersion()
+      // Optimistic throttle write: concurrent/next launches back off
+      // even while the detached install is still settling.
+      await writeCache({
+        checkedAt: new Date().toISOString(),
+        installedVersion,
+        latestVersion,
+      })
+      if (!npmPath) return
+      if (!latestVersion || !isPiNewer(installedVersion, latestVersion)) return
+      const queued = await withInstallLock("pi-install.lock", async () => {
+        queueDetachedGlobalInstall(npmPath, `${PI_NPM_PACKAGE}@${latestVersion}`)
+      })
+      if (queued) {
+        consola.info(
+          `Pi ${installedVersion} → ${latestVersion} update queued; it takes effect on the next launch.`,
+        )
+      }
+    } catch (err) {
+      consola.debug("Background Pi refresh failed:", err)
+    }
+  })().catch((err) => {
+    consola.debug("Background Pi refresh failed:", err)
   })
 }

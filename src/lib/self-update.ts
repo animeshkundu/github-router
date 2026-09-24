@@ -100,15 +100,21 @@ async function getLatestVersion(npmPath: string): Promise<string | null> {
 
 /**
  * Spawn a detached process that waits for THIS proxy (pid) to exit,
- * then runs `npm install -g github-router@latest`. Fully detached and
- * unref'd so it outlives the proxy; output discarded.
+ * then runs `npm install -g <spec>`. Fully detached and unref'd so it
+ * outlives the proxy; output discarded.
  *
  * The waiter is a tiny inline Node script (Node is guaranteed present —
  * the proxy runs on it) that polls `process.kill(pid, 0)` until the
  * parent is gone, then execs npm. This avoids the Windows file-lock by
  * never touching the global install while the proxy holds it open.
+ *
+ * Shared by the proxy self-update (`github-router@latest`) and the Pi
+ * background refresh (`@earendil-works/pi-coding-agent@<version>`):
+ * both must update a global install without delaying startup, holding
+ * shutdown, or racing each other (callers hold `withInstallLock`
+ * before queueing).
  */
-function spawnDetachedUpdater(npmPath: string): void {
+export function queueDetachedGlobalInstall(npmPath: string, spec: string): void {
   const parentPid = process.pid
   // Inline waiter: poll until the parent disappears, then install.
   const waiter = `
@@ -118,7 +124,7 @@ function spawnDetachedUpdater(npmPath: string): void {
     const timer = setInterval(() => {
       if (alive()) return;
       clearInterval(timer);
-      const args = ["install", "-g", ${JSON.stringify(`${NPM_PACKAGE}@latest`)}, "--silent"];
+      const args = ["install", "-g", ${JSON.stringify(spec)}, "--silent"];
       const isWin = process.platform === "win32";
       const child = spawn(${JSON.stringify(npmPath)}, args, {
         stdio: "ignore", windowsHide: true, shell: isWin, detached: !isWin,
@@ -139,6 +145,10 @@ function spawnDetachedUpdater(npmPath: string): void {
     windowsHide: true,
   })
   child.unref()
+}
+
+function spawnDetachedUpdater(npmPath: string): void {
+  queueDetachedGlobalInstall(npmPath, `${NPM_PACKAGE}@latest`)
 }
 
 export interface RunSelfUpdateOpts {

@@ -52,7 +52,7 @@ plus the mode identity. Each surface rides a flag:
 |---|---|---|
 | `--peers` / `--no-peers` | **on** | Native agent files, oracle tool (+cheapest advisor), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
 | `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: `pi-mcp-adapter`, allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `files`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
-| `--ui` / `--no-ui` | **on** | Claude-Code look (`pi-claude-code-ui`: grouped rows, Shiki diffs, Ctrl+O previews; fixed Claude palette via `themeAdaptive: false`; one-line tool rows via `summary`/`count` output modes). Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag. Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
+| `--ui` / `--no-ui` | **on** | Claude-Code look: genuine `claude-code-dark` theme (`#D77757` coral palette; all six CC variants pickable via `/settings`), fixed Claude palette in tool rows (`themeAdaptive: false`), one-line tool rows (`summary`/`count` modes), transparent tool backgrounds. Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag (the cc-ui `Thought for Xs` one-liner has no off switch upstream — it is the minimum). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
 | `--swe` | off | Pipeline surface: `gh-delegate` (+cheapest `gh-advisor`) skills, `review` / `parallel-review` (+cheapest `plan-review`) prompts |
 | `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill (tool and prose appear together or not at all) |
 | `--browse` | off | Browser tool surface when a supported browser is installed |
@@ -114,8 +114,19 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   the Pi-native analogue of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. The
   extension's `session_before_compact` handler observes only and always
   falls back to native.
-- **Pi lifecycle respected.** Version floor Pi ≥ 0.87.1 / Node ≥ 22.19
-  (`src/lib/pi-version-check.ts`, throttled hourly auto-install).
+- **Pi lifecycle respected.** Version floor Pi ≥ 0.87.1 / Node ≥ 22.19.
+  Startup never waits on npm: a fast local `pi --version` probe gates
+  the floor foreground; a missing Pi installs in parallel with server
+  boot (joined fail-closed before launch, aborted if setup fails); a
+  healthy install refreshes in the background (throttled hourly probe,
+  detached post-exit install when newer, cross-process locked, silent
+  on failure). Below-floor installs upgrade foreground and re-verify,
+  fail closed. `--no-update-check` skips the probe + refresh entirely
+  (offline/CI); `--no-auto-update` disables the background refresh
+  (the floor is still enforced). Throttle state lives in
+  `~/.local/share/github-router/last-pi-update-check`.
+  Parent env is stripped of Pi routing keys (`PI_CODING_AGENT_DIR`,
+  …) so a stale shell export can't re-route the session off the proxy.
   Parent env is stripped of Pi routing keys (`PI_CODING_AGENT_DIR`,
   …) so a stale shell export can't re-route the session off the proxy.
 
@@ -193,7 +204,11 @@ runner degrades to Pi's native footer, never a broken launch.
 
 ## Claude-Code look (bundled by default)
 `pi-claude-code-ui` ships by default (`--no-ui` opts out): grouped rows,
-Shiki diffs, Ctrl+O previews. For the full Claude behavior set, install
+Shiki diffs, Ctrl+O previews. The TUI theme defaults to the genuine
+`claude-code-dark` palette (themes-only load from `better-claude-code-ui`
+— none of its status line, footer, or tool rendering loads, so the
+router-owned AIC footer is untouched; light-terminal users can pick
+`claude-code-light` via `/settings`). For the full Claude behavior set, install
 yourself — the `~/.pi/agent` snapshot carries it into the mirror automatically
 (`pi-code` itself stays out of the bundle: its `/memory` + `/context`
 commands would collide with the router-owned pair):
@@ -208,17 +223,18 @@ Alternatives: `@owlburtoe/pi-claudify` (closest `⏺`/`⎿` grammar), `cc-my-pi`
 ### Customizing the look
 
 Yes — every display default is overridable, at three levels:
-
 1. **Your settings win for display keys.** Anything you set in
    `~/.pi/agent/settings.json` for these keys survives the launch
    (snapshot-carried into the mirror, applied over our defaults):
-   `hideThinkingBlock`, `themeAdaptive`, `groupToolCalls`,
-   `readOutputMode` (`summary`/`preview`/`hidden`),
+   `hideThinkingBlock`, `theme` (e.g. `claude-code-light` on light
+   terminals, or any installed theme), `themeAdaptive`,
+   `groupToolCalls`, `readOutputMode` (`summary`/`preview`/`hidden`),
    `searchOutputMode` (`count`/`preview`/`hidden`),
    `mcpOutputMode`, `bashOutputMode` (`summary`/`preview`/`opencode`),
-   `terminal`, `images`. Example: `"hideThinkingBlock": false` shows
-   thinking again; `"readOutputMode": "preview"` restores expanded
-   reads. Load-bearing keys (models, tools, thinking levels,
+   `toolBackground`,    `terminal`, `images`, `markdown` (`mermaid: streaming` pinned).
+   Example:
+   `"hideThinkingBlock": false` shows thinking again;
+   `"readOutputMode": "preview"` restores expanded reads. Load-bearing keys (models, tools, thinking levels,
    compaction, retry, packages) always stay router-owned — those are
    the cost contract, not a preference.
 2. **Kill-switch:** `--no-ui` drops the whole transcript package.
@@ -226,6 +242,12 @@ Yes — every display default is overridable, at three levels:
    `/cc-theme on|off|toggle` (Claude palette vs Pi theme),
    `/cc-tools thinking|group|outlines` (thinking expansion, grouping,
    chrome), `/cc-spinner` (spinner colors).
+
+Rich rendering never costs tokens: mermaid diagrams stream in the TUI
+(`markdown.mermaid: streaming`, pinned), pasted/dragged images display
+inline (`terminal.showImages`, kitty/iTerm2 auto-detect), and diffs
+render via Shiki in `pi-claude-code-ui`. All three are display-side —
+they change zero bytes on the wire to the model.
 
 ## Verification
 

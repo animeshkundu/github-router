@@ -546,10 +546,20 @@ export interface PiSettingsJson {
    */
   modelThinkingLevels?: Record<string, string>
   /** Inline-image display in capable terminals; part of the native
-   *  image loop (paste/attach → see → reason). */
+   *  image loop (paste/attach → see → reason). `showTerminalProgress`
+   *  emits OSC 9;4 tab progress (unsupported terminals ignore it). */
   terminal?: {
     showImages?: boolean
     imageWidthCells?: number
+    showTerminalProgress?: boolean
+  }
+  /**
+   * Markdown rendering. Mermaid diagrams stream-render in the TUI
+   * (pure display — zero tokens); pinned so a future Pi default change
+   * cannot silently drop it. Cosmetic-overridable like the other look keys.
+   */
+  markdown?: {
+    mermaid?: "off" | "final" | "streaming"
   }
   /** Native image pipeline switches. `autoResize` keeps sends under
    *  Copilot's image-size limit; `blockImages` is never set (that would
@@ -560,6 +570,11 @@ export interface PiSettingsJson {
   }
   /** Preferred transport for multi-transport providers. */
   transport?: "auto" | "sse" | "websocket" | "websocket-cached"
+  /**
+   * Condense the post-update changelog. Display-only noise reduction
+   * on update days; zero tokens, fully reversible below.
+   */
+  collapseChangelog?: boolean
   /**
    * Hide thinking blocks in the transcript. Default-on: reasoning
    * effort still applies, only the display is suppressed. Toggle at
@@ -585,6 +600,19 @@ export interface PiSettingsJson {
   searchOutputMode?: "hidden" | "count" | "preview"
   mcpOutputMode?: "hidden" | "summary" | "preview"
   bashOutputMode?: "opencode" | "summary" | "preview"
+  /**
+   * Transparent tool-row backgrounds (no heavy chrome — closest to
+   * Claude Code's chromeless rows). Same companion-package gating as
+   * the other cc-ui keys.
+   */
+  toolBackground?: "default" | "transparent" | "outlines" | "border"
+  /**
+   * Active Pi theme. Default is the genuine Claude Code dark palette
+   * (provided by the bundled theme package below); light-terminal
+   * users can pick `claude-code-light` (or any installed theme) and
+   * — like every other look key — their own snapshot value wins.
+   */
+  theme?: string
   /** Branch-summary token budget for session-tree navigation. */
   branchSummary?: {
     reserveTokens?: number
@@ -630,14 +658,18 @@ export interface PiSettingsJson {
  */
 export const PI_COSMETIC_SETTING_KEYS = [
   "hideThinkingBlock",
+  "theme",
   "themeAdaptive",
   "groupToolCalls",
   "readOutputMode",
   "searchOutputMode",
   "mcpOutputMode",
   "bashOutputMode",
+  "toolBackground",
   "terminal",
   "images",
+  "markdown",
+  "collapseChangelog",
 ] as const
 
 export type PiCosmeticSettingKey = (typeof PI_COSMETIC_SETTING_KEYS)[number]
@@ -728,6 +760,27 @@ export const PI_UI_PACKAGES: ReadonlyArray<PiPackageEntry> = Object.freeze([
   "npm:pi-claude-code-ui",
 ])
 
+/**
+ * Claude Code dark theme (`#D77757` coral and friends) from
+ * `better-claude-code-ui`, which ships six CC palettes. Themes-only:
+ * extensions/skills/prompts are explicitly emptied so none of the
+ * package's status line, footer, or tool rendering loads and fights
+ * the router-owned footer or `pi-claude-code-ui`. Theme files are
+ * pure JSON data — loading the whole `./theme` dir costs nothing at
+ * runtime and leaves all six CC variants pickable via `/settings`,
+ * with `claude-code-dark` the default (see `PI_CC_DARK_THEME`).
+ */
+export const PI_CC_THEME_PACKAGE: PiPackageEntry = {
+  source: "npm:better-claude-code-ui",
+  themes: ["./theme"],
+  extensions: [],
+  skills: [],
+  prompts: [],
+}
+
+/** Default Pi theme: genuine Claude Code dark palette. */
+export const PI_CC_DARK_THEME = "claude-code-dark" as const
+
 /** Built-in tools enabled at startup (Pi-native set incl. Windows). */
 export const PI_DEFAULT_TOOLS: ReadonlyArray<string> = Object.freeze([
   "read",
@@ -793,7 +846,9 @@ export function buildPiSettingsJson(opts: {
     enabledModels: modelIds.map((id) => `${PI_PROVIDER_NAME}/${id}`),
     defaultTools: [...PI_DEFAULT_TOOLS],
     modelThinkingLevels,
-    terminal: { showImages: true, imageWidthCells: 60 },
+    terminal: { showImages: true, imageWidthCells: 60, showTerminalProgress: true },
+    markdown: { mermaid: "streaming" },
+    collapseChangelog: true,
     images: { autoResize: true, blockImages: false },
     transport: "auto",
     hideThinkingBlock: true,
@@ -805,6 +860,8 @@ export function buildPiSettingsJson(opts: {
           searchOutputMode: "count" as const,
           mcpOutputMode: "summary" as const,
           bashOutputMode: "summary" as const,
+          toolBackground: "transparent" as const,
+          theme: PI_CC_DARK_THEME,
         }
       : {}),
     branchSummary: { reserveTokens: 16384, skipPrompt: false },
@@ -816,7 +873,7 @@ export function buildPiSettingsJson(opts: {
         : []),
       ...(helpers ? [PI_HELPERS_MCP_ADAPTER, PI_HELPERS_AGENT_EXTENSIONS] : []),
       ...(webAccess ? [PI_HELPERS_WEB_ACCESS] : []),
-      ...(ui ? [...PI_UI_PACKAGES] : []),
+      ...(ui ? [...PI_UI_PACKAGES, PI_CC_THEME_PACKAGE] : []),
       "local:gh-router-pi",
     ],
     // Disabled builtins ride `peers` like the package itself: peerless

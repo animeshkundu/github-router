@@ -352,17 +352,23 @@ describe("pi cosmetic user overrides", () => {
     const overrides = applyCosmeticUserOverrides(
       {
         hideThinkingBlock: false,
+        theme: "tokyo-night",
         readOutputMode: "preview",
         themeAdaptive: true,
+        toolBackground: "border",
         terminal: { showImages: false },
+        markdown: { mermaid: "off" },
       },
       built(),
     )
     expect(overrides).toEqual({
       hideThinkingBlock: false,
+      theme: "tokyo-night",
       readOutputMode: "preview",
       themeAdaptive: true,
+      toolBackground: "border",
       terminal: { showImages: false },
+      markdown: { mermaid: "off" },
     })
   })
 
@@ -386,6 +392,20 @@ describe("pi cosmetic user overrides", () => {
       built(),
     )
     expect(overrides).toEqual({})
+  })
+
+  test("rendering keys are cosmetic too", () => {
+    const built = () =>
+      buildPiSettingsJson({
+        profileId: "cheapest",
+        searchEnabled: false,
+        browseEnabled: false,
+      })
+    const overrides = applyCosmeticUserOverrides(
+      { markdown: { mermaid: "off" }, collapseChangelog: false },
+      built(),
+    )
+    expect(overrides).toEqual({ markdown: { mermaid: "off" }, collapseChangelog: false })
   })
 })
 
@@ -414,7 +434,11 @@ describe("pi settings.json", () => {
     expect(settings.modelThinkingLevels?.["gh-router/gpt-6-luna"]).toBe("max")
     // Native image loop switches (never blockImages).
     expect(settings.images).toEqual({ autoResize: true, blockImages: false })
-    expect(settings.terminal).toEqual({ showImages: true, imageWidthCells: 60 })
+    expect(settings.terminal).toEqual({ showImages: true, imageWidthCells: 60, showTerminalProgress: true })
+    // Zero-token display richness: mermaid streams, changelog condensed.
+    expect(settings.collapseChangelog).toBe(true)
+    // Mermaid streams in the TUI (display-only, zero tokens).
+    expect(settings.markdown).toEqual({ mermaid: "streaming" })
     expect(settings.transport).toBe("auto")
     // pi-subagents loads extensions ONLY (third-party skills/prompts
     // filtered out so they never reach Ctrl+O).
@@ -491,6 +515,16 @@ describe("pi settings.json", () => {
     expect(bare.searchOutputMode).toBe("count")
     expect(bare.mcpOutputMode).toBe("summary")
     expect(bare.bashOutputMode).toBe("summary")
+    expect(bare.toolBackground).toBe("transparent")
+    // Genuine Claude Code dark palette, themes-only package (no code).
+    expect(bare.theme).toBe("claude-code-dark")
+    expect(bare.packages).toContainEqual({
+      source: "npm:better-claude-code-ui",
+      themes: ["./theme"],
+      extensions: [],
+      skills: [],
+      prompts: [],
+    })
     // pi-code behaviors would collide with router-owned /memory + /context.
     expect(bare.packages).not.toContain("npm:pi-code")
     const noUi = buildPiSettingsJson({
@@ -506,6 +540,13 @@ describe("pi settings.json", () => {
     expect(noUi.themeAdaptive).toBeUndefined()
     expect(noUi.groupToolCalls).toBeUndefined()
     expect(noUi.readOutputMode).toBeUndefined()
+    expect(noUi.toolBackground).toBeUndefined()
+    expect(noUi.theme).toBeUndefined()
+    expect(
+      noUi.packages.some(
+        (p) => typeof p === "object" && p.source === "npm:better-claude-code-ui",
+      ),
+    ).toBe(false)
     expect(noUi.hideThinkingBlock).toBe(true)
   })
 })
