@@ -25,8 +25,10 @@ export function buildPiExtensionSource(opts: {
   profileId: PiProfileId
   searchEnabled: boolean
   browseEnabled: boolean
+  peers?: boolean
 }): string {
-  const advisor = piAdvisorModel(opts.profileId)
+  const peers = opts.peers !== false
+  const advisor = peers ? piAdvisorModel(opts.profileId) : undefined
   const oracleModel = piOracleModel(opts.profileId)
   const oracleThinking = piOracleThinking(opts.profileId)
   const lines: Array<string> = []
@@ -35,11 +37,15 @@ export function buildPiExtensionSource(opts: {
     `// Executable seams only. Workflow guidance lives in skills/, not here.`,
     `import { Type } from "typebox";`,
     ``,
-    `const OracleParams = Type.Object({`,
-    `  decision: Type.String({ description: "The risky decision to get a second opinion on" }),`,
-    `  options: Type.Optional(Type.String({ description: "Options considered" })),`,
-    `  context: Type.String({ description: "Missing-context gaps and background the cold-start oracle needs" }),`,
-    `});`,
+    ...(peers
+      ? [
+          `const OracleParams = Type.Object({`,
+          `  decision: Type.String({ description: "The risky decision to get a second opinion on" }),`,
+          `  options: Type.Optional(Type.String({ description: "Options considered" })),`,
+          `  context: Type.String({ description: "Missing-context gaps and background the cold-start oracle needs" }),`,
+          `});`,
+        ]
+      : []),
     ...(advisor
       ? [
           `const AdvisorParams = Type.Object({`,
@@ -63,8 +69,12 @@ export function buildPiExtensionSource(opts: {
     `}`,
     `const MCP_URL = (process.env.GH_ROUTER_HOOK_MCP_URL ?? "").replace(/\\/+$/, "");`,
     `const MCP_NONCE = process.env.GH_ROUTER_HOOK_NONCE ?? "";`,
-    `const ORACLE_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${oracleModel}`)};`,
-    `const ORACLE_THINKING = ${JSON.stringify(oracleThinking)};`,
+    ...(peers
+      ? [
+          `const ORACLE_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${oracleModel}`)};`,
+          `const ORACLE_THINKING = ${JSON.stringify(oracleThinking)};`,
+        ]
+      : []),
     ...(advisor
       ? [
           `const ADVISOR_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${advisor.model}`)};`,
@@ -90,15 +100,19 @@ export function buildPiExtensionSource(opts: {
     `}`,
     ``,
     `export default function (pi) {`,
-    `  pi.registerTool({`,
-    `    name: "oracle",`,
-    `    label: "Oracle",`,
-    `    description: "Second opinion before acting on a risky decision. Advisory only: challenges assumptions, never edits. Pass decision, options, and context.",`,
-    `    parameters: OracleParams,`,
-    `    async execute(_toolCallId, params, signal) {`,
-    `      return await toolText(callMcp("peers", "oracle", { decision: params.decision, options: params.options || "", context: params.context, model: ORACLE_MODEL, thinking: ORACLE_THINKING }, signal));`,
-    `    },`,
-    `  });`,
+    ...(peers
+      ? [
+          `  pi.registerTool({`,
+          `    name: "oracle",`,
+          `    label: "Oracle",`,
+          `    description: "Second opinion before acting on a risky decision. Advisory only: challenges assumptions, never edits. Pass decision, options, and context.",`,
+          `    parameters: OracleParams,`,
+          `    async execute(_toolCallId, params, signal) {`,
+          `      return await toolText(callMcp("peers", "oracle", { decision: params.decision, options: params.options || "", context: params.context, model: ORACLE_MODEL, thinking: ORACLE_THINKING }, signal));`,
+          `    },`,
+          `  });`,
+        ]
+      : []),
   )
   if (advisor) {
     lines.push(
@@ -164,10 +178,23 @@ export interface PiSkillDoc {
   content: string
 }
 
-/** Workflow guidance as skills (progressive disclosure, not tools). */
-export function buildPiSkills(profileId: PiProfileId): Array<PiSkillDoc> {
-  const skills: Array<PiSkillDoc> = [
-    {
+/**
+ * Workflow guidance as skills (progressive disclosure, not tools).
+ * Ownership mirrors the Claude launcher: peer consult prose rides
+ * `--peers`, semantic-search prose rides `--search`, and the
+ * delegation/review pipeline rides `--swe`. A bare launch emits NO
+ * skills at all.
+ */
+export function buildPiSkills(opts: {
+  profileId: PiProfileId
+  peers?: boolean
+  swe?: boolean
+  search?: boolean
+}): Array<PiSkillDoc> {
+  const peers = opts.peers !== false
+  const skills: Array<PiSkillDoc> = []
+  if (peers) {
+    skills.push({
       dir: "gh-oracle",
       content: [
         "---",
@@ -182,8 +209,10 @@ export function buildPiSkills(profileId: PiProfileId): Array<PiSkillDoc> {
         "Its verdict is advisory — verify with tests and code, never substitute votes",
         "for verification.",
       ].join("\n"),
-    },
-    {
+    })
+  }
+  if (opts.search === true) {
+    skills.push({
       dir: "gh-search-first",
       content: [
         "---",
@@ -198,8 +227,10 @@ export function buildPiSkills(profileId: PiProfileId): Array<PiSkillDoc> {
         "fallback is never silent, so retry narrower on fallback rather than",
         "assuming full coverage.",
       ].join("\n"),
-    },
-    {
+    })
+  }
+  if (opts.swe === true) {
+    skills.push({
       dir: "gh-delegate",
       content: [
         "---",
@@ -212,28 +243,28 @@ export function buildPiSkills(profileId: PiProfileId): Array<PiSkillDoc> {
         "Recommended loop: scout (Explore) before you understand the code, worker",
         "(General-Purpose) to implement, fresh reviewers to check, worker to apply",
         "feedback. Keep delegated tasks scoped with file:line evidence on return.",
-        profileId === "balanced"
+        opts.profileId === "balanced"
           ? "Send work to reviewer ONLY when the change alters behavior."
           : "Send finished work to reviewer for assessment.",
       ].join("\n"),
-    },
-  ]
-  if (piAdvisorModel(profileId)) {
-    skills.push({
-      dir: "gh-advisor",
-      content: [
-        "---",
-        "name: gh-advisor",
-        "description: Advisory review of the final plan before presenting it. Use when the lead has a plan ready.",
-        "---",
-        "",
-        "# Advisor review",
-        "",
-        "The lead plans directly (there is no Plan subagent). Review the final plan",
-        "with the `advisor` tool before presenting it. Advisory only: it never",
-        "executes and never overrides verification.",
-      ].join("\n"),
     })
+    if (peers && piAdvisorModel(opts.profileId)) {
+      skills.push({
+        dir: "gh-advisor",
+        content: [
+          "---",
+          "name: gh-advisor",
+          "description: Advisory review of the final plan before presenting it. Use when the lead has a plan ready.",
+          "---",
+          "",
+          "# Advisor review",
+          "",
+          "The lead plans directly (there is no Plan subagent). Review the final plan",
+          "with the `advisor` tool before presenting it. Advisory only: it never",
+          "executes and never overrides verification.",
+        ].join("\n"),
+      })
+    }
   }
   return skills
 }
@@ -243,8 +274,16 @@ export interface PiPromptDoc {
   content: string
 }
 
-/** Saved workflow shortcuts as prompt templates (`/name`). */
-export function buildPiPrompts(profileId: PiProfileId): Array<PiPromptDoc> {
+/**
+ * Saved workflow shortcuts as prompt templates (`/name`). The review
+ * pipeline is SWE-pipeline surface: only `--swe` emits prompts, so a
+ * bare launch advertises none.
+ */
+export function buildPiPrompts(opts: {
+  profileId: PiProfileId
+  swe?: boolean
+}): Array<PiPromptDoc> {
+  if (opts.swe !== true) return []
   const prompts: Array<PiPromptDoc> = [
     {
       name: "review",
@@ -267,7 +306,7 @@ export function buildPiPrompts(profileId: PiProfileId): Array<PiPromptDoc> {
       ].join("\n"),
     },
   ]
-  if (piAdvisorModel(profileId)) {
+  if (piAdvisorModel(opts.profileId)) {
     prompts.push({
       name: "plan-review",
       content: [

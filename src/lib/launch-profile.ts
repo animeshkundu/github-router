@@ -986,10 +986,17 @@ const CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS =
  * Oracle, and a Sol/medium Advisor — all at the 200K default with
  * their fixed efforts and supported endpoints. There is no `Plan` role: the
  * lead plans directly.
+ *
+ * `opts.peers === false` (the Pi `--no-peers` path) validates the LEAD only:
+ * no peer or native-role model is used in that launch, so requiring them
+ * would fail a session that cannot consume them. Defaults to full-roster
+ * validation (every existing caller, including `claude`, is unaffected).
  */
 export function validateCheapestProfilePrerequisites(
   catalog: ModelsResponse | undefined,
+  opts: { peers?: boolean } = {},
 ): CheapestPrerequisiteCheck {
+  const peers = opts.peers !== false
   const missing: Array<string> = []
 
   const luna = findModel(catalog, CHEAPEST_PROFILE_MODELS.lead)
@@ -1021,45 +1028,48 @@ export function validateCheapestProfilePrerequisites(
   // Sol Oracle (same id as the reviewer role): the lead's only consultant
   // besides the Advisor. The reviewer block below covers Sol tool-calling;
   // this block covers the Oracle brief's prompt-metadata requirement.
-  const oracle = findModel(catalog, CHEAPEST_PROFILE_MODELS.oracle)
-  if (!oracle) {
-    missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: absent from the live catalog`)
-  } else {
-    if (!hasContextAtLeast(oracle, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
-      missing.push(
-        `${CHEAPEST_PROFILE_MODELS.oracle}: advertised context window is below the 200K subagent floor`,
-      )
+  // Skipped under `peers: false` — a peerless launch consumes neither.
+  if (peers) {
+    const oracle = findModel(catalog, CHEAPEST_PROFILE_MODELS.oracle)
+    if (!oracle) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: absent from the live catalog`)
+    } else {
+      if (!hasContextAtLeast(oracle, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+        missing.push(
+          `${CHEAPEST_PROFILE_MODELS.oracle}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(oracle, "high")) {
+        missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: does not advertise a "high" reasoning effort`)
+      }
+      if (!supportsEndpoint(oracle, "responses")) {
+        missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: does not advertise a supported Responses endpoint`)
+      }
+      if (!hasUsablePromptMetadata(oracle)) {
+        missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: no usable max_prompt_tokens metadata (Oracle brief)`)
+      }
     }
-    if (!supportsEffort(oracle, "high")) {
-      missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: does not advertise a "high" reasoning effort`)
-    }
-    if (!supportsEndpoint(oracle, "responses")) {
-      missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: does not advertise a supported Responses endpoint`)
-    }
-    if (!hasUsablePromptMetadata(oracle)) {
-      missing.push(`${CHEAPEST_PROFILE_MODELS.oracle}: no usable max_prompt_tokens metadata (Oracle brief)`)
-    }
-  }
 
-  const reviewer = findModel(catalog, CHEAPEST_PROFILE_MODELS.reviewer)
-  if (!reviewer) {
-    missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: absent from the live catalog`)
-  } else {
-    if (!hasToolCalls(reviewer)) {
-      missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
-    }
-    if (!hasContextAtLeast(reviewer, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
-      missing.push(
-        `${CHEAPEST_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
-      )
-    }
-    if (!supportsEffort(reviewer, "high")) {
-      missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise a "high" reasoning effort`)
-    }
-    if (!supportsEndpoint(reviewer, "responses")) {
-      missing.push(
-        `${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`,
-      )
+    const reviewer = findModel(catalog, CHEAPEST_PROFILE_MODELS.reviewer)
+    if (!reviewer) {
+      missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: absent from the live catalog`)
+    } else {
+      if (!hasToolCalls(reviewer)) {
+        missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
+      }
+      if (!hasContextAtLeast(reviewer, CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+        missing.push(
+          `${CHEAPEST_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(reviewer, "high")) {
+        missing.push(`${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise a "high" reasoning effort`)
+      }
+      if (!supportsEndpoint(reviewer, "responses")) {
+        missing.push(
+          `${CHEAPEST_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`,
+        )
+      }
     }
   }
 
@@ -1103,10 +1113,16 @@ const BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS =
  * and a Grok Oracle — all at the 200K default with their
  * fixed efforts and supported endpoints. There is no `Plan` role: the lead
  * owns planning directly.
+ *
+ * `opts.peers === false` (the Pi `--no-peers` path) validates the LEAD only;
+ * see `validateCheapestProfilePrerequisites` for why. Defaults to full-roster
+ * validation (every existing caller is unaffected).
  */
 export function validateBalancedProfilePrerequisites(
   catalog: ModelsResponse | undefined,
+  opts: { peers?: boolean } = {},
 ): BalancedPrerequisiteCheck {
+  const peers = opts.peers !== false
   const missing: Array<string> = []
 
   const sol = findModel(catalog, BALANCED_PROFILE_MODELS.lead)
@@ -1129,87 +1145,91 @@ export function validateBalancedProfilePrerequisites(
     }
   }
 
-  const luna = findModel(catalog, BALANCED_PROFILE_MODELS.explore)
-  if (!luna) {
-    missing.push(`${BALANCED_PROFILE_MODELS.explore}: absent from the live catalog`)
-  } else {
-    if (!hasToolCalls(luna)) {
-      missing.push(`${BALANCED_PROFILE_MODELS.explore}: does not advertise tool_calls`)
+  // Native roles + Oracle are skipped under `peers: false` — a peerless
+  // launch consumes only the lead validated above.
+  if (peers) {
+    const luna = findModel(catalog, BALANCED_PROFILE_MODELS.explore)
+    if (!luna) {
+      missing.push(`${BALANCED_PROFILE_MODELS.explore}: absent from the live catalog`)
+    } else {
+      if (!hasToolCalls(luna)) {
+        missing.push(`${BALANCED_PROFILE_MODELS.explore}: does not advertise tool_calls`)
+      }
+      if (!hasContextAtLeast(luna, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+        missing.push(
+          `${BALANCED_PROFILE_MODELS.explore}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(luna, "high") || !supportsEffort(luna, "max")) {
+        missing.push(`${BALANCED_PROFILE_MODELS.explore}: does not advertise both "high" and "max" reasoning effort`)
+      }
+      if (!supportsEndpoint(luna, "responses")) {
+        missing.push(`${BALANCED_PROFILE_MODELS.explore}: does not advertise a supported Responses endpoint`)
+      }
     }
-    if (!hasContextAtLeast(luna, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
-      missing.push(
-        `${BALANCED_PROFILE_MODELS.explore}: advertised context window is below the 200K subagent floor`,
-      )
-    }
-    if (!supportsEffort(luna, "high") || !supportsEffort(luna, "max")) {
-      missing.push(`${BALANCED_PROFILE_MODELS.explore}: does not advertise both "high" and "max" reasoning effort`)
-    }
-    if (!supportsEndpoint(luna, "responses")) {
-      missing.push(`${BALANCED_PROFILE_MODELS.explore}: does not advertise a supported Responses endpoint`)
-    }
-  }
 
-  const generalPurpose = findModel(catalog, BALANCED_PROFILE_MODELS["General-Purpose"])
-  if (!generalPurpose) {
-    missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: absent from the live catalog`)
-  } else {
-    if (!hasToolCalls(generalPurpose)) {
-      missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise tool_calls`)
+    const generalPurpose = findModel(catalog, BALANCED_PROFILE_MODELS["General-Purpose"])
+    if (!generalPurpose) {
+      missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: absent from the live catalog`)
+    } else {
+      if (!hasToolCalls(generalPurpose)) {
+        missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise tool_calls`)
+      }
+      if (!hasContextAtLeast(generalPurpose, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+        missing.push(
+          `${BALANCED_PROFILE_MODELS["General-Purpose"]}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(generalPurpose, "max")) {
+        missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise a "max" reasoning effort`)
+      }
+      if (!supportsEndpoint(generalPurpose, "responses")) {
+        missing.push(
+          `${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise a supported Responses endpoint`,
+        )
+      }
     }
-    if (!hasContextAtLeast(generalPurpose, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
-      missing.push(
-        `${BALANCED_PROFILE_MODELS["General-Purpose"]}: advertised context window is below the 200K subagent floor`,
-      )
-    }
-    if (!supportsEffort(generalPurpose, "max")) {
-      missing.push(`${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise a "max" reasoning effort`)
-    }
-    if (!supportsEndpoint(generalPurpose, "responses")) {
-      missing.push(
-        `${BALANCED_PROFILE_MODELS["General-Purpose"]}: does not advertise a supported Responses endpoint`,
-      )
-    }
-  }
 
-  const balancedReviewer = findModel(catalog, BALANCED_PROFILE_MODELS.reviewer)
-  if (!balancedReviewer) {
-    missing.push(`${BALANCED_PROFILE_MODELS.reviewer}: absent from the live catalog`)
-  } else {
-    if (!hasToolCalls(balancedReviewer)) {
-      missing.push(`${BALANCED_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
+    const balancedReviewer = findModel(catalog, BALANCED_PROFILE_MODELS.reviewer)
+    if (!balancedReviewer) {
+      missing.push(`${BALANCED_PROFILE_MODELS.reviewer}: absent from the live catalog`)
+    } else {
+      if (!hasToolCalls(balancedReviewer)) {
+        missing.push(`${BALANCED_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
+      }
+      if (!hasContextAtLeast(balancedReviewer, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+        missing.push(
+          `${BALANCED_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(balancedReviewer, "high")) {
+        missing.push(`${BALANCED_PROFILE_MODELS.reviewer}: does not advertise a "high" reasoning effort`)
+      }
+      if (!supportsEndpoint(balancedReviewer, "responses")) {
+        missing.push(
+          `${BALANCED_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`,
+        )
+      }
     }
-    if (!hasContextAtLeast(balancedReviewer, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
-      missing.push(
-        `${BALANCED_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
-      )
-    }
-    if (!supportsEffort(balancedReviewer, "high")) {
-      missing.push(`${BALANCED_PROFILE_MODELS.reviewer}: does not advertise a "high" reasoning effort`)
-    }
-    if (!supportsEndpoint(balancedReviewer, "responses")) {
-      missing.push(
-        `${BALANCED_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`,
-      )
-    }
-  }
 
-  const grok = findModel(catalog, BALANCED_PROFILE_MODELS.oracle)
-  if (!grok) {
-    missing.push(`${BALANCED_PROFILE_MODELS.oracle}: absent from the live catalog`)
-  } else {
-    if (!hasContextAtLeast(grok, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
-      missing.push(
-        `${BALANCED_PROFILE_MODELS.oracle}: advertised context window is below the 200K subagent floor`,
-      )
-    }
-    if (!supportsEffort(grok, "medium")) {
-      missing.push(`${BALANCED_PROFILE_MODELS.oracle}: does not advertise a "medium" reasoning effort`)
-    }
-    if (!hasUsablePromptMetadata(grok)) {
-      missing.push(`${BALANCED_PROFILE_MODELS.oracle}: no usable max_prompt_tokens metadata`)
-    }
-    if (!supportsEndpoint(grok, "responses")) {
-      missing.push(`${BALANCED_PROFILE_MODELS.oracle}: does not advertise a supported Responses endpoint`)
+    const grok = findModel(catalog, BALANCED_PROFILE_MODELS.oracle)
+    if (!grok) {
+      missing.push(`${BALANCED_PROFILE_MODELS.oracle}: absent from the live catalog`)
+    } else {
+      if (!hasContextAtLeast(grok, BALANCED_SUBAGENT_MIN_CONTEXT_TOKENS)) {
+        missing.push(
+          `${BALANCED_PROFILE_MODELS.oracle}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(grok, "medium")) {
+        missing.push(`${BALANCED_PROFILE_MODELS.oracle}: does not advertise a "medium" reasoning effort`)
+      }
+      if (!hasUsablePromptMetadata(grok)) {
+        missing.push(`${BALANCED_PROFILE_MODELS.oracle}: no usable max_prompt_tokens metadata`)
+      }
+      if (!supportsEndpoint(grok, "responses")) {
+        missing.push(`${BALANCED_PROFILE_MODELS.oracle}: does not advertise a supported Responses endpoint`)
+      }
     }
   }
 

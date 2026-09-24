@@ -21,9 +21,30 @@ github-router pi -m balanced -- --print "review this diff"
 
 Everything after `--` is forwarded verbatim to `pi`; other Pi flags
 (`--print`, `--mode`, `--session`, …) flow through automatically.
-`--search` provisions the ColBERT semantic index (the `code_search`
-tool is absent without it); `--browse` enables the browser tool
-surface when a supported browser is installed.
+
+## Flag policy (mirrors the Claude launcher's house rules)
+
+A bare launch advertises no skills or prompts — only what Pi ships
+plus the mode identity. Each surface rides a flag:
+
+| Flag | Default | Surface |
+|---|---|---|
+| `--peers` / `--no-peers` | **on** | Native agent files, oracle tool (+cheapest advisor), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
+| `--swe` | off | Pipeline surface: `gh-delegate` (+cheapest `gh-advisor`) skills, `review` / `parallel-review` (+cheapest `plan-review`) prompts |
+| `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill (tool and prose appear together or not at all) |
+| `--browse` | off | Browser tool surface when a supported browser is installed |
+| `--bluebird` | off | No Pi-side surface; reaches Bluebird server-side through `/mcp/search/code` |
+
+Always injected regardless of flags (like Claude's operating
+defaults): `models.json` (routing is load-bearing), minimal
+`settings.json`, `APPEND_SYSTEM.md` digest, `pi-statusline` package
+(extension-only manifest — no skill/prompt noise; opt out with
+`GH_ROUTER_DISABLE_AIC_STATUSLINE=1`), toolbelt PATH (opt out with
+`GH_ROUTER_DISABLE_TOOLBELT=1`), launch binding. The user's own
+`~/.pi/agent` snapshot is their Pi default, never gated.
+
+Deliberate divergence: pinned Claude profiles refuse `--no-codex-mcp`;
+Pi allows `--no-peers`. Do not "fix" this back into parity.
 
 ## How it cooperates with Pi
 

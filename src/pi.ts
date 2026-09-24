@@ -82,6 +82,18 @@ export const piArgs = {
     description:
       "Install the latest Pi on launch when stale (default). Set to false (--no-auto-update) to warn only.",
   },
+  swe: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Enable the SWE pipeline surface: delegation/review skills (gh-delegate, cheapest-only gh-advisor) and the review prompt shortcuts (/review, /parallel-review, cheapest-only /plan-review). Off by default; a bare launch advertises no skills or prompts.",
+  },
+  peers: {
+    type: "boolean" as const,
+    default: true,
+    description:
+      "Wire the peer/subagent floor: native agent files, the oracle tool (plus cheapest-only advisor), the gh-oracle skill, and the pi-subagents package. Set to false (--no-peers) for a lead-only session; prereqs then validate the lead model only.",
+  },
 } satisfies ArgsDef
 
 /**
@@ -247,11 +259,19 @@ export const pi = defineCommand({
       }
     }
 
+    // Flag policy (mirrors the Claude launcher's house rules): peers are
+    // default-ON (opt out with --no-peers); the SWE pipeline, like its
+    // Claude namesake, is opt-IN with --swe. A bare launch advertises no
+    // skills or prompts — only what Pi ships plus the mode identity.
+    const peersEnabled = (args as Record<string, unknown>)["peers"] !== false
+    const sweEnabled = (args as Record<string, unknown>)["swe"] === true
+
     // Pin-mode prerequisites against the live catalog (fail-closed).
+    // Peerless launches validate the lead only (nothing else is consumed).
     const prereqCheck =
       profileId === "cheapest"
-        ? validateCheapestProfilePrerequisites(state.models)
-        : validateBalancedProfilePrerequisites(state.models)
+        ? validateCheapestProfilePrerequisites(state.models, { peers: peersEnabled })
+        : validateBalancedProfilePrerequisites(state.models, { peers: peersEnabled })
     if (!prereqCheck.ok) {
       const message =
         profileId === "cheapest"
@@ -290,7 +310,7 @@ export const pi = defineCommand({
       }))
       await writeJsonFile(
         path.join(mirror, "models.json"),
-        buildPiModelsJson({ serverUrl, profileId, catalog }),
+        buildPiModelsJson({ serverUrl, profileId, catalog, peers: peersEnabled }),
       )
 
       // Merge over snapshotted user settings: our keys win, user keys survive.
@@ -307,24 +327,29 @@ export const pi = defineCommand({
       }
       await writeJsonFile(settingsPath, {
         ...userSettings,
-        ...buildPiSettingsJson({ profileId, searchEnabled, browseEnabled, catalog }),
+        ...buildPiSettingsJson({ profileId, searchEnabled, browseEnabled, catalog, peers: peersEnabled }),
       })
 
       await writeTextFile(
         path.join(mirror, "extensions", "gh-router-pi", "index.ts"),
-        buildPiExtensionSource({ profileId, searchEnabled, browseEnabled }),
+        buildPiExtensionSource({ profileId, searchEnabled, browseEnabled, peers: peersEnabled }),
       )
-      const agentFiles = buildPiAgentFiles(profileId)
-      for (const [rel, content] of Object.entries(agentFiles)) {
-        await writeTextFile(path.join(mirror, rel), content)
+      // Peer floor (agents + consult skills) rides --peers; the SWE
+      // pipeline (delegate/advisor skills, review prompts) rides --swe;
+      // semantic-search prose rides --search. Bare launches write none.
+      if (peersEnabled) {
+        const agentFiles = buildPiAgentFiles(profileId)
+        for (const [rel, content] of Object.entries(agentFiles)) {
+          await writeTextFile(path.join(mirror, rel), content)
+        }
       }
-      for (const skill of buildPiSkills(profileId)) {
+      for (const skill of buildPiSkills({ profileId, peers: peersEnabled, swe: sweEnabled, search: searchEnabled })) {
         await writeTextFile(path.join(mirror, "skills", skill.dir, "SKILL.md"), skill.content)
       }
-      for (const prompt of buildPiPrompts(profileId)) {
+      for (const prompt of buildPiPrompts({ profileId, swe: sweEnabled })) {
         await writeTextFile(path.join(mirror, "prompts", `${prompt.name}.md`), prompt.content)
       }
-      await writeTextFile(path.join(mirror, "APPEND_SYSTEM.md"), buildPiAppendSystem(profileId))
+      await writeTextFile(path.join(mirror, "APPEND_SYSTEM.md"), buildPiAppendSystem(profileId, { peers: peersEnabled }))
     } catch (err) {
       consola.error(
         `Failed to write Pi launch files: ${err instanceof Error ? err.message : String(err)}.`,
@@ -401,7 +426,9 @@ export const pi = defineCommand({
 
     // Launch binding: the Pi extension reaches the proxy's /mcp with this
     // nonce (same channel as the Claude hooks). Descriptor carries the
-    // mode's group/persona allow-list so /mcp enforces it server-side.
+    // mode's group/persona allow-list so /mcp enforces it server-side;
+    // peerless launches drop the peers group + persona allow-list to match
+    // the unwritten tools.
     const descriptor = profileDescriptor(profileId)
     const nonce = randomBytes(32).toString("hex")
     const secret = randomBytes(32).toString("hex")
@@ -409,14 +436,23 @@ export const pi = defineCommand({
       profileId,
       nonce,
       secret,
-      allowedGroups: descriptor.allowedGroups,
-      allowedPersonas: descriptor.personaAllowlist,
+      allowedGroups: peersEnabled
+        ? descriptor.allowedGroups
+        : new Set(
+            [...(descriptor.allowedGroups ?? [])].filter((g) => g !== "peers"),
+          ),
+      allowedPersonas: peersEnabled ? descriptor.personaAllowlist : new Set<string>(),
     })
 
     const extraArgs = collectPiPassthroughArgs(rawArgs, piArgs)
     const lead = piLeadModel(profileId)
+    const modelIds = piProfileModelIds(profileId, { peers: peersEnabled })
+    const surface = [
+      `peers=${peersEnabled ? "on" : "off"}`,
+      `swe=${sweEnabled ? "on" : "off"}`,
+    ].join(" ")
     process.stderr.write(
-      `Server ready on ${serverUrl}, launching Pi (${profileId} lead ${lead}, models ${piProfileModelIds(profileId).length})...\n`,
+      `Server ready on ${serverUrl}, launching Pi (${profileId} lead ${lead}, models ${modelIds.length}, ${surface})...\n`,
     )
 
     const { disposeBluebirdClients } = await import("./lib/bluebird-client")

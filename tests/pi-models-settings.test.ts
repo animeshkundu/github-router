@@ -70,12 +70,16 @@ describe("pi balanced profile", () => {
     for (const content of Object.values(files)) {
       expect(content.toLowerCase()).not.toContain("advisor")
     }
-    expect(buildPiSkills("balanced").some((s) => s.dir.includes("advisor"))).toBe(
-      false,
-    )
-    expect(buildPiPrompts("balanced").some((p) => p.name.includes("plan-review"))).toBe(
-      false,
-    )
+    expect(
+      buildPiSkills({ profileId: "balanced", peers: true, swe: true }).some((s) =>
+        s.dir.includes("advisor"),
+      ),
+    ).toBe(false)
+    expect(
+      buildPiPrompts({ profileId: "balanced", swe: true }).some((p) =>
+        p.name.includes("plan-review"),
+      ),
+    ).toBe(false)
     expect(buildPiAppendSystem("balanced")).toContain("no advisor")
     const ext = buildPiExtensionSource({
       profileId: "balanced",
@@ -153,7 +157,13 @@ describe("pi settings.json", () => {
       "ls",
     ])
     expect(settings.retry).toEqual({ enabled: true, maxRetries: 3 })
-    expect(settings.packages).toContain("npm:pi-subagents")
+    // pi-subagents loads extensions ONLY (third-party skills/prompts
+    // filtered out so they never reach Ctrl+O).
+    expect(settings.packages).toContainEqual({
+      source: "npm:pi-subagents",
+      skills: [],
+      prompts: [],
+    })
     expect(settings.packages).toContain("npm:pi-statusline")
   })
 })

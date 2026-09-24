@@ -124,15 +124,22 @@ export function piNativeRoles(profileId: PiProfileId): Array<PiNativeRole> {
   ]
 }
 
-/** Every model id Pi must see for this profile (lead + roles + peers). */
-export function piProfileModelIds(profileId: PiProfileId): Array<string> {
-  const ids = new Set<string>([
-    piLeadModel(profileId),
-    piOracleModel(profileId),
-    ...piNativeRoles(profileId).map((r) => r.model),
-  ])
-  const advisor = piAdvisorModel(profileId)
-  if (advisor) ids.add(advisor.model)
+/**
+ * Every model id Pi must see for this profile. Peerless launches
+ * (`peers: false`) register the lead only — no peer or native-role model
+ * is consumed, so none is exposed to the picker or budgeted.
+ */
+export function piProfileModelIds(
+  profileId: PiProfileId,
+  opts: { peers?: boolean } = {},
+): Array<string> {
+  const ids = new Set<string>([piLeadModel(profileId)])
+  if (opts.peers !== false) {
+    ids.add(piOracleModel(profileId))
+    for (const r of piNativeRoles(profileId)) ids.add(r.model)
+    const advisor = piAdvisorModel(profileId)
+    if (advisor) ids.add(advisor.model)
+  }
   return [...ids]
 }
 
@@ -167,6 +174,7 @@ export function buildPiModelsJson(opts: {
   serverUrl: string
   profileId: PiProfileId
   catalog?: ReadonlyArray<PiCatalogModel>
+  peers?: boolean
 }): PiModelsJson {
   const baseUrl = `${opts.serverUrl.replace(/\/+$/, "")}/v1`
   return {
@@ -175,7 +183,7 @@ export function buildPiModelsJson(opts: {
         baseUrl,
         api: "openai-completions",
         apiKey: "dummy",
-        models: piProfileModelIds(opts.profileId).map((id) => ({
+        models: piProfileModelIds(opts.profileId, { peers: opts.peers }).map((id) => ({
           id,
           name: id,
           reasoning: true as const,
@@ -253,6 +261,22 @@ export function derivePiCompactionSettings(
   }
 }
 
+/**
+ * A Pi `packages[]` entry: either a bare source string (load everything
+ * the package declares) or the object form narrowing which resource types
+ * load. Object filters can only NARROW the package manifest — they never
+ * expose undeclared resources.
+ */
+export type PiPackageEntry =
+  | string
+  | {
+    source: string
+    extensions?: Array<string>
+    skills?: Array<string>
+    prompts?: Array<string>
+    themes?: Array<string>
+  }
+
 export interface PiSettingsJson {
   defaultProvider: string
   defaultModel: string
@@ -261,22 +285,29 @@ export interface PiSettingsJson {
   defaultTools: Array<string>
   compaction: PiCompactionSettings
   retry: { enabled: boolean; maxRetries: number }
-  packages: Array<string>
+  packages: Array<PiPackageEntry>
 }
 
 /**
  * Build the per-launch `settings.json`. Additive over the snapshotted
- * user settings (the launcher deep-merges lists it owns): narrow model
+ * user settings (the launcher merges lists it owns): narrow model
  * scope, fixed thinking, limited toolset, derived compaction, and the
  * mode's package slice. Never disables retry/transport hardening.
+ *
+ * `pi-subagents` rides `peersEnabled` and loads extensions ONLY
+ * (skills/prompts filtered out — the mode's own skills/prompts cover
+ * the roster, so the third-party sets never reach Ctrl+O).
+ * `pi-statusline` is extension-only by manifest and always present.
  */
 export function buildPiSettingsJson(opts: {
   profileId: PiProfileId
   searchEnabled: boolean
   browseEnabled: boolean
   catalog?: ReadonlyArray<PiCatalogModel>
+  peers?: boolean
 }): PiSettingsJson {
-  const modelIds = piProfileModelIds(opts.profileId)
+  const peers = opts.peers !== false
+  const modelIds = piProfileModelIds(opts.profileId, { peers })
   return {
     defaultProvider: PI_PROVIDER_NAME,
     defaultModel: piLeadModel(opts.profileId),
@@ -285,7 +316,13 @@ export function buildPiSettingsJson(opts: {
     defaultTools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
     compaction: derivePiCompactionSettings(opts.catalog, modelIds),
     retry: { enabled: true, maxRetries: 3 },
-    packages: ["npm:pi-subagents", "npm:pi-statusline", "local:gh-router-pi"],
+    packages: [
+      ...(peers
+        ? [{ source: "npm:pi-subagents", skills: [], prompts: [] } as PiPackageEntry]
+        : []),
+      "npm:pi-statusline",
+      "local:gh-router-pi",
+    ],
   }
 }
 
@@ -405,25 +442,39 @@ export function buildPiAgentFiles(
   return files;
 }
 
-/** Short operating digest appended to APPEND_SYSTEM.md (prompt-cache-stable). */
-export function buildPiAppendSystem(profileId: PiProfileId): string {
-  const advisor = piAdvisorModel(profileId);
+/**
+ * Short operating digest appended to APPEND_SYSTEM.md (prompt-cache-stable).
+ * Mode identity — always injected. Peer consult sentences drop out under
+ * `peers: false` so the digest never names tools that don't exist.
+ */
+export function buildPiAppendSystem(
+  profileId: PiProfileId,
+  opts: { peers?: boolean } = {},
+): string {
+  const peers = opts.peers !== false;
+  const advisor = peers ? piAdvisorModel(profileId) : undefined;
   const lines = [
     `# gh-router ${profileId} mode`,
     "",
     `- Lead owns planning directly; there is no Plan subagent.`,
-    `- Delegate FREELY to Explore for discovery and General-Purpose for scoped work.`,
-    profileId === "balanced"
-      ? `- Send work to reviewer ONLY when the change alters behavior.`
-      : `- Send finished work to reviewer for assessment.`,
-    `- Ask oracle for a second opinion when the decision itself feels risky.`,
-    advisor
-      ? `- Review the final plan with advisor (advisory) before presenting it.`
-      : `- There is no advisor in this mode: oracle is the only consultant.`,
-    `- Verify, don't vote: consultant verdicts never substitute for running the tests.`,
-    "",
-    `(${PI_MIN_VERSION_NOTE})`,
-    "",
   ];
+  if (peers) {
+    lines.push(
+      `- Delegate FREELY to Explore for discovery and General-Purpose for scoped work.`,
+      profileId === "balanced"
+        ? `- Send work to reviewer ONLY when the change alters behavior.`
+        : `- Send finished work to reviewer for assessment.`,
+      `- Ask oracle for a second opinion when the decision itself feels risky.`,
+      advisor
+        ? `- Review the final plan with advisor (advisory) before presenting it.`
+        : `- There is no advisor in this mode: oracle is the only consultant.`,
+      `- Verify, don't vote: consultant verdicts never substitute for running the tests.`,
+    );
+  } else {
+    lines.push(
+      `- Peerless launch: no subagents or consultants in this session; plan, implement, and verify directly.`,
+    );
+  }
+  lines.push("", `(${PI_MIN_VERSION_NOTE})`, "");
   return lines.join("\n");
 }
