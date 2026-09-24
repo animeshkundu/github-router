@@ -30,6 +30,7 @@ import {
   buildPiAppendSystem,
   buildPiModelsJson,
   buildPiSettingsJson,
+  mergeSubagentsSettings,
   piLeadModel,
   piProfileModelIds,
   piUsdCostFor,
@@ -336,9 +337,20 @@ export const pi = defineCommand({
       } catch {
         userSettings = {}
       }
+      // Merge over snapshotted user settings: our keys win, user keys survive.
+      // Exception: `subagents.agentOverrides` deep-merges (ours as defaults,
+      // user's entries win per-agent) so emitting our builtin disables never
+      // wipes a user's own overrides — a shallow spread would replace the
+      // whole object.
+      const builtSettings = buildPiSettingsJson({ profileId, searchEnabled, browseEnabled, catalog, peers: peersEnabled })
+      const mergedSubagents = mergeSubagentsSettings(
+        userSettings["subagents"],
+        builtSettings.subagents,
+      )
       await writeJsonFile(settingsPath, {
         ...userSettings,
-        ...buildPiSettingsJson({ profileId, searchEnabled, browseEnabled, catalog, peers: peersEnabled }),
+        ...builtSettings,
+        ...(mergedSubagents ? { subagents: mergedSubagents } : {}),
       })
 
       // Memory bridge collection runs BEFORE the extension build so scoped

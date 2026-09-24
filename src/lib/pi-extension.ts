@@ -469,8 +469,12 @@ export function buildPiExtensionSource(opts: {
       : []),
     `function stripNul(s) { return String(s ?? "").replace(/\\0/g, ""); }`,
     `async function toolText(promise) {`,
+    // Inbound NUL strip: MCP/tool results flow into workflowScript text and
+    // strict downstream JSON consumers reject literal U+0000 (observed as a
+    // subagent-workflow validate failure). Outbound params are stripped at
+    // each call site; this covers the return path in one place.
     `  const text = await promise;`,
-    `  return { content: [{ type: "text", text }], details: undefined };`,
+    `  return { content: [{ type: "text", text: stripNul(text) }], details: undefined };`,
     `}`,
     `function toolErrorText(text) {`,
     `  return { content: [{ type: "text", text }], details: undefined };`,
@@ -698,7 +702,9 @@ export function buildPiSkills(opts: {
         "Call the `oracle` tool with the decision, the options considered, and the",
         "missing-context gaps. The oracle is cold-start: it sees only what you pass.",
         "Its verdict is advisory — verify with tests and code, never substitute votes",
-        "for verification.",
+        "for verification. (The `oracle` tool is the one-shot consult; the `oracle`",
+        "subagent is the same role for interactive follow-ups — same name, different",
+        "invocation. Prefer the tool for a single verdict.)",
       ].join("\n"),
     })
   }
@@ -731,9 +737,14 @@ export function buildPiSkills(opts: {
         "",
         "# Delegate",
         "",
-        "Recommended loop: scout (Explore) before you understand the code, worker",
-        "(General-Purpose) to implement, fresh reviewers to check, worker to apply",
-        "feedback. Keep delegated tasks scoped with file:line evidence on return.",
+        "You may delegate via the `subagent` tool to this roster only: `Explore`",
+        "for discovery, `General-Purpose` for scoped implementation, `reviewer`",
+        "for verification, `oracle`/`advisor` for consults. (Builtin `scout` and",
+        "`worker` are disabled in this session; their aliases resolve here.)",
+        "Recommended loop: `Explore` to map the code (it records context.md),",
+        "`General-Purpose` to implement (it pre-reads context.md), `reviewer`",
+        "to check, `General-Purpose` to apply feedback. Keep delegated tasks",
+        "scoped with file:line evidence on return.",
         opts.profileId === "balanced"
           ? "Send work to reviewer ONLY when the change alters behavior."
           : "Send finished work to reviewer for assessment.",
@@ -769,6 +780,11 @@ export interface PiPromptDoc {
  * Saved workflow shortcuts as prompt templates (`/name`). The review
  * pipeline is SWE-pipeline surface: only `--swe` emits prompts, so a
  * bare launch advertises none.
+ *
+ * `/parallel-review` intentionally shadows the packaged pi-subagents
+ * prompt of the same name (package prompts are filtered to `[]` in
+ * settings): ours routes to our pinned-model `reviewer`, not the
+ * default-model builtin. `/review` is novel — no packaged collision.
  */
 export function buildPiPrompts(opts: {
   profileId: PiProfileId

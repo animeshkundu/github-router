@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test"
 
-import { buildPiExtensionSource } from "~/lib/pi-extension"
+import { buildPiExtensionSource, buildPiSkills } from "~/lib/pi-extension"
 import { buildMirrorBridgeSection } from "~/lib/pi-memory-bridge"
+import {
+  buildPiAgentFiles,
+  buildPiSettingsJson,
+  mergeSubagentsSettings,
+} from "~/lib/pi-models-settings"
 
 describe("pi bridge MCP contracts", () => {
   test("code_search carries workspace with launch-env fallback", () => {
@@ -64,5 +69,146 @@ describe("pi bridge NUL sanitization", () => {
     )
     expect(section).not.toContain("\0")
     expect(section).toContain("hello")
+  })
+
+  test("generated bridge strips NUL on the return path", () => {
+    const src = buildPiExtensionSource({
+      profileId: "cheapest",
+      searchEnabled: true,
+      browseEnabled: false,
+    })
+    // stripNul covers outbound params and the inbound toolText join alike.
+    expect(src).toContain("stripNul(text)")
+  })
+})
+
+describe("pi native agent files (pi-subagents contract)", () => {
+  for (const profileId of ["cheapest", "balanced"] as const) {
+    test(`${profileId}: every agent advertises, pins context, drops dead keys`, () => {
+      const files = buildPiAgentFiles(profileId)
+      for (const content of Object.values(files)) {
+        expect(content).toContain("advertise: true")
+        expect(content).toContain("inheritProjectContext: true")
+        expect(content).toContain("defaultContext: fresh")
+        expect(content).toContain("systemPromptMode: replace")
+        // max_turns is not a known pi-subagents field (silently inert).
+        expect(content).not.toContain("max_turns")
+      }
+    })
+  }
+
+  test("nesting grants back every allowedAgents edge", () => {
+    const cheapest = buildPiAgentFiles("cheapest")
+    const gp = cheapest["agents/general-purpose.md"]!
+    // General-Purpose delegates to reviewer + oracle: grant required.
+    expect(gp).toContain("allowNestedSubagents: true")
+    expect(gp).toContain("allowedAgents: [reviewer, oracle]")
+    expect(gp).toContain("subagent")
+    expect(gp).toContain("acceptanceRole: writer")
+    const balancedReviewer = buildPiAgentFiles("balanced")["agents/reviewer.md"]!
+    expect(balancedReviewer).toContain("allowNestedSubagents: true")
+    expect(balancedReviewer).toContain("allowedAgents: [Explore]")
+    // Cheapest reviewer is a leaf: no dangling edge.
+    expect(cheapest["agents/reviewer.md"]!).not.toContain("allowedAgents")
+    expect(cheapest["agents/explore.md"]!).not.toContain("allowedAgents")
+  })
+
+  test("aliases absorb disabled-builtin invocations deterministically", () => {
+    const files = buildPiAgentFiles("cheapest")
+    expect(files["agents/explore.md"]!).toContain("aliases: [scout]")
+    expect(files["agents/general-purpose.md"]!).toContain("aliases: [worker, developer, coder]")
+  })
+
+  test("reviewer carries the diff-anchored review contract", () => {
+    const reviewer = buildPiAgentFiles("cheapest")["agents/reviewer.md"]!
+    expect(reviewer).toContain("watchdog_diff")
+    expect(reviewer).toContain("contact_supervisor")
+    expect(reviewer).toContain("Merge verdict")
+  })
+
+  test("Explore feeds the context.md handoff General-Purpose pre-reads", () => {
+    const files = buildPiAgentFiles("cheapest")
+    expect(files["agents/explore.md"]!).toContain("output: context.md")
+    expect(files["agents/general-purpose.md"]!).toContain("defaultReads: [context.md]")
+  })
+
+  test("delegate skill names only canonical roster agents", () => {
+    const delegate = buildPiSkills({ profileId: "cheapest", peers: true, swe: true }).find(
+      (s) => s.dir === "gh-delegate",
+    )!
+    expect(delegate.content).toContain("`Explore`")
+    expect(delegate.content).toContain("`General-Purpose`")
+    expect(delegate.content).toContain("`reviewer`")
+    expect(delegate.content).toContain("`subagent` tool")
+    expect(delegate.content).toContain("context.md")
+    // Old phrasing mapped builtins parenthetically ("scout (Explore)"),
+    // inviting literal invocation of agents that no longer exist. The only
+    // remaining builtin mentions are the explicit disabled-note.
+    expect(delegate.content).not.toContain("scout (Explore)")
+    expect(delegate.content).not.toContain("(General-Purpose) to implement")
+    expect(delegate.content).toContain("are disabled in this session")
+  })
+})
+
+describe("pi settings builtin disables", () => {
+  test("peers launches disable shadowed/confusable builtins, keep delegate", () => {
+    for (const profileId of ["cheapest", "balanced"] as const) {
+      const settings = buildPiSettingsJson({ profileId, searchEnabled: false, browseEnabled: false })
+      const overrides = settings.subagents?.agentOverrides
+      expect(overrides?.["scout"]).toEqual({ disabled: true })
+      expect(overrides?.["worker"]).toEqual({ disabled: true })
+      expect(overrides?.["researcher"]).toEqual({ disabled: true })
+      expect(overrides?.["evidence-auditor"]).toEqual({ disabled: true })
+      // delegate stays enabled (append-mode cheap path); reviewer/oracle
+      // need no entry (our same-named files shadow them).
+      expect(overrides?.["delegate"]).toBeUndefined()
+      expect(overrides?.["reviewer"]).toBeUndefined()
+      expect(overrides?.["oracle"]).toBeUndefined()
+    }
+  })
+
+  test("peerless launches emit no subagents key", () => {
+    const settings = buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: false,
+      peers: false,
+    })
+    expect(settings.subagents).toBeUndefined()
+  })
+
+  test("mergeSubagentsSettings deep-merges overrides, user wins", () => {
+    // No inputs -> undefined (no key emitted).
+    expect(mergeSubagentsSettings(undefined, undefined)).toBeUndefined()
+    // Built-only passes through.
+    expect(
+      mergeSubagentsSettings(undefined, { agentOverrides: { scout: { disabled: true } } }),
+    ).toEqual({ agentOverrides: { scout: { disabled: true } } })
+    // User entries win per-agent; unrelated user subkeys survive.
+    expect(
+      mergeSubagentsSettings(
+        { agentOverrides: { scout: { disabled: false } }, defaultModel: "x" },
+        { agentOverrides: { scout: { disabled: true }, worker: { disabled: true } } },
+      ),
+    ).toEqual({
+      defaultModel: "x",
+      agentOverrides: { scout: { disabled: false }, worker: { disabled: true } },
+    })
+    // Corrupt user input degrades to built-only.
+    expect(
+      mergeSubagentsSettings("nope", { agentOverrides: { scout: { disabled: true } } }),
+    ).toEqual({ agentOverrides: { scout: { disabled: true } } })
+  })
+})
+
+describe("pi/claude isolation", () => {
+  test("claude/serve/codex entry points never import lib/pi-*", async () => {
+    // Guardrail: Pi alignment work must stay in the Pi surface. Shared
+    // modules (launch registry, MCP handler, personas) are consumed, never
+    // modified, by Pi changes.
+    for (const entry of ["src/claude.ts", "src/serve.ts", "src/codex.ts"]) {
+      const text = await Bun.file(entry).text()
+      expect(text).not.toContain("lib/pi-")
+    }
   })
 })

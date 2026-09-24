@@ -390,6 +390,18 @@ export interface PiSettingsJson {
   compaction: PiCompactionSettings
   retry: { enabled: boolean; maxRetries: number }
   packages: Array<PiPackageEntry>
+  /**
+   * Subagent overrides. Only `agentOverrides` with `disabled` flags is
+   * emitted: the builtin `scout`/`worker`/`researcher`/`evidence-auditor`
+   * agents are hidden so habitual invocations resolve deterministically
+   * via our own agents' `aliases` instead of running shadow rosters.
+   * `delegate` stays enabled (append-mode, inherits the lead model, so it
+   * is cost-safe and fills the lightweight-subtask path our roster lacks).
+   * `reviewer`/`oracle` need no entry: our same-named files shadow them.
+   */
+  subagents?: {
+    agentOverrides?: Record<string, { disabled?: boolean }>
+  }
 }
 
 /**
@@ -429,6 +441,20 @@ export function buildPiSettingsJson(opts: {
         : []),
       "local:gh-router-pi",
     ],
+    // Disabled builtins ride `peers` like the package itself: peerless
+    // launches have no delegation floor at all, so nothing to disambiguate.
+    ...(peers
+      ? {
+          subagents: {
+            agentOverrides: {
+              scout: { disabled: true },
+              worker: { disabled: true },
+              researcher: { disabled: true },
+              "evidence-auditor": { disabled: true },
+            },
+          },
+        }
+      : {}),
   }
 }
 
@@ -436,14 +462,51 @@ function agentFileName(name: string): string {
   return `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`
 }
 
+/**
+ * Deep-merge the `subagents` settings key across the snapshot/user and
+ * built layer. Only `agentOverrides` merges (per-agent, user wins);
+ * every other `subagents` sub-key follows the standard rule (built wins
+ * when present, else user survives). Non-object inputs are ignored so a
+ * corrupt user file degrades to built-only instead of crashing launch.
+ */
+export function mergeSubagentsSettings(
+  userSubagents: unknown,
+  builtSubagents: PiSettingsJson["subagents"],
+): Record<string, unknown> | undefined {
+  const user =
+    userSubagents && typeof userSubagents === "object" && !Array.isArray(userSubagents)
+      ? (userSubagents as Record<string, unknown>)
+      : undefined
+  const built = (builtSubagents ?? undefined) as Record<string, unknown> | undefined
+  if (!user && !built) return undefined
+  const userOverrides =
+    user?.["agentOverrides"] && typeof user["agentOverrides"] === "object" && !Array.isArray(user["agentOverrides"])
+      ? (user["agentOverrides"] as Record<string, unknown>)
+      : undefined
+  const builtOverrides = built?.["agentOverrides"] as Record<string, unknown> | undefined
+  const mergedOverrides =
+    userOverrides || builtOverrides
+      ? { ...builtOverrides, ...userOverrides }
+      : undefined
+  return {
+    ...user,
+    ...built,
+    ...(mergedOverrides ? { agentOverrides: mergedOverrides } : {}),
+  }
+}
+
 function roleDescription(
   profileId: PiProfileId,
   role: PiNativeRole,
 ): string {
+  // Nested-delegation channel note: General-Purpose is the only native
+  // role with a nesting grant, so only it can consult the oracle subagent
+  // directly. Explore/reviewer are leaves; they surface open questions in
+  // their report and the lead (or General-Purpose) consults oracle.
   const oracleNote =
-    "For risky decisions, ask the oracle subagent for a second opinion before acting.";
+    "May consult the oracle subagent when a decision feels risky.";
   if (role.name === "Explore") {
-    return `Fast read-only recon: locate code, answer evidence questions, return compressed context. ${oracleNote}`
+    return "Fast read-only recon: locate code, answer evidence questions, return compressed context."
   }
   if (role.name === "General-Purpose") {
     return profileId === "balanced"
@@ -458,20 +521,44 @@ function roleDescription(
 /**
  * Build `.md` agent definitions for the mode's native roster, in the
  * OpenCode/pi-subagents-lite frontmatter format Pi delegation tools
- * consume (`name/description/tools/model/thinking/max_turns`, plus
- * `allowedAgents` where the delegation graph has an edge). Bodies are
+ * consume (`name/description/tools/model/thinking`, plus `allowedAgents`
+ * where the delegation graph has an edge). Bodies are
  * short execution contracts; workflow prose lives in skills so agent
  * files stay small enough to inline cheaply.
+ *
+ * Load-bearing semantics (verified against pi-subagents docs + source):
+ * - `reviewer`/`oracle` intentionally SHADOW the same-named builtins
+ *   wholesale (user scope wins; omitted fields are NOT inherited). That
+ *   is how the roster pins gh-router models/thinking for cost control.
+ *   The shadowed `advisor` alias dies with the builtin oracle definition,
+ *   which is why `advisor` ships as its own file on cheapest.
+ * - `allowedAgents` only narrows an existing nesting grant, so every
+ *   delegating agent also sets `allowNestedSubagents: true` and lists
+ *   `subagent` in `tools`. Depth fits the default 2-level guard
+ *   (lead → child → grandchild).
+ * - `advertise: true` puts custom agents in the parent prompt catalog
+ *   (default false); `aliases` catch habitual builtin invocations
+ *   (`scout`, `worker`, …) deterministically since those builtins are
+ *   disabled in settings.
+ * - `inheritProjectContext: true` keeps bridged repo rules (AGENTS.md)
+ *   visible to children; `defaultContext: fresh` pins the cold-start
+ *   contract explicitly instead of relying on implicit fallback.
  */
 export function buildPiAgentFiles(
   profileId: PiProfileId,
 ): Record<string, string> {
   const files: Record<string, string> = {}
   for (const role of piNativeRoles(profileId)) {
-    const tools =
-      role.name === "General-Purpose"
-        ? "[read, bash, edit, write, grep, find, ls]"
-        : "[read, grep, find, ls]";
+    const isImplementer = role.name === "General-Purpose"
+    const isReviewer = role.name === "reviewer"
+    // `watchdog_diff` (diff-anchored review) and `contact_supervisor`
+    // (blocked-child escalation) are provided by the pi-subagents runtime,
+    // like the delegation primitives — no extra package needed.
+    const tools = isImplementer
+      ? "[read, grep, find, ls, bash, edit, write, subagent, contact_supervisor]"
+      : isReviewer
+        ? "[read, grep, find, ls, watchdog_diff, contact_supervisor]"
+        : "[read, grep, find, ls, bash]";
     const lines = [
       "---",
       `name: ${role.name}`,
@@ -479,64 +566,103 @@ export function buildPiAgentFiles(
       `tools: ${tools}`,
       `model: ${PI_PROVIDER_NAME}/${role.model}`,
       `thinking: ${role.thinking}`,
-      "max_turns: 80",
+      "advertise: true",
+      "systemPromptMode: replace",
+      "inheritProjectContext: true",
+      "defaultContext: fresh",
     ];
-    if (profileId === "balanced" && role.name === "reviewer") {
-      lines.push("allowedAgents: [Explore]");
+    if (role.name === "Explore") {
+      // `scout` alias absorbs habitual builtin invocations (the builtin is
+      // disabled in settings). `output: context.md` + `defaultProgress`
+      // feed the General-Purpose `defaultReads` handoff below.
+      lines.push("aliases: [scout]", "output: context.md", "defaultProgress: true");
     }
-    if (role.name === "General-Purpose") {
-      lines.push("allowedAgents: [reviewer]");
+    if (isImplementer) {
+      // Aliases absorb builtin `worker` (+ its `developer/coder`) traffic;
+      // `acceptanceRole: writer` restores the builtin worker's acceptance
+      // inference that shadowing would otherwise drop.
+      lines.push(
+        "aliases: [worker, developer, coder]",
+        "acceptanceRole: writer",
+        "defaultReads: [context.md]",
+        "defaultProgress: true",
+        "allowNestedSubagents: true",
+        "allowedAgents: [reviewer, oracle]",
+      );
+    }
+    if (profileId === "balanced" && isReviewer) {
+      lines.push("allowNestedSubagents: true", "allowedAgents: [Explore]");
     }
     lines.push("---", "");
     if (role.name === "Explore") {
       lines.push(
-        "You are a read-only scout. Never modify files. Search first, read second,",
-        "return the smallest sufficient evidence: file paths, line spans, and short quotes.",
+        "You are a read-only scout. Never modify files. Use bash only for non-interactive inspection.",
+        "Search first, read second: return the smallest sufficient evidence — entry points,",
+        "key types and functions, data flow, files likely to need changes, constraints and",
+        "open questions — with exact file paths and line ranges. Record the full brief in context.md.",
       );
-    } else if (role.name === "reviewer") {
+    } else if (isReviewer) {
       lines.push(
-        "You review a change that already exists. Reproduce failures before diagnosing.",
-        "Report findings with file:line references; do not rewrite code outside small,",
-        "clearly-marked suggestions.",
+        "You are a disciplined review subagent. Inspect the actual change; verify from code,",
+        "tests, and docs — never guess. Reproduce failures before diagnosing. Cover intent match,",
+        "correctness and edge cases, test coverage, side effects, and minimality.",
+        "Report findings with file:line evidence ranked P0 (blocker) / P1 (should fix) / P2 (nit),",
+        "ending with one of: Merge verdict: BLOCK, Merge verdict: OK, Merge verdict: OK with notes.",
+        "Do not rewrite code outside small, clearly-marked suggestions.",
       );
     } else {
       lines.push(
-        "You implement the scoped task and verify it (run the relevant tests).",
-        "Hand behavior-changing results to reviewer when asked; otherwise summarize",
-        "the diff and how it was verified.",
+        "You are the single writer thread. Execute the assigned task with narrow, coherent edits;",
+        "the lead remains the decision authority. Read provided context (context.md when present),",
+        "then implement minimally and verify by running the relevant tests.",
+        "If the work reveals an unapproved decision you cannot safely resolve, stop and escalate",
+        "instead of guessing; never leave placeholders or TODOs.",
+        "Hand behavior-changing results to reviewer when asked; otherwise summarize the diff,",
+        "validation, risks, and next step.",
       );
     }
     files[`agents/${agentFileName(role.name)}`] = `${lines.join("\n")}\n`;
   }
   // Oracle consultant agent (both modes). Advisory only: challenges
-  // assumptions, never edits.
+  // assumptions, never edits. Cold-start fresh context matches the MCP
+  // `peers/oracle` tool contract (stateless query + context, no transcript),
+  // deliberately unlike the builtin's forked decision-consistency role.
   const oracle = [
     "---",
     "name: oracle",
-    `description: Second opinion before acting. Challenges assumptions without editing. Use when the decision itself feels risky.`,
-    "tools: [read, grep, find, ls]",
+    "description: Second opinion before acting. Challenges assumptions without editing. Use when the decision itself feels risky.",
+    "tools: [read, grep, find, ls, bash]",
     `model: ${PI_PROVIDER_NAME}/${piOracleModel(profileId)}`,
     `thinking: ${piOracleThinking(profileId)}`,
-    "max_turns: 40",
+    "advertise: true",
+    "systemPromptMode: replace",
+    "inheritProjectContext: true",
+    "defaultContext: fresh",
     "---",
     "",
     "You are an oracle: a second set of eyes. You see only the task context",
     "you are given — you have no repo memory beyond what you read now.",
+    "Inspect the code yourself with read/grep/find/ls before opining.",
     "Challenge assumptions, name what is missing, recommend; never execute.",
   ].join("\n");
   files[`agents/${agentFileName("oracle")}`] = `${oracle}\n`;
-  // Advisor agent (cheapest only). Balanced stays advisor-free: no file,
-  // no skill, no prompt, no prose — asserted by tests.
+  // Advisor agent (cheapest only). Genuinely new role — the builtin has no
+  // separate advisor file (`advisor` is just an alias of builtin oracle, lost
+  // in shadowing). Balanced stays advisor-free: no file, no skill, no prompt,
+  // no prose — asserted by tests.
   const advisor = piAdvisorModel(profileId);
   if (advisor) {
     const body = [
       "---",
       "name: advisor",
-      `description: Advisory plan review for the lead: review the final plan before it is presented. Never executes.`,
+      "description: Advisory plan review for the lead: review the final plan before it is presented. Never executes.",
       "tools: [read, grep, find, ls]",
       `model: ${PI_PROVIDER_NAME}/${advisor.model}`,
       `thinking: ${advisor.thinking}`,
-      "max_turns: 40",
+      "advertise: true",
+      "systemPromptMode: replace",
+      "inheritProjectContext: true",
+      "defaultContext: fresh",
       "---",
       "",
       "You review the lead's final plan and give advisory feedback only.",
