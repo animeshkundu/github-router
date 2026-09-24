@@ -314,6 +314,7 @@ describe("pi extension source", () => {
     expect(base).toContain('"oracle"')
     expect(base).toContain('"advisor"')
     expect(base).not.toContain("code_search")
+    expect(base).not.toContain("open_tab")
     expect(base).not.toContain("browser_open_tab")
 
     const full = buildPiExtensionSource({
@@ -322,7 +323,17 @@ describe("pi extension source", () => {
       browseEnabled: true,
     })
     expect(full).toContain("code_search")
-    expect(full).toContain("browser_open_tab")
+    // Browser tools use stripped MCP names (open_tab/navigate/...) so a
+    // `browser_*` wire name never reaches tools/call (which keys on the
+    // stripped toolNameHttp and would reject with -32601).
+    expect(full).toContain('"open_tab"')
+    expect(full).toContain('"navigate"')
+    expect(full).toContain('"screenshot"')
+    expect(full).toContain('"act"')
+    expect(full).toContain('"observe"')
+    expect(full).toContain('"extract"')
+    expect(full).not.toContain('"browser_open_tab"')
+    expect(full).not.toContain('"browser_navigate"')
     // Compaction stays native; the hook only observes.
     expect(full).toContain("session_before_compact")
     // No [1m] accounting anywhere.
@@ -340,7 +351,13 @@ describe("pi extension source", () => {
     expect(src).toContain("parameters: OracleParams")
     expect(src).toContain("parameters: AdvisorParams")
     expect(src).toContain("parameters: CodeSearchParams")
-    expect(src).toContain("parameters: BrowserParams")
+    expect(src).toContain("parameters: OpenTabParams")
+    expect(src).toContain("parameters: NavigateParams")
+    expect(src).toContain("parameters: ScreenshotParams")
+    expect(src).toContain("parameters: ActParams")
+    expect(src).toContain("parameters: ObserveParams")
+    expect(src).toContain("parameters: ExtractParams")
+    expect(src).not.toContain("parameters: BrowserParams")
     expect(src).not.toContain("inputSchema")
     // execute(toolCallId, params, signal) returning { content, details }.
     expect(src).toContain("async execute(_toolCallId, params, signal)")
@@ -348,5 +365,30 @@ describe("pi extension source", () => {
     expect(src).toContain("details: undefined")
     expect(src).not.toContain("ctx.signal")
     expect(src).not.toContain("async execute(args, ctx)")
+  })
+
+  test("pi bridge maps to MCP contracts (no schema drift)", () => {
+    const src = buildPiExtensionSource({
+      profileId: "cheapest",
+      searchEnabled: true,
+      browseEnabled: true,
+    })
+    // Oracle/advisor translate Pi-friendly keys to the MCP {query, context}
+    // contract. The old payload (decision/options/model/thinking) was
+    // rejected by tools/call with -32602.
+    expect(src).toContain('callMcp("peers", "oracle", { query, context }')
+    expect(src).not.toContain("decision: params.decision")
+    expect(src).not.toContain("model: ORACLE_MODEL")
+    expect(src).not.toContain("model: ADVISOR_MODEL")
+    // code_search always carries a workspace (explicit arg or launch env),
+    // plus the X-GH-Workspace session header fallback.
+    expect(src).toContain("PI_WORKSPACE")
+    expect(src).toContain("GH_ROUTER_WORKSPACE")
+    expect(src).toContain("X-GH-Workspace")
+    expect(src).toContain('callMcp("search", "code"')
+    expect(src).toContain("workspace")
+    // NUL bytes are stripped before crossing the MCP boundary so strict
+    // downstream JSON consumers never see a literal U+0000.
+    expect(src).toContain("stripNul")
   })
 })

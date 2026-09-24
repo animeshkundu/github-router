@@ -58,8 +58,18 @@ export async function ensurePiAgentMirror(): Promise<string> {
   // user's — Pi resolves its dummy/provider key from our generated
   // models.json, and copying OAuth tokens into a swept dir risks stranding
   // them), never sessions/ (per-project history must not leak across the
-  // isolation boundary).
-  const SKIP = new Set(["auth.json", "sessions", "models-store.json"])
+  // isolation boundary), never models-store.json. User `extensions/` are
+  // excluded by default: third-party workflow orchestrators (background
+  // lanes / preflight tools) otherwise ride into the cost-controlled
+  // profile and break its fixed roster contract. Opt back in with
+  // GH_ROUTER_PI_KEEP_USER_EXTENSIONS=1.
+  const keepUserExtensions = process.env.GH_ROUTER_PI_KEEP_USER_EXTENSIONS === "1"
+  const SKIP = new Set([
+    "auth.json",
+    "sessions",
+    "models-store.json",
+    ...(keepUserExtensions ? [] : ["extensions"]),
+  ])
   await Promise.all(
     entries
       .filter((e) => !SKIP.has(e))

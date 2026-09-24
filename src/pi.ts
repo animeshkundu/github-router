@@ -540,6 +540,10 @@ export const pi = defineCommand({
           ...getPiLaunchEnvVars(mirror),
           GH_ROUTER_HOOK_MCP_URL: serverUrl,
           GH_ROUTER_HOOK_NONCE: nonce,
+          // Launch workspace for the Pi MCP bridge (code_search default +
+          // X-GH-Workspace header). The proxy is long-lived; the agent is
+          // not — only the launcher knows where the caller actually is.
+          GH_ROUTER_WORKSPACE: process.cwd(),
           ...(aicLedgerEnv ? { [AIC_LEDGER_ENV]: aicLedgerEnv } : {}),
           ...(aicStatusCommandEnv
             ? { [PI_STATUS_COMMAND_ENV]: aicStatusCommandEnv }
