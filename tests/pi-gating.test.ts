@@ -66,7 +66,8 @@ describe("pi launch advertises only owned surfaces", () => {
 
     test(`${profileId}: fully bare with --no-peers`, () => {
       expect(buildPiSkills({ profileId, peers: false })).toEqual([])
-      expect(buildPiPrompts({ profileId, peers: false })).toEqual([])
+      // Prompts are swe-gated only; peers is irrelevant to them.
+      expect(buildPiPrompts({ profileId })).toEqual([])
     })
 
     test(`${profileId}: extension carries consults but no search/browse`, () => {
