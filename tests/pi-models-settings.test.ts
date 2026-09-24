@@ -520,7 +520,7 @@ describe("pi settings.json", () => {
     expect(bare.theme).toBe("claude-code-dark")
     expect(bare.packages).toContainEqual({
       source: "npm:better-claude-code-ui",
-      themes: ["./theme"],
+      themes: ["theme/*.json"],
       extensions: [],
       skills: [],
       prompts: [],

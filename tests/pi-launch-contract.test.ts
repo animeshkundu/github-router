@@ -77,6 +77,20 @@ describe("pi launch contract: packages", () => {
           // strings load everything a package declares.
           expect(entry.skills ?? "absent").toEqual([])
           expect(entry.prompts ?? "absent").toEqual([])
+          // Pi matches filter patterns with minimatch against
+          // root-relative paths: a `./` prefix matches NOTHING and the
+          // resource type silently loads empty (observed live as a
+          // missing theme + zero helper extensions).
+          for (const values of [
+            entry.extensions,
+            entry.skills,
+            entry.prompts,
+            entry.themes,
+          ]) {
+            for (const v of values ?? []) {
+              expect(v.startsWith("./")).toBe(false)
+            }
+          }
         }
       })
 

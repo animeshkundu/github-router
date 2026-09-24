@@ -730,20 +730,23 @@ export const PI_HELPERS_WEB_ACCESS: PiPackageEntry = {
   prompts: [],
 }
 
-/** Verified manifest paths (pi-agent-extensions 0.5.x). */
+/** Verified manifest paths (pi-agent-extensions 0.5.x). Bare relative
+ * form, NO `./` prefix: Pi matches package-filter patterns with
+ * minimatch against root-relative paths, and a `./` prefix matches
+ * nothing (observed live: zero extensions loaded, silent). */
 export const PI_HELPERS_AGENT_EXTENSIONS: PiPackageEntry = {
   source: "npm:pi-agent-extensions",
   extensions: [
-    "./extensions/sessions/index.ts",
-    "./extensions/ask-user/index.ts",
-    "./extensions/handoff/index.ts",
-    "./extensions/notify/index.ts",
-    "./extensions/context/index.ts",
-    "./extensions/files/index.ts",
-    "./extensions/todos/index.ts",
-    "./extensions/answer/index.ts",
-    "./extensions/cwd-history/index.ts",
-    "./extensions/session-breakdown/index.ts",
+    "extensions/sessions/index.ts",
+    "extensions/ask-user/index.ts",
+    "extensions/handoff/index.ts",
+    "extensions/notify/index.ts",
+    "extensions/context/index.ts",
+    "extensions/files/index.ts",
+    "extensions/todos/index.ts",
+    "extensions/answer/index.ts",
+    "extensions/cwd-history/index.ts",
+    "extensions/session-breakdown/index.ts",
   ],
   skills: [],
   prompts: [],
@@ -772,7 +775,12 @@ export const PI_UI_PACKAGES: ReadonlyArray<PiPackageEntry> = Object.freeze([
  */
 export const PI_CC_THEME_PACKAGE: PiPackageEntry = {
   source: "npm:better-claude-code-ui",
-  themes: ["./theme"],
+  // Bare relative glob, NO `./` prefix (see note above): minimatch
+  // matches manifest files by root-relative path, so `./theme` selects
+  // nothing and the theme silently fails to load. All six CC variants
+  // load as pure JSON data (zero runtime cost); the default is
+  // `claude-code-dark`, light-terminal users pick `claude-code-light`.
+  themes: ["theme/*.json"],
   extensions: [],
   skills: [],
   prompts: [],
