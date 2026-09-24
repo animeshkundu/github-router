@@ -33,12 +33,12 @@ describe("pi tier thresholds", () => {
 describe("live catalog price normalization", () => {
   test("per-1M math with validation", () => {
     const rows = liveInputPer1M([
-      { id: "gpt-6-luna", billing: { is_premium: false, multiplier: 1, token_prices: { input_price: 1e9 * 0.1, batch_size: 1_000_000 } } } as never,
+      { id: "gpt-6-luna", billing: { is_premium: false, multiplier: 1, token_prices: { input_price: 10_000_000_000, batch_size: 1_000_000 } } } as never,
       { id: "bad-batch", billing: { is_premium: false, multiplier: 1, token_prices: { input_price: 5, batch_size: 0 } } } as never,
       { id: "no-billing" } as never,
     ])
     expect(rows).toEqual([
-      { id: "gpt-6-luna", inputPer1M: 0.1 },
+      { id: "gpt-6-luna", inputPer1M: 10 },
       { id: "bad-batch", inputPer1M: undefined },
       { id: "no-billing", inputPer1M: undefined },
     ])
@@ -46,20 +46,20 @@ describe("live catalog price normalization", () => {
 })
 
 describe("tier price drift guard", () => {
-  test("matching Default rates stay silent", () => {
+  test("matching Default rates stay silent (catalog units = USD x 100)", () => {
     expect(
       tierPriceDriftWarnings([
-        { id: "gpt-6-luna", inputPer1M: 0.1 },
-        { id: "gpt-6-sol", inputPer1M: 2.0 },
-        { id: "grok-4.6", inputPer1M: 2.0 },
+        { id: "gpt-6-luna", inputPer1M: 10 },
+        { id: "gpt-6-sol", inputPer1M: 200 },
+        { id: "grok-4.6", inputPer1M: 200 },
       ]),
     ).toEqual([])
   })
 
   test("drifted or Long-tier pricing warns per model", () => {
     const warnings = tierPriceDriftWarnings([
-      { id: "gpt-6-luna", inputPer1M: 0.2 },
-      { id: "gpt-6-sol", inputPer1M: 2.0 },
+      { id: "gpt-6-luna", inputPer1M: 20 },
+      { id: "gpt-6-sol", inputPer1M: 200 },
       { id: "gpt-9-unknown", inputPer1M: 99 },
       { id: "grok-4.6", inputPer1M: undefined },
     ])

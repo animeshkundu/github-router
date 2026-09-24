@@ -222,4 +222,25 @@ describe("pi extension source", () => {
     // No [1m] accounting anywhere.
     expect(full).not.toContain("[1m]")
   })
+
+  test("follows Pi's TypeBox registerTool contract", () => {
+    const src = buildPiExtensionSource({
+      profileId: "cheapest",
+      searchEnabled: true,
+      browseEnabled: true,
+    })
+    // TypeBox object schemas under `parameters` (Pi rejects plain JSON dicts).
+    expect(src).toContain('import { Type } from "typebox"')
+    expect(src).toContain("parameters: OracleParams")
+    expect(src).toContain("parameters: AdvisorParams")
+    expect(src).toContain("parameters: CodeSearchParams")
+    expect(src).toContain("parameters: BrowserParams")
+    expect(src).not.toContain("inputSchema")
+    // execute(toolCallId, params, signal) returning { content, details }.
+    expect(src).toContain("async execute(_toolCallId, params, signal)")
+    expect(src).toContain("content: [{ type: \"text\", text")
+    expect(src).toContain("details: undefined")
+    expect(src).not.toContain("ctx.signal")
+    expect(src).not.toContain("async execute(args, ctx)")
+  })
 })

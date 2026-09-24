@@ -33,16 +33,44 @@ export function buildPiExtensionSource(opts: {
   lines.push(
     `// gh-router-pi extension (${opts.profileId} mode). Generated per launch; do not edit.`,
     `// Executable seams only. Workflow guidance lives in skills/, not here.`,
+    `import { Type } from "typebox";`,
+    ``,
+    `const OracleParams = Type.Object({`,
+    `  decision: Type.String({ description: "The risky decision to get a second opinion on" }),`,
+    `  options: Type.Optional(Type.String({ description: "Options considered" })),`,
+    `  context: Type.String({ description: "Missing-context gaps and background the cold-start oracle needs" }),`,
+    `});`,
+    ...(advisor
+      ? [
+          `const AdvisorParams = Type.Object({`,
+          `  plan: Type.String({ description: "The final plan to review (advisory)" }),`,
+          `  context: Type.Optional(Type.String({ description: "Background context" })),`,
+          `});`,
+        ]
+      : []),
+    `const CodeSearchParams = Type.Object({`,
+    `  query: Type.String({ description: "What to find" }),`,
+    `  mode: Type.Optional(Type.String({ description: "semantic (default), lexical, exact, regex, or ast" })),`,
+    `  limit: Type.Optional(Type.Number({ description: "Max results" })),`,
+    `});`,
+    `const BrowserParams = Type.Object({`,
+    `  url: Type.Optional(Type.String({ description: "URL to act on" })),`,
+    `  intent: Type.Optional(Type.String({ description: "What to do on the page" })),`,
+    `});`,
+    `async function toolText(promise) {`,
+    `  const text = await promise;`,
+    `  return { content: [{ type: "text", text }], details: undefined };`,
+    `}`,
     `const MCP_URL = (process.env.GH_ROUTER_HOOK_MCP_URL ?? "").replace(/\\/+$/, "");`,
     `const MCP_NONCE = process.env.GH_ROUTER_HOOK_NONCE ?? "";`,
     `const ORACLE_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${oracleModel}`)};`,
     `const ORACLE_THINKING = ${JSON.stringify(oracleThinking)};`,
-    advisor
-      ? `const ADVISOR_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${advisor.model}`)};`
-      : `const ADVISOR_MODEL = null;`,
-    advisor
-      ? `const ADVISOR_THINKING = ${JSON.stringify(advisor.thinking)};`
-      : `const ADVISOR_THINKING = null;`,
+    ...(advisor
+      ? [
+          `const ADVISOR_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${advisor.model}`)};`,
+          `const ADVISOR_THINKING = ${JSON.stringify(advisor.thinking)};`,
+        ]
+      : []),
     `const LEAD_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${piLeadModel(opts.profileId)}`)};`,
     `const LEAD_THINKING = ${JSON.stringify(piLeadThinking(opts.profileId))};`,
     ``,
@@ -64,10 +92,11 @@ export function buildPiExtensionSource(opts: {
     `export default function (pi) {`,
     `  pi.registerTool({`,
     `    name: "oracle",`,
+    `    label: "Oracle",`,
     `    description: "Second opinion before acting on a risky decision. Advisory only: challenges assumptions, never edits. Pass decision, options, and context.",`,
-    `    inputSchema: { type: "object", properties: { decision: { type: "string" }, options: { type: "string" }, context: { type: "string" } }, required: ["decision", "context"] },`,
-    `    async execute(args, ctx) {`,
-    `      return await callMcp("peers", "oracle", { ...args, model: ORACLE_MODEL, thinking: ORACLE_THINKING }, ctx && ctx.signal);`,
+    `    parameters: OracleParams,`,
+    `    async execute(_toolCallId, params, signal) {`,
+    `      return await toolText(callMcp("peers", "oracle", { decision: params.decision, options: params.options || "", context: params.context, model: ORACLE_MODEL, thinking: ORACLE_THINKING }, signal));`,
     `    },`,
     `  });`,
   )
@@ -75,10 +104,11 @@ export function buildPiExtensionSource(opts: {
     lines.push(
       `  pi.registerTool({`,
       `    name: "advisor",`,
+      `    label: "Advisor",`,
       `    description: "Advisory plan review for the lead: review the final plan before presenting it. Never executes.",`,
-      `    inputSchema: { type: "object", properties: { plan: { type: "string" }, context: { type: "string" } }, required: ["plan"] },`,
-      `    async execute(args, ctx) {`,
-      `      return await callMcp("peers", "oracle", { decision: "Review this plan (advisory)", options: args.plan, context: args.context || "", model: ADVISOR_MODEL, thinking: ADVISOR_THINKING }, ctx && ctx.signal);`,
+      `    parameters: AdvisorParams,`,
+      `    async execute(_toolCallId, params, signal) {`,
+      `      return await toolText(callMcp("peers", "oracle", { decision: "Review this plan (advisory)", options: params.plan, context: params.context || "", model: ADVISOR_MODEL, thinking: ADVISOR_THINKING }, signal));`,
       `    },`,
       `  });`,
     )
@@ -87,10 +117,11 @@ export function buildPiExtensionSource(opts: {
     lines.push(
       `  pi.registerTool({`,
       `    name: "code_search",`,
+      `    label: "Code search",`,
       `    description: "Semantic-first code search over the workspace index (falls back to lexical with a label). Use for finding code by meaning.",`,
-      `    inputSchema: { type: "object", properties: { query: { type: "string" }, mode: { type: "string" }, limit: { type: "number" } }, required: ["query"] },`,
-      `    async execute(args, ctx) {`,
-      `      return await callMcp("search", "code", { query: args.query, mode: args.mode || "semantic", limit: args.limit || 15 }, ctx && ctx.signal);`,
+      `    parameters: CodeSearchParams,`,
+      `    async execute(_toolCallId, params, signal) {`,
+      `      return await toolText(callMcp("search", "code", { query: params.query, mode: params.mode || "semantic", limit: params.limit || 15 }, signal));`,
       `    },`,
       `  });`,
     )
@@ -102,9 +133,9 @@ export function buildPiExtensionSource(opts: {
       `    pi.registerTool({`,
       `      name: wireName,`,
       `      description: "Browser control (" + wireName + "). Returns install_required with setup steps when the extension is not loaded.",`,
-      `      inputSchema: { type: "object", properties: { url: { type: "string" }, intent: { type: "string" } } },`,
-      `      async execute(args, ctx) {`,
-      `        return await callMcp("browser", wireName, args, ctx && ctx.signal);`,
+      `      parameters: BrowserParams,`,
+      `      async execute(_toolCallId, params, signal) {`,
+      `        return await toolText(callMcp("browser", wireName, { url: params.url || "", intent: params.intent || "" }, signal));`,
       `      },`,
       `    });`,
       `  }`,

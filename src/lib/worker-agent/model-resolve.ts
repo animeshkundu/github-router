@@ -192,11 +192,17 @@ const CATALOG_PRICE_SCALE = 1_000_000_000
 const TOKENS_PER_MILLION = 1_000_000
 
 /**
- * Last-resort per-1M-token prices, recorded from the live catalog on
- * 2026-08-12. The LIVE catalog always wins; this only fills in when
- * `state.models` is unpopulated, which in practice means the startup catalog
- * fetch failed. Without it the injected roster degrades to bare names and the
- * model loses the cost signal entirely for that session.
+ * Last-resort per-1M-token prices in live-catalog normalized units
+ * (`price/1e9*1e6/batch`, i.e. billing-doc USD x 100 — verified 100x on
+ * luna/sol/opus-5.5 live-vs-doc pairs). Refreshed from the live catalog
+ * on 2026-09-24 (luna 20/120->10/50, sol 400/2000->200/1000,
+ * opus-5.5 500/2500->400/2000 — all three caught by
+ * `warnOnTokenPriceDrift()`); other rows re-verified clean against the
+ * billing doc's Default tiers the same day. The LIVE catalog always
+ * wins; this only fills in when `state.models` is unpopulated, which in
+ * practice means the startup catalog fetch failed. Without it the
+ * injected roster degrades to bare names and the model loses the cost
+ * signal entirely for that session.
  *
  * A hardcoded copy of a value that HAS a live source is a second source of
  * truth, and this one has already been observed to drift: two figures written
@@ -213,16 +219,16 @@ const TOKENS_PER_MILLION = 1_000_000
  */
 export const FALLBACK_TOKEN_PRICES: Readonly<Record<string, CatalogTokenPrices>> =
   Object.freeze({
-    "gpt-6-luna": { in: 20, out: 120 },
+    "gpt-6-luna": { in: 10, out: 50 },
     "gpt-5.6-luna": { in: 20, out: 120 },
     "gpt-5.6-terra": { in: 200, out: 1200 },
     "gpt-5.4-mini": { in: 75, out: 450 },
     "claude-sonnet-5": { in: 200, out: 1000 },
     "gpt-5.3-codex": { in: 175, out: 1400 },
     "claude-haiku-4.5": { in: 100, out: 500 },
-    "claude-opus-5.5": { in: 500, out: 2500 },
+    "claude-opus-5.5": { in: 400, out: 2000 },
     "claude-opus-5": { in: 500, out: 2500 },
-    "gpt-6-sol": { in: 400, out: 2000 },
+    "gpt-6-sol": { in: 200, out: 1000 },
     "gpt-5.6-sol": { in: 400, out: 2000 },
     "grok-4.5": { in: 200, out: 600 },
     "gpt-5.5": { in: 500, out: 3000 },

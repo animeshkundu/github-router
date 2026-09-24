@@ -337,8 +337,9 @@ test("falls back to recorded prices only when the live catalog cannot answer", (
   )
   // Pin the current live Sol price literally. Referring only to the fallback
   // table here would let a stale table prove itself correct on the exact
-  // degraded path this test exists to protect.
-  expect(catalogTokenPrices("gpt-6-sol")).toEqual({ in: 400, out: 2000 })
+  // degraded path this test exists to protect. Refreshed 2026-09-24 against
+  // the live catalog (200/1000) and the billing doc Default tier ($2/$10).
+  expect(catalogTokenPrices("gpt-6-sol")).toEqual({ in: 200, out: 1000 })
   // Not in the catalog AND not in the fallback table: still undefined. The
   // fallback covers models actually recorded, never every id.
   expect(catalogTokenPrices("no-such-model")).toBeUndefined()
@@ -388,6 +389,7 @@ test("drift check warns when a recorded price disagrees with the live catalog", 
     expect(warnings.some((w) => w.includes("gpt-6-luna") && w.includes("999"))).toBe(true)
 
     // Agreement must be silent, or the warning becomes noise nobody reads.
+    // Fixture tracks live truth (luna 10/50 since the 2026-09-24 refresh).
     warnings.length = 0
     setCatalog([
       model({
@@ -395,8 +397,8 @@ test("drift check warns when a recorded price disagrees with the live catalog", 
         billing: {
           token_prices: {
             batch_size: 1_000_000,
-            input_price: 20_000_000_000,
-            output_price: 120_000_000_000,
+            input_price: 10_000_000_000,
+            output_price: 50_000_000_000,
           },
         },
       }),

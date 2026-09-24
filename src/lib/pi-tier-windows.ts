@@ -51,11 +51,19 @@ export function piContextWindowFor(
   return threshold
 }
 
+/**
+ * Expected Default-tier input prices in CATALOG normalized units
+ * (`price/1e9*1e6/batch`, same as `livePricesFor`), NOT billing-doc USD.
+ * Empirically catalog units = USD × 100 (live luna 10/50 vs $0.10/$1.20,
+ * sol 200/1000 vs $2/$10, opus-5.5 400/2000 vs $4/$20 — all ×100).
+ * grok-4.6's 200 is inferred the same way (doc $2.00 × 100); if live
+ * disagrees the warning fires, which is the guard working, not failing.
+ */
 const EXPECTED_DEFAULT_INPUT_PER_1M: Readonly<Record<string, number>> =
   Object.freeze({
-    "gpt-6-luna": 0.1,
-    "gpt-6-sol": 2.0,
-    "grok-4.6": 2.0,
+    "gpt-6-luna": 10,
+    "gpt-6-sol": 200,
+    "grok-4.6": 200,
   })
 
 /**
@@ -74,7 +82,7 @@ export function tierPriceDriftWarnings(
     if (row.inputPer1M === undefined) continue
     if (Math.abs(row.inputPer1M - expected) > 1e-9) {
       warnings.push(
-        `Copilot catalog prices for "${row.id}" ($${row.inputPer1M}/1M input) disagree with the pinned Pi tier table ($${expected}/1M Default). Refresh PI_TIER_THRESHOLDS in src/lib/pi-tier-windows.ts.`,
+        `Copilot catalog prices for "${row.id}" (${row.inputPer1M}/1M input, catalog units) disagree with the pinned Pi tier table (${expected}/1M Default). Refresh PI_TIER_THRESHOLDS in src/lib/pi-tier-windows.ts.`,
       )
     }
   }
