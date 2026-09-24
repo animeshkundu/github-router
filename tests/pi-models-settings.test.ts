@@ -256,7 +256,11 @@ describe("pi settings.json", () => {
       skills: [],
       prompts: [],
     })
-    expect(settings.packages).toContain("npm:pi-statusline")
+    // No third-party statusline package: the footer is built into the
+    // mode's own gh-router-pi extension (the community bridge never sees
+    // the launch mirror, so it cannot drive a per-launch footer).
+    expect(settings.packages).not.toContain("npm:pi-statusline")
+    expect(settings.packages).toContain("local:gh-router-pi")
   })
 })
 

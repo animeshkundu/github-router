@@ -37,8 +37,8 @@ plus the mode identity. Each surface rides a flag:
 
 Always injected regardless of flags (like Claude's operating
 defaults): `models.json` (routing is load-bearing), minimal
-`settings.json`, `APPEND_SYSTEM.md` digest, `pi-statusline` package
-(extension-only manifest — no skill/prompt noise; opt out with
+`settings.json`, `APPEND_SYSTEM.md` digest, statusline footer (built into
+the `gh-router-pi` extension — no third-party package; opt out with
 `GH_ROUTER_DISABLE_AIC_STATUSLINE=1`), toolbelt PATH (opt out with
 `GH_ROUTER_DISABLE_TOOLBELT=1`), launch binding. The user's own
 `~/.pi/agent` snapshot is their Pi default, never gated.
@@ -113,15 +113,40 @@ disagree with the table. Refresh the table when the billing doc changes.
 ## Statusline
 
 Pi's footer shows `[AIC x.xx]` (this session's AI-credit total) plus
-the discounted actual (`~$`), same as Claude CLI — via the community
-`pi-statusline` package (in the mode's `packages[]`, configured not
-forked) driving the unchanged `internal-aic-status` command. The
-launcher injects the identical `{statusLine: {type: "command"}}` block
-into the mirror's `settings.json` (router-wins; user command sidecarred)
-and sets `GH_ROUTER_AIC_LEDGER` on the Pi child env. Ledger taps are
-proxy-side, so Pi traffic accumulates automatically. Opt out with
-`GH_ROUTER_DISABLE_AIC_STATUSLINE=1`. Fail-open: a broken runner
-degrades to no statusline, never a broken launch.
+the discounted actual (`~$`), rendered by the **same
+`internal-aic-status` runner** `github-router claude` drives — one
+renderer, identical segments (`src/lib/default-statusline.ts`).
+
+How it works: the mode's own `gh-router-pi` extension owns Pi's footer
+(`ctx.ui.setFooter`, refreshed on `session_start`/`turn_end`/
+`model_select`/`session_compact`/`session_tree`, 300 ms debounce) and
+spawns the runner with a natively-built Claude-shaped payload
+(`src/lib/pi-statusline.ts`): context % from Pi's authoritative
+`getContextUsage()`, cumulative in/out tokens summed over the session
+branch, wall-clock duration from session start (transcript-span
+fallback), line counts from edit tool-result details, model + cwd
+directly. The command travels via `GH_ROUTER_AIC_STATUS_COMMAND` env
+(alongside `GH_ROUTER_AIC_LEDGER`); the last footer width is fed back as
+`COLUMNS` so narrow terminals drop segments right-to-left with AIC
+pinned, plus an ANSI-aware truncation backstop. Statuses published by
+other extensions via `setStatus` render as extra footer rows so replacing
+the footer never silently drops them.
+
+Deliberate divergences from the Claude path:
+
+- No third-party statusline package and no `statusLine` settings block.
+  The community `pi-statusline` bridge only reads the user's real
+  global/project settings and never sees the launch mirror behind
+  `PI_CODING_AGENT_DIR`, so a mirror-injected block would be dead
+  config — verified live against v0.0.2 (its payload also hardcodes
+  line counts to null and derives context % from the latest turn only).
+- Router-wins by architecture: the footer is extension-owned, so a
+  user's own statusline command is never executed (pinned Claude
+  profiles behave the same via `routerWins`).
+- Ledger taps are proxy-side, so Pi traffic accumulates automatically.
+
+Opt out with `GH_ROUTER_DISABLE_AIC_STATUSLINE=1`. Fail-open: a broken
+runner degrades to Pi's native footer, never a broken launch.
 
 ## Files
 

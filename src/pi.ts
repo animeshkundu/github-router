@@ -10,10 +10,9 @@ import { checkPiVersion, updatePi } from "./lib/pi-version-check"
 import { warnOnTierPriceDriftForModels } from "./lib/pi-tier-windows"
 import {
   AIC_LEDGER_ENV,
-  AIC_USER_STATUSLINE_ENV,
   buildAicStatusHookCommand,
-  injectAicStatusLineIntoSettingsFile,
 } from "./lib/aic-statusline-settings"
+import { PI_STATUS_COMMAND_ENV } from "./lib/pi-statusline"
 import { aicLedgerPath, sweepStaleAicLedgerFiles } from "./lib/aic-ledger"
 import { resolveSelfInvocation } from "./lib/hook-launcher/self-invocation"
 import {
@@ -373,35 +372,27 @@ export const pi = defineCommand({
     }
 
     // AIC status line: this session's AI-credit total (`[AIC 12.42]`) plus
-    // the discounted actual (`~$`) in Pi's footer via the `pi-statusline`
-    // package (Claude-command contract: `internal-aic-status` runs
-    // unchanged). The mirror is disposable, so router-wins is safe; a
-    // user command is still sidecarred, never executed. Best-effort;
-    // opt out with GH_ROUTER_DISABLE_AIC_STATUSLINE=1. Fail-open: a
-    // broken runner degrades to no statusline, never a broken launch.
+    // the discounted actual (`~$`) in Pi's footer, rendered by the mode's
+    // own `gh-router-pi` extension (same `internal-aic-status` runner the
+    // Claude launcher drives — one renderer, identical segments). The
+    // command travels via `GH_ROUTER_AIC_STATUS_COMMAND` env, never a
+    // settings block: the community bridge only reads the user's real
+    // global/project settings and never sees the launch mirror, so a
+    // mirror-injected block would be dead config. Router-wins by
+    // architecture (the footer is extension-owned); opt out with
+    // GH_ROUTER_DISABLE_AIC_STATUSLINE=1. Fail-open: a broken runner
+    // degrades to no statusline, never a broken launch.
     let aicLedgerEnv: string | undefined
-    let aicUserStatuslineEnv: string | undefined
+    let aicStatusCommandEnv: string | undefined
     if (process.env.GH_ROUTER_DISABLE_AIC_STATUSLINE !== "1") {
       try {
         void sweepStaleAicLedgerFiles()
         const selfInvocation = await resolveSelfInvocation()
-        const statusCommand = buildAicStatusHookCommand(selfInvocation)
-        const injected = await injectAicStatusLineIntoSettingsFile(
-          path.join(mirror, "settings.json"),
-          statusCommand,
-          { routerWins: true },
+        aicStatusCommandEnv = buildAicStatusHookCommand(selfInvocation)
+        aicLedgerEnv = aicLedgerPath()
+        consola.info(
+          `Status line wired via the gh-router-pi footer for ${profileId} (shared internal-aic-status runner).`,
         )
-        if (injected.written) {
-          aicLedgerEnv = aicLedgerPath()
-          if (injected.mode === "wrapped" && injected.userCommand) {
-            aicUserStatuslineEnv = injected.userCommand
-          }
-          if (injected.mode === "forced") {
-            consola.info(
-              `Pinned status line installed natively for ${profileId}; a pre-existing statusLine was backed up in this launch's isolated settings and will not run.`,
-            )
-          }
-        }
       } catch (err) {
         consola.warn(
           `AIC status line skipped: ${
@@ -470,8 +461,8 @@ export const pi = defineCommand({
           GH_ROUTER_HOOK_MCP_URL: serverUrl,
           GH_ROUTER_HOOK_NONCE: nonce,
           ...(aicLedgerEnv ? { [AIC_LEDGER_ENV]: aicLedgerEnv } : {}),
-          ...(aicUserStatuslineEnv
-            ? { [AIC_USER_STATUSLINE_ENV]: aicUserStatuslineEnv }
+          ...(aicStatusCommandEnv
+            ? { [PI_STATUS_COMMAND_ENV]: aicStatusCommandEnv }
             : {}),
         },
         extraArgs,
