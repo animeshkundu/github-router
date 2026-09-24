@@ -117,7 +117,7 @@ export function getCodexVersion(): { ok: boolean; version?: string } {
 }
 
 export interface LaunchTarget {
-  kind: "claude-code" | "codex"
+  kind: "claude-code" | "codex" | "pi"
   envVars: Record<string, string>
   extraArgs: string[]
   model?: string
@@ -175,7 +175,15 @@ export function buildLaunchCommand(target: LaunchTarget): {
       ? wantsPermissionMode
         ? ["claude", ...target.extraArgs]
         : ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
-      : buildCodexCmd(target)
+      : target.kind === "pi"
+        ? [
+            "pi",
+            "--provider",
+            "gh-router",
+            ...(target.model ? ["--model", target.model] : []),
+            ...target.extraArgs,
+          ]
+        : buildCodexCmd(target)
 
   // Anti-shadow: resolve the top-level CLI to an ABSOLUTE path against
   // the clean parent PATH (excluding the cwd). The spawned child's env
