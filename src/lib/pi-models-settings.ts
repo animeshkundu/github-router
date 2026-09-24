@@ -12,6 +12,7 @@ import {
   CHEAPEST_PROFILE_ORACLE_EFFORT,
   CHEAPEST_PROFILE_ORACLE_MODEL,
 } from "./cheapest-profile-contract"
+import { piContextWindowFor } from "./pi-tier-windows"
 
 export type PiProfileId = "cheapest" | "balanced"
 
@@ -25,7 +26,11 @@ export interface PiCatalogModel {
   endpoints: ReadonlyArray<string>
 }
 
-/** All Pi roles run at the bare 200K default window — the cost lever. */
+/**
+ * Fallback Pi window (tokens) when a model has no pinned cheap-tier
+ * threshold. Per-model rows use `piContextWindowFor` (tier threshold);
+ * this constant remains the floor no role drops below.
+ */
 export const PI_PROFILE_CONTEXT_TOKENS = 200_000 as const
 /** Provider key used in models.json and agent `provider/model` references. */
 export const PI_PROVIDER_NAME = "gh-router" as const
@@ -153,12 +158,15 @@ export interface PiModelsJson {
  * Build the `models.json` provider entry pointing Pi at the running
  * proxy as an ordinary OpenAI-compatible endpoint (the documented
  * Ollama/vLLM pattern — no provider-override extension needed).
- * Every row is BARE (no `[1m]`): Pi budgets `contextWindow` and the
- * 200K value is the whole cost lever.
+ * Every row is BARE (no `[1m]`) with its cheap-tier window from
+ * `piContextWindowFor` (272K Luna/Sol, 200K Grok/unknown): Pi budgets
+ * `contextWindow` per model, so each role gets its cheapest tier and
+ * Long-tier (2x) pricing is structurally unreachable.
  */
 export function buildPiModelsJson(opts: {
   serverUrl: string
   profileId: PiProfileId
+  catalog?: ReadonlyArray<PiCatalogModel>
 }): PiModelsJson {
   const baseUrl = `${opts.serverUrl.replace(/\/+$/, "")}/v1`
   return {
@@ -172,7 +180,10 @@ export function buildPiModelsJson(opts: {
           name: id,
           reasoning: true as const,
           input: ["text"],
-          contextWindow: PI_PROFILE_CONTEXT_TOKENS,
+          contextWindow: piContextWindowFor(
+            id,
+            opts.catalog?.find((m) => m.id === id)?.maxContextTokens,
+          ),
         })),
       },
     },
@@ -191,14 +202,16 @@ export interface PiCompactionSettings {
 
 /**
  * Derive Pi compaction budgets from live catalog `max_prompt_tokens`
- * ceilings — the Pi-native analogue of `deriveAutoCompactWindowTokens`.
- * Pi triggers at `contextWindow − reserveTokens`; with the fixed 200K
- * window the reserve must leave the trigger below every reachable
- * model's Copilot prompt ceiling:
- *   reserve = 200K − min(floor(prompt × 0.85)) over known models,
+ * ceilings AND each model's cheap-tier window — the Pi-native analogue
+ * of `deriveAutoCompactWindowTokens`. Pi triggers at
+ * `contextWindow − reserveTokens` per active model; the trigger must sit
+ * below BOTH the tier price cliff and Copilot's acceptance ceiling:
+ *   reserve(id) = window(id) − floor(min(prompt, window) × 0.85),
  *   clamped to [16384, 100000]. keepRecentTokens stays 20000.
- * Unknown catalog (no prompt metadata) → Pi built-in defaults so a
- * missing signal can never disable compaction.
+ * The global reserve is the max over models (every model's trigger is
+ * safe); overrides carry each model's own value. Unknown catalog (no
+ * prompt metadata) → Pi built-in defaults so a missing signal can never
+ * disable compaction.
  */
 export function derivePiCompactionSettings(
   catalog: ReadonlyArray<PiCatalogModel> | undefined,
@@ -211,17 +224,22 @@ export function derivePiCompactionSettings(
     modelOverrides: {},
   }
   if (!catalog || catalog.length === 0) return FALLBACK
-  const ceilings = modelIds
-    .map((id) => catalog.find((m) => m.id === id)?.maxPromptTokens ?? 0)
-    .filter((n) => Number.isFinite(n) && n > 0)
-  if (ceilings.length === 0) return FALLBACK
-  const trigger = Math.min(...ceilings.map((p) => Math.floor(p * 0.85)))
-  const reserve = Math.min(
-    100_000,
-    Math.max(16384, PI_PROFILE_CONTEXT_TOKENS - trigger),
-  )
-  const modelOverrides: PiCompactionSettings["modelOverrides"] = {}
+  const perModel = new Map<string, number>()
   for (const id of modelIds) {
+    const entry = catalog.find((m) => m.id === id)
+    const window = piContextWindowFor(id, entry?.maxContextTokens)
+    const prompt = entry?.maxPromptTokens ?? 0
+    const ceiling =
+      Number.isFinite(prompt) && prompt > 0 ? Math.min(prompt, window) : window
+    perModel.set(
+      id,
+      Math.min(100_000, Math.max(16384, window - Math.floor(ceiling * 0.85))),
+    )
+  }
+  if (perModel.size === 0) return FALLBACK
+  const global = Math.max(...perModel.values())
+  const modelOverrides: PiCompactionSettings["modelOverrides"] = {}
+  for (const [id, reserve] of perModel) {
     modelOverrides[`${PI_PROVIDER_NAME}/${id}`] = {
       reserveTokens: reserve,
       keepRecentTokens: 20000,
@@ -229,7 +247,7 @@ export function derivePiCompactionSettings(
   }
   return {
     enabled: true,
-    reserveTokens: reserve,
+    reserveTokens: global,
     keepRecentTokens: 20000,
     modelOverrides,
   }
@@ -267,7 +285,7 @@ export function buildPiSettingsJson(opts: {
     defaultTools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
     compaction: derivePiCompactionSettings(opts.catalog, modelIds),
     retry: { enabled: true, maxRetries: 3 },
-    packages: ["npm:pi-subagents", "local:gh-router-pi"],
+    packages: ["npm:pi-subagents", "npm:pi-statusline", "local:gh-router-pi"],
   }
 }
 

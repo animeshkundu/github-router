@@ -56,12 +56,48 @@ surface when a supported browser is installed.
   Parent env is stripped of Pi routing keys (`PI_CODING_AGENT_DIR`,
   …) so a stale shell export can't re-route the session off the proxy.
 
+## Tier-priced context windows
+
+Copilot bills OpenAI/xAI models in two tiers keyed on per-request input
+tokens. Each Pi model row carries its cheap-tier window, so Long-tier
+(2x) pricing is structurally unreachable:
+
+| Model | Default (cheap) tier | `contextWindow` |
+|---|---|---|
+| `gpt-6-luna` | ≤ 272K ($0.10/1M in) | 272000 |
+| `gpt-6-sol` | ≤ 272K ($2.00/1M in) | 272000 |
+| `grok-4.6` | ≤ 200K ($2.00/1M in) | 200000 |
+| anything else | — | 200000 (fallback) |
+
+Pinned in `src/lib/pi-tier-windows.ts` (sourced to the billing doc;
+the live catalog carries no tier data). Compaction reserves derive per
+model (`reserve = window − floor(min(prompt, window) × 0.85)`), so the
+trigger sits below both the price cliff and Copilot's ceiling.
+`warnOnTierPriceDriftForModels` warns loudly when live catalog prices
+disagree with the table. Refresh the table when the billing doc changes.
+
+## Statusline
+
+Pi's footer shows `[AIC x.xx]` (this session's AI-credit total) plus
+the discounted actual (`~$`), same as Claude CLI — via the community
+`pi-statusline` package (in the mode's `packages[]`, configured not
+forked) driving the unchanged `internal-aic-status` command. The
+launcher injects the identical `{statusLine: {type: "command"}}` block
+into the mirror's `settings.json` (router-wins; user command sidecarred)
+and sets `GH_ROUTER_AIC_LEDGER` on the Pi child env. Ledger taps are
+proxy-side, so Pi traffic accumulates automatically. Opt out with
+`GH_ROUTER_DISABLE_AIC_STATUSLINE=1`. Fail-open: a broken runner
+degrades to no statusline, never a broken launch.
+
 ## Files
 
 - `src/pi.ts` — launcher (TTY or `--print`/`--mode` headless).
 - `src/lib/pi-models-settings.ts` — pure builders (models/settings,
   agents, APPEND_SYSTEM digest, compaction derivation). Unit-tested in
   `tests/pi-models-settings.test.ts`.
+- `src/lib/pi-tier-windows.ts` — pinned tier thresholds, window
+  derivation, price-drift guard. Unit-tested in
+  `tests/pi-tier-windows.test.ts`.
 - `src/lib/pi-extension.ts` — extension source + skills + prompts.
 - `src/lib/pi-paths.ts` — mirror lifecycle.
 - `src/lib/pi-version-check.ts` — install/update gate.

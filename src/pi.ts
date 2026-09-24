@@ -7,6 +7,15 @@ import { defineCommand, type ArgsDef } from "citty"
 import consola from "consola"
 
 import { checkPiVersion, updatePi } from "./lib/pi-version-check"
+import { warnOnTierPriceDriftForModels } from "./lib/pi-tier-windows"
+import {
+  AIC_LEDGER_ENV,
+  AIC_USER_STATUSLINE_ENV,
+  buildAicStatusHookCommand,
+  injectAicStatusLineIntoSettingsFile,
+} from "./lib/aic-statusline-settings"
+import { aicLedgerPath, sweepStaleAicLedgerFiles } from "./lib/aic-ledger"
+import { resolveSelfInvocation } from "./lib/hook-launcher/self-invocation"
 import {
   ensurePiAgentMirror,
   removeOwnPiAgentMirror,
@@ -279,10 +288,9 @@ export const pi = defineCommand({
         efforts: m.capabilities?.supports?.reasoning_effort ?? [],
         endpoints: m.supported_endpoints ?? [],
       }))
-
       await writeJsonFile(
         path.join(mirror, "models.json"),
-        buildPiModelsJson({ serverUrl, profileId }),
+        buildPiModelsJson({ serverUrl, profileId, catalog }),
       )
 
       // Merge over snapshotted user settings: our keys win, user keys survive.
@@ -322,6 +330,54 @@ export const pi = defineCommand({
         `Failed to write Pi launch files: ${err instanceof Error ? err.message : String(err)}.`,
       )
       process.exit(1)
+    }
+
+    // Tier-table drift guard: loud warning when live catalog input prices
+    // disagree with the pinned cheap-tier thresholds. Separate block (own
+    // try/catch) so a drift-check bug can never fail a launch. Warn-only.
+    try {
+      warnOnTierPriceDriftForModels(state.models?.data)
+    } catch (err) {
+      consola.debug("Pi tier drift check skipped:", err)
+    }
+
+    // AIC status line: this session's AI-credit total (`[AIC 12.42]`) plus
+    // the discounted actual (`~$`) in Pi's footer via the `pi-statusline`
+    // package (Claude-command contract: `internal-aic-status` runs
+    // unchanged). The mirror is disposable, so router-wins is safe; a
+    // user command is still sidecarred, never executed. Best-effort;
+    // opt out with GH_ROUTER_DISABLE_AIC_STATUSLINE=1. Fail-open: a
+    // broken runner degrades to no statusline, never a broken launch.
+    let aicLedgerEnv: string | undefined
+    let aicUserStatuslineEnv: string | undefined
+    if (process.env.GH_ROUTER_DISABLE_AIC_STATUSLINE !== "1") {
+      try {
+        void sweepStaleAicLedgerFiles()
+        const selfInvocation = await resolveSelfInvocation()
+        const statusCommand = buildAicStatusHookCommand(selfInvocation)
+        const injected = await injectAicStatusLineIntoSettingsFile(
+          path.join(mirror, "settings.json"),
+          statusCommand,
+          { routerWins: true },
+        )
+        if (injected.written) {
+          aicLedgerEnv = aicLedgerPath()
+          if (injected.mode === "wrapped" && injected.userCommand) {
+            aicUserStatuslineEnv = injected.userCommand
+          }
+          if (injected.mode === "forced") {
+            consola.info(
+              `Pinned status line installed natively for ${profileId}; a pre-existing statusLine was backed up in this launch's isolated settings and will not run.`,
+            )
+          }
+        }
+      } catch (err) {
+        consola.warn(
+          `AIC status line skipped: ${
+            err instanceof Error ? err.message : String(err)
+          }.`,
+        )
+      }
     }
 
     if (toolbeltEnabled()) {
@@ -371,6 +427,10 @@ export const pi = defineCommand({
           ...getPiLaunchEnvVars(mirror),
           GH_ROUTER_HOOK_MCP_URL: serverUrl,
           GH_ROUTER_HOOK_NONCE: nonce,
+          ...(aicLedgerEnv ? { [AIC_LEDGER_ENV]: aicLedgerEnv } : {}),
+          ...(aicUserStatuslineEnv
+            ? { [AIC_USER_STATUSLINE_ENV]: aicUserStatuslineEnv }
+            : {}),
         },
         extraArgs,
         model: lead,

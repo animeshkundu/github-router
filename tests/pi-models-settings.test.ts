@@ -93,7 +93,12 @@ describe("pi balanced profile", () => {
 })
 
 describe("pi models.json", () => {
-  test("single gh-router OpenAI-compatible provider, bare 200K rows", () => {
+  test("single gh-router OpenAI-compatible provider, tier windows, bare rows", () => {
+    const windows: Record<string, number> = {
+      "gpt-6-luna": 272_000,
+      "gpt-6-sol": 272_000,
+      "grok-4.6": 200_000,
+    }
     for (const profile of ["cheapest", "balanced"] as const) {
       const json = buildPiModelsJson({
         serverUrl: "http://127.0.0.1:8787",
@@ -104,11 +109,27 @@ describe("pi models.json", () => {
       expect(provider.api).toBe("openai-completions")
       expect(provider.models.length).toBeGreaterThan(0)
       for (const m of provider.models) {
-        expect(m.contextWindow).toBe(200_000)
+        expect(m.contextWindow).toBe(windows[m.id] ?? 200_000)
         expect(m.reasoning).toBe(true)
         expect(m.id).not.toContain("[1m]")
       }
     }
+  })
+
+  test("window is capped at the advertised catalog total", () => {
+    const json = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "cheapest",
+      catalog: [
+        { id: "gpt-6-luna", maxContextTokens: 200_000, maxPromptTokens: 150_000, efforts: ["max"], endpoints: ["responses"] },
+        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"] },
+      ],
+    })
+    const rows = Object.fromEntries(
+      json.providers["gh-router"].models.map((m) => [m.id, m.contextWindow]),
+    )
+    expect(rows["gpt-6-luna"]).toBe(200_000)
+    expect(rows["gpt-6-sol"]).toBe(272_000)
   })
 })
 
@@ -133,6 +154,7 @@ describe("pi settings.json", () => {
     ])
     expect(settings.retry).toEqual({ enabled: true, maxRetries: 3 })
     expect(settings.packages).toContain("npm:pi-subagents")
+    expect(settings.packages).toContain("npm:pi-statusline")
   })
 })
 
@@ -143,13 +165,16 @@ describe("pi compaction derivation", () => {
     { id: "grok-4.6", maxContextTokens: 500_000, maxPromptTokens: 300_000, efforts: ["medium"], endpoints: ["responses"] },
   ]
 
-  test("reserve keeps the trigger below the smallest prompt ceiling", () => {
+  test("reserve keeps the trigger below tier cliff and prompt ceiling", () => {
     const s = derivePiCompactionSettings(catalog, ["gpt-6-luna", "gpt-6-sol"])
-    // min ceiling 400K -> floor(400000*0.85)=340000, above the 200K window,
-    // so the trigger (200000-16384=183616) is safely below every ceiling.
-    expect(s.reserveTokens).toBe(16384)
+    // windows 272K/272K; ceilings min(922000,272000)=272000 and
+    // min(400000,272000)=272000 -> trigger floor(272000*0.85)=231200,
+    // reserve 272000-231200=40800. Trigger sits below the 272K price
+    // cliff AND every prompt ceiling.
+    expect(s.reserveTokens).toBe(40_800)
     expect(s.keepRecentTokens).toBe(20_000)
     expect(s.enabled).toBe(true)
+    expect(s.modelOverrides["gh-router/gpt-6-luna"].reserveTokens).toBe(40_800)
   })
 
   test("tight ceiling raises the reserve", () => {
