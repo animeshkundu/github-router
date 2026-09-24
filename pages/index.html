@@ -586,7 +586,7 @@
       <h1>One proxy. <span>Every AI coding tool.</span></h1>
       <p class="lead">Route your GitHub Copilot subscription through standard OpenAI and Anthropic APIs. Works with Claude Code, Codex CLI, and anything that speaks OpenAI.</p>
       <p style="color:var(--text3);font-family:var(--mono);font-size:0.85rem;margin-bottom:2.5rem;">Your tool &rarr; github-router &rarr; GitHub Copilot API</p>
-      <div class="install-cmd" onclick="navigator.clipboard.writeText('npx github-router@latest start');this.querySelector('.copy-hint').textContent='copied!'">
+      <div class="install-cmd" onclick="navigator.clipboard.writeText('bunx github-router@latest start');this.querySelector('.copy-hint').textContent='copied!'">
         <div class="terminal-bar">
           <span class="terminal-dot"></span>
           <span class="terminal-dot"></span>
@@ -595,7 +595,7 @@
         </div>
         <div class="terminal-body">
           <span class="prompt">$</span>
-          <span class="cmd">npx github-router@latest start</span>
+          <span class="cmd">bunx github-router@latest start</span>
           <span class="copy-hint">click to copy</span>
         </div>
       </div>
@@ -611,14 +611,14 @@
         <div class="tool-card">
           <h3>Claude Code</h3>
           <p>Interactive setup copies a launch command to your clipboard:</p>
-          <pre><div class="code-bar"><span class="code-dot"></span><span class="code-dot"></span><span class="code-dot"></span></div><div class="code-inner"><code class="language-bash">npx github-router@latest start --claude-code</code></div></pre>
+          <pre><div class="code-bar"><span class="code-dot"></span><span class="code-dot"></span><span class="code-dot"></span></div><div class="code-inner"><code class="language-bash">bunx github-router@latest start --claude-code</code></div></pre>
           <p>Or drop this in <code>.claude/settings.json</code>:</p>
         </div>
 
         <div class="tool-card">
           <h3>Codex CLI</h3>
           <p>One flag or two env vars:</p>
-          <pre><div class="code-bar"><span class="code-dot"></span><span class="code-dot"></span><span class="code-dot"></span></div><div class="code-inner"><code class="language-bash">npx github-router@latest start --codex</code></div></pre>
+          <pre><div class="code-bar"><span class="code-dot"></span><span class="code-dot"></span><span class="code-dot"></span></div><div class="code-inner"><code class="language-bash">bunx github-router@latest start --codex</code></div></pre>
           <pre><div class="code-bar"><span class="code-dot"></span><span class="code-dot"></span><span class="code-dot"></span></div><div class="code-inner"><code class="language-bash">export OPENAI_BASE_URL=http://localhost:8787/v1
 export OPENAI_API_KEY=dummy
 codex -m gpt5.2-codex</code></div></pre>

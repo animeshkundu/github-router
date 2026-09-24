@@ -16,7 +16,16 @@ Roster notes: our `reviewer`/`oracle` agent files intentionally shadow the
 same-named pi-subagents builtins (pinned models); builtin
 `scout`/`worker`/`researcher`/`evidence-auditor` are disabled via settings
 (their habitual invocations resolve through our `scout`/`worker` aliases),
-while builtin `delegate` stays enabled as the cheap append-mode path.
+as are the external-CLI families `claude-code`/`codex-exec`/`cursor-agent`
+(+ `-writer` variants — they shell out to other CLIs with ambient auth,
+off-proxy and off-ledger), while builtin `delegate` stays enabled as the
+cheap append-mode path.
+Every emitted agent runs foreground (`async: false`): the detached
+background runner demonstrably drops `read`/`bash` from its tool registry
+(observed live as `requested unavailable child tools: [read, bash]`),
+failing every strict-allowlist child it touches. `contact_supervisor`
+appears only on `General-Purpose` (blocked-writer escalation); leaves
+never page the supervisor.
 `General-Purpose` may nest `reviewer`/`oracle`, balanced `reviewer` may nest
 `Explore` (ceiling raised to 3 via `PI_SUBAGENT_MAX_DEPTH`). Handoff is
 inline prose in the delegating brief — no `context.md`/`progress.md` file
@@ -43,7 +52,7 @@ plus the mode identity. Each surface rides a flag:
 |---|---|---|
 | `--peers` / `--no-peers` | **on** | Native agent files, oracle tool (+cheapest advisor), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
 | `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: `pi-mcp-adapter`, allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `files`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
-| `--ui` | off | Claude-look UI bundle: `pi-code` behaviors + `pi-claude-code-ui` transcript. Opt-in; bare launches stay minimal. |
+| `--ui` / `--no-ui` | **on** | Claude-look transcript UI (`pi-claude-code-ui`: grouped rows, Shiki diffs, Ctrl+O previews). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
 | `--swe` | off | Pipeline surface: `gh-delegate` (+cheapest `gh-advisor`) skills, `review` / `parallel-review` (+cheapest `plan-review`) prompts |
 | `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill (tool and prose appear together or not at all) |
 | `--browse` | off | Browser tool surface when a supported browser is installed |
@@ -182,9 +191,13 @@ runner degrades to Pi's native footer, never a broken launch.
 - `src/lib/pi-paths.ts` — mirror lifecycle.
 - `src/lib/pi-version-check.ts` — install/update gate.
 
-## Claude-Code look (recipe, not bundled)
+## Claude-Code look (bundled by default)
 
-Bare launches stay minimal per flag policy, and the `gh-router-pi` footer is router-owned (third-party footers lose). For a familiar look, install yourself — the `~/.pi/agent` snapshot carries it into the mirror automatically:
+`pi-claude-code-ui` ships by default (`--no-ui` opts out): grouped rows,
+Shiki diffs, Ctrl+O previews. For the full Claude behavior set, install
+yourself — the `~/.pi/agent` snapshot carries it into the mirror automatically
+(`pi-code` itself stays out of the bundle: its `/memory` + `/context`
+commands would collide with the router-owned pair):
 
 ```bash
 pi install npm:pi-code            # Claude behavior: todos, /rewind, /memory, subagents, /context, /init

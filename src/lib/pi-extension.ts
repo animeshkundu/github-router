@@ -750,6 +750,11 @@ export function buildPiSkills(opts: {
         "into the `General-Purpose` brief to implement, `reviewer` to check,",
         "`General-Purpose` to apply feedback. Keep delegated tasks",
         "scoped with file:line evidence on return.",
+        "Call `subagent` directly (agent + task). Reserve `workflowScript`",
+        "workflows for genuinely parallel or scripted multi-step fanout —",
+        "our agents run foreground and background runs add spawn overhead.",
+        "After any subagent work completes, always write the final answer",
+        "yourself; never end on tool output or completion notices alone.",
         opts.profileId === "balanced"
           ? "Send work to reviewer ONLY when the change alters behavior."
           : "Send finished work to reviewer for assessment.",

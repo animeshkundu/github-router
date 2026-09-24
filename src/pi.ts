@@ -103,9 +103,9 @@ export const piArgs = {
   },
   ui: {
     type: "boolean" as const,
-    default: false,
+    default: true,
     description:
-      "Load the Claude-look UI bundle (pi-code behaviors + pi-claude-code-ui transcript). Off by default; bare launches stay minimal.",
+      "Load the Claude-look transcript UI (pi-claude-code-ui: grouped rows, Shiki diffs, Ctrl+O previews). Presentational only, zero model cost. Set to false (--no-ui) for stock Pi rendering.",
   },
   "memory-bridge": {
     type: "boolean" as const,
@@ -285,7 +285,7 @@ export const pi = defineCommand({
     const peersEnabled = (args as Record<string, unknown>)["peers"] !== false
     const sweEnabled = (args as Record<string, unknown>)["swe"] === true
     const helpersEnabled = (args as Record<string, unknown>)["helpers"] !== false
-    const uiEnabled = (args as Record<string, unknown>)["ui"] === true
+    const uiEnabled = (args as Record<string, unknown>)["ui"] !== false
 
     // Pin-mode prerequisites against the live catalog (fail-closed).
     // Peerless launches validate the lead only (nothing else is consumed).

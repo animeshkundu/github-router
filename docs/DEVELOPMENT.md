@@ -2,7 +2,12 @@
 
 ## Prerequisites
 
-- [Bun](https://bun.sh/) runtime
+- [Bun](https://bun.sh/) 1.4.2 or newer (latest stable; the default runtime
+  for developing, testing, and running — `bun install`, `bun test`,
+  `bun run dev`). Plain Node.js 24/26 + npm stay supported (the
+  `node-compat` CI lane runs the CLI, serve relay, and mock-API smoke
+  under Node), so every `bunx`/`bun` command below also works via
+  `npx`/`npm` — but development defaults to Bun.
 - A GitHub account with an active Copilot subscription (Individual, Business, or Enterprise)
 
 ## Setup

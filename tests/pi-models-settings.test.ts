@@ -419,21 +419,24 @@ describe("pi settings.json", () => {
     expect(onBrowse.packages).not.toContainEqual(PI_HELPERS_WEB_ACCESS)
   })
 
-  test("ui bundle is opt-in only", () => {
+  test("ui transcript package is default-on, pi-code stays opt-out", () => {
     const bare = buildPiSettingsJson({
       profileId: "cheapest",
       searchEnabled: false,
       browseEnabled: false,
     })
+    // Presentational only (grouped rows, Shiki diffs) — zero model cost.
+    expect(bare.packages).toContain("npm:pi-claude-code-ui")
+    // pi-code behaviors would collide with router-owned /memory + /context.
     expect(bare.packages).not.toContain("npm:pi-code")
-    const ui = buildPiSettingsJson({
+    const noUi = buildPiSettingsJson({
       profileId: "cheapest",
       searchEnabled: false,
       browseEnabled: false,
-      ui: true,
+      ui: false,
     })
-    expect(ui.packages).toContain("npm:pi-code")
-    expect(ui.packages).toContain("npm:pi-claude-code-ui")
+    expect(noUi.packages).not.toContain("npm:pi-claude-code-ui")
+    expect(noUi.packages).toContain("local:gh-router-pi")
   })
 })
 

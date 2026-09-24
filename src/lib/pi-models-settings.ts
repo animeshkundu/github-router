@@ -582,7 +582,10 @@ export interface PiSettingsJson {
    * Subagent overrides. Only `agentOverrides` with `disabled` flags is
    * emitted: the builtin `scout`/`worker`/`researcher`/`evidence-auditor`
    * agents are hidden so habitual invocations resolve deterministically
-   * via our own agents' `aliases` instead of running shadow rosters.
+   * via our own agents' `aliases` instead of running shadow rosters,
+   * and the `claude-code`/`codex-exec`/`cursor-agent` families (+ their
+   * `-writer` variants) are hidden because they shell out to other CLIs
+   * with the operator's own auth — off-proxy, off-ledger, off-cost-control.
    * `delegate` stays enabled (append-mode, inherits the lead model, so it
    * is cost-safe and fills the lightweight-subtask path our roster lacks).
    * `reviewer`/`oracle` need no entry: our same-named files shadow them.
@@ -642,9 +645,13 @@ export const PI_HELPERS_AGENT_EXTENSIONS: PiPackageEntry = {
   themes: [],
 }
 
-/** Opt-in Claude-look UI bundle (loads everything it declares). */
+/** Claude-look UI bundle: transcript grouping, Shiki diffs, Ctrl+O
+ * previews. Default-on (purely presentational — zero model cost);
+ * opt out with `--no-ui`. `pi-code` behaviors stay a docs recipe:
+ * its `/memory` + `/context` commands would collide with the
+ * router-owned pair in `gh-router-pi`, and Pi offers no per-command
+ * filtering inside one extension. */
 export const PI_UI_PACKAGES: ReadonlyArray<PiPackageEntry> = Object.freeze([
-  "npm:pi-code",
   "npm:pi-claude-code-ui",
 ])
 
@@ -691,6 +698,7 @@ export function buildPiSettingsJson(opts: {
   const peers = opts.peers !== false
   const helpers = opts.helpers !== false && peers
   const webAccess = helpers && !opts.searchEnabled && !opts.browseEnabled
+  const ui = opts.ui !== false
   const modelIds = piProfileModelIds(opts.profileId, { peers })
   const modelThinkingLevels: Record<string, string> = {}
   modelThinkingLevels[`${PI_PROVIDER_NAME}/${piLeadModel(opts.profileId)}`] =
@@ -724,7 +732,7 @@ export function buildPiSettingsJson(opts: {
         : []),
       ...(helpers ? [PI_HELPERS_MCP_ADAPTER, PI_HELPERS_AGENT_EXTENSIONS] : []),
       ...(webAccess ? [PI_HELPERS_WEB_ACCESS] : []),
-      ...(opts.ui ? [...PI_UI_PACKAGES] : []),
+      ...(ui ? [...PI_UI_PACKAGES] : []),
       "local:gh-router-pi",
     ],
     // Disabled builtins ride `peers` like the package itself: peerless
@@ -737,6 +745,15 @@ export function buildPiSettingsJson(opts: {
               worker: { disabled: true },
               researcher: { disabled: true },
               "evidence-auditor": { disabled: true },
+              // External-CLI families (0.71+): shell out to other CLIs
+              // with ambient auth. Off-proxy and off-ledger — never in a
+              // cost-controlled launch.
+              "claude-code": { disabled: true },
+              "claude-code-writer": { disabled: true },
+              "codex-exec": { disabled: true },
+              "codex-exec-writer": { disabled: true },
+              "cursor-agent": { disabled: true },
+              "cursor-agent-writer": { disabled: true },
             },
           },
         }
@@ -813,16 +830,24 @@ function roleDescription(
  * files stay small enough to inline cheaply.
  *
  * Load-bearing semantics (verified against pi-subagents docs + source):
- * - `reviewer`/`oracle` intentionally SHADOW the same-named builtins
- *   wholesale (user scope wins; omitted fields are NOT inherited). That
- *   is how the roster pins gh-router models/thinking for cost control.
- *   The shadowed `advisor` alias dies with the builtin oracle definition,
- *   which is why `advisor` ships as its own file on cheapest.
+  * - `reviewer`/`oracle` intentionally SHADOW the same-named builtins
+  *   wholesale (user scope wins; omitted fields are NOT inherited). That
+  *   is how the roster pins gh-router models/thinking for cost control.
+  *   The shadowed `advisor` alias dies with the builtin oracle definition,
+  *   which is why `advisor` ships as its own file on cheapest.
+  *   Shadowing deliberately does NOT inherit `contact_supervisor` on
+  *   reviewer (leaf) or `defaultContext: fork` on oracle (fresh keeps
+  *   the cold-start consultant contract).
   * - `allowedAgents` only narrows an existing nesting grant, so every
   *   delegating agent also sets `allowNestedSubagents: true` and lists
   *   `subagent` in `tools`. Depth reaches 3 on balanced
   *   (lead → General-Purpose → reviewer → Explore), covered by
   *   `PI_SUBAGENT_MAX_DEPTH=3` in the launch env (default guard is 2).
+  * - `async: false` on every file: foreground children run in-process
+  *   with the parent's full tool registry. The detached background
+  *   runner demonstrably drops read/bash from its registry (observed
+  *   live as "requested unavailable child tools: [read, bash]"),
+  *   failing every strict-allowlist child it touches.
   * - Deliberately NO `output:`/`defaultReads`/`defaultProgress` file
   *   bindings: single-shot launches resolve relative outputs under
   *   per-run artifact dirs while `defaultReads` resolves against the
@@ -845,18 +870,24 @@ export function buildPiAgentFiles(
   for (const role of piNativeRoles(profileId)) {
     const isImplementer = role.name === "General-Purpose"
     const isReviewer = role.name === "reviewer"
-    // `watchdog_diff` (diff-anchored review) and `contact_supervisor`
-    // (blocked-child escalation) are provided by the pi-subagents runtime,
-    // like the delegation primitives — no extra package needed. Balanced
-    // reviewer additionally lists `subagent`: it holds the roster's other
-    // nesting grant (→ Explore) and the grant is inert without it.
+    // `watchdog_diff` (diff-anchored review) is provided by the
+    // pi-subagents runtime, like the delegation primitives — no extra
+    // package needed. Balanced reviewer additionally lists `subagent`:
+    // it holds the roster's other nesting grant (→ Explore) and the
+    // grant is inert without it.
+    //
+    // Bare comma form (no brackets), matching every pi-subagents
+    // builtin file. `contact_supervisor` appears ONLY on the writer:
+    // it is a blocked-child escalation channel, meaningless on leaves
+    // (reviewer/Explore just return; supervisor pings from them are
+    // noise that costs a turn each).
     const tools = isImplementer
-      ? "[read, grep, find, ls, bash, edit, write, subagent, contact_supervisor]"
+      ? "read, grep, find, ls, bash, edit, write, subagent, contact_supervisor"
       : isReviewer
         ? profileId === "balanced"
-          ? "[read, grep, find, ls, watchdog_diff, contact_supervisor, subagent]"
-          : "[read, grep, find, ls, watchdog_diff, contact_supervisor]"
-        : "[read, grep, find, ls, bash]";
+          ? "read, grep, find, ls, watchdog_diff, subagent"
+          : "read, grep, find, ls, watchdog_diff"
+        : "read, grep, find, ls, bash";
     const lines = [
       "---",
       `name: ${role.name}`,
@@ -865,6 +896,14 @@ export function buildPiAgentFiles(
       `model: ${PI_PROVIDER_NAME}/${role.model}`,
       `thinking: ${role.thinking}`,
       "advertise: true",
+      // Foreground by default. pi-subagents launches workflow children
+      // async (detached runner) by default, and the runner's tool
+      // registry demonstrably drops read/bash (observed live:
+      // "requested unavailable child tools: [read, bash]"), failing
+      // every strict-allowlist child. Foreground children run in-process
+      // with the parent's full registry — nesting works, no spawn
+      // overhead, no runner cost. Explicit call values still win.
+      "async: false",
       "systemPromptMode: replace",
       "inheritProjectContext: true",
       "defaultContext: fresh",
@@ -933,10 +972,11 @@ export function buildPiAgentFiles(
     "---",
     "name: oracle",
     "description: Second opinion before acting. Challenges assumptions without editing. Use when the decision itself feels risky.",
-    "tools: [read, grep, find, ls, bash]",
+    "tools: read, grep, find, ls, bash",
     `model: ${PI_PROVIDER_NAME}/${piOracleModel(profileId)}`,
     `thinking: ${piOracleThinking(profileId)}`,
     "advertise: true",
+    "async: false",
     "systemPromptMode: replace",
     "inheritProjectContext: true",
     "defaultContext: fresh",
@@ -958,10 +998,11 @@ export function buildPiAgentFiles(
       "---",
       "name: advisor",
       "description: Advisory plan review for the lead: review the final plan before it is presented. Never executes.",
-      "tools: [read, grep, find, ls]",
+      "tools: read, grep, find, ls",
       `model: ${PI_PROVIDER_NAME}/${advisor.model}`,
       `thinking: ${advisor.thinking}`,
       "advertise: true",
+      "async: false",
       "systemPromptMode: replace",
       "inheritProjectContext: true",
       "defaultContext: fresh",
@@ -995,6 +1036,7 @@ export function buildPiAppendSystem(
   if (peers) {
     lines.push(
       `- Delegate FREELY to Explore for discovery and General-Purpose for scoped work.`,
+      `- Call subagent directly (agent + task); save workflows for genuinely parallel fanout.`,
       profileId === "balanced"
         ? `- Send work to reviewer ONLY when the change alters behavior.`
         : `- Send finished work to reviewer for assessment.`,
@@ -1003,6 +1045,7 @@ export function buildPiAppendSystem(
         ? `- Review the final plan with advisor (advisory) before presenting it.`
         : `- There is no advisor in this mode: oracle is the only consultant.`,
       `- Verify, don't vote: consultant verdicts never substitute for running the tests.`,
+      `- After any subagent work completes, always write the final answer yourself.`,
     );
   } else {
     lines.push(
