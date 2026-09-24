@@ -587,7 +587,10 @@ export function buildPiAgentFiles(
       // `scout` alias absorbs habitual builtin invocations (the builtin is
       // disabled in settings). Handoff is inline prose: the lead pastes
       // brief excerpts into the next brief (see gh-delegate skill).
-      lines.push("aliases: [scout]");
+      // Bare form (no brackets): the aliases/allowedAgents splitter does
+      // not understand YAML flow lists — `[reviewer, oracle]` parses as
+      // `'[reviewer'` + `'oracle]'` and fails the run (observed live).
+      lines.push("aliases: scout");
     }
     if (isImplementer) {
       // Aliases absorb builtin `worker` traffic (`developer/coder` plus
@@ -595,14 +598,14 @@ export function buildPiAgentFiles(
       // `acceptanceRole: writer` restores the builtin worker's acceptance
       // inference that shadowing would otherwise drop.
       lines.push(
-        "aliases: [worker, developer, coder, implementer, develop]",
+        "aliases: worker, developer, coder, implementer, develop",
         "acceptanceRole: writer",
         "allowNestedSubagents: true",
-        "allowedAgents: [reviewer, oracle]",
+        "allowedAgents: reviewer, oracle",
       );
     }
     if (profileId === "balanced" && isReviewer) {
-      lines.push("allowNestedSubagents: true", "allowedAgents: [Explore]");
+      lines.push("allowNestedSubagents: true", "allowedAgents: Explore");
     }
     lines.push("---", "");
     if (role.name === "Explore") {

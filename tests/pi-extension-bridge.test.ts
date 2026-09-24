@@ -102,12 +102,12 @@ describe("pi native agent files (pi-subagents contract)", () => {
     const gp = cheapest["agents/general-purpose.md"]!
     // General-Purpose delegates to reviewer + oracle: grant required.
     expect(gp).toContain("allowNestedSubagents: true")
-    expect(gp).toContain("allowedAgents: [reviewer, oracle]")
+    expect(gp).toContain("allowedAgents: reviewer, oracle")
     expect(gp).toContain("tools: [read, grep, find, ls, bash, edit, write, subagent, contact_supervisor]")
     expect(gp).toContain("acceptanceRole: writer")
     const balancedReviewer = buildPiAgentFiles("balanced")["agents/reviewer.md"]!
     expect(balancedReviewer).toContain("allowNestedSubagents: true")
-    expect(balancedReviewer).toContain("allowedAgents: [Explore]")
+    expect(balancedReviewer).toContain("allowedAgents: Explore")
     // The grant is inert without `subagent` in the same tools list.
     expect(balancedReviewer).toContain("contact_supervisor, subagent]")
     // Cheapest reviewer is a leaf: no dangling edge, no nesting tool.
@@ -116,11 +116,24 @@ describe("pi native agent files (pi-subagents contract)", () => {
     expect(cheapest["agents/explore.md"]!).not.toContain("allowedAgents")
   })
 
+  test("aliases/allowedAgents use bare comma form, never YAML flow lists", () => {
+    // The aliases/allowedAgents splitter does not understand brackets:
+    // `[reviewer, oracle]` parses as `'[reviewer'` and fails the run.
+    // (`tools:` is parsed by a different, bracket-tolerant parser —
+    // proven live — so it keeps flow-list form.)
+    for (const profileId of ["cheapest", "balanced"] as const) {
+      for (const content of Object.values(buildPiAgentFiles(profileId))) {
+        expect(content).not.toContain("allowedAgents: [")
+        expect(content).not.toContain("aliases: [")
+      }
+    }
+  })
+
   test("aliases absorb disabled-builtin invocations deterministically", () => {
     const files = buildPiAgentFiles("cheapest")
-    expect(files["agents/explore.md"]!).toContain("aliases: [scout]")
+    expect(files["agents/explore.md"]!).toContain("aliases: scout")
     expect(files["agents/general-purpose.md"]!).toContain(
-      "aliases: [worker, developer, coder, implementer, develop]",
+      "aliases: worker, developer, coder, implementer, develop",
     )
   })
 

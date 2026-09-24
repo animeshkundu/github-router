@@ -95,7 +95,7 @@ describe("pi balanced profile", () => {
   test("reviewer may delegate Explore", () => {
     const files = buildPiAgentFiles("balanced")
     const reviewer = files["agents/reviewer.md"]
-    expect(reviewer).toContain("allowedAgents: [Explore]")
+    expect(reviewer).toContain("allowedAgents: Explore")
   })
 })
 
