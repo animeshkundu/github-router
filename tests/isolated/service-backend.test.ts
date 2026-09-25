@@ -39,19 +39,57 @@ let dropCalls = 0
 let deleteMergeDelayMs = 0
 /** In-flight deferred merges (drained per test to avoid cross-test leaks). */
 const fakePendingMerges: Array<Promise<void>> = []
+/**
+ * Fake server child process for crash-path tests. Null = healthy server
+ * (default). Set to `{ exitCode: 1, ... }` to simulate a server that died
+ * mid-populate; `populateWorkspace` must then throw `ServerCrashedError`,
+ * not a bare connection error.
+ */
+let fakeProcess: {
+  exitCode: number | null
+  signalCode: string | null
+  once: (...args: Array<unknown>) => void
+  off: (...args: Array<unknown>) => void
+} | null = null
+/** When true, the fake server reports unhealthy (for no-exit-observed tests). */
+let fakeUnhealthy = false
+/** When set, updateDocuments throws this (simulates a dead socket). */
+let fakeUpdateError: Error | null = null
+
+/** When true, the fake server reports memory pressure (restart path). */
+let mockMemoryOver = false
+/** Restart reasons recorded via the mocked recordServerRestart. */
+const restartReasons: Array<string> = []
 
 mock.module("../../src/lib/colbert/service", () => ({
   indexNameForWorkspace: (ws: string) => `ws-mock-${ws.length}`,
   serverParallelSessions: () => 1,
+  isServerMemoryOverLimit: async () => mockMemoryOver,
+  recordServerRestart: (reason: string) => {
+    restartReasons.push(reason)
+  },
   ServiceBusyError: class extends Error {},
+  ServerCrashedError: class extends Error {
+    exitCode: number | null = null;
+    signal: string | null = null;
+    stderrTail = "";
+    detail = "";
+    constructor(opts: { detail?: string } = {}) {
+      super("fake server crash");
+      this.detail = opts.detail ?? "";
+    }
+  },
   startManagedServer: async (_opts: unknown) => {
     startCalls += 1
     if (failStart) throw new Error("fake spawn failure")
     return {
       url: "http://127.0.0.1:9",
       client: {
+        ensureHealthy: async () => {
+          if (fakeUnhealthy) throw new Error("fake server unhealthy")
+        },
         health: async () => ({
-          ok: true,
+          ok: !fakeUnhealthy,
           indices: [...fakeIndices.entries()].map(([name, docs]) => ({
             name,
             num_documents: docs.length,
@@ -73,6 +111,7 @@ mock.module("../../src/lib/colbert/service", () => ({
           documents: Array<string>,
           metadata: Array<Record<string, unknown>>,
         ) => {
+          if (fakeUpdateError) throw fakeUpdateError
           updateCalls += documents.length
           const docs = fakeIndices.get(name) ?? []
           documents.forEach((text, i) => docs.push({ text, metadata: metadata[i] ?? {} }))
@@ -129,6 +168,9 @@ mock.module("../../src/lib/colbert/service", () => ({
         },
       },
       stop: async () => {},
+      ...(fakeProcess
+        ? { process: fakeProcess, stderrTail: () => "fake boom: OOM" }
+        : {}),
     }
   },
 }))
@@ -182,6 +224,14 @@ beforeEach(async () => {
   dropCalls = 0
   deleteMergeDelayMs = 0
   fakePendingMerges.length = 0
+  fakeProcess = null
+  fakeUnhealthy = false
+  fakeUpdateError = null
+  mockMemoryOver = false
+  restartReasons.length = 0
+  delete process.env.GH_ROUTER_SERVICE_MAX_QUERIES
+  delete process.env.GH_ROUTER_SERVICE_MAX_QUERY_MS
+  delete process.env.GH_ROUTER_SERVICE_HEALTH_TTL_MS
   delete process.env.GH_ROUTER_SEMANTIC_BACKEND
   delete process.env.GH_ROUTER_NEXTPLAID_BIN
   await mkModelDir()
@@ -194,6 +244,7 @@ afterEach(async () => {
   fakePendingMerges.length = 0
   b.__resetServiceSingletonForTests()
   b.__resetServicePopulateForTests()
+  b.__resetServiceQueryCountForTests()
   delete process.env.GH_ROUTER_SEMANTIC_BACKEND
   delete process.env.GH_ROUTER_NEXTPLAID_BIN
   delete process.env.GH_ROUTER_NEXTPLAID_VARIANT
@@ -653,5 +704,138 @@ describe("slow delete merge (ordering hazard)", () => {
     expect(meta?.fileHashes?.["src/auth.ts"]).not.toBe(
       (await import("node:crypto")).createHash("sha256").update("export function alphaV2() { return 2 }\n").digest("hex"),
     )
+  })
+})
+
+describe("server crash during populate", () => {
+  beforeEach(() => {
+    process.env.GH_ROUTER_NEXTPLAID_BIN = process.execPath
+  })
+
+  test("dead server process throws ServerCrashedError, not a bare connection error", async () => {
+    const svcMod = (await import("../../src/lib/colbert/service")) as unknown as {
+      ServerCrashedError: new () => Error
+    }
+    const ws = fsSync.realpathSync(await fs.mkdtemp(path.join(TEST_HOME, "svccrash-")))
+    await fs.mkdir(path.join(ws, "src"), { recursive: true })
+    await fs.writeFile(
+      path.join(ws, "src", "auth.ts"),
+      "export function alphaOne() { return 1 }\n",
+    )
+    // Simulate a server that died (OOM / access violation) before the
+    // first encode batch: exit code already set on the child.
+    fakeProcess = { exitCode: 1, signalCode: null, once: () => {}, off: () => {} }
+    const err = await backend.populateWorkspace(ws, {}).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(svcMod.ServerCrashedError)
+    // Crash context is plumbed through (this early crash fires before the
+    // encode counters exist, so only elapsed is present here).
+    expect((err as { detail: string }).detail).toMatch(/elapsed=/)
+  })
+
+  test("connection error with no exit observed + failing health throws ServerCrashedError", async () => {
+    const svcMod = (await import("../../src/lib/colbert/service")) as unknown as {
+      ServerCrashedError: new () => Error
+    }
+    const ws = fsSync.realpathSync(await fs.mkdtemp(path.join(TEST_HOME, "svccrashrace-")))
+    await fs.mkdir(path.join(ws, "src"), { recursive: true })
+    await fs.writeFile(
+      path.join(ws, "src", "auth.ts"),
+      "export function alphaOne() { return 1 }\n",
+    )
+    // The race: fetch fails BEFORE Node delivers the child exit event, so
+    // exitCode is still null. Health also fails → dead/wedged server.
+    fakeProcess = { exitCode: null, signalCode: null, once: () => {}, off: () => {} }
+    fakeUpdateError = new Error("Unable to connect. Is the computer able to access the url?")
+    fakeUnhealthy = true
+    const err = await backend.populateWorkspace(ws, {}).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(svcMod.ServerCrashedError)
+    expect((err as { detail: string }).detail).toMatch(/exit not observed/)
+  })
+
+  test("connection error with healthy server rethrows the original error", async () => {
+    const ws = fsSync.realpathSync(await fs.mkdtemp(path.join(TEST_HOME, "svccrashblip-")))
+    await fs.mkdir(path.join(ws, "src"), { recursive: true })
+    await fs.writeFile(
+      path.join(ws, "src", "auth.ts"),
+      "export function alphaOne() { return 1 }\n",
+    )
+    // Transient blip: socket fails once but the server is alive (health
+    // ok, process running) → the original error surfaces, not a crash.
+    fakeProcess = { exitCode: null, signalCode: null, once: () => {}, off: () => {} }
+    fakeUpdateError = new Error("Unable to connect. Is the computer able to access the url?")
+    const err = await backend.populateWorkspace(ws, {}).catch((e: unknown) => e)
+    expect(err).toBe(fakeUpdateError)
+  })
+})
+
+describe("query-time stability", () => {
+  beforeEach(() => {
+    process.env.GH_ROUTER_NEXTPLAID_BIN = process.execPath
+  })
+
+  async function readyRepo(name: string): Promise<string> {
+    const ws = fsSync.realpathSync(await fs.mkdtemp(path.join(TEST_HOME, `${name}-`)))
+    await fs.mkdir(path.join(ws, "src"), { recursive: true })
+    await fs.writeFile(
+      path.join(ws, "src", "auth.ts"),
+      "export function refreshAuthToken() { return 'tok' }\n",
+    )
+    // First call kicks the background populate; poll until servable.
+    await backend.runServiceSearch({ query: "x", workspace: ws })
+    const t0 = Date.now()
+    for (;;) {
+      const r = await backend.runServiceSearch({ query: "x", workspace: ws })
+      if (r.status === "ready") break
+      if (Date.now() - t0 > 30_000) throw new Error("never became ready")
+      await Bun.sleep(300)
+    }
+    return ws
+  }
+
+  test("memory pressure restarts the server and search still serves", async () => {
+    const ws = await readyRepo("svcmem")
+    const startsBefore = startCalls
+    mockMemoryOver = true
+    const r = await backend.runServiceSearch({ query: "refreshAuthToken", workspace: ws })
+    expect(r.status).toBe("ready")
+    expect(startCalls).toBeGreaterThan(startsBefore)
+    expect(restartReasons).toContain("memory")
+  })
+
+  test("query budget recycles the server", async () => {
+    const ws = await readyRepo("svcbudget")
+    process.env.GH_ROUTER_SERVICE_MAX_QUERIES = "1"
+    const startsBefore = startCalls
+    const r = await backend.runServiceSearch({ query: "refreshAuthToken", workspace: ws })
+    expect(r.status).toBe("ready")
+    expect(startCalls).toBeGreaterThan(startsBefore)
+    expect(restartReasons).toContain("query-budget")
+  })
+
+  test("query budget of 0 disables recycling", async () => {
+    const ws = await readyRepo("svcnobudget")
+    process.env.GH_ROUTER_SERVICE_MAX_QUERIES = "0"
+    const startsBefore = startCalls
+    const r = await backend.runServiceSearch({ query: "refreshAuthToken", workspace: ws })
+    expect(r.status).toBe("ready")
+    expect(startCalls).toBe(startsBefore)
+    expect(restartReasons).toHaveLength(0)
+  })
+
+  test("pre-flight unhealthy → unavailable (caller falls back)", async () => {
+    const ws = await readyRepo("svcpreflight")
+    fakeUnhealthy = true
+    const r = await backend.runServiceSearch({ query: "refreshAuthToken", workspace: ws })
+    expect(r.status).toBe("unavailable")
+  })
+
+  test("serviceMaxQueries parses env (default 500, 0 disables)", async () => {
+    expect(backend.serviceMaxQueries()).toBe(500)
+    process.env.GH_ROUTER_SERVICE_MAX_QUERIES = "25"
+    expect(backend.serviceMaxQueries()).toBe(25)
+    process.env.GH_ROUTER_SERVICE_MAX_QUERIES = "0"
+    expect(backend.serviceMaxQueries()).toBe(Number.POSITIVE_INFINITY)
+    process.env.GH_ROUTER_SERVICE_MAX_QUERIES = "junk"
+    expect(backend.serviceMaxQueries()).toBe(500)
   })
 })

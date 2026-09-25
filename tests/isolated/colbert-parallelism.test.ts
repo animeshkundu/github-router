@@ -49,6 +49,17 @@ describe("colgrep parallelism cap", () => {
     const { colbertParallelSessions } = await import("../../src/lib/colbert/runner")
     process.env.GH_ROUTER_COLBERT_PARALLEL = "13"
     expect(colbertParallelSessions()).toBe(13)
+    expect(colbertParallelSessions(true)).toBe(13)
+  })
+
+  test("foreground uses all threads, capped at colgrep's max of 16", async () => {
+    const { colbertParallelSessions } = await import("../../src/lib/colbert/runner")
+    expect(colbertParallelSessions(true)).toBe(Math.max(1, Math.min(realThreads, 16)))
+  })
+
+  test("foreground never drops below 1 on a tiny box", async () => {
+    const { colbertParallelSessions } = await import("../../src/lib/colbert/runner")
+    expect(colbertParallelSessions(true)).toBeGreaterThanOrEqual(1)
   })
 
   test("a junk or non-positive override falls back to the computed cap", async () => {

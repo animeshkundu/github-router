@@ -964,12 +964,16 @@ function clampLimit(limit: number | undefined): number {
  * (workspace, model). Fire-and-forget; updates the sidecar metadata to
  * `building` (with our PID + instance UUID) on start and `ready`/`failed`
  * on completion. Never throws to the caller.
+ *
+ * Pass `{ foreground: true }` for explicit `github-router index` builds:
+ * the encode runs at full CPU parallelism instead of the 25% background
+ * share.
  */
-export function kickBackgroundInit(workspace: string): void {
+export function kickBackgroundInit(workspace: string, opts: { foreground?: boolean } = {}): void {
   if (isInitInFlight(workspace)) return
   if (!tryClaimInit(workspace)) return
   const key = path.resolve(workspace)
-  const promise = runInit(workspace)
+  const promise = runInit(workspace, opts)
     .catch(async (err) => {
       releaseInit(workspace)
       consola.error("colbert: background init failed:", err)
@@ -1042,9 +1046,9 @@ export async function startupKickAllowed(workspace: string): Promise<boolean> {
 }
 
 /**
- * Encoding sessions colgrep may run in parallel: 25% of the machine's
- * threads, never fewer than 2.
+ * Encoding sessions colgrep may run in parallel.
  *
+ * Background (default): 25% of the machine's threads, never fewer than 2.
  * colgrep defaults this to the FULL CPU count, so a background index build
  * saturates the machine — the exact opposite of what a background build
  * should do during an interactive agent session (the proxy even holds a
@@ -1052,12 +1056,17 @@ export async function startupKickAllowed(workspace: string): Promise<boolean> {
  * of 2 keeps a 1- to 7-thread box from dropping to a single session and
  * taking proportionally forever.
  *
+ * Foreground (`github-router index`): ALL threads, capped at colgrep's max
+ * of 16. An explicit invocation expects maximum speed, and the operator is
+ * present to observe the load.
+ *
  * Override with `GH_ROUTER_COLBERT_PARALLEL` (a positive integer).
  */
-export function colbertParallelSessions(): number {
+export function colbertParallelSessions(foreground = false): number {
   const raw = Number(process.env.GH_ROUTER_COLBERT_PARALLEL)
   if (Number.isSafeInteger(raw) && raw > 0) return raw
   const threads = os.availableParallelism?.() ?? os.cpus?.().length ?? 4
+  if (foreground) return Math.max(1, Math.min(threads, 16))
   return Math.max(2, Math.floor(threads * 0.25))
 }
 
@@ -1075,8 +1084,8 @@ export function colbertParallelSessions(): number {
  * threads), which is greedy but not incorrect, so it must never block a
  * build.
  */
-async function applyParallelismCap(binary: string): Promise<void> {
-  const sessions = colbertParallelSessions()
+async function applyParallelismCap(binary: string, foreground = false): Promise<void> {
+  const sessions = colbertParallelSessions(foreground)
   try {
     await _runManagedExeCapture(
       binary,
@@ -1088,20 +1097,21 @@ async function applyParallelismCap(binary: string): Promise<void> {
   }
 }
 
-async function runInit(workspace: string): Promise<void> {
+async function runInit(workspace: string, opts: { foreground?: boolean } = {}): Promise<void> {
   const binary = colgrepBinaryPath()
   if (!existsSync(binary)) {
-    throw new Error("colgrep binary is missing")
+    throw new Error(`colgrep binary is missing (${binary})`)
   }
   // Fail closed if the ORT dylib is missing — otherwise the background
   // init would spawn colgrep, which silently downloads an UNVERIFIED ONNX
   // runtime when ORT_DYLIB_PATH can't be loaded.
-  if (!existsSync(colbertOrtDylibPath())) {
-    throw new Error("ColBERT ONNX runtime is missing")
+  const ortPath = colbertOrtDylibPath()
+  if (!existsSync(ortPath)) {
+    throw new Error(`ColBERT ONNX runtime is missing (${ortPath})`)
   }
   // Cap parallelism before the encode starts. The setting persists in our
   // data dir, so it also governs the reconcile a later `search` may run.
-  await applyParallelismCap(binary)
+  await applyParallelismCap(binary, opts.foreground === true)
   // Carry the failure streak across the building→done transition so the
   // attempt cap accrues (reset to 0 only on a successful build).
   const prior = await readColbertMeta(workspace)
@@ -1212,7 +1222,10 @@ async function runInit(workspace: string): Promise<void> {
   } catch (err) {
     ok = false
     failureClass = "launch"
-    consola.error("colbert: init failed to launch:", err)
+    consola.error(
+      `colbert: init failed to launch (binary=${binary} ort=${colbertOrtDylibPath()} model=${canonicalColbertModelDir()}):`,
+      err,
+    )
   } finally {
     releaseInit(workspace)
   }

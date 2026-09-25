@@ -13,12 +13,20 @@ import os from "node:os"
 import path from "node:path"
 
 import {
+  getServerStats,
   indexNameForWorkspace,
+  isServerMemoryOverLimit,
   NextPlaidClient,
+  recordServerRestart,
+  sampleChildMemory,
   serverArgv,
+  serviceMemoryLimits,
   serverParallelSessions,
   ServiceBusyError,
+  serviceHealthTtlMs,
   startManagedServer,
+  __resetServerMemoryCacheForTests,
+  __resetServerStatsForTests,
   type ManagedServer,
 } from "../../src/lib/colbert/service"
 
@@ -62,6 +70,11 @@ afterEach(() => {
   for (const k of Object.keys(canned)) delete canned[k]
   for (const k of Object.keys(seen)) delete seen[k]
   delete process.env.GH_ROUTER_NP_PARALLEL
+  delete process.env.GH_ROUTER_SERVICE_HEALTH_TTL_MS
+  delete process.env.GH_ROUTER_SERVICE_MAX_RSS_MB
+  delete process.env.GH_ROUTER_SERVICE_MAX_COMMIT_MB
+  __resetServerMemoryCacheForTests()
+  __resetServerStatsForTests()
 })
 
 describe("NextPlaidClient protocol", () => {
@@ -198,10 +211,82 @@ describe("naming + sizing helpers", () => {
     expect(serverParallelSessions()).toBeGreaterThanOrEqual(1)
   })
 
-  test("serverParallelSessions foreground uses all cores", async () => {
+  test("serverParallelSessions foreground caps at 8 sessions", async () => {
     const os = await import("node:os")
-    expect(serverParallelSessions(true)).toBe(os.cpus().length)
+    // Capped at 8: each ONNX session duplicates model state, so uncapped
+    // all-core foreground encodes OOM large repos (Windows commit limit).
+    expect(serverParallelSessions(true)).toBe(Math.max(1, Math.min(os.cpus().length, 8)))
     expect(serverParallelSessions(false)).toBeLessThanOrEqual(os.cpus().length)
+  })
+
+  test("serviceHealthTtlMs honors env (default 30s, 0 disables cache)", () => {
+    expect(serviceHealthTtlMs()).toBe(30_000)
+    process.env.GH_ROUTER_SERVICE_HEALTH_TTL_MS = "5000"
+    expect(serviceHealthTtlMs()).toBe(5000)
+    process.env.GH_ROUTER_SERVICE_HEALTH_TTL_MS = "0"
+    expect(serviceHealthTtlMs()).toBe(0)
+    process.env.GH_ROUTER_SERVICE_HEALTH_TTL_MS = "junk"
+    expect(serviceHealthTtlMs()).toBe(30_000)
+  })
+
+  test("ensureHealthy caches healthy verdicts within TTL", async () => {
+    canned["GET /health"] = [200, { status: "healthy", indices: [] }]
+    const c = new NextPlaidClient(mockBase)
+    await c.ensureHealthy()
+    delete seen["GET /health"]
+    // Second call inside the TTL must not hit the server again.
+    await c.ensureHealthy()
+    expect("GET /health" in seen).toBe(false)
+  })
+
+  test("ensureHealthy re-probes after TTL expiry and on unhealthy cache", async () => {
+    canned["GET /health"] = [200, { status: "healthy", indices: [] }]
+    const c = new NextPlaidClient(mockBase)
+    await c.ensureHealthy()
+    process.env.GH_ROUTER_SERVICE_HEALTH_TTL_MS = "0"
+    delete seen["GET /health"]
+    await c.ensureHealthy()
+    expect("GET /health" in seen).toBe(true)
+  })
+
+  test("ensureHealthy throws on unhealthy server", async () => {
+    canned["GET /health"] = [500, { code: "INTERNAL_ERROR", message: "x" }]
+    await expect(new NextPlaidClient(mockBase).ensureHealthy()).rejects.toThrow(/unhealthy/)
+  })
+
+  test("serviceMemoryLimits honors env", () => {
+    expect(serviceMemoryLimits()).toEqual({
+      maxRssBytes: 4096 * 1024 * 1024,
+      maxCommitBytes: 6144 * 1024 * 1024,
+    })
+    process.env.GH_ROUTER_SERVICE_MAX_RSS_MB = "512"
+    process.env.GH_ROUTER_SERVICE_MAX_COMMIT_MB = "1024"
+    expect(serviceMemoryLimits()).toEqual({
+      maxRssBytes: 512 * 1024 * 1024,
+      maxCommitBytes: 1024 * 1024 * 1024,
+    })
+  })
+
+  test("sampleChildMemory measures live pids, null for dead ones", async () => {
+    const live = await sampleChildMemory(process.pid)
+    expect(live === null || live.rssBytes > 0).toBe(true)
+    if (live !== null) expect(live.rssBytes).toBeGreaterThan(0)
+    expect(await sampleChildMemory(999_999_999)).toBeNull()
+    expect(await sampleChildMemory(-1)).toBeNull()
+  })
+
+  test("isServerMemoryOverLimit is false without a managed process", async () => {
+    const svc = { url: mockBase, client: new NextPlaidClient(mockBase), stop: async () => {} }
+    expect(await isServerMemoryOverLimit(svc)).toBe(false)
+  })
+
+  test("recordServerRestart/getServerStats accounting", () => {
+    expect(getServerStats()).toEqual({ restartsTotal: 0, lastRestartAt: null, lastRestartReason: null })
+    recordServerRestart("memory")
+    const s = getServerStats()
+    expect(s.restartsTotal).toBe(1)
+    expect(s.lastRestartReason).toBe("memory")
+    expect(typeof s.lastRestartAt).toBe("string")
   })
 })
 
