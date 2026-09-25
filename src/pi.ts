@@ -14,7 +14,17 @@ import {
   buildAicStatusHookCommand,
 } from "./lib/aic-statusline-settings"
 import { PI_STATUS_COMMAND_ENV } from "./lib/pi-statusline"
-import { aicLedgerPath, sweepStaleAicLedgerFiles } from "./lib/aic-ledger"
+import {
+  aicLedgerPath,
+  aicSnapshot,
+  formatAicExitSummary,
+  removeAicLedgerFile,
+  sweepStaleAicLedgerFiles,
+} from "./lib/aic-ledger"
+import {
+  discountedUsdForSnapshot,
+  formatDiscountedCostTable,
+} from "./lib/copilot-discount"
 import { resolveSelfInvocation } from "./lib/hook-launcher/self-invocation"
 import {
   ensurePiAgentMirror,
@@ -663,6 +673,27 @@ export const pi = defineCommand({
           await stopKeepAwake()
           await disposeBluebirdClients()
           await removeOwnPiAgentMirror()
+          await removeAicLedgerFile()
+        },
+        // Session AIC total + discounted per-model cost table, printed
+        // after cleanup on every exit path. The table is default-on (not
+        // debug-gated): every value in it is upstream-measured, and the
+        // ~$ column carries the same static-discount approximation as the
+        // status line. Per-model credit splits stay verbose-only — they
+        // imply billing-grade attribution the estimates can't support.
+        onExitSummary: () => {
+          const snapshot = aicSnapshot()
+          if (snapshot.requests === 0 || snapshot.totalNanoAiu <= 0) {
+            return undefined
+          }
+          const summary = formatAicExitSummary(snapshot, {
+            verbose: consola.level >= 4,
+          })
+          const table = formatDiscountedCostTable(
+            snapshot,
+            discountedUsdForSnapshot(snapshot),
+          )
+          return table ? `${summary}\n${table}` : summary
         },
       },
     )

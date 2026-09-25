@@ -4,8 +4,10 @@ import path from "node:path"
 import consola from "consola"
 
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
+import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { resolveTierModel } from "~/lib/first-mate/model-tiers"
 import { resolveCloudAgentModel } from "~/lib/first-mate/task-model"
+import { resolveModel } from "~/lib/utils"
 import { PATHS } from "~/lib/paths"
 import { state } from "~/lib/state"
 
@@ -189,7 +191,9 @@ export const defaultTier1Judge: Tier1Judge = async (req, opts) => {
     return null
   }
   try {
-    const content = firstMessageContent(await response.json())
+    const body: unknown = await response.json()
+    extractAndRecordAic(resolveModel(model), body)
+    const content = firstMessageContent(body)
     return content ? parseVerdict(content) : null
   } catch {
     return null

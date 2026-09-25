@@ -22,6 +22,7 @@ import fsp from "node:fs/promises"
 import path from "node:path"
 
 import { PATHS } from "~/lib/paths"
+import { resolveModel } from "~/lib/utils"
 
 import {
   extractCopilotUsage,
@@ -110,6 +111,31 @@ function persistBestEffort(): void {
 }
 
 /**
+ * Normalize a ledger model key to the catalog-canonical id so the same
+ * spend never splits across alias variants (`opus` vs `opus-1m`,
+ * `claude-opus-4-7[1m]`, dotted vs dashed, dated slugs).
+ *
+ * Uses `resolveModel` (NOT `normalizeModelId`: the fuzzy form breaks
+ * dotted discount keys like `gpt-5.3-codex`). Vendor prefixes
+ * (`provider/model`) are stripped first. Never throws: on any failure
+ * or catalog-miss the raw id is kept so spend is never dropped.
+ */
+function aicModelKey(model: string | undefined): string {
+  if (!model || model.length === 0) return "unknown"
+  const noVendor = model.includes("/")
+    ? model.slice(model.lastIndexOf("/") + 1)
+    : model
+  const trimmed = noVendor.trim()
+  if (trimmed.length === 0) return "unknown"
+  try {
+    const resolved = resolveModel(trimmed)
+    return resolved && resolved.length > 0 ? resolved : trimmed
+  } catch {
+    return trimmed
+  }
+}
+
+/**
  * Record one upstream `copilot_usage` reading. No-op on undefined.
  * `model` is the resolved (Copilot-side) model id when known.
  */
@@ -120,7 +146,7 @@ export function recordAic(
   if (!usage) return
   ledger.totalNanoAiu += usage.totalNanoAiu
   ledger.requests += 1
-  const key = model && model.length > 0 ? model : "unknown"
+  const key = aicModelKey(model)
   const entry = ledger.perModel[key] ?? { nanoAiu: 0, requests: 0 }
   entry.nanoAiu += usage.totalNanoAiu
   entry.requests += 1

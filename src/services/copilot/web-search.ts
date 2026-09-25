@@ -3,6 +3,7 @@ import { events } from "fetch-event-stream"
 import { z } from "zod"
 
 import { copilotBaseUrl, copilotVersion } from "~/lib/api-config"
+import { extractAndRecordPricedAic } from "~/lib/aic-ledger"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 import { sleep } from "~/lib/utils"
@@ -205,6 +206,7 @@ export async function searchWeb(
     }
 
     let rpc: z.infer<typeof RpcSchema> | undefined
+    let webSearchAicRecorded = false
     for await (const ev of events(callRes)) {
       // Bail mid-stream if the caller signalled abort. The fetch's
       // AbortSignal also tears down the underlying socket, but the
@@ -220,6 +222,13 @@ export async function searchWeb(
         parsedJson = JSON.parse(ev.data)
       } catch {
         continue
+      }
+      // Defensive: record only when upstream bills MCP search via
+      // `copilot_usage` (no-op today; priced-latch skips zero frames and
+      // the flag keeps exactly-once semantics across SSE frames).
+      if (!webSearchAicRecorded) {
+        const nano = extractAndRecordPricedAic("web_search", parsedJson)
+        if (nano !== undefined) webSearchAicRecorded = true
       }
       const parsed = RpcSchema.safeParse(parsedJson)
       if (parsed.success && parsed.data.id === callId) {
