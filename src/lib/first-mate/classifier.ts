@@ -1,8 +1,10 @@
 import consola from "consola"
 
+import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { state } from "~/lib/state"
 import { resolveTierModel } from "~/lib/first-mate/model-tiers"
+import { resolveModel } from "~/lib/utils"
 
 type JsonRecord = Record<string, unknown>
 
@@ -77,6 +79,7 @@ export async function microClassify<T>(
 
   try {
     const body: unknown = await response.json()
+    extractAndRecordAic(resolveModel(model), body)
     const content = firstMessageContent(body)
     if (!content) return null
 
