@@ -32,6 +32,11 @@ import {
   sweepStalePiAgentMirrors,
 } from "./lib/pi-paths"
 import {
+  seedPiPackageCache,
+  savePiPackageCache,
+  sweepStalePiPackageCaches,
+} from "./lib/pi-package-cache"
+import {
   buildPiExtensionSource,
   buildPiPrompts,
   buildPiSkills,
@@ -47,6 +52,7 @@ import {
   piLeadModel,
   piProfileModelIds,
   piUsdCostFor,
+  type PiPackageEntry,
   type PiProfileId,
 } from "./lib/pi-models-settings"
 import { launchChild } from "./lib/launch"
@@ -114,7 +120,7 @@ export const piArgs = {
     type: "boolean" as const,
     default: true,
     description:
-      "Wire the helpful bundle: pi-mcp-adapter, allowlisted pi-agent-extensions (sessions, ask_user, todos, handoff, context, files, analytics — no review/loop/footer), and pi-web-access when neither --search nor --browse is on. Set to false (--no-helpers) for pi-subagents + gh-router-pi only.",
+      "Wire the helpful bundle: pi-mcp-adapter, allowlisted pi-agent-extensions (sessions, ask_user, todos, handoff, context, analytics — no review/loop/footer, no files picker so Ctrl+Shift+O stays unambiguous for the UI), and pi-web-access when neither --search nor --browse is on. Set to false (--no-helpers) for pi-subagents + gh-router-pi only.",
   },
   ui: {
     type: "boolean" as const,
@@ -364,6 +370,7 @@ export const pi = defineCommand({
     try {
       mirror = await ensurePiAgentMirror()
       await sweepStalePiAgentMirrors()
+      void sweepStalePiPackageCaches()
     } catch (err) {
       consola.error(
         `Failed to provision Pi config mirror: ${err instanceof Error ? err.message : String(err)}.`,
@@ -372,6 +379,11 @@ export const pi = defineCommand({
     }
 
     enableFileLogging()
+
+    // The exact `packages[]` slice for this launch (flag-dependent), used
+    // to key the persistent npm-package cache: seed before Pi boots, save
+    // on shutdown before the mirror is removed.
+    let packagesForCache: Array<PiPackageEntry> = []
 
     // Generate the mode's Pi files into the mirror.
     try {
@@ -427,6 +439,16 @@ export const pi = defineCommand({
         ...cosmeticOverrides,
         ...(mergedSubagents ? { subagents: mergedSubagents } : {}),
       })
+      // Pre-seed <mirror>/npm from the durable package cache so Pi's
+      // per-boot `packages[]` install is a no-op on a hit (faster + silent:
+      // npm's `added N packages` summary bypasses npm_config_loglevel).
+      // Misses (cold/stale/flag-changed cache) install from the registry
+      // as before and are saved back on shutdown for the next launch.
+      packagesForCache = [...builtSettings.packages]
+      const cacheHit = await seedPiPackageCache(mirror, packagesForCache)
+      if (cacheHit) {
+        consola.debug("Pi package cache hit: mirror pre-seeded, skipping registry install.")
+      }
 
       // Memory bridge collection runs BEFORE the extension build so scoped
       // rules + stats can be embedded for lazy attach + /memory + /context.
@@ -672,6 +694,11 @@ export const pi = defineCommand({
           unregisterLaunch(entry.launchId)
           await stopKeepAwake()
           await disposeBluebirdClients()
+          // Persist this launch's installed <mirror>/npm for the next
+          // launch's pre-seed (keyed by the exact packages[] slice), then
+          // remove the per-launch mirror as before. Best-effort, never
+          // fatal — a failed save just means the next boot reinstalls.
+          await savePiPackageCache(mirror, packagesForCache)
           await removeOwnPiAgentMirror()
           await removeAicLedgerFile()
         },

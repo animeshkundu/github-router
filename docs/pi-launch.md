@@ -51,7 +51,7 @@ plus the mode identity. Each surface rides a flag:
 | Flag | Default | Surface |
 |---|---|---|
 | `--peers` / `--no-peers` | **on** | Native agent files, oracle tool (+cheapest advisor), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
-| `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: `pi-mcp-adapter`, allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `files`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
+| `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: `pi-mcp-adapter`, allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer and no `files` picker, whose `ctrl+shift+o` would collide with the UI's extra-detail toggle), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
 | `--ui` / `--no-ui` | **on** | Claude-Code look: genuine `claude-code-dark` theme (`#D77757` coral palette; all six CC variants pickable via `/settings`), fixed Claude palette in tool rows (`themeAdaptive: false`), one-line tool rows (`summary`/`count` modes), transparent tool backgrounds. Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag (the cc-ui `Thought for Xs` one-liner has no off switch upstream — it is the minimum). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
 | `--swe` | off | Pipeline surface: `gh-delegate` (+cheapest `gh-advisor`) skills, `review` / `parallel-review` (+cheapest `plan-review`) prompts |
 | `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill (tool and prose appear together or not at all) |
@@ -98,6 +98,16 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   per-launch dir (`PI_CODING_AGENT_DIR` → mirror); `auth.json` and
   `sessions/` are never copied. The mirror is swept on shutdown (plus a
   boot sweep of dead-PID mirrors).
+- **Persistent npm-package cache.** A fresh mirror would force Pi to
+  reinstall every `packages[]` entry from the registry on each boot
+  (seconds + `added N packages` noise that bypasses npm's loglevel, since
+  Pi spawns npm with inherited stdio). Instead the launcher pre-seeds
+  `<mirror>/npm` from `~/.local/share/github-router/pi-packages/<hash>/`
+  (keyed by the exact flag-dependent package set) and saves the installed
+  tree back on shutdown. Repeat launches with the same flags install
+  nothing. Entries older than 7 days are treated as a miss so unpinned
+  packages periodically refresh; opt out with
+  `GH_ROUTER_PI_NO_PACKAGE_CACHE=1`.
 - **Subagents via `pi-subagents` + our agents.** The `gh-router-pi`
   extension registers executable seams only (`oracle`, cheapest-only
   `advisor`, `code_search`, `browser_*`), each POSTing JSON-RPC
