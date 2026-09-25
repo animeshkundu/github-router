@@ -103,6 +103,23 @@ describe("pi launch contract: packages", () => {
         expect(settings.packages).toContain("local:gh-router-pi")
       })
 
+      test(`${tag}: no ctrl+shift+o shortcut conflict (files picker stays out)`, () => {
+        const settings = buildPiSettingsJson({ profileId, catalog: [...VISION_CATALOG], ...flags })
+        // extensions/files/index.ts registers ctrl+shift+o (file browser),
+        // colliding with pi-claude-code-ui's ctrl+shift+o (extra tool
+        // detail). Pi warns and the files binding dies — so it is never
+        // wired; Ctrl+Shift+O unambiguously belongs to the UI bundle.
+        for (const entry of settings.packages) {
+          if (typeof entry === "string") continue
+          for (const ext of entry.extensions ?? []) {
+            expect(ext).not.toContain("extensions/files/index.ts")
+          }
+        }
+        if (flags.ui) {
+          expect(settings.packages).toContain("npm:pi-claude-code-ui")
+        }
+      })
+
       test(`${tag}: theme field and theme package agree`, () => {
         const settings = buildPiSettingsJson({ profileId, catalog: [...VISION_CATALOG], ...flags })
         const themePkg = settings.packages.find(

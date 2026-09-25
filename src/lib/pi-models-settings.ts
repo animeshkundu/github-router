@@ -713,10 +713,15 @@ export function applyCosmeticUserOverrides(
  *   the launch has neither `--search` nor `--browse`, otherwise it
  *   double-pays our ColBERT/browser surfaces.
  * - `pi-agent-extensions`: allowlisted stable extensions only
- *   (sessions, structured questions, todos, handoff, context/files
+ *   (sessions, structured questions, todos, handoff, context
  *   dashboards, notifications, analytics). `review`/`loop`/`workflow`/
  *   `control` overlap our delegate/review pipeline and `powerline-footer`
  *   would fight the router-owned AIC footer, so all are excluded.
+ *   `files` is deliberately excluded too: it registers `ctrl+shift+o`
+ *   (file browser), colliding with `pi-claude-code-ui`'s `ctrl+shift+o`
+ *   (extra tool detail) — Pi warns and the files binding dies, so
+ *   shipping it only buys noise. `@file` mentions + the `context`
+ *   dashboard + `read`/`ls`/`find` cover the need.
  */
 export const PI_HELPERS_MCP_ADAPTER: PiPackageEntry = {
   source: "npm:pi-mcp-adapter",
@@ -733,7 +738,9 @@ export const PI_HELPERS_WEB_ACCESS: PiPackageEntry = {
 /** Verified manifest paths (pi-agent-extensions 0.5.x). Bare relative
  * form, NO `./` prefix: Pi matches package-filter patterns with
  * minimatch against root-relative paths, and a `./` prefix matches
- * nothing (observed live: zero extensions loaded, silent). */
+ * nothing (observed live: zero extensions loaded, silent).
+ * `extensions/files/index.ts` is intentionally absent: it owns
+ * `ctrl+shift+o`, which `pi-claude-code-ui` also registers. */
 export const PI_HELPERS_AGENT_EXTENSIONS: PiPackageEntry = {
   source: "npm:pi-agent-extensions",
   extensions: [
@@ -742,7 +749,6 @@ export const PI_HELPERS_AGENT_EXTENSIONS: PiPackageEntry = {
     "extensions/handoff/index.ts",
     "extensions/notify/index.ts",
     "extensions/context/index.ts",
-    "extensions/files/index.ts",
     "extensions/todos/index.ts",
     "extensions/answer/index.ts",
     "extensions/cwd-history/index.ts",
