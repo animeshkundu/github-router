@@ -6,20 +6,29 @@ import {
   buildPiSkills,
 } from "~/lib/pi-extension"
 import {
+  applyCosmeticUserOverrides,
   buildPiAgentFiles,
   buildPiAppendSystem,
+  buildPiLaunchCard,
   buildPiModelsJson,
   buildPiSettingsJson,
   derivePiCompactionSettings,
-  PI_MAX_TOKENS_FALLBACK,
-  PI_PROFILE_CONTEXT_TOKENS,
+  PI_HELPERS_AGENT_EXTENSIONS,
+  PI_HELPERS_MCP_ADAPTER,
+  PI_HELPERS_WEB_ACCESS,
+  PI_IMAGE_RESIZE_MAX_BYTES,
   piAdvisorModel,
+  piApiForEndpoints,
+  piImageResizeFor,
   piLeadModel,
   piLeadThinking,
   piNativeRoles,
   piOracleModel,
   piProfileModelIds,
+  piThinkingLevelMapFor,
   piUsdCostFor,
+  PI_MAX_TOKENS_FALLBACK,
+  PI_PROFILE_CONTEXT_TOKENS,
 } from "~/lib/pi-models-settings"
 import { EFFORT_ORDER } from "~/lib/reasoning-effort"
 
@@ -229,6 +238,230 @@ describe("pi models.json", () => {
   })
 })
 
+describe("pi models.json vision + thinking + api parity", () => {
+  test("vision fail-open: unknown advertises image, explicit false is text-only", () => {
+    const json = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "cheapest",
+      catalog: [
+        { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["max"], endpoints: ["responses"], vision: true },
+        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"], vision: false },
+      ],
+    })
+    const rows = Object.fromEntries(
+      json.providers["gh-router"].models.map((m) => [m.id, m]),
+    )
+    expect(rows["gpt-6-luna"].input).toEqual(["text", "image"])
+    expect(rows["gpt-6-sol"].input).toEqual(["text"])
+    // No catalog entry at all also fails open (preflight is the backstop).
+    const bare = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "cheapest",
+    })
+    for (const m of bare.providers["gh-router"].models) {
+      expect(m.input).toEqual(["text", "image"])
+    }
+  })
+
+  test("thinkingLevelMap mirrors the catalog effort allowlist", () => {
+    expect(piThinkingLevelMapFor(["high"])).toEqual({
+      minimal: null,
+      low: null,
+      medium: null,
+      high: "high",
+      xhigh: null,
+      max: null,
+    })
+    expect(piThinkingLevelMapFor([])).toBeUndefined()
+    expect(piThinkingLevelMapFor(undefined)).toBeUndefined()
+    const json = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "cheapest",
+      catalog: [
+        { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["max"], endpoints: ["responses"] },
+        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: [], endpoints: ["responses"] },
+      ],
+    })
+    const rows = Object.fromEntries(
+      json.providers["gh-router"].models.map((m) => [m.id, m]),
+    )
+    expect(rows["gpt-6-luna"].thinkingLevelMap?.["max"]).toBe("max")
+    expect(rows["gpt-6-luna"].thinkingLevelMap?.["low"]).toBeNull()
+    expect(rows["gpt-6-sol"].thinkingLevelMap).toBeUndefined()
+  })
+
+  test("inputLimits resize is conservative and clamps to small catalog limits", () => {
+    const resize = piImageResizeFor(true, 3 * 1024 * 1024)
+    expect(resize?.images?.resize?.maxWidth).toBe(1568)
+    expect(resize?.images?.resize?.maxBytes).toBe(PI_IMAGE_RESIZE_MAX_BYTES)
+    // Text-only models carry no budget.
+    expect(piImageResizeFor(false, 3 * 1024 * 1024)).toBeUndefined()
+    // A tiny catalog limit clamps the encoded budget (decoded × 4/3).
+    const small = piImageResizeFor(true, 3000)
+    expect(small?.images?.resize?.maxBytes).toBe(4000)
+    const json = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "cheapest",
+      catalog: [
+        { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["max"], endpoints: ["responses"], vision: true, maxImageBytes: 3 * 1024 * 1024 },
+        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"], vision: false },
+      ],
+    })
+    const rows = Object.fromEntries(
+      json.providers["gh-router"].models.map((m) => [m.id, m]),
+    )
+    expect(rows["gpt-6-luna"].inputLimits?.images?.resize?.maxBytes).toBe(
+      PI_IMAGE_RESIZE_MAX_BYTES,
+    )
+    expect(rows["gpt-6-sol"].inputLimits).toBeUndefined()
+  })
+
+  test("api override derives from catalog endpoints, explicit wins", () => {
+    expect(piApiForEndpoints(["/responses"])).toBe("openai-responses")
+    expect(piApiForEndpoints(["/chat/completions"])).toBe("openai-completions")
+    expect(piApiForEndpoints([])).toBeUndefined()
+    expect(piApiForEndpoints(undefined)).toBeUndefined()
+    // Responses-capable rows omit the override (matches provider default).
+    const json = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "cheapest",
+      catalog: [
+        { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["max"], endpoints: ["/responses"] },
+        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["/responses"] },
+      ],
+    })
+    for (const m of json.providers["gh-router"].models) {
+      expect(m.api).toBeUndefined()
+    }
+  })
+})
+
+describe("pi cosmetic user overrides", () => {
+  const built = () =>
+    buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: false,
+    })
+
+  test("empty user settings change nothing", () => {
+    expect(applyCosmeticUserOverrides({}, built())).toEqual({})
+    expect(applyCosmeticUserOverrides(undefined, built())).toEqual({})
+  })
+
+  test("user look wins for presentational keys", () => {
+    const overrides = applyCosmeticUserOverrides(
+      {
+        hideThinkingBlock: false,
+        theme: "tokyo-night",
+        readOutputMode: "preview",
+        themeAdaptive: true,
+        toolBackground: "border",
+        terminal: { showImages: false },
+        markdown: { mermaid: "off" },
+      },
+      built(),
+    )
+    expect(overrides).toEqual({
+      hideThinkingBlock: false,
+      theme: "tokyo-night",
+      readOutputMode: "preview",
+      themeAdaptive: true,
+      toolBackground: "border",
+      terminal: { showImages: false },
+      markdown: { mermaid: "off" },
+    })
+  })
+
+  test("load-bearing keys never override, unknown keys ignored", () => {
+    const overrides = applyCosmeticUserOverrides(
+      {
+        defaultModel: "gpt-6-sol",
+        defaultTools: ["read"],
+        packages: [],
+        compaction: {},
+        somethingElse: 1,
+      },
+      built(),
+    )
+    expect(overrides).toEqual({})
+  })
+
+  test("explicit undefined does not override", () => {
+    const overrides = applyCosmeticUserOverrides(
+      { hideThinkingBlock: undefined },
+      built(),
+    )
+    expect(overrides).toEqual({})
+  })
+
+  test("rendering keys are cosmetic too", () => {
+    const built = () =>
+      buildPiSettingsJson({
+        profileId: "cheapest",
+        searchEnabled: false,
+        browseEnabled: false,
+      })
+    const overrides = applyCosmeticUserOverrides(
+      { markdown: { mermaid: "off" }, collapseChangelog: false },
+      built(),
+    )
+    expect(overrides).toEqual({ markdown: { mermaid: "off" }, collapseChangelog: false })
+  })
+})
+
+describe("pi launch card", () => {
+  const full = {
+    version: "0.3.321",
+    profileId: "cheapest" as const,
+    accountType: "enterprise",
+    login: "animeshkundu",
+    copilotVersion: "0.48.1",
+    vsCodeVersion: "1.139.0",
+    lead: "gpt-6-luna",
+    modelCount: 2,
+    peers: true,
+    helpers: true,
+    ui: true,
+    swe: false,
+    search: true,
+    browse: false,
+    serverUrl: "http://127.0.0.1:59088",
+  }
+
+  test("three aligned lines, no timestamps or icons", () => {
+    const card = buildPiLaunchCard(full)
+    expect(card).toBe(
+      [
+        "github-router v0.3.321 · pi (cheapest)",
+        "  enterprise · animeshkundu · copilot chat 0.48.1 · vscode 1.139.0",
+        "  lead gpt-6-luna · 2 models · peers helpers ui search · http://127.0.0.1:59088",
+      ].join("\n"),
+    )
+  })
+
+  test("peerless collapses the surface, missing facts omitted cleanly", () => {
+    const card = buildPiLaunchCard({
+      ...full,
+      peers: false,
+      helpers: false,
+      ui: false,
+      search: false,
+      browse: false,
+      login: undefined,
+      copilotVersion: undefined,
+      vsCodeVersion: undefined,
+    })
+    expect(card).toBe(
+      [
+        "github-router v0.3.321 · pi (cheapest)",
+        "  enterprise",
+        "  lead gpt-6-luna · 2 models · peerless · http://127.0.0.1:59088",
+      ].join("\n"),
+    )
+  })
+})
+
 describe("pi settings.json", () => {
   test("narrow scope, limited tools, retry on", () => {
     const settings = buildPiSettingsJson({
@@ -242,13 +475,24 @@ describe("pi settings.json", () => {
     expect(settings.defaultTools).toEqual([
       "read",
       "bash",
+      "powershell",
       "edit",
       "write",
       "grep",
       "find",
       "ls",
     ])
-    expect(settings.retry).toEqual({ enabled: true, maxRetries: 3 })
+    expect(settings.retry).toEqual({ enabled: true, maxRetries: 3, provider: { maxRetries: 0 } })
+    // Per-model startup thinking stays on catalog-supported tiers.
+    expect(settings.modelThinkingLevels?.["gh-router/gpt-6-luna"]).toBe("max")
+    // Native image loop switches (never blockImages).
+    expect(settings.images).toEqual({ autoResize: true, blockImages: false })
+    expect(settings.terminal).toEqual({ showImages: true, imageWidthCells: 60, showTerminalProgress: true })
+    // Zero-token display richness: mermaid streams, changelog condensed.
+    expect(settings.collapseChangelog).toBe(true)
+    // Mermaid streams in the TUI (display-only, zero tokens).
+    expect(settings.markdown).toEqual({ mermaid: "streaming" })
+    expect(settings.transport).toBe("auto")
     // pi-subagents loads extensions ONLY (third-party skills/prompts
     // filtered out so they never reach Ctrl+O).
     expect(settings.packages).toContainEqual({
@@ -256,11 +500,107 @@ describe("pi settings.json", () => {
       skills: [],
       prompts: [],
     })
+    // Helpful bundle rides peers by default (extensions-only filters).
+    expect(settings.packages).toContainEqual(PI_HELPERS_MCP_ADAPTER)
+    expect(settings.packages).toContainEqual(PI_HELPERS_AGENT_EXTENSIONS)
     // No third-party statusline package: the footer is built into the
     // mode's own gh-router-pi extension (the community bridge never sees
     // the launch mirror, so it cannot drive a per-launch footer).
     expect(settings.packages).not.toContain("npm:pi-statusline")
     expect(settings.packages).toContain("local:gh-router-pi")
+  })
+
+  test("helpers off drops the bundle but keeps pi-subagents + footer", () => {
+    const settings = buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: false,
+      helpers: false,
+    })
+    expect(settings.packages).toContainEqual({
+      source: "npm:pi-subagents",
+      skills: [],
+      prompts: [],
+    })
+    expect(
+      settings.packages.some(
+        (p) => typeof p === "object" && p.source === "npm:pi-mcp-adapter",
+      ),
+    ).toBe(false)
+    expect(settings.packages).toContain("local:gh-router-pi")
+  })
+
+  test("web-access rides helpers only when search and browse are both off", () => {
+    const off = buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: false,
+    })
+    expect(off.packages).toContainEqual(PI_HELPERS_WEB_ACCESS)
+    const onSearch = buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: true,
+      browseEnabled: false,
+    })
+    expect(onSearch.packages).not.toContainEqual(PI_HELPERS_WEB_ACCESS)
+    const onBrowse = buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: true,
+    })
+    expect(onBrowse.packages).not.toContainEqual(PI_HELPERS_WEB_ACCESS)
+  })
+
+  test("ui transcript package is default-on, pi-code stays opt-out", () => {
+    const bare = buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: false,
+    })
+    // Presentational only (grouped rows, Shiki diffs) — zero model cost.
+    expect(bare.packages).toContain("npm:pi-claude-code-ui")
+    // Claude-Code look: hidden thinking, fixed Claude palette, one-line
+    // tool rows (expandable via Ctrl+O).
+    expect(bare.hideThinkingBlock).toBe(true)
+    expect(bare.themeAdaptive).toBe(false)
+    expect(bare.groupToolCalls).toBe(true)
+    expect(bare.readOutputMode).toBe("summary")
+    expect(bare.searchOutputMode).toBe("count")
+    expect(bare.mcpOutputMode).toBe("summary")
+    expect(bare.bashOutputMode).toBe("summary")
+    expect(bare.toolBackground).toBe("transparent")
+    // Genuine Claude Code dark palette, themes-only package (no code).
+    expect(bare.theme).toBe("claude-code-dark")
+    expect(bare.packages).toContainEqual({
+      source: "npm:better-claude-code-ui",
+      themes: ["theme/*.json"],
+      extensions: [],
+      skills: [],
+      prompts: [],
+    })
+    // pi-code behaviors would collide with router-owned /memory + /context.
+    expect(bare.packages).not.toContain("npm:pi-code")
+    const noUi = buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: false,
+      ui: false,
+    })
+    expect(noUi.packages).not.toContain("npm:pi-claude-code-ui")
+    expect(noUi.packages).toContain("local:gh-router-pi")
+    // UI companion keys are inert without the package, so omitted;
+    // thinking stays hidden regardless (native Pi setting, not cc-ui).
+    expect(noUi.themeAdaptive).toBeUndefined()
+    expect(noUi.groupToolCalls).toBeUndefined()
+    expect(noUi.readOutputMode).toBeUndefined()
+    expect(noUi.toolBackground).toBeUndefined()
+    expect(noUi.theme).toBeUndefined()
+    expect(
+      noUi.packages.some(
+        (p) => typeof p === "object" && p.source === "npm:better-claude-code-ui",
+      ),
+    ).toBe(false)
+    expect(noUi.hideThinkingBlock).toBe(true)
   })
 })
 

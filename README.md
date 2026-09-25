@@ -16,13 +16,18 @@ github-router is a local reverse proxy that translates standard API formats to G
 
 ```sh
 # 1. Authenticate (one-time)
-npx github-router@latest auth
+bunx github-router@latest auth
 
 # 2. Start the proxy
-npx github-router@latest start
+bunx github-router@latest start
 ```
 
 The server runs at `http://localhost:8787`. Now pick your tool below.
+
+> Bun is the default runtime for developing and running github-router
+> (`bunx`, `bun install`, `bun test`). Plain Node.js 24/26 + npm stay
+> supported (see the `node-compat` CI lane) — every `bunx` command below
+> has an `npx` equivalent.
 
 ---
 
@@ -31,13 +36,13 @@ The server runs at `http://localhost:8787`. Now pick your tool below.
 **Option A: One-shot subcommand (recommended)**
 
 ```sh
-npx github-router@latest claude
+bunx github-router@latest claude
 ```
 
 Boots the proxy on a random port and spawns Claude Code wired to it. Sets `ANTHROPIC_MODEL=claude-opus-4-8` (Anthropic's dashed slug — Claude Code's `/model` UI displays this as menu entry "Opus 4.8 (1M context)"). The proxy translates to Copilot's `claude-opus-4.8` at request time (single base slug; the catalog entry's `max_context_window_tokens` already advertises 1M context — no `-1m` sibling needed for 4.8). Major.minor fallback chain: `claude-opus-4-7` → `claude-opus-4-6` → `claude-opus-4-5`. Override with `-m`:
 
 ```sh
-npx github-router@latest claude -m claude-opus-4-8
+bunx github-router@latest claude -m claude-opus-4-8
 ```
 
 The launcher sanitizes parent-env auth keys and sets `CLAUDE_CONFIG_DIR=$HOME/.claude` so the spawned `claude` ignores any persisted Console OAuth credential without requiring `claude /logout`. Settings, MCP servers, hooks, and CLAUDE.md auto-discovery still load from `~/.claude` as normal.
@@ -45,7 +50,7 @@ The launcher sanitizes parent-env auth keys and sets `CLAUDE_CONFIG_DIR=$HOME/.c
 **Option B: Interactive launch-command generator**
 
 ```sh
-npx github-router@latest start --claude-code
+bunx github-router@latest start --claude-code
 ```
 
 Select your models, a launch command gets copied to your clipboard. Paste it in a new terminal.
@@ -128,19 +133,19 @@ Ripgrep is provided via the `@vscode/ripgrep` npm dependency (per-platform binar
 The fastest path is the `codex` subcommand — it boots the proxy on a random port and spawns Codex CLI wired to it:
 
 ```sh
-npx github-router@latest codex
+bunx github-router@latest codex
 ```
 
 Defaults to `gpt-6-sol`; falls back to `gpt-5.5` → `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex` if your Copilot tier doesn't expose 5.6-sol yet. Override with `-m`:
 
 ```sh
-npx github-router@latest codex -m gpt-5.3-codex
+bunx github-router@latest codex -m gpt-5.3-codex
 ```
 
 Or run the proxy and Codex CLI separately:
 
 ```sh
-npx github-router@latest start --codex   # interactive launch-command generator
+bunx github-router@latest start --codex   # interactive launch-command generator
 # — or set env vars yourself —
 export OPENAI_BASE_URL="http://localhost:8787/v1"
 export OPENAI_API_KEY="dummy"

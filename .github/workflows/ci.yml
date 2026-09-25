@@ -32,15 +32,14 @@ jobs:
         # live in the unit suite, which is why macOS is here and not in
         # `node-compat`.
         #
-        # Single bun line as of 2026-08-12: the supported runtime is 1.4, which
-        # ships as `canary` (no 1.4.x is on npm yet, so `"1.4"` would not
-        # resolve). Recorded rather than deleted: `1.3.14` was the stable GATE
-        # and is still what `npm i -g bun` serves, so CI now validates a
-        # PRE-RELEASE channel only and a bug reproducing solely on current
-        # stable will not be caught here. A streaming test once passed on
-        # canary/Windows and failed on 1.3.14/ubuntu, because when bun's socket
-        # reaper fires is a platform- and version-specific internal.
-        bun-version: ["canary"]
+        # Single bun line as of 2026-09-24: the supported runtime is the
+        # latest stable 1.4.2. Recorded rather than deleted: `canary`
+        # (1.4.3+) was the gate while no 1.4.x was stable, and a bug
+        # reproducing solely on canary will now not be caught here; a
+        # streaming test once passed on canary/Windows and failed on
+        # 1.3.14/ubuntu, because when bun's socket reaper fires is a
+        # platform- and version-specific internal.
+        bun-version: ["1.4.2"]
     runs-on: ${{ matrix.os }}
     # A hung job would otherwise sit on a runner for GitHub's 360-minute
     # default. The full suite is minutes, not hours, so this is a runaway
@@ -51,7 +50,10 @@ jobs:
     # a red tick for someone else's unreleased bug would erode the zero-red-CI
     # rule that makes a red tick mean something. That trade only works while a
     # stable lane is also running. With the matrix narrowed to the 1.4 line,
-    # canary IS the supported runtime, so it must block — leaving the old
+    # `1.4.2` (latest stable) IS the supported runtime, so it must block
+    # — leaving the old conditional in place would have made every
+    # unit-suite job advisory and turned CI permanently green regardless
+    # of failures.
     # conditional in place would have made every unit-suite job advisory and
     # turned CI permanently green regardless of failures.
     continue-on-error: false
@@ -120,7 +122,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "canary"
+          bun-version: "1.4.2"
 
       - uses: actions/setup-node@v7
         with:

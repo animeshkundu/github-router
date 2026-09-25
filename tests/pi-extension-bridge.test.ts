@@ -103,13 +103,16 @@ describe("pi native agent files (pi-subagents contract)", () => {
     // General-Purpose delegates to reviewer + oracle: grant required.
     expect(gp).toContain("allowNestedSubagents: true")
     expect(gp).toContain("allowedAgents: reviewer, oracle")
-    expect(gp).toContain("tools: [read, grep, find, ls, bash, edit, write, subagent, contact_supervisor]")
+    expect(gp).toContain("tools: read, grep, find, ls, bash, edit, write, subagent, contact_supervisor")
     expect(gp).toContain("acceptanceRole: writer")
+    // Foreground by default: the detached runner drops read/bash.
+    expect(gp).toContain("async: false")
     const balancedReviewer = buildPiAgentFiles("balanced")["agents/reviewer.md"]!
     expect(balancedReviewer).toContain("allowNestedSubagents: true")
     expect(balancedReviewer).toContain("allowedAgents: Explore")
     // The grant is inert without `subagent` in the same tools list.
-    expect(balancedReviewer).toContain("contact_supervisor, subagent]")
+    expect(balancedReviewer).toContain("watchdog_diff, subagent")
+    expect(balancedReviewer).toContain("async: false")
     // Cheapest reviewer is a leaf: no dangling edge, no nesting tool.
     expect(cheapest["agents/reviewer.md"]!).not.toContain("allowedAgents")
     expect(cheapest["agents/reviewer.md"]!).not.toContain("subagent]")
@@ -140,7 +143,9 @@ describe("pi native agent files (pi-subagents contract)", () => {
   test("reviewer carries the diff-anchored review contract, honestly tool-scoped", () => {
     const reviewer = buildPiAgentFiles("cheapest")["agents/reviewer.md"]!
     expect(reviewer).toContain("watchdog_diff")
-    expect(reviewer).toContain("contact_supervisor")
+    // Leaf reviewer never escalates: contact_supervisor is a blocked-child
+    // channel and pings from a verdict-only leaf are pure noise/cost.
+    expect(reviewer).not.toContain("contact_supervisor")
     expect(reviewer).toContain("Merge verdict")
     // No shell on reviewer: body must not promise reproduction it can't run.
     expect(reviewer).toContain("You have no shell")
@@ -162,7 +167,8 @@ describe("pi native agent files (pi-subagents contract)", () => {
       }
       // ...which restores Explore to pure read-only (the write grant existed
       // only for the reverted bindings — observed failure otherwise).
-      expect(files["agents/explore.md"]!).toContain("tools: [read, grep, find, ls, bash]")
+      expect(files["agents/explore.md"]!).toContain("tools: read, grep, find, ls, bash")
+      expect(files["agents/explore.md"]!).toContain("async: false")
       expect(files["agents/explore.md"]!).toContain("Never modify files.")
     }
   })
@@ -216,6 +222,18 @@ describe("pi settings builtin disables", () => {
       expect(overrides?.["worker"]).toEqual({ disabled: true })
       expect(overrides?.["researcher"]).toEqual({ disabled: true })
       expect(overrides?.["evidence-auditor"]).toEqual({ disabled: true })
+      // External-CLI families shell out with ambient auth: off-proxy,
+      // off-ledger, never in a cost-controlled launch.
+      for (const name of [
+        "claude-code",
+        "claude-code-writer",
+        "codex-exec",
+        "codex-exec-writer",
+        "cursor-agent",
+        "cursor-agent-writer",
+      ]) {
+        expect(overrides?.[name]).toEqual({ disabled: true })
+      }
       // delegate stays enabled (append-mode cheap path); reviewer/oracle
       // need no entry (our same-named files shadow them).
       expect(overrides?.["delegate"]).toBeUndefined()

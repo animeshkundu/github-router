@@ -26,6 +26,16 @@ export interface PiCatalogModel {
   /** Canonical endpoint kinds, e.g. "responses" | "chat" | "messages". */
   endpoints: ReadonlyArray<string>
   /**
+   * Whether the model accepts image input (`supports.vision`). Absent
+   * means unknown — models.json fails OPEN (`["text","image"]`) so Pi's
+   * native image paths (@path/--file/paste/read) stay available and the
+   * proxy preflight remains the backstop. Only an explicit `false`
+   * advertises text-only.
+   */
+  vision?: boolean
+  /** Decoded-byte per-image limit (`limits.vision.max_prompt_image_size`). */
+  maxImageBytes?: number
+  /**
    * Per-1M USD costs (converted from catalog units by the launcher).
    * All-or-nothing: Pi silently rejects the whole provider when any of
    * the four figures is missing, so the launcher emits `cost` only when
@@ -40,6 +50,39 @@ export interface PiCatalogModel {
 }
 
 /**
+ * Pi thinking levels that can appear in `thinkingLevelMap`. `off` is
+ * omitted: it means "no reasoning" and is never mapped to a provider
+ * value.
+ */
+export const PI_THINKING_LEVELS = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const
+
+/**
+ * Build a Pi `thinkingLevelMap` from a catalog `reasoning_effort`
+ * allowlist: supported levels map to themselves, unsupported to `null`
+ * (Pi hides them in `/thinking`). Returns `undefined` when the catalog
+ * carries no effort signal so Pi falls back to its own defaults rather
+ * than a guessed map.
+ */
+export function piThinkingLevelMapFor(
+  efforts: ReadonlyArray<string> | undefined,
+): Record<string, string | null> | undefined {
+  if (!efforts || efforts.length === 0) return undefined
+  const set = new Set(efforts)
+  const map: Record<string, string | null> = {}
+  for (const level of PI_THINKING_LEVELS) {
+    map[level] = set.has(level) ? level : null
+  }
+  return map
+}
+
+/**
  * Fallback Pi window (tokens) when a model has no pinned cheap-tier
  * threshold. Per-model rows use `piContextWindowFor` (tier threshold);
  * this constant remains the floor no role drops below.
@@ -48,7 +91,7 @@ export const PI_PROFILE_CONTEXT_TOKENS = 200_000 as const
 /** Provider key used in models.json and agent `provider/model` references. */
 export const PI_PROVIDER_NAME = "gh-router" as const
 
-const PI_MIN_VERSION_NOTE = "Requires Pi >= 0.80.10 and Node >= 22.19."
+const PI_MIN_VERSION_NOTE = "Requires Pi >= 0.87.1 and Node >= 22.19."
 
 export function piLeadModel(profileId: PiProfileId): string {
   return profileId === "cheapest"
@@ -182,6 +225,29 @@ export interface PiModelsJson {
           cacheRead?: number
           cacheWrite?: number
         }
+        /**
+         * Maps Pi thinking levels to provider values; `null` hides the
+         * level in `/thinking`. Derived from the catalog
+         * `reasoning_effort` allowlist; omitted when the catalog carries
+         * no effort signal.
+         */
+        thinkingLevelMap?: Record<string, string | null>
+        /**
+         * Per-model image encode budget so Pi resizes BEFORE sending
+         * instead of the proxy dropping after sending. Conservative
+         * docs-example values (1568px, 512KiB encoded, q75) clamped
+         * further when a model publishes a smaller image-size limit.
+         */
+        inputLimits?: {
+          images?: {
+            resize?: {
+              maxWidth?: number
+              maxHeight?: number
+              maxBytes?: number
+              jpegQuality?: number
+            }
+          }
+        }
         /** Per-model API override (documented Pi capability) for a
          *  future chat-served model on this provider. Omitted when it
          *  matches the provider default. */
@@ -189,6 +255,74 @@ export interface PiModelsJson {
       }>
     }
   >
+}
+
+/**
+ * Conservative per-model image resize Pi applies before sending.
+ * Docs-example values: 1568px, 512KiB encoded payload, JPEG quality 75.
+ * Well under Copilot's 3MiB decoded limit and ample for UI screenshots
+ * (measured ~35KB PNG), so sends stay fast and cheap. A model publishing
+ * a smaller `max_prompt_image_size` clamps `maxBytes` further via
+ * `piImageResizeFor` (encoded budget scaled from the decoded limit).
+ */
+export const PI_IMAGE_RESIZE_MAX_WIDTH: number = 1568
+export const PI_IMAGE_RESIZE_MAX_HEIGHT: number = 1568
+export const PI_IMAGE_RESIZE_MAX_BYTES: number = 524288
+export const PI_IMAGE_RESIZE_JPEG_QUALITY: number = 75
+
+/**
+ * Derive the `inputLimits.images.resize` budget for a model row.
+ * Returns `undefined` for text-only models (explicit `vision === false`).
+ * Otherwise the conservative defaults, with `maxBytes` clamped to the
+ * decoded catalog limit scaled to encoded units when that limit is
+ * smaller than the default budget.
+ */
+export function piImageResizeFor(
+  vision: boolean | undefined,
+  maxImageBytes: number | undefined,
+): PiModelsJson["providers"][string]["models"][number]["inputLimits"] | undefined {
+  if (vision === false) return undefined
+  let maxBytes = PI_IMAGE_RESIZE_MAX_BYTES
+  if (
+    typeof maxImageBytes === "number"
+    && Number.isFinite(maxImageBytes)
+    && maxImageBytes > 0
+  ) {
+    // Encoded payload inflates ~4/3 over decoded bytes; scale the
+    // decoded catalog limit into encoded units before clamping.
+    const scaled = Math.floor(maxImageBytes * 4 / 3)
+    if (scaled < maxBytes) maxBytes = Math.max(scaled, 1)
+  }
+  return {
+    images: {
+      resize: {
+        maxWidth: PI_IMAGE_RESIZE_MAX_WIDTH,
+        maxHeight: PI_IMAGE_RESIZE_MAX_HEIGHT,
+        maxBytes,
+        jpegQuality: PI_IMAGE_RESIZE_JPEG_QUALITY,
+      },
+    },
+  }
+}
+
+/**
+ * Derive a per-model Responses/Completions API from catalog endpoints.
+ * Returns `undefined` when the catalog carries no endpoint signal so the
+ * caller falls back to the provider default. A Responses-capable model
+ * stays on the provider default; a chat-only model overrides to
+ * completions.
+ */
+export function piApiForEndpoints(
+  endpoints: ReadonlyArray<string> | undefined,
+): PiModelApi | undefined {
+  if (!endpoints || endpoints.length === 0) return undefined
+  const lower = endpoints.map((e) => e.toLowerCase())
+  const hasResponses = lower.some((e) => e.includes("responses"))
+  if (hasResponses) return "openai-responses"
+  if (lower.some((e) => e.includes("chat") || e.includes("completion"))) {
+    return "openai-completions"
+  }
+  return undefined
 }
 
 /**
@@ -254,11 +388,23 @@ export function piUsdCostFor(
  * Responses-only on Copilot, and Pi POSTs `{baseUrl}/responses` for
  * that API — i.e. our `/v1/responses`, the Codex-proven path. Sending
  * these models to `/v1/chat/completions` is a Copilot 400 (observed).
+ * A model whose catalog endpoints lack Responses (future chat-served
+ * model) overrides per-model via `piApiForEndpoints`.
  *
  * Every row is BARE (no `[1m]`) with its cheap-tier window from
  * `piContextWindowFor` (272K Luna/Sol, 200K Grok/unknown): Pi budgets
  * `contextWindow` per model, so each role gets its cheapest tier and
  * Long-tier (2x) pricing is structurally unreachable.
+ *
+ * Vision is fail-open: only an explicit catalog `vision === false`
+ * advertises `["text"]`; unknown models advertise `["text","image"]`
+ * so Pi's native image paths (@path/--file/paste/read) stay available
+ * and the proxy vision preflight (drop-with-note + learned upstream
+ * ceilings) remains the backstop. Vision rows also carry
+ * `inputLimits.images.resize` so Pi resizes before sending instead of
+ * paying a send-then-drop round trip, and `thinkingLevelMap` from the
+ * catalog `reasoning_effort` allowlist so Pi never offers an effort
+ * tier Copilot would 400.
  */
 export function buildPiModelsJson(opts: {
   serverUrl: string
@@ -285,15 +431,20 @@ export function buildPiModelsJson(opts: {
             typeof out === "number" && Number.isFinite(out) && out >= 16
               ? Math.floor(out)
               : PI_MAX_TOKENS_FALLBACK
-          const override = opts.apiOverrides?.[id]
+          const endpointApi = piApiForEndpoints(entry?.endpoints)
+          const override = opts.apiOverrides?.[id] ?? endpointApi
+          const thinkingLevelMap = piThinkingLevelMapFor(entry?.efforts)
+          const inputLimits = piImageResizeFor(entry?.vision, entry?.maxImageBytes)
           return {
             id,
             name: id,
             reasoning: true as const,
-            input: ["text"],
+            input: entry?.vision === false ? ["text"] : ["text", "image"],
             contextWindow: piContextWindowFor(id, entry?.maxContextTokens),
             maxTokens,
             ...(entry?.cost ? { cost: entry.cost } : {}),
+            ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
+            ...(inputLimits ? { inputLimits } : {}),
             ...(override && override !== providerApi ? { api: override } : {}),
           }
         }),
@@ -388,13 +539,106 @@ export interface PiSettingsJson {
   enabledModels: Array<string>
   defaultTools: Array<string>
   compaction: PiCompactionSettings
-  retry: { enabled: boolean; maxRetries: number }
+  /**
+   * Per-model startup thinking levels keyed by exact `provider/modelId`.
+   * Keeps the picker on tiers the catalog actually supports so Pi never
+   * sends an effort Copilot would 400.
+   */
+  modelThinkingLevels?: Record<string, string>
+  /** Inline-image display in capable terminals; part of the native
+   *  image loop (paste/attach → see → reason). `showTerminalProgress`
+   *  emits OSC 9;4 tab progress (unsupported terminals ignore it). */
+  terminal?: {
+    showImages?: boolean
+    imageWidthCells?: number
+    showTerminalProgress?: boolean
+  }
+  /**
+   * Markdown rendering. Mermaid diagrams stream-render in the TUI
+   * (pure display — zero tokens); pinned so a future Pi default change
+   * cannot silently drop it. Cosmetic-overridable like the other look keys.
+   */
+  markdown?: {
+    mermaid?: "off" | "final" | "streaming"
+  }
+  /** Native image pipeline switches. `autoResize` keeps sends under
+   *  Copilot's image-size limit; `blockImages` is never set (that would
+   *  reintroduce the text-only block at the settings layer). */
+  images?: {
+    autoResize?: boolean
+    blockImages?: boolean
+  }
+  /** Preferred transport for multi-transport providers. */
+  transport?: "auto" | "sse" | "websocket" | "websocket-cached"
+  /**
+   * Condense the post-update changelog. Display-only noise reduction
+   * on update days; zero tokens, fully reversible below.
+   */
+  collapseChangelog?: boolean
+  /**
+   * Hide thinking blocks in the transcript. Default-on: reasoning
+   * effort still applies, only the display is suppressed. Toggle at
+   * runtime via `/settings`; never affects cost or behavior.
+   */
+  hideThinkingBlock?: boolean
+  /**
+   * Companion config for the bundled `pi-claude-code-ui` package
+   * (which reads flat settings keys): `false` keeps its fixed
+   * Claude-style palette regardless of the active Pi theme instead of
+   * deriving chrome colors from it. Gated on the `ui` bundle — inert
+   * and therefore omitted when the package is not loaded.
+   */
+  themeAdaptive?: boolean
+  /**
+   * Claude-Code-style one-line tool rows (same companion package):
+   * `summary`/`count` collapse completed calls to a single summary
+   * line instead of multi-line previews (expandable via Ctrl+O).
+   * Gated on the `ui` bundle like `themeAdaptive`.
+   */
+  groupToolCalls?: boolean
+  readOutputMode?: "hidden" | "summary" | "preview"
+  searchOutputMode?: "hidden" | "count" | "preview"
+  mcpOutputMode?: "hidden" | "summary" | "preview"
+  bashOutputMode?: "opencode" | "summary" | "preview"
+  /**
+   * Transparent tool-row backgrounds (no heavy chrome — closest to
+   * Claude Code's chromeless rows). Same companion-package gating as
+   * the other cc-ui keys.
+   */
+  toolBackground?: "default" | "transparent" | "outlines" | "border"
+  /**
+   * Active Pi theme. Default is the genuine Claude Code dark palette
+   * (provided by the bundled theme package below); light-terminal
+   * users can pick `claude-code-light` (or any installed theme) and
+   * — like every other look key — their own snapshot value wins.
+   */
+  theme?: string
+  /** Branch-summary token budget for session-tree navigation. */
+  branchSummary?: {
+    reserveTokens?: number
+    skipPrompt?: boolean
+  }
+  retry: {
+    enabled: boolean
+    maxRetries: number
+    /**
+     * Provider-level retries stay at 0: provider retries delay Pi from
+     * handling quota/usage-limit errors itself, and the proxy already
+     * owns transient retry below the agent.
+     */
+    provider?: {
+      maxRetries?: number
+    }
+  }
   packages: Array<PiPackageEntry>
   /**
    * Subagent overrides. Only `agentOverrides` with `disabled` flags is
    * emitted: the builtin `scout`/`worker`/`researcher`/`evidence-auditor`
    * agents are hidden so habitual invocations resolve deterministically
-   * via our own agents' `aliases` instead of running shadow rosters.
+   * via our own agents' `aliases` instead of running shadow rosters,
+   * and the `claude-code`/`codex-exec`/`cursor-agent` families (+ their
+   * `-writer` variants) are hidden because they shell out to other CLIs
+   * with the operator's own auth — off-proxy, off-ledger, off-cost-control.
    * `delegate` stays enabled (append-mode, inherits the lead model, so it
    * is cost-safe and fills the lightweight-subtask path our roster lacks).
    * `reviewer`/`oracle` need no entry: our same-named files shadow them.
@@ -405,6 +649,159 @@ export interface PiSettingsJson {
 }
 
 /**
+ * Presentational settings keys that stay user-customizable. When the
+ * snapshotted user settings already define one of these, the user's
+ * value wins over the built default at launch-merge time (see
+ * `applyCosmeticUserOverrides`). Everything else the builder emits —
+ * models, tools, thinking levels, compaction, retry, packages — stays
+ * built-wins: those are the cost contract, not a preference.
+ */
+export const PI_COSMETIC_SETTING_KEYS = [
+  "hideThinkingBlock",
+  "theme",
+  "themeAdaptive",
+  "groupToolCalls",
+  "readOutputMode",
+  "searchOutputMode",
+  "mcpOutputMode",
+  "bashOutputMode",
+  "toolBackground",
+  "terminal",
+  "images",
+  "markdown",
+  "collapseChangelog",
+] as const
+
+export type PiCosmeticSettingKey = (typeof PI_COSMETIC_SETTING_KEYS)[number]
+
+/**
+ * Overlay user-defined presentational values onto built settings.
+ * Only keys listed in `PI_COSMETIC_SETTING_KEYS` that are actually
+ * present (not `undefined`) in `userSettings` override — so a user
+ * `~/.pi/agent/settings.json` with e.g. `"hideThinkingBlock": false`
+ * or `"readOutputMode": "preview"` keeps their look, while everyone
+ * else gets the Claude-Code-like defaults. Returns the picked
+ * overrides (empty object when the user customized nothing).
+ */
+export function applyCosmeticUserOverrides(
+  userSettings: Record<string, unknown> | undefined,
+  builtSettings: PiSettingsJson,
+): Record<string, unknown> {
+  const overrides: Record<string, unknown> = {}
+  if (!userSettings) return overrides
+  const built = builtSettings as unknown as Record<string, unknown>
+  for (const key of PI_COSMETIC_SETTING_KEYS) {
+    if (!(key in userSettings)) continue
+    const value = userSettings[key]
+    if (value === undefined) continue
+    if (!(key in built)) continue
+    overrides[key] = value
+  }
+  return overrides
+}
+
+/**
+ * Helpful third-party bundle, wired extensions-only (skills/prompts/
+ * themes filtered out so third-party prose never reaches Ctrl+O — same
+ * policy as `pi-subagents`). Router-owned surfaces stay excluded:
+ * no statusline/footer package (built into `local:gh-router-pi`), no
+ * compaction replacers, no provider/model overriders.
+ *
+ * - `pi-mcp-adapter`: MCP servers as one proxy tool instead of hundreds
+ *   of definitions (context/cost win).
+ * - `pi-web-access`: search/fetch/PDF-extract fallback. Only wired when
+ *   the launch has neither `--search` nor `--browse`, otherwise it
+ *   double-pays our ColBERT/browser surfaces.
+ * - `pi-agent-extensions`: allowlisted stable extensions only
+ *   (sessions, structured questions, todos, handoff, context/files
+ *   dashboards, notifications, analytics). `review`/`loop`/`workflow`/
+ *   `control` overlap our delegate/review pipeline and `powerline-footer`
+ *   would fight the router-owned AIC footer, so all are excluded.
+ */
+export const PI_HELPERS_MCP_ADAPTER: PiPackageEntry = {
+  source: "npm:pi-mcp-adapter",
+  skills: [],
+  prompts: [],
+}
+
+export const PI_HELPERS_WEB_ACCESS: PiPackageEntry = {
+  source: "npm:pi-web-access",
+  skills: [],
+  prompts: [],
+}
+
+/** Verified manifest paths (pi-agent-extensions 0.5.x). Bare relative
+ * form, NO `./` prefix: Pi matches package-filter patterns with
+ * minimatch against root-relative paths, and a `./` prefix matches
+ * nothing (observed live: zero extensions loaded, silent). */
+export const PI_HELPERS_AGENT_EXTENSIONS: PiPackageEntry = {
+  source: "npm:pi-agent-extensions",
+  extensions: [
+    "extensions/sessions/index.ts",
+    "extensions/ask-user/index.ts",
+    "extensions/handoff/index.ts",
+    "extensions/notify/index.ts",
+    "extensions/context/index.ts",
+    "extensions/files/index.ts",
+    "extensions/todos/index.ts",
+    "extensions/answer/index.ts",
+    "extensions/cwd-history/index.ts",
+    "extensions/session-breakdown/index.ts",
+  ],
+  skills: [],
+  prompts: [],
+  themes: [],
+}
+
+/** Claude-look UI bundle: transcript grouping, Shiki diffs, Ctrl+O
+ * previews. Default-on (purely presentational — zero model cost);
+ * opt out with `--no-ui`. `pi-code` behaviors stay a docs recipe:
+ * its `/memory` + `/context` commands would collide with the
+ * router-owned pair in `gh-router-pi`, and Pi offers no per-command
+ * filtering inside one extension. */
+export const PI_UI_PACKAGES: ReadonlyArray<PiPackageEntry> = Object.freeze([
+  "npm:pi-claude-code-ui",
+])
+
+/**
+ * Claude Code dark theme (`#D77757` coral and friends) from
+ * `better-claude-code-ui`, which ships six CC palettes. Themes-only:
+ * extensions/skills/prompts are explicitly emptied so none of the
+ * package's status line, footer, or tool rendering loads and fights
+ * the router-owned footer or `pi-claude-code-ui`. Theme files are
+ * pure JSON data — loading the whole `./theme` dir costs nothing at
+ * runtime and leaves all six CC variants pickable via `/settings`,
+ * with `claude-code-dark` the default (see `PI_CC_DARK_THEME`).
+ */
+export const PI_CC_THEME_PACKAGE: PiPackageEntry = {
+  source: "npm:better-claude-code-ui",
+  // Bare relative glob, NO `./` prefix (see note above): minimatch
+  // matches manifest files by root-relative path, so `./theme` selects
+  // nothing and the theme silently fails to load. All six CC variants
+  // load as pure JSON data (zero runtime cost); the default is
+  // `claude-code-dark`, light-terminal users pick `claude-code-light`.
+  themes: ["theme/*.json"],
+  extensions: [],
+  skills: [],
+  prompts: [],
+}
+
+/** Default Pi theme: genuine Claude Code dark palette. */
+export const PI_CC_DARK_THEME = "claude-code-dark" as const
+
+/** Built-in tools enabled at startup (Pi-native set incl. Windows). */
+export const PI_DEFAULT_TOOLS: ReadonlyArray<string> = Object.freeze([
+  "read",
+  "bash",
+  "powershell",
+  "edit",
+  "write",
+  "grep",
+  "find",
+  "ls",
+])
+
+/**
  * Build the per-launch `settings.json`. Additive over the snapshotted
  * user settings (the launcher merges lists it owns): narrow model
  * scope, fixed thinking, limited toolset, derived compaction, and the
@@ -413,6 +810,11 @@ export interface PiSettingsJson {
  * `pi-subagents` rides `peersEnabled` and loads extensions ONLY
  * (skills/prompts filtered out — the mode's own skills/prompts cover
  * the roster, so the third-party sets never reach Ctrl+O).
+ * The helpful bundle rides `helpers` (default on, peers-gated):
+ * `pi-mcp-adapter` + allowlisted `pi-agent-extensions` always, plus
+ * `pi-web-access` only when neither search nor browse is on (otherwise
+ * it double-pays our ColBERT/browser surfaces). The `--ui` bundle
+ * (`pi-code`, `pi-claude-code-ui`) is opt-in.
  * The statusline footer is built into `local:gh-router-pi` (no
  * third-party statusline package: the community bridge reads only the
  * user's real global/project settings and never sees the launch mirror,
@@ -424,21 +826,62 @@ export function buildPiSettingsJson(opts: {
   browseEnabled: boolean
   catalog?: ReadonlyArray<PiCatalogModel>
   peers?: boolean
+  helpers?: boolean
+  ui?: boolean
 }): PiSettingsJson {
   const peers = opts.peers !== false
+  const helpers = opts.helpers !== false && peers
+  const webAccess = helpers && !opts.searchEnabled && !opts.browseEnabled
+  const ui = opts.ui !== false
   const modelIds = piProfileModelIds(opts.profileId, { peers })
+  const modelThinkingLevels: Record<string, string> = {}
+  modelThinkingLevels[`${PI_PROVIDER_NAME}/${piLeadModel(opts.profileId)}`] =
+    piLeadThinking(opts.profileId)
+  for (const role of piNativeRoles(opts.profileId)) {
+    modelThinkingLevels[`${PI_PROVIDER_NAME}/${role.model}`] = role.thinking
+  }
+  modelThinkingLevels[`${PI_PROVIDER_NAME}/${piOracleModel(opts.profileId)}`] =
+    piOracleThinking(opts.profileId)
+  const advisor = piAdvisorModel(opts.profileId)
+  if (advisor) {
+    modelThinkingLevels[`${PI_PROVIDER_NAME}/${advisor.model}`] =
+      advisor.thinking
+  }
   return {
     defaultProvider: PI_PROVIDER_NAME,
     defaultModel: piLeadModel(opts.profileId),
     defaultThinkingLevel: piLeadThinking(opts.profileId),
     enabledModels: modelIds.map((id) => `${PI_PROVIDER_NAME}/${id}`),
-    defaultTools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+    defaultTools: [...PI_DEFAULT_TOOLS],
+    modelThinkingLevels,
+    terminal: { showImages: true, imageWidthCells: 60, showTerminalProgress: true },
+    markdown: { mermaid: "streaming" },
+    collapseChangelog: true,
+    images: { autoResize: true, blockImages: false },
+    transport: "auto",
+    hideThinkingBlock: true,
+    ...(ui
+      ? {
+          themeAdaptive: false,
+          groupToolCalls: true,
+          readOutputMode: "summary" as const,
+          searchOutputMode: "count" as const,
+          mcpOutputMode: "summary" as const,
+          bashOutputMode: "summary" as const,
+          toolBackground: "transparent" as const,
+          theme: PI_CC_DARK_THEME,
+        }
+      : {}),
+    branchSummary: { reserveTokens: 16384, skipPrompt: false },
     compaction: derivePiCompactionSettings(opts.catalog, modelIds),
-    retry: { enabled: true, maxRetries: 3 },
+    retry: { enabled: true, maxRetries: 3, provider: { maxRetries: 0 } },
     packages: [
       ...(peers
         ? [{ source: "npm:pi-subagents", skills: [], prompts: [] } as PiPackageEntry]
         : []),
+      ...(helpers ? [PI_HELPERS_MCP_ADAPTER, PI_HELPERS_AGENT_EXTENSIONS] : []),
+      ...(webAccess ? [PI_HELPERS_WEB_ACCESS] : []),
+      ...(ui ? [...PI_UI_PACKAGES, PI_CC_THEME_PACKAGE] : []),
       "local:gh-router-pi",
     ],
     // Disabled builtins ride `peers` like the package itself: peerless
@@ -451,6 +894,15 @@ export function buildPiSettingsJson(opts: {
               worker: { disabled: true },
               researcher: { disabled: true },
               "evidence-auditor": { disabled: true },
+              // External-CLI families (0.71+): shell out to other CLIs
+              // with ambient auth. Off-proxy and off-ledger — never in a
+              // cost-controlled launch.
+              "claude-code": { disabled: true },
+              "claude-code-writer": { disabled: true },
+              "codex-exec": { disabled: true },
+              "codex-exec-writer": { disabled: true },
+              "cursor-agent": { disabled: true },
+              "cursor-agent-writer": { disabled: true },
             },
           },
         }
@@ -527,16 +979,24 @@ function roleDescription(
  * files stay small enough to inline cheaply.
  *
  * Load-bearing semantics (verified against pi-subagents docs + source):
- * - `reviewer`/`oracle` intentionally SHADOW the same-named builtins
- *   wholesale (user scope wins; omitted fields are NOT inherited). That
- *   is how the roster pins gh-router models/thinking for cost control.
- *   The shadowed `advisor` alias dies with the builtin oracle definition,
- *   which is why `advisor` ships as its own file on cheapest.
+  * - `reviewer`/`oracle` intentionally SHADOW the same-named builtins
+  *   wholesale (user scope wins; omitted fields are NOT inherited). That
+  *   is how the roster pins gh-router models/thinking for cost control.
+  *   The shadowed `advisor` alias dies with the builtin oracle definition,
+  *   which is why `advisor` ships as its own file on cheapest.
+  *   Shadowing deliberately does NOT inherit `contact_supervisor` on
+  *   reviewer (leaf) or `defaultContext: fork` on oracle (fresh keeps
+  *   the cold-start consultant contract).
   * - `allowedAgents` only narrows an existing nesting grant, so every
   *   delegating agent also sets `allowNestedSubagents: true` and lists
   *   `subagent` in `tools`. Depth reaches 3 on balanced
   *   (lead → General-Purpose → reviewer → Explore), covered by
   *   `PI_SUBAGENT_MAX_DEPTH=3` in the launch env (default guard is 2).
+  * - `async: false` on every file: foreground children run in-process
+  *   with the parent's full tool registry. The detached background
+  *   runner demonstrably drops read/bash from its registry (observed
+  *   live as "requested unavailable child tools: [read, bash]"),
+  *   failing every strict-allowlist child it touches.
   * - Deliberately NO `output:`/`defaultReads`/`defaultProgress` file
   *   bindings: single-shot launches resolve relative outputs under
   *   per-run artifact dirs while `defaultReads` resolves against the
@@ -559,18 +1019,24 @@ export function buildPiAgentFiles(
   for (const role of piNativeRoles(profileId)) {
     const isImplementer = role.name === "General-Purpose"
     const isReviewer = role.name === "reviewer"
-    // `watchdog_diff` (diff-anchored review) and `contact_supervisor`
-    // (blocked-child escalation) are provided by the pi-subagents runtime,
-    // like the delegation primitives — no extra package needed. Balanced
-    // reviewer additionally lists `subagent`: it holds the roster's other
-    // nesting grant (→ Explore) and the grant is inert without it.
+    // `watchdog_diff` (diff-anchored review) is provided by the
+    // pi-subagents runtime, like the delegation primitives — no extra
+    // package needed. Balanced reviewer additionally lists `subagent`:
+    // it holds the roster's other nesting grant (→ Explore) and the
+    // grant is inert without it.
+    //
+    // Bare comma form (no brackets), matching every pi-subagents
+    // builtin file. `contact_supervisor` appears ONLY on the writer:
+    // it is a blocked-child escalation channel, meaningless on leaves
+    // (reviewer/Explore just return; supervisor pings from them are
+    // noise that costs a turn each).
     const tools = isImplementer
-      ? "[read, grep, find, ls, bash, edit, write, subagent, contact_supervisor]"
+      ? "read, grep, find, ls, bash, edit, write, subagent, contact_supervisor"
       : isReviewer
         ? profileId === "balanced"
-          ? "[read, grep, find, ls, watchdog_diff, contact_supervisor, subagent]"
-          : "[read, grep, find, ls, watchdog_diff, contact_supervisor]"
-        : "[read, grep, find, ls, bash]";
+          ? "read, grep, find, ls, watchdog_diff, subagent"
+          : "read, grep, find, ls, watchdog_diff"
+        : "read, grep, find, ls, bash";
     const lines = [
       "---",
       `name: ${role.name}`,
@@ -579,6 +1045,14 @@ export function buildPiAgentFiles(
       `model: ${PI_PROVIDER_NAME}/${role.model}`,
       `thinking: ${role.thinking}`,
       "advertise: true",
+      // Foreground by default. pi-subagents launches workflow children
+      // async (detached runner) by default, and the runner's tool
+      // registry demonstrably drops read/bash (observed live:
+      // "requested unavailable child tools: [read, bash]"), failing
+      // every strict-allowlist child. Foreground children run in-process
+      // with the parent's full registry — nesting works, no spawn
+      // overhead, no runner cost. Explicit call values still win.
+      "async: false",
       "systemPromptMode: replace",
       "inheritProjectContext: true",
       "defaultContext: fresh",
@@ -647,10 +1121,11 @@ export function buildPiAgentFiles(
     "---",
     "name: oracle",
     "description: Second opinion before acting. Challenges assumptions without editing. Use when the decision itself feels risky.",
-    "tools: [read, grep, find, ls, bash]",
+    "tools: read, grep, find, ls, bash",
     `model: ${PI_PROVIDER_NAME}/${piOracleModel(profileId)}`,
     `thinking: ${piOracleThinking(profileId)}`,
     "advertise: true",
+    "async: false",
     "systemPromptMode: replace",
     "inheritProjectContext: true",
     "defaultContext: fresh",
@@ -672,10 +1147,11 @@ export function buildPiAgentFiles(
       "---",
       "name: advisor",
       "description: Advisory plan review for the lead: review the final plan before it is presented. Never executes.",
-      "tools: [read, grep, find, ls]",
+      "tools: read, grep, find, ls",
       `model: ${PI_PROVIDER_NAME}/${advisor.model}`,
       `thinking: ${advisor.thinking}`,
       "advertise: true",
+      "async: false",
       "systemPromptMode: replace",
       "inheritProjectContext: true",
       "defaultContext: fresh",
@@ -688,6 +1164,52 @@ export function buildPiAgentFiles(
     files[`agents/${agentFileName("advisor")}`] = `${body}\n`;
   }
   return files;
+}
+
+export interface PiLaunchCardOpts {
+  version: string
+  profileId: PiProfileId
+  accountType: string
+  /** GitHub login; omitted when setup never resolved it. */
+  login?: string
+  copilotVersion?: string
+  vsCodeVersion?: string
+  lead: string
+  modelCount: number
+  peers: boolean
+  helpers: boolean
+  ui: boolean
+  swe: boolean
+  search: boolean
+  browse: boolean
+  serverUrl: string
+}
+
+/**
+ * One elegant three-line launch summary for the `pi` preamble,
+ * written directly to stderr (no reporter icons or timestamps).
+ * Missing facts are omitted, never printed as blanks — a first run
+ * that never resolved versions still renders cleanly.
+ */
+export function buildPiLaunchCard(opts: PiLaunchCardOpts): string {
+  const surface: Array<string> = []
+  surface.push(opts.peers ? "peers" : "peerless")
+  if (opts.peers && opts.helpers) surface.push("helpers")
+  if (opts.ui) surface.push("ui")
+  if (opts.swe) surface.push("swe")
+  if (opts.search) surface.push("search")
+  if (opts.browse) surface.push("browse")
+  const identity = [
+    opts.accountType,
+    opts.login,
+    opts.copilotVersion ? `copilot chat ${opts.copilotVersion}` : undefined,
+    opts.vsCodeVersion ? `vscode ${opts.vsCodeVersion}` : undefined,
+  ].filter((part): part is string => typeof part === "string" && part.length > 0)
+  return [
+    `github-router v${opts.version} · pi (${opts.profileId})`,
+    `  ${identity.join(" · ")}`,
+    `  lead ${opts.lead} · ${opts.modelCount} models · ${surface.join(" ")} · ${opts.serverUrl}`,
+  ].join("\n")
 }
 
 /**
@@ -709,6 +1231,7 @@ export function buildPiAppendSystem(
   if (peers) {
     lines.push(
       `- Delegate FREELY to Explore for discovery and General-Purpose for scoped work.`,
+      `- Call subagent directly (agent + task); save workflows for genuinely parallel fanout.`,
       profileId === "balanced"
         ? `- Send work to reviewer ONLY when the change alters behavior.`
         : `- Send finished work to reviewer for assessment.`,
@@ -717,6 +1240,7 @@ export function buildPiAppendSystem(
         ? `- Review the final plan with advisor (advisory) before presenting it.`
         : `- There is no advisor in this mode: oracle is the only consultant.`,
       `- Verify, don't vote: consultant verdicts never substitute for running the tests.`,
+      `- After any subagent work completes, always write the final answer yourself.`,
     );
   } else {
     lines.push(

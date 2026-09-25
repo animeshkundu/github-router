@@ -1364,6 +1364,20 @@ export function getPiLaunchEnvVars(mirrorDir: string): Record<string, string> {
   const vars: Record<string, string> = {
     PI_CODING_AGENT_DIR: mirrorDir,
   }
+  // Quiet npm inside the Pi session. Pi installs the mirror's `packages[]`
+  // on every boot (fresh mirror dir each launch), and npm's default
+  // chatter (added/audited/funding lines) drowns the startup screen.
+  // These only lower npm's own verbosity — exit codes still signal
+  // failure, Pi still reports install errors, and `error` level keeps
+  // genuine npm failures visible. Audit is skipped too (it costs time
+  // on every boot for information nobody reads here). Opt out with
+  // `GH_ROUTER_PI_VERBOSE_NPM=1` to restore stock npm output.
+  if (process.env.GH_ROUTER_PI_VERBOSE_NPM !== "1") {
+    vars.npm_config_loglevel = "error"
+    vars.npm_config_audit = "false"
+    vars.npm_config_fund = "false"
+    vars.npm_config_update_notifier = "false"
+  }
   if (toolbeltEnabled()) {
     Object.assign(vars, toolbeltPathOverride(process.env, PATHS.TOOLBELT_BIN_DIR))
   }

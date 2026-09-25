@@ -57,6 +57,11 @@ const DEFAULT_LAUNCH_ID = "__default__"
 export interface State {
   githubToken?: string
   copilotToken?: string
+  /**
+   * GitHub login of `githubToken`, resolved once at setup for the
+   * launch summary. Display-only; auth decisions never read it.
+   */
+  githubUserLogin?: string
 
   /**
    * Where `githubToken` came from, which decides whether the proxy may

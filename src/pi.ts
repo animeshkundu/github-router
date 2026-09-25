@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto"
+import { existsSync } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import process from "node:process"
@@ -6,7 +7,7 @@ import process from "node:process"
 import { defineCommand, type ArgsDef } from "citty"
 import consola from "consola"
 
-import { checkPiVersion, updatePi } from "./lib/pi-version-check"
+import { ensurePiInstalled, getInstalledPiVersion, meetsPiMinVersion, refreshPiInBackground, updatePi } from "./lib/pi-version-check"
 import { warnOnTierPriceDriftForModels } from "./lib/pi-tier-windows"
 import {
   AIC_LEDGER_ENV,
@@ -26,8 +27,10 @@ import {
   buildPiSkills,
 } from "./lib/pi-extension"
 import {
+  applyCosmeticUserOverrides,
   buildPiAgentFiles,
   buildPiAppendSystem,
+  buildPiLaunchCard,
   buildPiModelsJson,
   buildPiSettingsJson,
   mergeSubagentsSettings,
@@ -38,11 +41,13 @@ import {
 } from "./lib/pi-models-settings"
 import { launchChild } from "./lib/launch"
 import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
+import { PATHS } from "./lib/paths"
 import { state } from "./lib/state"
 import { runSelfUpdate } from "./lib/self-update"
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
+import { getPackageVersion } from "./lib/version"
 import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
@@ -75,13 +80,13 @@ export const piArgs = {
     type: "boolean" as const,
     default: true,
     description:
-      "Check the npm registry for a newer Pi release on launch (throttled hourly). Set to false (--no-update-check) to skip (offline/CI).",
+      "Verify Pi is installed and above the supported floor on launch (fast local probe), and refresh it in the background (throttled hourly). Set to false (--no-update-check) to skip both (offline/CI).",
   },
   "auto-update": {
     type: "boolean" as const,
     default: true,
     description:
-      "Install the latest Pi on launch when stale (default). Set to false (--no-auto-update) to warn only.",
+      "Refresh Pi in the background (throttled hourly): probe npm and queue a post-exit install when newer, without delaying launch. Set to false (--no-auto-update) to disable background updates (the install floor is still enforced).",
   },
   swe: {
     type: "boolean" as const,
@@ -94,6 +99,18 @@ export const piArgs = {
     default: true,
     description:
       "Wire the peer/subagent floor: native agent files, the oracle tool (plus cheapest-only advisor), the gh-oracle skill, and the pi-subagents package. Set to false (--no-peers) for a lead-only session; prereqs then validate the lead model only.",
+  },
+  helpers: {
+    type: "boolean" as const,
+    default: true,
+    description:
+      "Wire the helpful bundle: pi-mcp-adapter, allowlisted pi-agent-extensions (sessions, ask_user, todos, handoff, context, files, analytics — no review/loop/footer), and pi-web-access when neither --search nor --browse is on. Set to false (--no-helpers) for pi-subagents + gh-router-pi only.",
+  },
+  ui: {
+    type: "boolean" as const,
+    default: true,
+    description:
+      "Load the Claude-look transcript UI (pi-claude-code-ui: grouped rows, Shiki diffs, Ctrl+O previews). Presentational only, zero model cost. Set to false (--no-ui) for stock Pi rendering.",
   },
   "memory-bridge": {
     type: "boolean" as const,
@@ -195,74 +212,112 @@ export const pi = defineCommand({
 
     let server: Awaited<ReturnType<typeof setupAndServe>>["server"]
     let serverUrl: string
+    // Pi install / update (default-on, throttled, best-effort).
+    const updateCheck = (args as Record<string, unknown>)["update-check"] !== false
+    const autoUpdate = (args as Record<string, unknown>)["auto-update"] !== false
+    // Fast foreground gate: `pi --version` is local (milliseconds) and
+    // decides everything launch-critical. Network (npm view) and installs
+    // never block a healthy launch — see below.
+    let installedVersion: string | null = null
+    // Pending fresh install when Pi is absent: started before server boot
+    // so the two overlap, joined fail-closed right after setup.
+    const pendingInstall: { promise: Promise<string> | null; abort: (() => void) | null } = {
+      promise: null,
+      abort: null,
+    }
+    if (updateCheck) {
+      try {
+        installedVersion = await getInstalledPiVersion()
+      } catch (err) {
+        consola.debug("Pi presence probe failed:", err)
+      }
+      if (installedVersion === null) {
+        // Pi absent: it must be installed before launch, but the install
+        // starts NOW so it overlaps server boot instead of following it.
+        // Joined (fail-closed) right after setup; aborted if setup fails
+        // so a doomed launch never leaves a half-written global install.
+        const controller = new AbortController()
+        pendingInstall.abort = () => controller.abort()
+        pendingInstall.promise = ensurePiInstalled({ signal: controller.signal })
+        pendingInstall.promise.catch(() => {
+          // Observed at the join below; never an unhandled rejection.
+        })
+      }
+    }
     try {
-      const result = await setupAndServe({
-        ...parsed,
-        port: parsed.port,
-        silent: true,
-      })
-      server = result.server
-      serverUrl = result.serverUrl
+      // Quiet boot: with stored auth there is no interactive flow to
+      // display, so info-level setup chatter (versions, re-login,
+      // token refreshes) is held back and the launch card below carries
+      // the same facts elegantly. Warn+error always show. Skipped for
+      // explicit --verbose/--show-token, and never applied without
+      // stored auth (first-time device flow must stay visible).
+      const quietBoot =
+        existsSync(PATHS.GITHUB_TOKEN_PATH) && !parsed.verbose && !parsed.showToken
+      const priorLevel = consola.level
+      if (quietBoot) consola.level = 1
+      let setupResult: Awaited<ReturnType<typeof setupAndServe>>
+      try {
+        setupResult = await setupAndServe({
+          ...parsed,
+          port: parsed.port,
+          silent: true,
+        })
+      } finally {
+        if (quietBoot) consola.level = priorLevel
+      }
+      server = setupResult.server
+      serverUrl = setupResult.serverUrl
     } catch (error) {
+      pendingInstall.abort?.()
       consola.error("Failed to start server:", error instanceof Error ? error.message : error)
       process.exit(1)
     }
 
     void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
 
-    // Pi install / update (default-on, throttled, best-effort).
-    const updateCheck = (args as Record<string, unknown>)["update-check"] !== false
-    const autoUpdate = (args as Record<string, unknown>)["auto-update"] !== false
-    if (updateCheck) {
+    if (pendingInstall.promise) {
+      // The blocking join: without Pi there is nothing to launch.
+      // Same failure contract as a sequential install, minus the wait.
       try {
-        const check = await checkPiVersion()
-        if (!check.installed) {
+        installedVersion = await pendingInstall.promise
+      } catch (err) {
+        consola.error(
+          `Pi is not installed and automatic install failed (${err instanceof Error ? err.message : String(err)}). Install it with \`npm install -g @earendil-works/pi-coding-agent\`, then retry.`,
+        )
+        process.exit(1)
+      } finally {
+        pendingInstall.promise = null
+        pendingInstall.abort = null
+      }
+    }
+
+    if (updateCheck && installedVersion !== null) {
+      if (!meetsPiMinVersion(installedVersion)) {
+        // Below the floor Pi cannot serve the roster correctly: upgrade
+        // foreground and re-verify, fail closed. `latest` needs no
+        // registry probe — npm resolves it at install time.
+        if (autoUpdate) {
           try {
             await updatePi("latest")
-            const retry = await checkPiVersion({ force: true })
-            if (!retry.installed) {
-              throw new Error("install did not place pi on PATH")
-            }
+            installedVersion = await getInstalledPiVersion()
           } catch (err) {
             consola.error(
-              `Pi is not installed and automatic install failed (${err instanceof Error ? err.message : String(err)}). Install it with \`npm install -g @earendil-works/pi-coding-agent\`, then retry.`,
+              `Installed Pi v${installedVersion} is below the supported floor and auto-upgrade failed (${err instanceof Error ? err.message : String(err)}). Upgrade manually: \`npm install -g @earendil-works/pi-coding-agent@latest\`.`,
             )
             process.exit(1)
-          }
-        } else if (check.needsMinUpgrade) {
-          if (autoUpdate && check.latestVersion) {
-            try {
-              await updatePi(check.latestVersion)
-            } catch (err) {
-              consola.error(
-                `Installed Pi v${check.installedVersion} is below the supported floor and auto-upgrade failed. Upgrade manually: \`npm install -g @earendil-works/pi-coding-agent@latest\`.`,
-              )
-              void err
-              process.exit(1)
-            }
-          } else {
-            consola.error(
-              `Installed Pi v${check.installedVersion} is below the supported floor. Upgrade: \`npm install -g @earendil-works/pi-coding-agent@latest\`.`,
-            )
-            process.exit(1)
-          }
-        } else if (check.needsUpdate && check.latestVersion) {
-          if (autoUpdate) {
-            try {
-              await updatePi(check.latestVersion)
-            } catch (err) {
-              consola.warn(
-                `Auto-update of Pi to ${check.latestVersion} failed (${err instanceof Error ? err.message : String(err)}); continuing with installed v${check.installedVersion}.`,
-              )
-            }
-          } else {
-            consola.warn(
-              `Pi v${check.installedVersion} is installed; v${check.latestVersion} is available. Run with --auto-update (the default) to install on launch.`,
-            )
           }
         }
-      } catch (err) {
-        consola.debug("Pi version check failed:", err)
+        if (!meetsPiMinVersion(installedVersion)) {
+          consola.error(
+            `Installed Pi v${installedVersion} is below the supported floor. Upgrade: \`npm install -g @earendil-works/pi-coding-agent@latest\`.`,
+          )
+          process.exit(1)
+        }
+      } else {
+        // Healthy: freshness refreshes in the background (throttled npm
+        // probe, detached post-exit install when newer). Never blocks,
+        // never throws, never touches this session's validated install.
+        refreshPiInBackground({ autoUpdate })
       }
     }
 
@@ -272,6 +327,11 @@ export const pi = defineCommand({
     // skills or prompts — only what Pi ships plus the mode identity.
     const peersEnabled = (args as Record<string, unknown>)["peers"] !== false
     const sweEnabled = (args as Record<string, unknown>)["swe"] === true
+    const helpersEnabled = (args as Record<string, unknown>)["helpers"] !== false
+    const uiEnabled = (args as Record<string, unknown>)["ui"] !== false
+    const searchEnabled =
+      parsed.searchEnabled || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
+    const browseEnabled = browserToolsEnabled()
 
     // Pin-mode prerequisites against the live catalog (fail-closed).
     // Peerless launches validate the lead only (nothing else is consumed).
@@ -305,9 +365,6 @@ export const pi = defineCommand({
 
     // Generate the mode's Pi files into the mirror.
     try {
-      const searchEnabled =
-        parsed.searchEnabled || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
-      const browseEnabled = browserToolsEnabled()
       const catalog = state.models?.data.map((m) => {
         const cost = piUsdCostFor(m.billing?.token_prices)
         return {
@@ -317,6 +374,8 @@ export const pi = defineCommand({
           maxOutputTokens: m.capabilities?.limits?.max_output_tokens ?? 0,
           efforts: m.capabilities?.supports?.reasoning_effort ?? [],
           endpoints: m.supported_endpoints ?? [],
+          vision: m.capabilities?.supports?.vision,
+          maxImageBytes: m.capabilities?.limits?.vision?.max_prompt_image_size,
           ...(cost ? { cost } : {}),
         }
       })
@@ -342,14 +401,20 @@ export const pi = defineCommand({
       // user's entries win per-agent) so emitting our builtin disables never
       // wipes a user's own overrides — a shallow spread would replace the
       // whole object.
-      const builtSettings = buildPiSettingsJson({ profileId, searchEnabled, browseEnabled, catalog, peers: peersEnabled })
+      const builtSettings = buildPiSettingsJson({ profileId, searchEnabled, browseEnabled, catalog, peers: peersEnabled, helpers: helpersEnabled, ui: uiEnabled })
       const mergedSubagents = mergeSubagentsSettings(
         userSettings["subagents"],
         builtSettings.subagents,
       )
+      // Presentational keys stay user-customizable: a look the user set
+      // in their own settings (thinking visibility, Claude palette,
+      // one-line tool rows, terminal/images) wins over our defaults,
+      // while load-bearing keys stay built-wins (cost contract).
+      const cosmeticOverrides = applyCosmeticUserOverrides(userSettings, builtSettings)
       await writeJsonFile(settingsPath, {
         ...userSettings,
         ...builtSettings,
+        ...cosmeticOverrides,
         ...(mergedSubagents ? { subagents: mergedSubagents } : {}),
       })
 
@@ -538,12 +603,27 @@ export const pi = defineCommand({
     const extraArgs = collectPiPassthroughArgs(rawArgs, piArgs)
     const lead = piLeadModel(profileId)
     const modelIds = piProfileModelIds(profileId, { peers: peersEnabled })
-    const surface = [
-      `peers=${peersEnabled ? "on" : "off"}`,
-      `swe=${sweEnabled ? "on" : "off"}`,
-    ].join(" ")
+    // One elegant preamble (stderr, no reporter icons or timestamps).
+    // Replaces both the gated setup chatter and the old single line:
+    // same facts, three aligned lines.
     process.stderr.write(
-      `Server ready on ${serverUrl}, launching Pi (${profileId} lead ${lead}, models ${modelIds.length}, ${surface})...\n`,
+      `${buildPiLaunchCard({
+        version: getPackageVersion(),
+        profileId,
+        accountType: parsed.accountType,
+        login: state.githubUserLogin,
+        copilotVersion: state.copilotVersion,
+        vsCodeVersion: state.vsCodeVersion,
+        lead,
+        modelCount: modelIds.length,
+        peers: peersEnabled,
+        helpers: helpersEnabled && peersEnabled,
+        ui: uiEnabled,
+        swe: sweEnabled,
+        search: searchEnabled,
+        browse: browseEnabled,
+        serverUrl,
+      })}\n`,
     )
     if (sweEnabled && !peersEnabled) {
       process.stderr.write(

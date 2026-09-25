@@ -1,6 +1,6 @@
 {
   "name": "@animeshkundu/github-router",
-  "version": "0.3.320",
+  "version": "0.3.321",
   "license": "MIT",
   "description": "A reverse proxy that exposes GitHub Copilot as OpenAI and Anthropic compatible API endpoints.",
   "keywords": [
@@ -87,7 +87,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/bun": "^1.3.14",
+    "@types/bun": "^1.4.2",
     "@types/proxy-from-env": "^1.0.4",
     "@types/ws": "^8.18.1",
     "eslint": "^10.8.0",

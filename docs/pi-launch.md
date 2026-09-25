@@ -16,7 +16,16 @@ Roster notes: our `reviewer`/`oracle` agent files intentionally shadow the
 same-named pi-subagents builtins (pinned models); builtin
 `scout`/`worker`/`researcher`/`evidence-auditor` are disabled via settings
 (their habitual invocations resolve through our `scout`/`worker` aliases),
-while builtin `delegate` stays enabled as the cheap append-mode path.
+as are the external-CLI families `claude-code`/`codex-exec`/`cursor-agent`
+(+ `-writer` variants — they shell out to other CLIs with ambient auth,
+off-proxy and off-ledger), while builtin `delegate` stays enabled as the
+cheap append-mode path.
+Every emitted agent runs foreground (`async: false`): the detached
+background runner demonstrably drops `read`/`bash` from its tool registry
+(observed live as `requested unavailable child tools: [read, bash]`),
+failing every strict-allowlist child it touches. `contact_supervisor`
+appears only on `General-Purpose` (blocked-writer escalation); leaves
+never page the supervisor.
 `General-Purpose` may nest `reviewer`/`oracle`, balanced `reviewer` may nest
 `Explore` (ceiling raised to 3 via `PI_SUBAGENT_MAX_DEPTH`). Handoff is
 inline prose in the delegating brief — no `context.md`/`progress.md` file
@@ -42,6 +51,8 @@ plus the mode identity. Each surface rides a flag:
 | Flag | Default | Surface |
 |---|---|---|
 | `--peers` / `--no-peers` | **on** | Native agent files, oracle tool (+cheapest advisor), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
+| `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: `pi-mcp-adapter`, allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `files`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
+| `--ui` / `--no-ui` | **on** | Claude-Code look: genuine `claude-code-dark` theme (`#D77757` coral palette; all six CC variants pickable via `/settings`), fixed Claude palette in tool rows (`themeAdaptive: false`), one-line tool rows (`summary`/`count` modes), transparent tool backgrounds. Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag (the cc-ui `Thought for Xs` one-liner has no off switch upstream — it is the minimum). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
 | `--swe` | off | Pipeline surface: `gh-delegate` (+cheapest `gh-advisor`) skills, `review` / `parallel-review` (+cheapest `plan-review`) prompts |
 | `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill (tool and prose appear together or not at all) |
 | `--browse` | off | Browser tool surface when a supported browser is installed |
@@ -63,13 +74,18 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
 
 - **Right wire endpoint, not a provider hack.** The launcher writes a
   `gh-router` provider into the mirror's `models.json` with
-  `api: openai-responses` (per-model `api` override supported for a
-  future chat-served model), `baseUrl: <proxy>/v1`, and `authHeader`
+  `api: openai-responses` (per-model `api` override derives from catalog
+  endpoints for a future chat-served model), `baseUrl: <proxy>/v1`, and `authHeader`
   for the dummy bearer — Pi POSTs `/v1/responses`, the Codex-proven
   path. Every roster model is Responses-only on Copilot; sending them
   to `/v1/chat/completions` is an upstream 400 (observed live). Each
   row also carries `maxTokens` (catalog output cap, ≥16 floor the
-  proxy enforces), `cost` (USD/1M from live billing), and its
+  proxy enforces), `cost` (USD/1M from live billing), `input`
+  (`["text","image"]` when the catalog says vision — fail-open so
+  `@path`/`--file`/paste/`read` images work, with the proxy vision
+  preflight as backstop), `inputLimits.images.resize` (1568px/512KiB/q75
+  so Pi resizes before sending), `thinkingLevelMap` (catalog
+  `reasoning_effort` allowlist, unsupported tiers hidden), and its
   cheap-tier `contextWindow`. No `registerProvider` override, no
   proxy-side translation. Two Pi quirks discovered live and pinned by
   tests: tool schemas must be TypeBox `parameters` (plain-JSON
@@ -98,8 +114,23 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   the Pi-native analogue of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. The
   extension's `session_before_compact` handler observes only and always
   falls back to native.
-- **Pi lifecycle respected.** Version floor Pi ≥ 0.80.10 / Node ≥ 22.19
-  (`src/lib/pi-version-check.ts`, throttled hourly auto-install).
+- **Pi lifecycle respected.** Version floor Pi ≥ 0.87.1 / Node ≥ 22.19.
+  Startup never waits on npm: a fast local `pi --version` probe gates
+  the floor foreground; a missing Pi installs in parallel with server
+  boot (joined fail-closed before launch, aborted if setup fails); a
+  healthy install refreshes in the background (throttled hourly probe,
+  detached post-exit install when newer, cross-process locked, silent
+  on failure). Below-floor installs upgrade foreground and re-verify,
+  fail closed. `--no-update-check` skips the probe + refresh entirely
+  (offline/CI); `--no-auto-update` disables the background refresh
+  (the floor is still enforced).   Throttle state lives in
+  `~/.local/share/github-router/last-pi-update-check`.
+  Boot is quiet by design: with stored auth, setup chatter is held
+  back and one three-line card (version · account · lead/models/surface)
+  replaces it; `--verbose`/`--show-token` restore full logs, and
+  first-time device flow is never gated.
+  Parent env is stripped of Pi routing keys (`PI_CODING_AGENT_DIR`,
+  …) so a stale shell export can't re-route the session off the proxy.
   Parent env is stripped of Pi routing keys (`PI_CODING_AGENT_DIR`,
   …) so a stale shell export can't re-route the session off the proxy.
 
@@ -175,9 +206,16 @@ runner degrades to Pi's native footer, never a broken launch.
 - `src/lib/pi-paths.ts` — mirror lifecycle.
 - `src/lib/pi-version-check.ts` — install/update gate.
 
-## Claude-Code look (recipe, not bundled)
-
-Bare launches stay minimal per flag policy, and the `gh-router-pi` footer is router-owned (third-party footers lose). For a familiar look, install yourself — the `~/.pi/agent` snapshot carries it into the mirror automatically:
+## Claude-Code look (bundled by default)
+`pi-claude-code-ui` ships by default (`--no-ui` opts out): grouped rows,
+Shiki diffs, Ctrl+O previews. The TUI theme defaults to the genuine
+`claude-code-dark` palette (themes-only load from `better-claude-code-ui`
+— none of its status line, footer, or tool rendering loads, so the
+router-owned AIC footer is untouched; light-terminal users can pick
+`claude-code-light` via `/settings`). For the full Claude behavior set, install
+yourself — the `~/.pi/agent` snapshot carries it into the mirror automatically
+(`pi-code` itself stays out of the bundle: its `/memory` + `/context`
+commands would collide with the router-owned pair):
 
 ```bash
 pi install npm:pi-code            # Claude behavior: todos, /rewind, /memory, subagents, /context, /init
@@ -185,6 +223,35 @@ pi install npm:pi-claude-code-ui  # Claude transcript: grouped rows, Shiki diffs
 ```
 
 Alternatives: `@owlburtoe/pi-claudify` (closest `⏺`/`⎿` grammar), `cc-my-pi` (header + spinner + dark theme), `better-claude-code-ui` (6 themes + footer). Themes: `pi.dev/packages?type=theme`, `pi --theme <file>`, `/settings`.
+
+### Customizing the look
+
+Yes — every display default is overridable, at three levels:
+1. **Your settings win for display keys.** Anything you set in
+   `~/.pi/agent/settings.json` for these keys survives the launch
+   (snapshot-carried into the mirror, applied over our defaults):
+   `hideThinkingBlock`, `theme` (e.g. `claude-code-light` on light
+   terminals, or any installed theme), `themeAdaptive`,
+   `groupToolCalls`, `readOutputMode` (`summary`/`preview`/`hidden`),
+   `searchOutputMode` (`count`/`preview`/`hidden`),
+   `mcpOutputMode`, `bashOutputMode` (`summary`/`preview`/`opencode`),
+   `toolBackground`,    `terminal`, `images`, `markdown` (`mermaid: streaming` pinned).
+   Example:
+   `"hideThinkingBlock": false` shows thinking again;
+   `"readOutputMode": "preview"` restores expanded reads. Load-bearing keys (models, tools, thinking levels,
+   compaction, retry, packages) always stay router-owned — those are
+   the cost contract, not a preference.
+2. **Kill-switch:** `--no-ui` drops the whole transcript package.
+3. **Runtime toggles (this session):** `/settings` (thinking, theme),
+   `/cc-theme on|off|toggle` (Claude palette vs Pi theme),
+   `/cc-tools thinking|group|outlines` (thinking expansion, grouping,
+   chrome), `/cc-spinner` (spinner colors).
+
+Rich rendering never costs tokens: mermaid diagrams stream in the TUI
+(`markdown.mermaid: streaming`, pinned), pasted/dragged images display
+inline (`terminal.showImages`, kitty/iTerm2 auto-detect), and diffs
+render via Shiki in `pi-claude-code-ui`. All three are display-side —
+they change zero bytes on the wire to the model.
 
 ## Verification
 
@@ -196,3 +263,17 @@ bun run typecheck && bun run lint:all && bun run build
 Spike note: Pi 0.87.1 (latest at time of writing) vs the vendored
 worker runtime pin v0.82.0 — the launcher uses the installed Pi and is
 independent of the vendor tree.
+
+## Helpful bundle (exclusion guardrails)
+
+`--helpers` (default on, peers-gated) wires `pi-mcp-adapter`,
+allowlisted `pi-agent-extensions`, and conditional `pi-web-access`
+(all extensions-only filtered: `skills: []`, `prompts: []`, so
+third-party prose never reaches Ctrl+O). Deliberately excluded:
+`review`/`loop`/`workflow`/`control` (overlap our delegate/review
+pipeline), any footer/statusline package (router owns the AIC footer
+via `gh-router-pi`), compaction replacers (`session_before_compact`
+stays observe-only), and provider/model overriders (would break the
+fixed-roster cost contract). `--ui` opts into `pi-code` +
+`pi-claude-code-ui`; `pi-lean-ctx` stays a docs recipe until its
+manifest paths are pinned.
