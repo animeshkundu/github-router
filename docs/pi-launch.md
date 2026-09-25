@@ -123,8 +123,12 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   on failure). Below-floor installs upgrade foreground and re-verify,
   fail closed. `--no-update-check` skips the probe + refresh entirely
   (offline/CI); `--no-auto-update` disables the background refresh
-  (the floor is still enforced). Throttle state lives in
+  (the floor is still enforced).   Throttle state lives in
   `~/.local/share/github-router/last-pi-update-check`.
+  Boot is quiet by design: with stored auth, setup chatter is held
+  back and one three-line card (version · account · lead/models/surface)
+  replaces it; `--verbose`/`--show-token` restore full logs, and
+  first-time device flow is never gated.
   Parent env is stripped of Pi routing keys (`PI_CODING_AGENT_DIR`,
   …) so a stale shell export can't re-route the session off the proxy.
   Parent env is stripped of Pi routing keys (`PI_CODING_AGENT_DIR`,

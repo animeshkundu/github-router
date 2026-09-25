@@ -15,6 +15,7 @@ import {
   parseSharedArgs,
   getClaudeCodeEnvVars,
   getCodexEnvVars,
+  getPiLaunchEnvVars,
   withBodyLimit,
 } from "../src/lib/server-setup"
 
@@ -1437,5 +1438,39 @@ describe("budget-mode lead and small/fast tier", () => {
         else process.env.ANTHROPIC_SMALL_FAST_MODEL = prior
       }
     })
+  })
+})
+
+describe("getPiLaunchEnvVars npm quiet", () => {
+  test("mirror npm installs run quiet by default, errors still visible", () => {
+    const prior = process.env.GH_ROUTER_PI_VERBOSE_NPM
+    delete process.env.GH_ROUTER_PI_VERBOSE_NPM
+    try {
+      const vars = getPiLaunchEnvVars("/tmp/mirror")
+      expect(vars.PI_CODING_AGENT_DIR).toBe("/tmp/mirror")
+      // loglevel=error keeps genuine failures visible; audit/fund/notifier
+      // are pure boot noise (and audit costs time on every launch).
+      expect(vars.npm_config_loglevel).toBe("error")
+      expect(vars.npm_config_audit).toBe("false")
+      expect(vars.npm_config_fund).toBe("false")
+      expect(vars.npm_config_update_notifier).toBe("false")
+    } finally {
+      if (prior === undefined) delete process.env.GH_ROUTER_PI_VERBOSE_NPM
+      else process.env.GH_ROUTER_PI_VERBOSE_NPM = prior
+    }
+  })
+
+  test("GH_ROUTER_PI_VERBOSE_NPM=1 restores stock npm output", () => {
+    const prior = process.env.GH_ROUTER_PI_VERBOSE_NPM
+    process.env.GH_ROUTER_PI_VERBOSE_NPM = "1"
+    try {
+      const vars = getPiLaunchEnvVars("/tmp/mirror")
+      expect(vars.PI_CODING_AGENT_DIR).toBe("/tmp/mirror")
+      expect(vars).not.toHaveProperty("npm_config_loglevel")
+      expect(vars).not.toHaveProperty("npm_config_audit")
+    } finally {
+      if (prior === undefined) delete process.env.GH_ROUTER_PI_VERBOSE_NPM
+      else process.env.GH_ROUTER_PI_VERBOSE_NPM = prior
+    }
   })
 })

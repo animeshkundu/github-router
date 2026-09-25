@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto"
+import { existsSync } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import process from "node:process"
@@ -29,6 +30,7 @@ import {
   applyCosmeticUserOverrides,
   buildPiAgentFiles,
   buildPiAppendSystem,
+  buildPiLaunchCard,
   buildPiModelsJson,
   buildPiSettingsJson,
   mergeSubagentsSettings,
@@ -39,11 +41,13 @@ import {
 } from "./lib/pi-models-settings"
 import { launchChild } from "./lib/launch"
 import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
+import { PATHS } from "./lib/paths"
 import { state } from "./lib/state"
 import { runSelfUpdate } from "./lib/self-update"
 import { enableFileLogging } from "./lib/file-log-reporter"
 import { toolbeltEnabled } from "./lib/toolbelt"
 import { provisionToolbelt } from "./lib/toolbelt/provision"
+import { getPackageVersion } from "./lib/version"
 import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
@@ -241,13 +245,28 @@ export const pi = defineCommand({
       }
     }
     try {
-      const result = await setupAndServe({
-        ...parsed,
-        port: parsed.port,
-        silent: true,
-      })
-      server = result.server
-      serverUrl = result.serverUrl
+      // Quiet boot: with stored auth there is no interactive flow to
+      // display, so info-level setup chatter (versions, re-login,
+      // token refreshes) is held back and the launch card below carries
+      // the same facts elegantly. Warn+error always show. Skipped for
+      // explicit --verbose/--show-token, and never applied without
+      // stored auth (first-time device flow must stay visible).
+      const quietBoot =
+        existsSync(PATHS.GITHUB_TOKEN_PATH) && !parsed.verbose && !parsed.showToken
+      const priorLevel = consola.level
+      if (quietBoot) consola.level = 1
+      let setupResult: Awaited<ReturnType<typeof setupAndServe>>
+      try {
+        setupResult = await setupAndServe({
+          ...parsed,
+          port: parsed.port,
+          silent: true,
+        })
+      } finally {
+        if (quietBoot) consola.level = priorLevel
+      }
+      server = setupResult.server
+      serverUrl = setupResult.serverUrl
     } catch (error) {
       pendingInstall.abort?.()
       consola.error("Failed to start server:", error instanceof Error ? error.message : error)
@@ -310,6 +329,9 @@ export const pi = defineCommand({
     const sweEnabled = (args as Record<string, unknown>)["swe"] === true
     const helpersEnabled = (args as Record<string, unknown>)["helpers"] !== false
     const uiEnabled = (args as Record<string, unknown>)["ui"] !== false
+    const searchEnabled =
+      parsed.searchEnabled || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
+    const browseEnabled = browserToolsEnabled()
 
     // Pin-mode prerequisites against the live catalog (fail-closed).
     // Peerless launches validate the lead only (nothing else is consumed).
@@ -343,9 +365,6 @@ export const pi = defineCommand({
 
     // Generate the mode's Pi files into the mirror.
     try {
-      const searchEnabled =
-        parsed.searchEnabled || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
-      const browseEnabled = browserToolsEnabled()
       const catalog = state.models?.data.map((m) => {
         const cost = piUsdCostFor(m.billing?.token_prices)
         return {
@@ -584,14 +603,27 @@ export const pi = defineCommand({
     const extraArgs = collectPiPassthroughArgs(rawArgs, piArgs)
     const lead = piLeadModel(profileId)
     const modelIds = piProfileModelIds(profileId, { peers: peersEnabled })
-    const surface = [
-      `peers=${peersEnabled ? "on" : "off"}`,
-      `helpers=${helpersEnabled && peersEnabled ? "on" : "off"}`,
-      `ui=${uiEnabled ? "on" : "off"}`,
-      `swe=${sweEnabled ? "on" : "off"}`,
-    ].join(" ")
+    // One elegant preamble (stderr, no reporter icons or timestamps).
+    // Replaces both the gated setup chatter and the old single line:
+    // same facts, three aligned lines.
     process.stderr.write(
-      `Server ready on ${serverUrl}, launching Pi (${profileId} lead ${lead}, models ${modelIds.length}, ${surface})...\n`,
+      `${buildPiLaunchCard({
+        version: getPackageVersion(),
+        profileId,
+        accountType: parsed.accountType,
+        login: state.githubUserLogin,
+        copilotVersion: state.copilotVersion,
+        vsCodeVersion: state.vsCodeVersion,
+        lead,
+        modelCount: modelIds.length,
+        peers: peersEnabled,
+        helpers: helpersEnabled && peersEnabled,
+        ui: uiEnabled,
+        swe: sweEnabled,
+        search: searchEnabled,
+        browse: browseEnabled,
+        serverUrl,
+      })}\n`,
     )
     if (sweEnabled && !peersEnabled) {
       process.stderr.write(

@@ -1166,6 +1166,52 @@ export function buildPiAgentFiles(
   return files;
 }
 
+export interface PiLaunchCardOpts {
+  version: string
+  profileId: PiProfileId
+  accountType: string
+  /** GitHub login; omitted when setup never resolved it. */
+  login?: string
+  copilotVersion?: string
+  vsCodeVersion?: string
+  lead: string
+  modelCount: number
+  peers: boolean
+  helpers: boolean
+  ui: boolean
+  swe: boolean
+  search: boolean
+  browse: boolean
+  serverUrl: string
+}
+
+/**
+ * One elegant three-line launch summary for the `pi` preamble,
+ * written directly to stderr (no reporter icons or timestamps).
+ * Missing facts are omitted, never printed as blanks — a first run
+ * that never resolved versions still renders cleanly.
+ */
+export function buildPiLaunchCard(opts: PiLaunchCardOpts): string {
+  const surface: Array<string> = []
+  surface.push(opts.peers ? "peers" : "peerless")
+  if (opts.peers && opts.helpers) surface.push("helpers")
+  if (opts.ui) surface.push("ui")
+  if (opts.swe) surface.push("swe")
+  if (opts.search) surface.push("search")
+  if (opts.browse) surface.push("browse")
+  const identity = [
+    opts.accountType,
+    opts.login,
+    opts.copilotVersion ? `copilot chat ${opts.copilotVersion}` : undefined,
+    opts.vsCodeVersion ? `vscode ${opts.vsCodeVersion}` : undefined,
+  ].filter((part): part is string => typeof part === "string" && part.length > 0)
+  return [
+    `github-router v${opts.version} · pi (${opts.profileId})`,
+    `  ${identity.join(" · ")}`,
+    `  lead ${opts.lead} · ${opts.modelCount} models · ${surface.join(" ")} · ${opts.serverUrl}`,
+  ].join("\n")
+}
+
 /**
  * Short operating digest appended to APPEND_SYSTEM.md (prompt-cache-stable).
  * Mode identity — always injected. Peer consult sentences drop out under

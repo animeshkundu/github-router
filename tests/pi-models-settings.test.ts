@@ -9,6 +9,7 @@ import {
   applyCosmeticUserOverrides,
   buildPiAgentFiles,
   buildPiAppendSystem,
+  buildPiLaunchCard,
   buildPiModelsJson,
   buildPiSettingsJson,
   derivePiCompactionSettings,
@@ -406,6 +407,58 @@ describe("pi cosmetic user overrides", () => {
       built(),
     )
     expect(overrides).toEqual({ markdown: { mermaid: "off" }, collapseChangelog: false })
+  })
+})
+
+describe("pi launch card", () => {
+  const full = {
+    version: "0.3.321",
+    profileId: "cheapest" as const,
+    accountType: "enterprise",
+    login: "animeshkundu",
+    copilotVersion: "0.48.1",
+    vsCodeVersion: "1.139.0",
+    lead: "gpt-6-luna",
+    modelCount: 2,
+    peers: true,
+    helpers: true,
+    ui: true,
+    swe: false,
+    search: true,
+    browse: false,
+    serverUrl: "http://127.0.0.1:59088",
+  }
+
+  test("three aligned lines, no timestamps or icons", () => {
+    const card = buildPiLaunchCard(full)
+    expect(card).toBe(
+      [
+        "github-router v0.3.321 · pi (cheapest)",
+        "  enterprise · animeshkundu · copilot chat 0.48.1 · vscode 1.139.0",
+        "  lead gpt-6-luna · 2 models · peers helpers ui search · http://127.0.0.1:59088",
+      ].join("\n"),
+    )
+  })
+
+  test("peerless collapses the surface, missing facts omitted cleanly", () => {
+    const card = buildPiLaunchCard({
+      ...full,
+      peers: false,
+      helpers: false,
+      ui: false,
+      search: false,
+      browse: false,
+      login: undefined,
+      copilotVersion: undefined,
+      vsCodeVersion: undefined,
+    })
+    expect(card).toBe(
+      [
+        "github-router v0.3.321 · pi (cheapest)",
+        "  enterprise",
+        "  lead gpt-6-luna · 2 models · peerless · http://127.0.0.1:59088",
+      ].join("\n"),
+    )
   })
 })
 
