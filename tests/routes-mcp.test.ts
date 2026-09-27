@@ -844,7 +844,7 @@ describe("/mcp tools/call routing", () => {
     return captured
   }
 
-  test("codex_critic call hits /responses with model=gpt-6-sol and persona instructions", async () => {
+  test("codex_critic call hits /responses with model=gpt-5.6-sol and persona instructions", async () => {
     const captured = mockResponsesUpstream("no material objection")
     const { status, json } = await rpc({
       jsonrpc: "2.0",
@@ -863,7 +863,7 @@ describe("/mcp tools/call routing", () => {
       stream?: boolean
       reasoning?: { effort?: string }
     }
-    expect(upstream.model).toBe("gpt-6-sol")
+    expect(upstream.model).toBe("gpt-5.6-sol")
     expect(upstream.instructions).toContain("codex-critic")
     expect(upstream.instructions).toContain("1–5") // grading rubric
     expect(upstream.stream).toBe(false)
@@ -1536,7 +1536,7 @@ describe("/mcp stand_in tool", () => {
     state.models = {
       object: "list",
       data: [
-        capable("gpt-6-sol", 1_050_000, "/responses", "openai"),
+        capable("gpt-5.6-sol", 1_050_000, "/responses", "openai"),
         capable("gpt-5.3-codex", 400_000, "/responses", "openai"),
         capable("claude-opus-5.5", 1_000_000, "/v1/messages", "anthropic", true),
         capable("claude-sonnet-5", 1_000_000, "/v1/messages", "anthropic", true),
@@ -1617,7 +1617,7 @@ describe("/mcp stand_in tool", () => {
     state.models = {
       object: "list",
       data: [
-        capable("gpt-6-sol", 1_050_000, "/responses", "openai"),
+        capable("gpt-5.6-sol", 1_050_000, "/responses", "openai"),
         capable("claude-opus-5.5", 1_000_000, "/v1/messages", "anthropic"),
         capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions", "google"),
         capable("gemini-3.8-flash", 1_000_000, "/chat/completions", "google"),
@@ -2658,7 +2658,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
             ![
               "gpt-5.4-mini",
               "gpt-5.5",
-              "gpt-6-sol",
+              "gpt-5.6-sol",
               "gemini-3.1-pro-preview",
               "gpt-6-luna",
             ].includes(m.id),
@@ -2672,7 +2672,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
           reasoning_effort: ["minimal", "low", "medium", "high"],
         }),
         // implement default (routes to /responses)
-        fakeWorkerModel("gpt-6-sol", {
+        fakeWorkerModel("gpt-5.6-sol", {
           reasoning_effort: ["none", "low", "medium", "high", "xhigh"],
         }),
         // retained OpenAI fallback + explicit-model fixture
@@ -2720,7 +2720,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
           workspace: process.cwd(),
           // Pin a chat-endpoint model so the chat-SSE mock applies — this
           // test covers the in-place implement path, not the implement
-          // default (gpt-6-sol, which routes to /responses).
+          // default (gpt-5.6-sol, which routes to /responses).
           model: "gemini-3.1-pro-preview",
         },
       },
@@ -2748,7 +2748,7 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
           prompt: "fix the typo",
           worktree: true,
           workspace: process.cwd(),
-          // Chat-endpoint pin (see above) — gpt-6-sol default routes to
+          // Chat-endpoint pin (see above) — gpt-5.6-sol default routes to
           // /responses, which the chat-SSE mock doesn't serve.
           model: "gemini-3.1-pro-preview",
         },
@@ -3089,11 +3089,11 @@ describe("/mcp peer prompt-window guard", () => {
   }
 
   test("rejects a brief that exceeds the persona model's prompt window (no upstream call)", async () => {
-    // gpt-6-sol with a deliberately tiny 200-token window; send a brief far
+    // gpt-5.6-sol with a deliberately tiny 200-token window; send a brief far
     // larger so the exact o200k count busts it.
     state.models = {
       object: "list",
-      data: [modelWith("gpt-6-sol", 200, ["/v1/responses"])],
+      data: [modelWith("gpt-5.6-sol", 200, ["/v1/responses"])],
     }
     const captured = mockResponses("should-not-be-called")
     const { status, json } = await rpc({
@@ -3117,7 +3117,7 @@ describe("/mcp peer prompt-window guard", () => {
   test("allows a brief that fits the window (reaches upstream)", async () => {
     state.models = {
       object: "list",
-      data: [modelWith("gpt-6-sol", 900_000, ["/v1/responses"])],
+      data: [modelWith("gpt-5.6-sol", 900_000, ["/v1/responses"])],
     }
     const captured = mockResponses("ok")
     const { json } = await rpc({

@@ -11,13 +11,13 @@ import type { LaunchProfileId } from "~/lib/launch-profile"
 import { state } from "~/lib/state"
 
 const STANDARD_IDS = [
-  "gpt-6-sol",
+  "gpt-5.6-sol",
   "gpt-6-luna",
   "gemini-3.8-flash",
   "grok-4.6",
 ] as const
 const MAX_IDS = [
-  "gpt-6-sol",
+  "gpt-5.6-sol",
   "gpt-6-luna",
   "gemini-3.8-flash",
   "claude-opus-5.5",
@@ -54,7 +54,7 @@ function setCatalog(entries: Record<string, number>): void {
 }
 
 const WINDOWS: Record<string, number> = {
-  "gpt-6-sol": 1_050_000,
+  "gpt-5.6-sol": 1_050_000,
   "gpt-6-luna": 1_050_000,
   "gemini-3.8-flash": 1_000_000,
   "grok-4.6": 500_000,
@@ -89,14 +89,14 @@ describe("selectableModelsInCatalog", () => {
   test("gates rows on the live catalog and keeps Standard and Fast aligned", () => {
     setCatalog(WINDOWS)
     expect(ids("standard")).toEqual([
-      "gpt-6-sol[1m]",
+      "gpt-5.6-sol[1m]",
       "gpt-6-luna[1m]",
       "gemini-3.8-flash[1m]",
       "grok-4.6",
     ])
     expect(ids("fast")).toEqual(ids("standard"))
     expect(selectableModelsInCatalog("standard").map((row) => row.label)).toEqual([
-      "GPT-6 Sol",
+      "GPT-5.6 Sol",
       "GPT-6 Luna",
       "Gemini 3.8 Flash",
       "Grok 4.6",
@@ -109,7 +109,7 @@ describe("selectableModelsInCatalog", () => {
   test("uses the exact Max lineup and excludes Grok from lead selection", () => {
     setCatalog(WINDOWS)
     expect(ids("max")).toEqual([
-      "gpt-6-sol[1m]",
+      "gpt-5.6-sol[1m]",
       "gpt-6-luna[1m]",
       "gemini-3.8-flash[1m]",
       "claude-opus-5.5[1m]",
@@ -140,13 +140,13 @@ describe("selectableModelsInCatalog", () => {
     // at the request layer (bare lead strip + bare subagent aliases).
     setCatalog(WINDOWS)
     expect(ids("standard")).toEqual([
-      "gpt-6-sol[1m]",
+      "gpt-5.6-sol[1m]",
       "gpt-6-luna[1m]",
       "gemini-3.8-flash[1m]",
       "grok-4.6",
     ])
     const cheapWithLuna1M = [
-      "gpt-6-sol",
+      "gpt-5.6-sol",
       "gpt-6-luna[1m]",
       "gemini-3.8-flash",
       "grok-4.6",
@@ -164,13 +164,13 @@ describe("selectableModelsInCatalog", () => {
       "gpt-6-luna[1m]",
     ])
     expect(selectableModelsInCatalog("cheap").map((row) => row.label)).toEqual([
-      "GPT-6 Sol",
+      "GPT-5.6 Sol",
       "GPT-6 Luna",
       "Gemini 3.8 Flash",
       "Grok 4.6",
     ])
     expect(selectableModelsInCatalog("cheap1m").map((row) => row.label)).toEqual([
-      "GPT-6 Sol",
+      "GPT-5.6 Sol",
       "GPT-6 Luna",
       "Gemini 3.8 Flash",
       "Grok 4.6",
@@ -180,11 +180,11 @@ describe("selectableModelsInCatalog", () => {
   test("cheapest and balanced also exempt only Luna from the 200K pin", () => {
     setCatalog(WINDOWS)
     expect(ids("cheapest")).toEqual([
-      "gpt-6-sol",
+      "gpt-5.6-sol",
       "gpt-6-luna[1m]",
     ])
     expect(ids("balanced")).toEqual([
-      "gpt-6-sol",
+      "gpt-5.6-sol",
       "gpt-6-luna[1m]",
       "grok-4.6",
     ])
@@ -197,13 +197,13 @@ describe("selectableModelsInCatalog", () => {
 
   test("Luna exemption follows the catalog gate and the 1M opt-out", () => {
     // Luna absent → row omitted everywhere including cheap/balanced.
-    setCatalog({ "gpt-6-sol": 1_050_000 })
+    setCatalog({ "gpt-5.6-sol": 1_050_000 })
     for (const profile of ["cheap", "balanced", "standard"] as const) {
       expect(ids(profile)).not.toContain("gpt-6-luna")
       expect(ids(profile)).not.toContain("gpt-6-luna[1m]")
     }
     // Luna sub-1M → bare row even where exempt.
-    setCatalog({ "gpt-6-sol": 1_050_000, "gpt-6-luna": 500_000 })
+    setCatalog({ "gpt-5.6-sol": 1_050_000, "gpt-6-luna": 500_000 })
     for (const profile of ["cheap", "balanced", "standard"] as const) {
       expect(ids(profile)).toContain("gpt-6-luna")
       expect(ids(profile)).not.toContain("gpt-6-luna[1m]")
@@ -233,8 +233,8 @@ describe("selectableModelsInCatalog", () => {
     setCatalog(WINDOWS)
     for (
       const [profile, expected] of [
-        ["cheapest", ["gpt-6-sol", "gpt-6-luna[1m]"]],
-        ["balanced", ["gpt-6-sol", "gpt-6-luna[1m]", "grok-4.6"]],
+        ["cheapest", ["gpt-5.6-sol", "gpt-6-luna[1m]"]],
+        ["balanced", ["gpt-5.6-sol", "gpt-6-luna[1m]", "grok-4.6"]],
       ] as const
     ) {
       const result = await injectModelPickerSettingsFile(settingsPath, profile)
@@ -299,7 +299,7 @@ describe("injectModelPickerSettingsFile", () => {
     const result = await injectModelPickerSettingsFile(settingsPath, "cheap")
     expect(result.written).toBe(true)
     expect(result.models).toEqual([
-      "gpt-6-sol",
+      "gpt-5.6-sol",
       "gpt-6-luna[1m]",
       "gemini-3.8-flash",
       "grok-4.6",
@@ -310,7 +310,7 @@ describe("injectModelPickerSettingsFile", () => {
     const settings = await read()
     const options = (settings.modelPicker as { options: Array<Record<string, unknown>> }).options
     expect(options.map((option) => option.model)).toEqual([
-      "gpt-6-sol",
+      "gpt-5.6-sol",
       "gpt-6-luna[1m]",
       "gemini-3.8-flash",
       "grok-4.6",
@@ -328,7 +328,7 @@ describe("injectModelPickerSettingsFile", () => {
     const result = await injectModelPickerSettingsFile(settingsPath, "cheap1m")
     expect(result.written).toBe(true)
     expect(result.models).toEqual([
-      "gpt-6-sol",
+      "gpt-5.6-sol",
       "gpt-6-luna[1m]",
       "gemini-3.8-flash",
       "grok-4.6",
@@ -339,7 +339,7 @@ describe("injectModelPickerSettingsFile", () => {
     const settings = await read()
     const options = (settings.modelPicker as { options: Array<Record<string, unknown>> }).options
     expect(options.map((option) => option.model)).toEqual([
-      "gpt-6-sol",
+      "gpt-5.6-sol",
       "gpt-6-luna[1m]",
       "gemini-3.8-flash",
       "grok-4.6",

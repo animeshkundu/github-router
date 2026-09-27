@@ -127,7 +127,7 @@ mock.module("~/lib/port", () => ({
   },
   // launch.ts imports DEFAULT_CODEX_MODEL transitively via claude.ts → launchChild;
   // re-export it so the module mock doesn't break sibling imports.
-  DEFAULT_CODEX_MODEL: "gpt-6-sol",
+  DEFAULT_CODEX_MODEL: "gpt-5.6-sol",
   DEFAULT_CODEX_MODEL_FALLBACKS: ["gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"],
   DEFAULT_PORT: 8787,
   // The worker-agent surface (registered via peer-mcp-personas → tools.ts →
@@ -261,7 +261,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // is selected; stubbed here so the static import graph resolves for
   // every other test in this file too).
   fastScoutModel: mock(() => "gpt-6-luna"),
-  fastPlanModel: mock(() => "gpt-6-sol"),
+  fastPlanModel: mock(() => "gpt-5.6-sol"),
   fastGeneralPurposeModel: mock(() => "gpt-6-luna"),
   fastImplementerModel: mock(() => "gemini-3.8-flash"),
   fastReviewerModel: mock(() => "claude-sonnet-5"),
@@ -271,18 +271,18 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // Cheap-profile resolvers (only exercised under `-m cheap`); stubbed so the
   // static import graph used by mcp/handler.ts resolves for every test here.
   cheapOracleModel: mock(() => "grok-4.6"),
-  cheapAdvisorModel: mock(() => "gpt-6-sol"),
+  cheapAdvisorModel: mock(() => "gpt-5.6-sol"),
   cheapReviewerModel: mock(() => "gpt-6-luna"),
   cheapAstraModel: mock(() => "gpt-6-astra"),
   // Cheapest-profile resolvers (only exercised under `-m cheapest`); stubbed
   // for the same static-import-graph reason as the cheap entries above.
-  cheapestOracleModel: mock(() => "gpt-6-sol"),
-  cheapestAdvisorModel: mock(() => "gpt-6-sol"),
-  cheapestReviewerModel: mock(() => "gpt-6-sol"),
+  cheapestOracleModel: mock(() => "gpt-5.6-sol"),
+  cheapestAdvisorModel: mock(() => "gpt-5.6-sol"),
+  cheapestReviewerModel: mock(() => "gpt-5.6-sol"),
   // Balanced-profile resolvers (only exercised under `-m balanced`); stubbed
   // for the same static-import-graph reason as the cheap entries above.
   balancedOracleModel: mock(() => "grok-4.6"),
-  balancedReviewerModel: mock(() => "gpt-6-sol"),
+  balancedReviewerModel: mock(() => "gpt-5.6-sol"),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
   FAST_GENERAL_PURPOSE_EFFORT: "max",
@@ -290,7 +290,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   FAST_REVIEWER_EFFORT: "xhigh",
   // stand-in.ts (pulled in transitively via handler.ts) imports this;
   // stub it so the module mock doesn't break that import.
-  resolveOpenAiFrontier: mock(() => "gpt-6-sol"),
+  resolveOpenAiFrontier: mock(() => "gpt-5.6-sol"),
 }))
 
 // The CLAUDE.md append + prepend helpers are the new descendant-reach
@@ -711,7 +711,7 @@ describe("claude command", () => {
           supported_endpoints: ["/responses"],
         },
         {
-          id: "gpt-6-sol",
+          id: "gpt-5.6-sol",
           capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
           supported_endpoints: ["/responses"],
         },
@@ -765,7 +765,7 @@ describe("claude command", () => {
           supported_endpoints: ["/responses"],
         },
         {
-          id: "gpt-6-sol",
+          id: "gpt-5.6-sol",
           capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
           supported_endpoints: ["/responses"],
         },
@@ -823,7 +823,7 @@ describe("claude command", () => {
           supported_endpoints: ["/responses"],
         },
         {
-          id: "gpt-6-sol",
+          id: "gpt-5.6-sol",
           capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
           supported_endpoints: ["/responses"],
         },
@@ -878,7 +878,7 @@ describe("claude command", () => {
           supported_endpoints: ["/responses"],
         },
         {
-          id: "gpt-6-sol",
+          id: "gpt-5.6-sol",
           capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
           supported_endpoints: ["/responses"],
         },
@@ -911,7 +911,7 @@ describe("claude command", () => {
     const [, args] = spawnMock.mock.calls[0]
     const advisorAt = args.indexOf("--advisor")
     expect(advisorAt).toBeGreaterThanOrEqual(0)
-    expect(args[advisorAt + 1]).toBe("gpt-6-sol[1m]")
+    expect(args[advisorAt + 1]).toBe("gpt-5.6-sol[1m]")
     expect(args.filter((arg: string) => arg === "--advisor")).toHaveLength(1)
     expect(args.some((arg: string) => arg.startsWith("--advisor="))).toBe(false)
     expect(args).not.toContain("opus")
@@ -929,7 +929,7 @@ describe("claude command", () => {
           supported_endpoints: ["/responses"],
         },
         {
-          id: "gpt-6-sol",
+          id: "gpt-5.6-sol",
           capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
           supported_endpoints: ["/responses"],
         },
@@ -962,7 +962,7 @@ describe("claude command", () => {
     const [, args] = spawnMock.mock.calls[0]
     const advisorAt = args.indexOf("--advisor")
     expect(advisorAt).toBeGreaterThanOrEqual(0)
-    expect(args[advisorAt + 1]).toBe("gpt-6-sol")
+    expect(args[advisorAt + 1]).toBe("gpt-5.6-sol")
     expect(args.filter((arg: string) => arg === "--advisor")).toHaveLength(1)
     expect(args.some((arg: string) => arg.startsWith("--advisor="))).toBe(false)
     expect(args).not.toContain("opus")
@@ -980,7 +980,7 @@ describe("claude command", () => {
           supported_endpoints: ["/responses"],
         },
         {
-          id: "gpt-6-sol",
+          id: "gpt-5.6-sol",
           capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
           supported_endpoints: ["/responses"],
         },
@@ -1013,7 +1013,7 @@ describe("claude command", () => {
     const [, args] = spawnMock.mock.calls[0]
     const advisorAt = args.indexOf("--advisor")
     expect(advisorAt).toBeGreaterThanOrEqual(0)
-    expect(args[advisorAt + 1]).toBe("gpt-6-sol")
+    expect(args[advisorAt + 1]).toBe("gpt-5.6-sol")
     expect(args.filter((arg: string) => arg === "--advisor")).toHaveLength(1)
     expect(args.some((arg: string) => arg.startsWith("--advisor="))).toBe(false)
     expect(args).not.toContain("opus")
@@ -1027,7 +1027,7 @@ describe("claude command", () => {
       object: "list",
       data: [
         { id: "gpt-6-luna", capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max"] } }, supported_endpoints: ["/responses"] },
-        { id: "gpt-6-sol", capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } }, supported_endpoints: ["/responses"] },
+        { id: "gpt-5.6-sol", capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } }, supported_endpoints: ["/responses"] },
         { id: "claude-opus-5.5", capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } }, supported_endpoints: ["/v1/messages"] },
         { id: "claude-sonnet-5", capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } }, supported_endpoints: ["/v1/messages"] },
         { id: "gemini-3.8-flash", capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } }, supported_endpoints: ["/v1/chat/completions"] },
@@ -1055,7 +1055,7 @@ describe("claude command", () => {
           supported_endpoints: ["/responses"],
         },
         {
-          id: "gpt-6-sol",
+          id: "gpt-5.6-sol",
           capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
           supported_endpoints: ["/responses"],
         },
@@ -1506,7 +1506,7 @@ describe("claude command", () => {
             supported_endpoints: ["/responses"],
           },
           {
-            id: "gpt-6-sol",
+            id: "gpt-5.6-sol",
             capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
             supported_endpoints: ["/responses"],
           },
@@ -1558,7 +1558,7 @@ describe("claude command", () => {
       expect(opts.workerToolsAvailable).toBe(false)
       expect(opts.browseAvailable).toBe(false)
       expect(opts.fastExploreModel).toBe("gpt-6-luna")
-      expect(opts.fastPlanModel).toBe("gpt-6-sol")
+      expect(opts.fastPlanModel).toBe("gpt-5.6-sol")
       expect(opts.fastGeneralPurposeModel).toBe("gpt-6-luna")
       expect(opts.fastImplementerModel).toBeUndefined()
       expect(opts.fastReviewerModel).toBe("claude-sonnet-5")
@@ -1770,7 +1770,7 @@ describe("claude command", () => {
             supported_endpoints: ["/responses"],
           },
           {
-            id: "gpt-6-sol",
+            id: "gpt-5.6-sol",
             capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
             supported_endpoints: ["/responses"],
           },
@@ -1813,7 +1813,7 @@ describe("claude command", () => {
             supported_endpoints: ["/responses"],
           },
           {
-            id: "gpt-6-sol",
+            id: "gpt-5.6-sol",
             capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
             supported_endpoints: ["/responses"],
           },
@@ -2009,7 +2009,7 @@ describe("claude command", () => {
         object: "list",
         data: [
           {
-            id: "gpt-6-sol",
+            id: "gpt-5.6-sol",
             capabilities: { limits: { max_context_window_tokens: 1_050_000, max_prompt_tokens: 900_000, max_output_tokens: 32_000 }, supports: { tool_calls: true, reasoning_effort: ["high"] } },
             supported_endpoints: ["/responses"],
           },
@@ -2053,7 +2053,7 @@ describe("claude command", () => {
       expect(opts.maxProfile).toBe(true)
       expect(opts.workerToolsAvailable).toBe(false)
       expect(opts.maxImplementerModel).toBe("gemini-3.8-flash")
-      expect(opts.maxPlanModel).toBe("gpt-6-sol")
+      expect(opts.maxPlanModel).toBe("gpt-5.6-sol")
       expect(opts.maxReviewerModel).toBe("claude-sonnet-5")
       expect(opts.maxReviewerEffort).toBe("xhigh")
       expect(buildMaxDispatchGuardHookCommandMock).toHaveBeenCalledWith(
@@ -2061,7 +2061,7 @@ describe("claude command", () => {
         { reviewerModel: "claude-sonnet-5", reviewerEffort: "xhigh" },
       )
       expect(opts.maxPeerModels).toEqual(expect.objectContaining({
-        sol: "gpt-6-sol",
+        sol: "gpt-5.6-sol",
         codex: undefined,
         sonnet: "claude-sonnet-5",
         opus: "claude-opus-5.5",

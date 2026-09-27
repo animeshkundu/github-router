@@ -44,10 +44,10 @@ describe("pi cheapest profile", () => {
 
   test("Sol advisor present (medium), Sol oracle (high)", () => {
     expect(piAdvisorModel("cheapest")).toEqual({
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       thinking: "medium",
     })
-    expect(piOracleModel("cheapest")).toBe("gpt-6-sol")
+    expect(piOracleModel("cheapest")).toBe("gpt-5.6-sol")
   })
 
   test("three-agent roster, no Plan", () => {
@@ -71,7 +71,7 @@ describe("pi cheapest profile", () => {
 
 describe("pi balanced profile", () => {
   test("Sol/medium lead", () => {
-    expect(piLeadModel("balanced")).toBe("gpt-6-sol")
+    expect(piLeadModel("balanced")).toBe("gpt-5.6-sol")
     expect(piLeadThinking("balanced")).toBe("medium")
   })
 
@@ -112,7 +112,7 @@ describe("pi models.json", () => {
   test("Responses provider (roster is Responses-only), tier windows, bare rows", () => {
     const windows: Record<string, number> = {
       "gpt-6-luna": 272_000,
-      "gpt-6-sol": 272_000,
+      "gpt-5.6-sol": 272_000,
       "grok-4.6": 200_000,
     }
     for (const profile of ["cheapest", "balanced"] as const) {
@@ -144,9 +144,9 @@ describe("pi models.json", () => {
       profileId: "cheapest",
       catalog: [
         { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, maxOutputTokens: 128_000, efforts: ["max"], endpoints: ["responses"], cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 } },
-        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"] },
+        { id: "gpt-5.6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"] },
       ],
-      apiOverrides: { "gpt-6-sol": "openai-completions" },
+      apiOverrides: { "gpt-5.6-sol": "openai-completions" },
     })
     const rows = Object.fromEntries(
       json.providers["gh-router"].models.map((m) => [m.id, m]),
@@ -160,9 +160,9 @@ describe("pi models.json", () => {
     })
     expect(rows["gpt-6-luna"].api).toBeUndefined()
     // No output metadata -> documented fallback (proxy floor is 16).
-    expect(rows["gpt-6-sol"].maxTokens).toBe(PI_MAX_TOKENS_FALLBACK)
-    expect(rows["gpt-6-sol"].cost).toBeUndefined()
-    expect(rows["gpt-6-sol"].api).toBe("openai-completions")
+    expect(rows["gpt-5.6-sol"].maxTokens).toBe(PI_MAX_TOKENS_FALLBACK)
+    expect(rows["gpt-5.6-sol"].cost).toBeUndefined()
+    expect(rows["gpt-5.6-sol"].api).toBe("openai-completions")
   })
 
   test("emitted lead triple is proxy-acceptable on /v1/responses", () => {
@@ -175,7 +175,7 @@ describe("pi models.json", () => {
         profileId: profile,
         catalog: [
           { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, maxOutputTokens: 128_000, efforts: ["max"], endpoints: ["responses"] },
-          { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, maxOutputTokens: 64_000, efforts: ["medium", "high"], endpoints: ["responses"] },
+          { id: "gpt-5.6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, maxOutputTokens: 64_000, efforts: ["medium", "high"], endpoints: ["responses"] },
           { id: "grok-4.6", maxContextTokens: 500_000, maxPromptTokens: 300_000, maxOutputTokens: 128_000, efforts: ["medium"], endpoints: ["responses"] },
         ],
       })
@@ -227,14 +227,14 @@ describe("pi models.json", () => {
       profileId: "cheapest",
       catalog: [
         { id: "gpt-6-luna", maxContextTokens: 200_000, maxPromptTokens: 150_000, efforts: ["max"], endpoints: ["responses"] },
-        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"] },
+        { id: "gpt-5.6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"] },
       ],
     })
     const rows = Object.fromEntries(
       json.providers["gh-router"].models.map((m) => [m.id, m.contextWindow]),
     )
     expect(rows["gpt-6-luna"]).toBe(200_000)
-    expect(rows["gpt-6-sol"]).toBe(272_000)
+    expect(rows["gpt-5.6-sol"]).toBe(272_000)
   })
 })
 
@@ -245,14 +245,14 @@ describe("pi models.json vision + thinking + api parity", () => {
       profileId: "cheapest",
       catalog: [
         { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["max"], endpoints: ["responses"], vision: true },
-        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"], vision: false },
+        { id: "gpt-5.6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"], vision: false },
       ],
     })
     const rows = Object.fromEntries(
       json.providers["gh-router"].models.map((m) => [m.id, m]),
     )
     expect(rows["gpt-6-luna"].input).toEqual(["text", "image"])
-    expect(rows["gpt-6-sol"].input).toEqual(["text"])
+    expect(rows["gpt-5.6-sol"].input).toEqual(["text"])
     // No catalog entry at all also fails open (preflight is the backstop).
     const bare = buildPiModelsJson({
       serverUrl: "http://127.0.0.1:8787",
@@ -279,7 +279,7 @@ describe("pi models.json vision + thinking + api parity", () => {
       profileId: "cheapest",
       catalog: [
         { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["max"], endpoints: ["responses"] },
-        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: [], endpoints: ["responses"] },
+        { id: "gpt-5.6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: [], endpoints: ["responses"] },
       ],
     })
     const rows = Object.fromEntries(
@@ -287,7 +287,7 @@ describe("pi models.json vision + thinking + api parity", () => {
     )
     expect(rows["gpt-6-luna"].thinkingLevelMap?.["max"]).toBe("max")
     expect(rows["gpt-6-luna"].thinkingLevelMap?.["low"]).toBeNull()
-    expect(rows["gpt-6-sol"].thinkingLevelMap).toBeUndefined()
+    expect(rows["gpt-5.6-sol"].thinkingLevelMap).toBeUndefined()
   })
 
   test("inputLimits resize is conservative and clamps to small catalog limits", () => {
@@ -304,7 +304,7 @@ describe("pi models.json vision + thinking + api parity", () => {
       profileId: "cheapest",
       catalog: [
         { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["max"], endpoints: ["responses"], vision: true, maxImageBytes: 3 * 1024 * 1024 },
-        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"], vision: false },
+        { id: "gpt-5.6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"], vision: false },
       ],
     })
     const rows = Object.fromEntries(
@@ -313,7 +313,7 @@ describe("pi models.json vision + thinking + api parity", () => {
     expect(rows["gpt-6-luna"].inputLimits?.images?.resize?.maxBytes).toBe(
       PI_IMAGE_RESIZE_MAX_BYTES,
     )
-    expect(rows["gpt-6-sol"].inputLimits).toBeUndefined()
+    expect(rows["gpt-5.6-sol"].inputLimits).toBeUndefined()
   })
 
   test("api override derives from catalog endpoints, explicit wins", () => {
@@ -327,7 +327,7 @@ describe("pi models.json vision + thinking + api parity", () => {
       profileId: "cheapest",
       catalog: [
         { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["max"], endpoints: ["/responses"] },
-        { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["/responses"] },
+        { id: "gpt-5.6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["/responses"] },
       ],
     })
     for (const m of json.providers["gh-router"].models) {
@@ -376,7 +376,7 @@ describe("pi cosmetic user overrides", () => {
   test("load-bearing keys never override, unknown keys ignored", () => {
     const overrides = applyCosmeticUserOverrides(
       {
-        defaultModel: "gpt-6-sol",
+        defaultModel: "gpt-5.6-sol",
         defaultTools: ["read"],
         packages: [],
         compaction: {},
@@ -607,12 +607,12 @@ describe("pi settings.json", () => {
 describe("pi compaction derivation", () => {
   const catalog = [
     { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["high", "max"], endpoints: ["responses"] },
-    { id: "gpt-6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"] },
+    { id: "gpt-5.6-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["high"], endpoints: ["responses"] },
     { id: "grok-4.6", maxContextTokens: 500_000, maxPromptTokens: 300_000, efforts: ["medium"], endpoints: ["responses"] },
   ]
 
   test("reserve keeps the trigger below tier cliff and prompt ceiling", () => {
-    const s = derivePiCompactionSettings(catalog, ["gpt-6-luna", "gpt-6-sol"])
+    const s = derivePiCompactionSettings(catalog, ["gpt-6-luna", "gpt-5.6-sol"])
     // windows 272K/272K; ceilings min(922000,272000)=272000 and
     // min(400000,272000)=272000 -> trigger floor(272000*0.85)=231200,
     // reserve 272000-231200=40800. Trigger sits below the 272K price

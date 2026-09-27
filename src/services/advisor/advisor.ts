@@ -30,7 +30,7 @@
  *       SSE connection (no new message_start; the original one is
  *       still open). Loop up to ADVISOR_MAX_TURNS times.
  * 4. Lead-aware model choice: route the advisor call to a different model
- *    family than the main loop (gpt-6-sol) so the user gets a true "second
+ *    family than the main loop (gpt-5.6-sol) so the user gets a true "second
  *    set of eyes" instead of Opus reviewing Opus (gemini-critic finding). When
  *    the LEAD is a lighter Claude tier the choice inverts and the advisor
  *    escalates to `ADVISOR_ESCALATION_MODEL` instead — see that constant for
@@ -121,7 +121,7 @@ export const ADVISOR_CLIENT_TOOL_NAME = "advisor"
 export const ADVISOR_MAX_TURNS = 16
 
 /** Default advisor model + reasoning effort. Per gemini-critic + user
- *  direction: hardcode to a cross-lab model (gpt-6-sol — Copilot's
+ *  direction: hardcode to a cross-lab model (gpt-5.6-sol — Copilot's
  *  /responses-only flagship). The cross-lab choice gives a true "second set
  *  of eyes" instead of the main model reviewing itself.
  *
@@ -131,7 +131,7 @@ export const ADVISOR_MAX_TURNS = 16
  *  expresses no preference — a deliberate, user-approved cost/depth trade
  *  applied uniformly across every advisor target (Sol, the Opus escalation,
  *  and the fast-profile Gemini advisor below all read this same constant). */
-export const ADVISOR_DEFAULT_MODEL = "gpt-6-sol"
+export const ADVISOR_DEFAULT_MODEL = "gpt-5.6-sol"
 export const ADVISOR_DEFAULT_EFFORT = "xhigh"
 const ADVISOR_MIN_EFFORT: Effort = "high"
 
@@ -169,7 +169,7 @@ function fastProfileAdvisorAvailable(): boolean {
 }
 
 /** The Advisor model for an authenticated cheapest primary lead:
- * `gpt-6-sol` at medium effort over its Responses endpoint, transcript
+ * `gpt-5.6-sol` at medium effort over its Responses endpoint, transcript
  * capped at `CHEAPEST_PROFILE_ADVISOR_CONTEXT_TOKENS` (200K). */
 export const ADVISOR_CHEAPEST_PROFILE_MODEL = CHEAPEST_PROFILE_ADVISOR_MODEL
 export const ADVISOR_CHEAPEST_PROFILE_EFFORT = CHEAPEST_PROFILE_ADVISOR_EFFORT
@@ -246,7 +246,7 @@ export function advisorUsesResponses(resolvedAdvisorModel: string): boolean {
 
 /** Which Copilot transport `runAdvisor` dispatches an advisor call on.
  *  Generalizes the historical two-way `useResponses` branch (added when
- *  `gpt-6-sol` was the only advisor candidate) to three, now that
+ *  `gpt-5.6-sol` was the only advisor candidate) to three, now that
  *  `resolveAdvisorModel` can also pick a `/chat/completions`-only model
  *  (`gemini-3.8-flash`, the authenticated fast profile's advisor). */
 export type AdvisorTransport = "responses" | "chat" | "messages"
@@ -689,7 +689,7 @@ export const ADVISOR_FALLBACK_MAX_TOKENS = 240_000
  *  budget is `max_prompt_tokens - reserve`. Generous on purpose: a 400
  *  `model_max_prompt_tokens_exceeded` degrades to a silent advisor
  *  fallback, and the window given up is marginal against either advisor
- *  model's real prompt window (`claude-opus-5.5` 936k, `gpt-6-sol` ~1M off
+ *  model's real prompt window (`claude-opus-5.5` 936k, `gpt-5.6-sol` ~1M off
  *  the live catalog). Sized as a fraction of the smaller of the two, not as
  *  "irrelevant next to ~1M" — that framing assumed the advisor was always
  *  the cheap side of the pair, which stopped being true once a budget lead
@@ -721,7 +721,7 @@ export function resolveAdvisorMaxTokens(advisorModel: string): number {
 /**
  * Render an Anthropic-shape conversation (messages array with
  * role/content blocks) as a single human-readable text blob. Used
- * as the input to the advisor model (gpt-6-sol via /v1/responses
+ * as the input to the advisor model (gpt-5.6-sol via /v1/responses
  * doesn't have a 1:1 mapping for Anthropic's tool_use/tool_result
  * blocks; serializing to text preserves the semantics — the advisor
  * just needs to READ the conversation, not produce more of it).
@@ -891,7 +891,7 @@ function truncateTailToUnits(
  * Routes by model family:
  *   - gpt-5.x / codex / o-series (have `/responses` in supported_endpoints):
  *     use createResponses with `reasoning.effort` set. This is the
- *     default path — gpt-6-sol at xhigh effort.
+ *     default path — gpt-5.6-sol at xhigh effort.
  *   - claude-* (no `/responses`): fall back to createMessages.
  *
  * The conversation is serialized to text via renderConversationAsText
@@ -960,7 +960,7 @@ async function runAdvisor(
   // Budget the rendered transcript against the advisor model's REAL
   // prompt-token window using its exact tokenizer, not a chars/token
   // approximation. Both advisor-eligible families declare o200k_base
-  // (`gpt-6-sol` and `claude-opus-5.5` were each read off the live catalog when
+   // (`gpt-5.6-sol` and `claude-opus-5.5` were each read off the live catalog when
   // the Anthropic escalation was added), so `getTokenizerFromModel` agrees with
   // the default — but the value is read per model rather than assumed, because
   // counting a transcript with the wrong tokenizer under-counts silently and

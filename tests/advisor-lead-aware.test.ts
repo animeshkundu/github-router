@@ -172,7 +172,7 @@ describe("resolveAdvisorModel — budget lead escalates", () => {
   })
 
   test("a non-Claude lead is not a budget lead", () => {
-    expect(resolveAdvisorModel("gpt-6-sol").escalated).toBe(false)
+    expect(resolveAdvisorModel("gpt-5.6-sol").escalated).toBe(false)
     expect(resolveAdvisorModel("gemini-3.1-pro-preview").escalated).toBe(false)
   })
 })
@@ -218,7 +218,7 @@ describe("resolveAdvisorModel — authenticated fast profile", () => {
     "gpt-6-luna",
     "gpt-6-luna[1m]",
     "openai/gpt-6-luna",
-    "gpt-6-sol",
+    "gpt-5.6-sol",
     "grok-4.6",
     "gemini-3.8-flash",
     "claude-opus-5.5",
@@ -349,7 +349,7 @@ describe("resolveAdvisorEffort — standard floor and fast fixed effort", () => 
 
 describe("resolveAdvisorEffort — clamping against the ADVISOR's ladder", () => {
   test("a ladder without the picked tier clamps down", () => {
-    // gpt-6-sol advertises no `max`, so a `max` pick must not be forwarded.
+    // gpt-5.6-sol advertises no `max`, so a `max` pick must not be forwarded.
     const body = JSON.stringify({ output_config: { effort: "max" } })
     expect(resolveAdvisorEffort(body, ADVISOR_DEFAULT_MODEL)).toBe("xhigh")
     // ...while the escalation model does advertise it.
@@ -387,11 +387,11 @@ describe("resolveAdvisorEffort — clamping against the ADVISOR's ladder", () =>
 describe("review regressions", () => {
   test("a namespaced operator pin is normalized to the catalog id AND routed to /responses", () => {
     // Found by SMOKE TEST, after two unit-test-only fixes had already "passed".
-    // Choosing the transport correctly was not sufficient: `openai/gpt-6-sol`
+    // Choosing the transport correctly was not sufficient: `openai/gpt-5.6-sol`
     // still went upstream verbatim and Copilot answered 400 model_not_supported,
     // so the advisor degraded to its "[Advisor unavailable: ...]" fallback while
     // every assertion here stayed green. Assert BOTH halves.
-    process.env.GH_ROUTER_ADVISOR_MODEL = "openai/gpt-6-sol"
+    process.env.GH_ROUTER_ADVISOR_MODEL = "openai/gpt-5.6-sol"
     const choice = resolveAdvisorModel("claude-sonnet-5")
     expect(choice).toEqual({
       model: ADVISOR_DEFAULT_MODEL,

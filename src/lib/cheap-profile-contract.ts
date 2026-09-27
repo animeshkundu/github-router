@@ -22,10 +22,10 @@
 export const CHEAP_PROFILE_MODELS = Object.freeze({
   lead: "gemini-3.8-flash",
   explore: "gpt-6-luna",
-  plan: "gpt-6-sol",
+  plan: "gpt-5.6-sol",
   "General-Purpose": "gemini-3.8-flash",
   reviewer: "gpt-6-luna",
-  advisor: "gpt-6-sol",
+  advisor: "gpt-5.6-sol",
   oracle: "grok-4.6",
   astra: "gpt-6-astra",
 } as const)

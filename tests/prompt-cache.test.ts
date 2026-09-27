@@ -146,7 +146,7 @@ describe("Responses cache policy", () => {
   test("adds an opaque GPT-5.6 key and explicit stable breakpoint (reusable-prefix only)", () => {
     const payload = applyResponsesCachePolicy(
       {
-        model: "gpt-6-sol",
+        model: "gpt-5.6-sol",
         instructions: stable,
         input: [{ role: "system", content: "dynamic" }, { role: "user", content: "hi" }],
       },
@@ -181,7 +181,7 @@ describe("Responses cache policy", () => {
     // model, or the kill switch (which only matters when explicit treatment
     // would otherwise apply).
     const bigEnoughForExplicitIfItWereReusablePrefix: ResponsesPayload = {
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       instructions: stable,
       input: [{ role: "user", content: "hi" }],
     }
@@ -211,7 +211,7 @@ describe("Responses cache policy", () => {
       ).toBe(payload)
     }
     const callerOwned: ResponsesPayload = {
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       instructions: stable,
       input: "hi",
       prompt_cache_key: "caller",
@@ -224,7 +224,7 @@ describe("Responses cache policy", () => {
   test("kill switch and short prefixes suppress explicit writes", () => {
     process.env.GH_ROUTER_DISABLE_GPT56_EXPLICIT_CACHE = "1"
     const disabled: ResponsesPayload = {
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       instructions: stable,
       input: "hi",
     }
@@ -234,7 +234,7 @@ describe("Responses cache policy", () => {
     delete process.env.GH_ROUTER_DISABLE_GPT56_EXPLICIT_CACHE
 
     const short: ResponsesPayload = {
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       instructions: "short",
       input: "hi",
     }
@@ -274,11 +274,11 @@ describe("Responses cache policy", () => {
         { model, instructions: prefix, input: "dynamic" },
         { workload: "reusable-prefix" },
       ).prompt_cache_key
-    expect(make("gpt-6-sol", stable)).toBe(make("gpt-6-sol", stable))
-    expect(make("gpt-6-sol", stable)).not.toBe(
-      make("gpt-6-sol", `${stable}changed`),
+    expect(make("gpt-5.6-sol", stable)).toBe(make("gpt-5.6-sol", stable))
+    expect(make("gpt-5.6-sol", stable)).not.toBe(
+      make("gpt-5.6-sol", `${stable}changed`),
     )
-    expect(make("gpt-6-sol", stable)).not.toBe(
+    expect(make("gpt-5.6-sol", stable)).not.toBe(
       make("gpt-5.6-terra", stable),
     )
   })
@@ -555,7 +555,7 @@ describe("web-search stable-prefix placement", () => {
 
   test("Responses preserves instructions and inserts results before user input", () => {
     const payload: ResponsesPayload = {
-      model: "gpt-6-sol",
+      model: "gpt-5.6-sol",
       instructions: "stable",
       input: [{ role: "user", content: "question" }],
     }

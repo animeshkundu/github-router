@@ -1,7 +1,7 @@
 /**
  * Fixed identities for the literal `github-router claude -m balanced` profile.
  *
- * The most-complex-tasks tier: a `gpt-6-sol`/medium LEAD at Claude Code's
+ * The most-complex-tasks tier: a `gpt-5.6-sol`/medium LEAD at Claude Code's
  * DEFAULT (bare-slug) 200K window, every subagent at the same 200K default,
  * and a `grok-4.6`/medium primary Oracle. Advisor-free by design: no Advisor
  *  model, tool, or prose is wired for this profile. Oracle-only peer set
@@ -22,10 +22,10 @@
  */
 
 export const BALANCED_PROFILE_MODELS = Object.freeze({
-  lead: "gpt-6-sol",
+  lead: "gpt-5.6-sol",
   explore: "gpt-6-luna",
   "General-Purpose": "gpt-6-luna",
-  reviewer: "gpt-6-sol",
+  reviewer: "gpt-5.6-sol",
   oracle: "grok-4.6",
   astra: "gpt-6-astra",
 } as const)

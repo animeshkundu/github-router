@@ -560,7 +560,7 @@ describe("buildPeerAgentDefinitions", () => {
   // true as agents are added.
   test("every native description names its model, its trigger, and stays bare of [1m]", () => {
     const models: Record<string, string> = {
-      implementer: "gpt-6-sol",
+      implementer: "gpt-5.6-sol",
       reviewer: "gemini-3.1-pro-preview",
       "reviewer-fast": "gemini-3.8-flash",
       brainstorm: "gemini-3.1-pro-preview",
@@ -635,7 +635,7 @@ describe("buildPeerAgentDefinitions", () => {
       state.models = {
         object: "list",
         data: [
-          entry("gpt-6-sol", 1_050_000),
+          entry("gpt-5.6-sol", 1_050_000),
           entry("gemini-3.1-pro-preview", 1_000_000),
           entry("gpt-5.6-terra", 1_050_000),
           entry("gemini-3.8-flash", 1_000_000),
@@ -650,7 +650,7 @@ describe("buildPeerAgentDefinitions", () => {
         codexCli: false,
         geminiAvailable: false,
         groupKeys: { peers: "peers" },
-        nativeSubagentModel: "gpt-6-sol",
+        nativeSubagentModel: "gpt-5.6-sol",
         reviewerModel: "gemini-3.1-pro-preview",
         reviewerFastModel: "gemini-3.8-flash",
         brainstormModel: "synthetic-sub-1m",
@@ -661,7 +661,7 @@ describe("buildPeerAgentDefinitions", () => {
         nonce: NONCE,
         codexHome: "/tmp/codex",
       })
-      expect(agents.implementer!.model).toBe("gpt-6-sol[1m]")
+      expect(agents.implementer!.model).toBe("gpt-5.6-sol[1m]")
       expect(agents.reviewer!.model).toBe("gemini-3.1-pro-preview[1m]")
       expect(agents["reviewer-fast"]!.model).toBe("gemini-3.8-flash[1m]")
       // Synthetic sub-1M model: bare, so Claude Code keeps its conservative
@@ -689,7 +689,7 @@ describe("buildPeerAgentDefinitions", () => {
 
       // The decoration is frontmatter-only. Descriptions are prose the lead
       // reads, so they keep the bare id.
-      expect(agents.implementer!.description).toContain("gpt-6-sol")
+      expect(agents.implementer!.description).toContain("gpt-5.6-sol")
       expect(agents.implementer!.description).not.toContain("[1m]")
       expect(agents.scribe!.description).not.toContain("[1m]")
 
@@ -699,13 +699,13 @@ describe("buildPeerAgentDefinitions", () => {
         codexCli: false,
         geminiAvailable: false,
         groupKeys: { peers: "peers" },
-        nativeSubagentModel: "gpt-6-sol",
+        nativeSubagentModel: "gpt-5.6-sol",
         brainstormModel: "synthetic-sub-1m",
         scoutModel: "gpt-6-luna",
         nonce: NONCE,
         codexHome: "/tmp/codex",
       })
-      expect(optedOut.implementer!.model).toBe("gpt-6-sol")
+      expect(optedOut.implementer!.model).toBe("gpt-5.6-sol")
       expect(optedOut.brainstorm!.model).toBe("synthetic-sub-1m")
       expect(optedOut.scout!.model).toBe("gpt-6-luna")
     } finally {
@@ -764,12 +764,12 @@ describe("buildPeerAgentDefinitions", () => {
       codexCli: false,
       geminiAvailable: true,
       groupKeys: { peers: "peers" },
-      nativeSubagentModel: "gpt-6-sol",
+      nativeSubagentModel: "gpt-5.6-sol",
       reviewerModel: "gemini-3.1-pro-preview",
       nonce: NONCE,
       codexHome: "/tmp/codex",
     })
-    expect(agents.implementer!.model).toBe("gpt-6-sol")
+    expect(agents.implementer!.model).toBe("gpt-5.6-sol")
     expect(agents.reviewer!.model).toBe("gemini-3.1-pro-preview")
     expect(agents.reviewer!.model).not.toBe(agents.implementer!.model)
     // The description has to say WHY it is the right pick over a peer critic,
@@ -838,7 +838,7 @@ describe("buildPeerAgentDefinitions", () => {
         nativeRoster: FAST_ROSTER,
         includeCoordinator: false,
         fastExploreModel: "gpt-6-luna",
-        fastPlanModel: "gpt-6-sol",
+        fastPlanModel: "gpt-5.6-sol",
         fastGeneralPurposeModel: "gemini-3.8-flash",
         fastReviewerModel: "claude-sonnet-5",
         ...extra,
@@ -857,7 +857,7 @@ describe("buildPeerAgentDefinitions", () => {
     test("pins fast role models, effort and oracle tool access", () => {
       const agents = buildFastAgents()
       expect(agents.Explore!.model).toBe("gh-router-luna-scout-high[1m]")
-      expect(agents.Plan!.model).toBe("gpt-6-sol[1m]")
+      expect(agents.Plan!.model).toBe("gpt-5.6-sol[1m]")
       expect(agents["General-Purpose"]!.model).toBe("gemini-3.8-flash[1m]")
       expect(agents.reviewer!.model).toBe("claude-sonnet-5[1m]")
 
@@ -954,7 +954,7 @@ describe("buildPeerAgentDefinitions", () => {
         nativeRoster: CHEAP_ROSTER,
         includeCoordinator: false,
         cheapExploreModel: "gpt-6-luna",
-        cheapPlanModel: "gpt-6-sol",
+        cheapPlanModel: "gpt-5.6-sol",
         cheapGeneralPurposeModel: "gemini-3.8-flash",
         cheapReviewerModel: "gpt-6-luna",
         ...extra,
@@ -1040,7 +1040,7 @@ describe("buildPeerAgentDefinitions", () => {
         // to [1m] by the client).
         cheapestExploreModel: "gpt-6-luna",
         cheapestGeneralPurposeModel: "gpt-6-luna",
-        cheapestReviewerModel: "gpt-6-sol",
+        cheapestReviewerModel: "gpt-5.6-sol",
         ...extra,
       })
     }
@@ -1258,7 +1258,7 @@ describe("buildPeerAgentDefinitions", () => {
         nativeRoster: ["Explore", "Plan", "General-Purpose", "reviewer"],
         includeCoordinator: false,
         fastExploreModel: "gpt-6-luna",
-        fastPlanModel: "gpt-6-sol",
+        fastPlanModel: "gpt-5.6-sol",
         fastGeneralPurposeModel: "gemini-3.8-flash",
         fastReviewerModel: "claude-sonnet-5",
       })
@@ -1327,7 +1327,7 @@ describe("buildPeerAgentDefinitions", () => {
         includeCoordinator: false,
         browseAvailable: true,
         fastExploreModel: "gpt-6-luna",
-        fastPlanModel: "gpt-6-sol",
+        fastPlanModel: "gpt-5.6-sol",
         fastGeneralPurposeModel: "gemini-3.8-flash",
         fastReviewerModel: "claude-sonnet-5",
       }),
@@ -1338,7 +1338,7 @@ describe("buildPeerAgentDefinitions", () => {
         includeCoordinator: false,
         browseAvailable: true,
         cheapExploreModel: "gpt-6-luna",
-        cheapPlanModel: "gpt-6-sol",
+        cheapPlanModel: "gpt-5.6-sol",
         cheapGeneralPurposeModel: "gemini-3.8-flash",
         cheapReviewerModel: "gpt-6-luna",
       }),
@@ -1350,7 +1350,7 @@ describe("buildPeerAgentDefinitions", () => {
         browseAvailable: true,
         cheapestExploreModel: "gpt-6-luna",
         cheapestGeneralPurposeModel: "gpt-6-luna",
-        cheapestReviewerModel: "gpt-6-sol",
+        cheapestReviewerModel: "gpt-5.6-sol",
       }),
       buildPeerAgentDefinitions({
         ...common,

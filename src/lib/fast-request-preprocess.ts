@@ -105,7 +105,7 @@ export function preprocessFastRequest(
     parsed.model = canonicalizeAliasModel(originalModel)
   } else if (bare === "gpt-6-luna" || bare === "gpt-6-luna") {
     fixedEffort = "max"
-  } else if (bare === "gpt-6-sol" || bare === "gpt-6-sol") {
+  } else if (bare === "gpt-5.6-sol" || bare === "gpt-6-sol") {
     // Balanced leads at medium by contract (`BALANCED_PROFILE_LEAD_EFFORT`);
     // every other Sol caller stays high.
     fixedEffort = profileId === "balanced" && !subagentRequest

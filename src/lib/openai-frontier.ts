@@ -10,7 +10,7 @@
  */
 
 /** Preference-ordered OpenAI frontier reasoning models (SELECTION list). */
-export const OPENAI_FRONTIER_MODELS = ["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"] as const
+export const OPENAI_FRONTIER_MODELS = ["gpt-5.6-sol", "gpt-6-sol", "gpt-5.5"] as const
 
 /** Models whose shim reasoning effort becomes xhigh when the operator opts in
  *  with `GH_ROUTER_FRONTIER_XHIGH_DEFAULT=1` (effort POLICY set).

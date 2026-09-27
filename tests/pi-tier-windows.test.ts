@@ -11,6 +11,7 @@ import {
 describe("pi tier thresholds", () => {
   test("pinned cheap-tier thresholds", () => {
     expect(piTierThresholdFor("gpt-6-luna")).toBe(272_000)
+    expect(piTierThresholdFor("gpt-5.6-sol")).toBe(272_000)
     expect(piTierThresholdFor("gpt-6-sol")).toBe(272_000)
     expect(piTierThresholdFor("grok-4.6")).toBe(200_000)
   })
@@ -23,6 +24,7 @@ describe("pi tier thresholds", () => {
 
   test("window is capped at the advertised catalog total", () => {
     expect(piContextWindowFor("gpt-6-luna", 1_050_000)).toBe(272_000)
+    expect(piContextWindowFor("gpt-5.6-sol", 1_050_000)).toBe(272_000)
     expect(piContextWindowFor("gpt-6-sol", 200_000)).toBe(200_000)
     expect(piContextWindowFor("grok-4.6", 0)).toBe(200_000)
     expect(piContextWindowFor("gpt-9-unknown", undefined)).toBe(200_000)
@@ -50,6 +52,7 @@ describe("tier price drift guard", () => {
     expect(
       tierPriceDriftWarnings([
         { id: "gpt-6-luna", inputPer1M: 10 },
+        { id: "gpt-5.6-sol", inputPer1M: 400 },
         { id: "gpt-6-sol", inputPer1M: 200 },
         { id: "grok-4.6", inputPer1M: 200 },
       ]),

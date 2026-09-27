@@ -1000,7 +1000,7 @@ async function predictedWindowOverflow(
     + `${budget}-token budget for ${persona.model} (its ${maxPromptTokens}-token prompt window `
     + `minus a ${PEER_PROMPT_TOKEN_RESERVE}-token framing reserve). Do NOT summarize or truncate `
     + `the artifact to fit. Route the full artifact to a larger-window peer — `
-    + `\`codex_critic\` (gpt-6-sol ≈ 1M tokens)${opusHint} — or split it into focused `
+    + `\`codex_critic\` (gpt-5.6-sol ≈ 1M tokens)${opusHint} — or split it into focused `
     + `sub-calls BY CONCERN and call them in parallel, then aggregate.`
   )
 }

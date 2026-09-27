@@ -1,11 +1,11 @@
 # Default models and launch profiles
 
-`github-router claude` defaults to `claude-opus-5.5`; `github-router codex` defaults to `gpt-6-sol`. Full model fallback and slug-translation behavior is implemented in `src/lib/port.ts` and `src/lib/utils.ts`.
+`github-router claude` defaults to `claude-opus-5.5`; `github-router codex` defaults to `gpt-5.6-sol`. Full model fallback and slug-translation behavior is implemented in `src/lib/port.ts` and `src/lib/utils.ts`.
 
 ## Max launch profile (`-m max`)
 
 Only the trimmed raw alias `max` selects this profile. It starts on
-`gpt-6-sol[1m]` at high effort and accepts controlled lead switches only among
+`gpt-5.6-sol[1m]` at high effort and accepts controlled lead switches only among
 Sol, Luna, Gemini 3.8 Flash, and Opus 5. Grok 4.6 is not a Max lead or picker
 row because its advertised context is below 1M.
 
@@ -80,7 +80,7 @@ stand-in, fleet, and first-mate surfaces. It never exposes orchestration or core
 worker modes, and it does not inject `/gh-research`, `/gh-orchestrate`,
 `/gh-floor-keeper`, or `/gh-worker`. First-mate operator skills remain conditional
 on the first-mate capability. Advisor is lead-only and defaults to Opus 5/high
-over native Messages; `GH_ROUTER_ADVISOR_MODEL=gpt-6-sol` selects Sol instead. Native
+over native Messages; `GH_ROUTER_ADVISOR_MODEL=gpt-5.6-sol` selects Sol instead. Native
 subagents and browse workers do not receive Advisor. Max rejects `--codex-cli`,
 `--no-codex-mcp`, and arbitrary lead models before creating launch artifacts.
 
@@ -101,11 +101,11 @@ Only the trimmed raw alias `fast` selects this profile. It is a Gemini-led, role
 |---|---|---:|---|
 | Lead | `gemini-3.8-flash[1m]` | high | Primary working loop |
 | `Explore` | `gpt-6-luna[1m]` | high | Broad read-only repository discovery |
-| `Plan` | `gpt-6-sol[1m]` | high | Implementation planning consultant (non-mandatory gate) |
+| `Plan` | `gpt-5.6-sol[1m]` | high | Implementation planning consultant (non-mandatory gate) |
 | `general-purpose` | `gpt-6-luna[1m]` | max | Fast, economical catch-all for mixed/unusual work |
 | `implementer` | `gemini-3.8-flash[1m]` | high | Bounded coding implementation |
 | `reviewer` | `claude-sonnet-5[1m]` | xhigh | Repository-aware review/reproduction/tests |
-| Advisor | `gpt-6-sol[1m]` | high | Transcript-aware brainstorming/sounding board/fresh look |
+| Advisor | `gpt-5.6-sol[1m]` | high | Transcript-aware brainstorming/sounding board/fresh look |
 | `oracle` | `claude-opus-5.5[1m]` | high | Stateless last-resort guidance (lead & Plan only) |
 | `astra` | `gpt-6-astra` | high | Stateless terminal escalation (200K window, lead only) |
 
@@ -199,13 +199,13 @@ As the recovery half of the fix, the proxy maps an upstream overflow onto Claude
 
 ### Advisor
 
-The user-facing role is Advisor. In an authenticated fast launch it remains available only to the primary lead across every fixed `/model` selection (Luna, Sol, Grok 4.6, Gemini 3.8 Flash, or Opus 5), uses GPT-6 Sol via Responses at fixed high effort, and sees the lead's bounded recent transcript. The launcher passes `--advisor gpt-6-sol[1m]`, overriding a mirrored standard Advisor preference only for this session, so Claude Code's native tool schema, UI label, and JSONL identify the same model the proxy actually dispatches. Fast selection is fixed: `GH_ROUTER_ADVISOR_MODEL` and forwarded `--advisor` values cannot change it, and a missing/wrong-endpoint Sol runtime invariant fails visibly rather than silently falling back. An in-session `/advisor` mismatch is rejected with a restoration command. In a cheap or cheap1m launch the same fixed Sol Advisory runs at the 200K cost class: the launcher pins the **bare** `gpt-6-sol` slug (no `[1m]`), and the proxy caps the transcript at 200K tokens while keeping the original user ask pinned through seat-backward truncation. Standard launches retain operator pins and fallback behavior unchanged. Fast and cheap Task subagents have all Advisor tool forms stripped; their narrower transcripts are not the session context Advisor exists to assess. Advisor is optional, non-binding consultation for consequential unresolved uncertainty, conflicting evidence, a genuinely non-converging approach, materially changed assumptions, or an explicit request for a fresh perspective. It is not used for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. The lead retains decision ownership and may consult again when materially new evidence creates a different question. Non-Claude continuations reuse the selected lead's translation shim/endpoint and existing SSE lifecycle.
+The user-facing role is Advisor. In an authenticated fast launch it remains available only to the primary lead across every fixed `/model` selection (Luna, Sol, Grok 4.6, Gemini 3.8 Flash, or Opus 5), uses GPT-5.6 Sol via Responses at fixed high effort, and sees the lead's bounded recent transcript. The launcher passes `--advisor gpt-5.6-sol[1m]`, overriding a mirrored standard Advisor preference only for this session, so Claude Code's native tool schema, UI label, and JSONL identify the same model the proxy actually dispatches. Fast selection is fixed: `GH_ROUTER_ADVISOR_MODEL` and forwarded `--advisor` values cannot change it, and a missing/wrong-endpoint Sol runtime invariant fails visibly rather than silently falling back. An in-session `/advisor` mismatch is rejected with a restoration command. In a cheap or cheap1m launch the same fixed Sol Advisory runs at the 200K cost class: the launcher pins the **bare** `gpt-5.6-sol` slug (no `[1m]`), and the proxy caps the transcript at 200K tokens while keeping the original user ask pinned through seat-backward truncation. Standard launches retain operator pins and fallback behavior unchanged. Fast and cheap Task subagents have all Advisor tool forms stripped; their narrower transcripts are not the session context Advisor exists to assess. Advisor is optional, non-binding consultation for consequential unresolved uncertainty, conflicting evidence, a genuinely non-converging approach, materially changed assumptions, or an explicit request for a fresh perspective. It is not used for routine progress, waiting, directly verifiable facts, planner approval, reviewer verification, or completion ritual. The lead retains decision ownership and may consult again when materially new evidence creates a different question. Non-Claude continuations reuse the selected lead's translation shim/endpoint and existing SSE lifecycle.
 
 Oracle remains separate and stateless. It is available to the lead and `Plan` as a last resort for one focused unresolved question on profiles with a `Plan` role (fast, cheap, cheap1m); on cheapest and balanced — which have no `Plan` role — it is lead-only. It remains unavailable to `reviewer`, `implementer`, `Explore`, and `general-purpose`. Fast launches keep the proxy MCP servers out of the shared mirrored config: the lead receives them through its launch-only MCP config, while `Plan` receives its role-scoped inline servers. This prevents other natives from inheriting Oracle.
 
 Standard Advisor behavior is unchanged: Sol/xhigh (high floor) on the normal Opus path and Opus escalation for lighter Claude leads.
 
-In a cheapest launch the Advisor is `gpt-6-sol` at medium effort via Responses, pinned to the bare slug at the 200K cost class like cheap (transcript capped at 200K with the original ask pinned). Cheapest has no `Plan` subagent: the lead plans directly and reviews the final plan with the Advisor (advisory, non-binding — the lead retains decision ownership) before presenting it to the user; the lead prompt carries this as an injected directive.
+In a cheapest launch the Advisor is `gpt-5.6-sol` at medium effort via Responses, pinned to the bare slug at the 200K cost class like cheap (transcript capped at 200K with the original ask pinned). Cheapest has no `Plan` subagent: the lead plans directly and reviews the final plan with the Advisor (advisory, non-binding — the lead retains decision ownership) before presenting it to the user; the lead prompt carries this as an injected directive.
 
 ## Cheap launch profiles (`-m cheap`, `-m cheap1m`)
 
@@ -222,11 +222,11 @@ The lead is `gemini-3.8-flash` bare.
 |---|---|---|---|
 | Lead | `gemini-3.8-flash` | high | 200K |
 | `Explore` | `gpt-6-luna` | high | 200K |
-| `Plan` | `gpt-6-sol` | high | 200K |
+| `Plan` | `gpt-5.6-sol` | high | 200K |
 | `general-purpose` | `gpt-6-luna` | max | 200K |
 | `implementer` | `gemini-3.8-flash` | high | 200K |
 | `reviewer` | `gpt-6-luna` | max | 200K |
-| Advisor | `gpt-6-sol` | high | 200K |
+| Advisor | `gpt-5.6-sol` | high | 200K |
 | `oracle` | `grok-4.6` | medium | 200K |
 
 ### `-m cheap1m` (1M leader)
@@ -237,28 +237,28 @@ The lead is `gemini-3.8-flash[1m]`, decorated only when the live catalog serves 
 |---|---|---|---|
 | Lead | `gemini-3.8-flash[1m]` | high | 1M |
 | `Explore` | `gpt-6-luna` | high | 200K |
-| `Plan` | `gpt-6-sol` | high | 200K |
+| `Plan` | `gpt-5.6-sol` | high | 200K |
 | `general-purpose` | `gpt-6-luna` | max | 200K |
 | `implementer` | `gemini-3.8-flash` | high | 200K |
 | `reviewer` | `gpt-6-luna` | max | 200K |
-| Advisor | `gpt-6-sol` | high | 200K |
+| Advisor | `gpt-5.6-sol` | high | 200K |
 | `oracle` | `grok-4.6` | medium | 200K |
 | `astra` | `gpt-6-astra` | medium | 200K |
 
 ### Cost levers and validation (shared family)
 
-- **Cost lever**: the curated picker flags every cheap row except Luna `neverOneM`, the agent/MCP wiring emits bare router-owned alias ids (never bare real slugs — the client would catalog-resolve those to `[1m]`), and the launcher pins Claude Code's Advisor to the bare `gpt-6-sol`, so nothing in the cheap surface acquires `[1m]` accounting except an explicitly selected Luna 1M row. Even in `-m cheap1m`, a `/model` switch drops to a 200K-budget row — except Luna, which keeps 1M like the fixed lead. The proxy caps the Advisor transcript at 200K tokens (`CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS`) while keeping the original user ask pinned.
+- **Cost lever**: the curated picker flags every cheap row except Luna `neverOneM`, the agent/MCP wiring emits bare router-owned alias ids (never bare real slugs — the client would catalog-resolve those to `[1m]`), and the launcher pins Claude Code's Advisor to the bare `gpt-5.6-sol`, so nothing in the cheap surface acquires `[1m]` accounting except an explicitly selected Luna 1M row. Even in `-m cheap1m`, a `/model` switch drops to a 200K-budget row — except Luna, which keeps 1M like the fixed lead. The proxy caps the Advisor transcript at 200K tokens (`CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS`) while keeping the original user ask pinned.
 - **Oracle**: swaps Fast's exact Opus 5 for Grok 4.6 (`/responses`, medium) — the cheaper cross-lab second set of eyes, scoped to the lead and `Plan` like Fast. **Astra** (cheap1m only) is GPT-6 Astra at medium effort, lead-only, 200K policy window.
 - **Prerequisites**: `validateCheapProfilePrerequisites` gates the leader at the 200K floor; `validateCheap1mProfilePrerequisites` gates the same leader at 1M. Every other role needs just its fixed effort, tool-calling (where relevant), and a supported endpoint. `astra` is optional (exposed only when the catalog serves it); every other role in the roster is mandatory, and startup fails with an actionable list rather than substituting a model.
 - Delegation edges, Oracle scoping, MCP surface and hard-denies, and picker rows are otherwise identical to Fast.
 
 ## Balanced launch profile (`-m balanced`)
 
-The literal raw alias `balanced` selects the Sol-led 200K tier: a `gpt-6-sol`/medium lead at the bare 200K default window, a three-agent surface (`Explore`/`General-Purpose`/`reviewer` — no `Plan`: the lead owns planning directly), and an Oracle-only peer set (no `astra`, no Advisor surface).
+The literal raw alias `balanced` selects the Sol-led 200K tier: a `gpt-5.6-sol`/medium lead at the bare 200K default window, a three-agent surface (`Explore`/`General-Purpose`/`reviewer` — no `Plan`: the lead owns planning directly), and an Oracle-only peer set (no `astra`, no Advisor surface).
 
 | Surface | Model | Effort | Window |
 |---|---|---|---|
-| Lead | `gpt-6-sol` | medium | 200K |
+| Lead | `gpt-5.6-sol` | medium | 200K |
 | `Explore` | `gpt-6-luna` | high | 200K |
 | `General-Purpose` | `gpt-6-luna` | max | 200K |
 | `reviewer` | `gemini-3.8-flash` | high | 200K |

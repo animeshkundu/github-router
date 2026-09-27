@@ -1,10 +1,11 @@
-// Unit tests for the OpenAI-frontier resolver introduced with the
-// gpt-6-sol swap: `resolveOpenAiFrontier` (prefer gpt-6-sol, fall back to
-// gpt-5.5) and its two consumers `standInToolEnabled` / `nativeSubagentModel`.
+// Unit tests for the OpenAI-frontier resolver: `resolveOpenAiFrontier`
+// (prefer gpt-5.6-sol, fall back to gpt-6-sol, then gpt-5.5) and its two
+// consumers `standInToolEnabled` / `nativeSubagentModel`.
 //
-// The load-bearing property: no capability that works on a gpt-5.5-only
+// The load-bearing property: no capability that works on a thinner
 // (rollout-lag) catalog regresses — the gate must still pass and the
-// implementer subagent must still resolve, dispatching gpt-5.5.
+// implementer subagent must still resolve, dispatching the best available
+// fallback.
 
 import { afterEach, beforeEach, expect, test } from "bun:test"
 
@@ -50,16 +51,21 @@ beforeEach(() => {
   state.models = undefined
 })
 
-test("OPENAI_FRONTIER_MODELS is [gpt-6-sol, gpt-5.6-sol, gpt-5.5] in preference order", () => {
-  expect(Array.from(OPENAI_FRONTIER_MODELS)).toEqual(["gpt-6-sol", "gpt-5.6-sol", "gpt-5.5"])
+test("OPENAI_FRONTIER_MODELS is [gpt-5.6-sol, gpt-6-sol, gpt-5.5] in preference order", () => {
+  expect(Array.from(OPENAI_FRONTIER_MODELS)).toEqual(["gpt-5.6-sol", "gpt-6-sol", "gpt-5.5"])
 })
 
-test("prefers gpt-6-sol when present", () => {
+test("prefers gpt-5.6-sol when present", () => {
+  setCatalog([entry("gpt-5.6-sol", true), entry("gpt-6-sol", true), entry("gpt-5.5", true)])
+  expect(resolveOpenAiFrontier()).toBe("gpt-5.6-sol")
+})
+
+test("falls back to gpt-6-sol when gpt-5.6-sol is absent", () => {
   setCatalog([entry("gpt-6-sol", true), entry("gpt-5.5", true)])
   expect(resolveOpenAiFrontier()).toBe("gpt-6-sol")
 })
 
-test("falls back to gpt-5.5 when gpt-6-sol is absent (rollout lag)", () => {
+test("falls back to gpt-5.5 when both sol models are absent (rollout lag)", () => {
   setCatalog([entry("gpt-5.5", true), entry("gpt-5.4", true)])
   expect(resolveOpenAiFrontier()).toBe("gpt-5.5")
 })
@@ -75,25 +81,28 @@ test("returns undefined when the catalog is unset", () => {
 })
 
 test("requireToolCalls skips a frontier model that lacks tool_calls and falls through", () => {
-  // gpt-6-sol present but WITHOUT tool_calls → skip; gpt-5.5 has them → win.
-  setCatalog([entry("gpt-6-sol", false), entry("gpt-5.5", true)])
-  expect(resolveOpenAiFrontier()).toBe("gpt-6-sol") // no requirement → first present
-  expect(resolveOpenAiFrontier({ requireToolCalls: true })).toBe("gpt-5.5")
+  // gpt-5.6-sol present but WITHOUT tool_calls → skip; gpt-6-sol has them → win.
+  setCatalog([entry("gpt-5.6-sol", false), entry("gpt-6-sol", true), entry("gpt-5.5", true)])
+  expect(resolveOpenAiFrontier()).toBe("gpt-5.6-sol") // no requirement → first present
+  expect(resolveOpenAiFrontier({ requireToolCalls: true })).toBe("gpt-6-sol")
 })
 
 test("requireToolCalls returns undefined when no frontier model has tool_calls", () => {
-  setCatalog([entry("gpt-6-sol", false), entry("gpt-5.5", false)])
+  setCatalog([entry("gpt-5.6-sol", false), entry("gpt-6-sol", false), entry("gpt-5.5", false)])
   expect(resolveOpenAiFrontier({ requireToolCalls: true })).toBeUndefined()
 })
 
-test("nativeSubagentModel prefers gpt-6-sol, falls back to gpt-5.5, requires tool_calls", () => {
-  setCatalog([entry("gpt-6-sol", true)])
+test("nativeSubagentModel prefers gpt-5.6-sol, falls back through gpt-6-sol to gpt-5.5, requires tool_calls", () => {
+  setCatalog([entry("gpt-5.6-sol", true)])
+  expect(nativeSubagentModel()).toBe("gpt-5.6-sol")
+
+  setCatalog([entry("gpt-6-sol", true)]) // 5.6 absent
   expect(nativeSubagentModel()).toBe("gpt-6-sol")
 
   setCatalog([entry("gpt-5.5", true)]) // rollout lag
   expect(nativeSubagentModel()).toBe("gpt-5.5")
 
-  setCatalog([entry("gpt-6-sol", false)]) // present but no tool_calls
+  setCatalog([entry("gpt-5.6-sol", false)]) // present but no tool_calls
   expect(nativeSubagentModel()).toBeUndefined()
 
   setCatalog([entry("gpt-5.4", true)]) // neither frontier model
@@ -102,7 +111,7 @@ test("nativeSubagentModel prefers gpt-6-sol, falls back to gpt-5.5, requires too
 
 test("standInToolEnabled passes on a gpt-5.5-only (rollout-lag) catalog when opus + gemini are present", () => {
   setCatalog([
-    entry("gpt-5.5", true), // sol absent — the OpenAI slot resolves to gpt-5.5
+    entry("gpt-5.5", true), // sol models absent — the OpenAI slot resolves to gpt-5.5
     entry("claude-opus-5.5", true),
     entry("gemini-3.1-pro-preview", true),
   ])
@@ -111,7 +120,7 @@ test("standInToolEnabled passes on a gpt-5.5-only (rollout-lag) catalog when opu
 
 test("standInToolEnabled keeps the Google slot on the Flash fallback", () => {
   setCatalog([
-    entry("gpt-6-sol", true),
+    entry("gpt-5.6-sol", true),
     entry("claude-opus-5.5", true),
     entry("gemini-3.8-flash", true),
   ])
@@ -133,7 +142,7 @@ test("max standInToolEnabled ignores Gemini Pro and prefers Grok/high or Flash 1
     },
   })
   setCatalog([
-    capable("gpt-6-sol", 1_050_000, "/responses"),
+    capable("gpt-5.6-sol", 1_050_000, "/responses"),
     capable("claude-opus-5.5", 1_000_000, "/v1/messages"),
     capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions"),
     capable("gemini-3.8-flash", 1_000_000, "/chat/completions"),
@@ -142,14 +151,14 @@ test("max standInToolEnabled ignores Gemini Pro and prefers Grok/high or Flash 1
   expect(standInToolEnabled({ maxProfile: true })).toBe(true)
 
   setCatalog([
-    capable("gpt-6-sol", 1_050_000, "/responses"),
+    capable("gpt-5.6-sol", 1_050_000, "/responses"),
     capable("claude-opus-5.5", 1_000_000, "/v1/messages"),
     capable("gemini-3.1-pro-preview", 1_000_000, "/chat/completions"),
   ])
   expect(standInToolEnabled({ maxProfile: true })).toBe(false)
 })
 
-test("standInToolEnabled fails closed when neither gpt-6-sol nor gpt-5.5 is present", () => {
+test("standInToolEnabled fails closed when no frontier model is present", () => {
   setCatalog([
     entry("gpt-5.4", true), // no OpenAI frontier model
     entry("claude-opus-5.5", true),
@@ -158,9 +167,9 @@ test("standInToolEnabled fails closed when neither gpt-6-sol nor gpt-5.5 is pres
   expect(standInToolEnabled()).toBe(false)
 })
 
-test("standInToolEnabled fails closed when the Anthropic peer is missing even with gpt-6-sol present", () => {
+test("standInToolEnabled fails closed when the Anthropic peer is missing even with gpt-5.6-sol present", () => {
   setCatalog([
-    entry("gpt-6-sol", true),
+    entry("gpt-5.6-sol", true),
     entry("gemini-3.1-pro-preview", true),
   ])
   expect(standInToolEnabled()).toBe(false)

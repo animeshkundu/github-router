@@ -1206,16 +1206,16 @@ export const claude = defineCommand({
         ) {
           if (launchProfileId === "cheapest") {
             throw new Error(
-              "cheapest profile prerequisite drift: exact reviewer (gpt-6-sol), oracle (gpt-6-sol), or advisor (gpt-6-sol) model no longer resolves",
+              "cheapest profile prerequisite drift: exact reviewer (gpt-5.6-sol), oracle (gpt-5.6-sol), or advisor (gpt-5.6-sol) model no longer resolves",
             )
           }
           if (launchProfileId === "balanced") {
             throw new Error(
-              "balanced profile prerequisite drift: exact reviewer (gpt-6-sol) or oracle (grok-4.6) model no longer resolves",
+              "balanced profile prerequisite drift: exact reviewer (gpt-5.6-sol) or oracle (grok-4.6) model no longer resolves",
             )
           }
           if (isCheapProfile) {
-            // Cheap oracle (grok-4.6) and advisor (gpt-6-sol) are fixed
+            // Cheap oracle (grok-4.6) and advisor (gpt-5.6-sol) are fixed
             // constants; the cheap drift surface is reviewer + oracle.
             throw new Error(
               "cheap profile prerequisite drift: exact reviewer or oracle (grok-4.6) model no longer resolves",

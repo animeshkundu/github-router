@@ -131,22 +131,22 @@ test("fast Explore pins to Luna and General-Purpose pins to Gemini, requiring to
 })
 
 test("fast Plan pins to Sol high, requiring tool_calls + 1M + Responses", () => {
-  expect(FAST_PLAN_MODEL).toBe("gpt-6-sol")
+  expect(FAST_PLAN_MODEL).toBe("gpt-5.6-sol")
   expect(FAST_PLAN_EFFORT).toBe("high")
 
-  setCatalog(entry("gpt-6-sol", { ctx: 1_050_000, efforts: ["high"], endpoints: ["/responses"] }))
-  expect(fastPlanModel()).toBe("gpt-6-sol")
+  setCatalog(entry("gpt-5.6-sol", { ctx: 1_050_000, efforts: ["high"], endpoints: ["/responses"] }))
+  expect(fastPlanModel()).toBe("gpt-5.6-sol")
 
   // Below 1M -> dropped
-  setCatalog(entry("gpt-6-sol", { ctx: 400_000, efforts: ["high"], endpoints: ["/responses"] }))
+  setCatalog(entry("gpt-5.6-sol", { ctx: 400_000, efforts: ["high"], endpoints: ["/responses"] }))
   expect(fastPlanModel()).toBeUndefined()
 
   // Missing tool calls -> dropped
-  setCatalog(entry("gpt-6-sol", { ctx: 1_050_000, toolCalls: false, efforts: ["high"], endpoints: ["/responses"] }))
+  setCatalog(entry("gpt-5.6-sol", { ctx: 1_050_000, toolCalls: false, efforts: ["high"], endpoints: ["/responses"] }))
   expect(fastPlanModel()).toBeUndefined()
 
   // Wrong endpoint -> dropped
-  setCatalog(entry("gpt-6-sol", { ctx: 1_050_000, efforts: ["high"], endpoints: ["/chat/completions"] }))
+  setCatalog(entry("gpt-5.6-sol", { ctx: 1_050_000, efforts: ["high"], endpoints: ["/chat/completions"] }))
   expect(fastPlanModel()).toBeUndefined()
 })
 
@@ -186,31 +186,31 @@ test("fast reviewer pins to Sonnet 5 via 1M context, adaptive thinking, tool cal
   expect(fastReviewerModel()).toBeUndefined()
 })
 
-test("fast Advisor decouples to dedicated GPT-6 Sol 1M high on responses", () => {
-  expect(FAST_ADVISOR_MODEL).toBe("gpt-6-sol")
+test("fast Advisor decouples to dedicated GPT-5.6 Sol 1M high on responses", () => {
+  expect(FAST_ADVISOR_MODEL).toBe("gpt-5.6-sol")
   expect(FAST_ADVISOR_EFFORT).toBe("high")
-  setCatalog(entry("gpt-6-sol", { ctx: ONE_M, efforts: ["high"], endpoints: ["/responses"] }))
-  expect(fastAdvisorModel()).toBe("gpt-6-sol")
+  setCatalog(entry("gpt-5.6-sol", { ctx: ONE_M, efforts: ["high"], endpoints: ["/responses"] }))
+  expect(fastAdvisorModel()).toBe("gpt-5.6-sol")
 })
 
 test("cheap Advisor pins to Sol/medium at the 200K default window on responses (no 1M gate)", () => {
-  setCatalog(entry("gpt-6-sol", { ctx: 500_000, efforts: ["medium"], endpoints: ["/responses"] }))
-  expect(cheapAdvisorModel()).toBe("gpt-6-sol")
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["medium"], endpoints: ["/responses"] }))
+  expect(cheapAdvisorModel()).toBe("gpt-5.6-sol")
 
   // Below the 200K subagent floor -> dropped.
-  setCatalog(entry("gpt-6-sol", { ctx: 100_000, efforts: ["medium"], endpoints: ["/responses"] }))
+  setCatalog(entry("gpt-5.6-sol", { ctx: 100_000, efforts: ["medium"], endpoints: ["/responses"] }))
   expect(cheapAdvisorModel()).toBeUndefined()
 
   // Missing medium effort -> dropped.
-  setCatalog(entry("gpt-6-sol", { ctx: 500_000, efforts: ["high"], endpoints: ["/responses"] }))
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["high"], endpoints: ["/responses"] }))
   expect(cheapAdvisorModel()).toBeUndefined()
 
   // No tool_calls -> dropped.
-  setCatalog(entry("gpt-6-sol", { ctx: 500_000, toolCalls: false, efforts: ["medium"], endpoints: ["/responses"] }))
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, toolCalls: false, efforts: ["medium"], endpoints: ["/responses"] }))
   expect(cheapAdvisorModel()).toBeUndefined()
 
   // Wrong endpoint -> dropped.
-  setCatalog(entry("gpt-6-sol", { ctx: 500_000, efforts: ["medium"], endpoints: ["/v1/messages"] }))
+  setCatalog(entry("gpt-5.6-sol", { ctx: 500_000, efforts: ["medium"], endpoints: ["/v1/messages"] }))
   expect(cheapAdvisorModel()).toBeUndefined()
 })
 

@@ -349,7 +349,7 @@ describe("getClaudeCodeEnvVars", () => {
     // bare 200K rows via the client's Math.min.
     const value = withCatalog(
       [
-        catalogModel("gpt-6-sol", 1_050_000, 922_000),
+        catalogModel("gpt-5.6-sol", 1_050_000, 922_000),
         catalogModel("gpt-6-luna", 1_050_000, 922_000),
         catalogModel("gemini-3.8-flash", 1_000_000, 983_040, 65_536),
         catalogModel("grok-4.6", 500_000, 372_000),

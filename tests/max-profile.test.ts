@@ -86,7 +86,7 @@ afterEach(() => {
 const catalog = {
   object: "list" as const,
   data: [
-    model("gpt-6-sol", { context: 1_050_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
+    model("gpt-5.6-sol", { context: 1_050_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
     model("gpt-6-luna", { context: 1_050_000, prompt: 900_000, output: 32_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
     model("gemini-3.8-flash", { context: 1_000_000, prompt: 900_000, output: 32_000, efforts: ["low", "medium", "high"], endpoints: ["/chat/completions"] }),
     model("grok-4.6", { context: 500_000, prompt: 372_000, output: 16_000, efforts: ["low", "medium", "high"], endpoints: ["/responses"] }),
@@ -99,7 +99,7 @@ const catalog = {
 describe("max profile contract", () => {
   test("selects only the raw max alias", () => {
     expect(resolveLaunchProfile(" max ")).toBe("max")
-    expect(resolveLaunchProfile("gpt-6-sol")).toBe("standard")
+    expect(resolveLaunchProfile("gpt-5.6-sol")).toBe("standard")
     expect(resolveLaunchProfile("fast")).toBe("fast")
   })
 
@@ -125,7 +125,7 @@ describe("max profile contract", () => {
     expect(result.ok).toBe(true)
     const failure = validateMaxProfilePrerequisites({ object: "list", data: [] } as never)
     expect(failure.ok).toBe(false)
-    expect(formatMaxPrerequisiteFailure(failure.missing)).toContain("gpt-6-sol")
+    expect(formatMaxPrerequisiteFailure(failure.missing)).toContain("gpt-5.6-sol")
   })
 
   test("resolves Max native and Codex reviewers from their required capabilities", () => {
@@ -144,7 +144,7 @@ describe("max profile contract", () => {
       codexHome: "/tmp/codex",
     })
     expect(agents.Explore?.model).toBe("gpt-6-luna[1m]")
-    expect(agents.Plan?.model).toBe("gpt-6-sol[1m]")
+    expect(agents.Plan?.model).toBe("gpt-5.6-sol[1m]")
     expect(agents["general-purpose"]?.model).toBe("gpt-6-luna[1m]")
     expect(agents.implementer?.model).toBe("gemini-3.8-flash[1m]")
     expect(agents.reviewer?.model).toBe("claude-sonnet-5[1m]")
@@ -171,7 +171,7 @@ describe("max profile contract", () => {
     expect(Object.keys(agents).sort()).toEqual([
       "Explore", "Plan", "brainstorm", "general-purpose", "implementer", "peer-review-coordinator", "reviewer",
     ])
-    expect(agents.Plan?.model).toBe("gpt-6-sol[1m]")
+    expect(agents.Plan?.model).toBe("gpt-5.6-sol[1m]")
     expect(agents.Plan?.effort).toBe("high")
     expect(agents.reviewer?.model).toBe("claude-sonnet-5[1m]")
     expect(agents.reviewer?.effort).toBe("xhigh")
@@ -363,7 +363,7 @@ describe("max profile contract", () => {
     )
     expect(pinnedReviewer.updatedInput).toEqual({ subagent_type: "reviewer", effort: "xhigh" })
 
-    const denied = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-6-sol[1m]" } }))
+    const denied = decideMaxDispatchGuard(JSON.stringify({ tool_name: "Agent", tool_input: { subagent_type: "reviewer", model: "gpt-5.6-sol[1m]" } }))
     expect(denied.allowed).toBe(false)
   })
 
@@ -393,7 +393,7 @@ describe("max profile contract", () => {
     expect(JSON.parse(browseAliasReq.body).output_config.effort).toBe("low")
 
     const allowedLead = preprocessMaxRequest(
-      JSON.stringify({ model: "gpt-6-sol[1m]", messages: [] }),
+      JSON.stringify({ model: "gpt-5.6-sol[1m]", messages: [] }),
       launch,
     )
     expect(allowedLead.modified).toBe(true)
@@ -519,12 +519,15 @@ describe("max profile contract", () => {
   test("validates max advisor pins strictly", () => {
     expect(maxAdvisorPinIsValid(undefined)).toBe(true)
     expect(maxAdvisorPinIsValid("")).toBe(true)
+    expect(maxAdvisorPinIsValid("gpt-5.6-sol")).toBe(true)
     expect(maxAdvisorPinIsValid("gpt-6-sol")).toBe(true)
     expect(maxAdvisorPinIsValid("claude-opus-5.5")).toBe(true)
+    expect(maxAdvisorPinIsValid("gpt-5.6-sol[1m]")).toBe(true)
     expect(maxAdvisorPinIsValid("gpt-6-sol[1m]")).toBe(true)
     expect(maxAdvisorPinIsValid("claude-opus-5.5[1m]")).toBe(true)
     expect(maxAdvisorPinIsValid("gemini-3.8-flash")).toBe(false)
     expect(maxAdvisorPinIsValid("gpt-6-luna")).toBe(false)
+    expect(maxAdvisorModelFromPin("gpt-5.6-sol", "claude-opus-5.5")).toBe("gpt-5.6-sol")
     expect(maxAdvisorModelFromPin("gpt-6-sol", "claude-opus-5.5")).toBe("gpt-6-sol")
     expect(maxAdvisorModelFromPin(undefined, "claude-opus-5.5")).toBe("claude-opus-5.5")
   })

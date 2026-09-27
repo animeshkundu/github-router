@@ -37,7 +37,7 @@ const VISION_CATALOG: ReadonlyArray<PiCatalogModel> = [
     maxImageBytes: 3 * 1024 * 1024,
   },
   {
-    id: "gpt-6-sol",
+    id: "gpt-5.6-sol",
     maxContextTokens: 500_000,
     maxPromptTokens: 400_000,
     maxOutputTokens: 64_000,

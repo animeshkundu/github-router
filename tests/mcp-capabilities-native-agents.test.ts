@@ -72,21 +72,21 @@ test("reviewer and brainstorm prefer Pro, then Flash, then OpenAI frontier", () 
   setCatalog(
     entry("gemini-3.1-pro-preview", { ctx: ONE_M }),
     entry("gemini-3.8-flash", { ctx: ONE_M }),
-    entry("gpt-6-sol", { ctx: 1_050_000 }),
+    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
   )
   expect(reviewerModel()).toBe("gemini-3.1-pro-preview")
   expect(brainstormModel()).toBe("gemini-3.1-pro-preview")
 
   setCatalog(
     entry("gemini-3.8-flash", { ctx: ONE_M }),
-    entry("gpt-6-sol", { ctx: 1_050_000 }),
+    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
   )
   expect(reviewerModel()).toBe("gemini-3.8-flash")
   expect(brainstormModel()).toBe("gemini-3.8-flash")
 
-  setCatalog(entry("gpt-6-sol", { ctx: 1_050_000 }))
-  expect(reviewerModel()).toBe("gpt-6-sol")
-  expect(brainstormModel()).toBe("gpt-6-sol")
+  setCatalog(entry("gpt-5.6-sol", { ctx: 1_050_000 }))
+  expect(reviewerModel()).toBe("gpt-5.6-sol")
+  expect(brainstormModel()).toBe("gpt-5.6-sol")
 })
 
 // Regression: an earlier draft of the deprecation fix replaced the
@@ -99,7 +99,7 @@ test("reviewer and brainstorm recognize a GA rename of the preview slug ahead of
   setCatalog(
     entry("gemini-3.1-pro", { ctx: ONE_M }),
     entry("gemini-3.8-flash", { ctx: ONE_M }),
-    entry("gpt-6-sol", { ctx: 1_050_000 }),
+    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
   )
   expect(reviewerModel()).toBe("gemini-3.1-pro")
   expect(brainstormModel()).toBe("gemini-3.1-pro")
@@ -109,7 +109,7 @@ test("reviewer and brainstorm recognize a GA rename of the preview slug ahead of
   // Without a GA rename present, Flash still wins over OpenAI as before.
   setCatalog(
     entry("gemini-3.8-flash", { ctx: ONE_M }),
-    entry("gpt-6-sol", { ctx: 1_050_000 }),
+    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
   )
   expect(resolveGeminiReviewModel()).toBe("gemini-3.8-flash")
 })
@@ -139,12 +139,12 @@ test("implementerFastModel prefers gpt-5.6-terra, falls back to gemini-3.1-pro-p
   expect(implementerFastModel()).toBe("gemini-3.1-pro-preview")
 })
 
-// gpt-6-sol is deliberately absent from this chain: the OpenAI frontier coder
+// gpt-5.6-sol is deliberately absent from this chain: the OpenAI frontier coder
 // is already `implementer`'s job, and a catch-all that quietly bills at frontier
 // rates is the opposite of what the agent is for.
 test("implementerFastModel does NOT fall through to the OpenAI frontier", () => {
   setCatalog(
-    entry("gpt-6-sol", { ctx: 1_050_000 }),
+    entry("gpt-5.6-sol", { ctx: 1_050_000 }),
     entry("gpt-5.5", { ctx: 1_050_000 }),
   )
   expect(implementerFastModel()).toBeUndefined()

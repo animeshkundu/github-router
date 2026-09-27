@@ -3,7 +3,7 @@
  *
  * The cheapest all-200K tier: a `gpt-6-luna`/max LEAD at Claude Code's
  * DEFAULT (bare-slug) 200K window, every subagent at the same 200K default,
- * a `gpt-6-sol`/medium Advisor (bare slug), and a `gpt-6-sol`/high
+ * a `gpt-5.6-sol`/medium Advisor (bare slug), and a `gpt-5.6-sol`/high
  * primary Oracle. Oracle-only peer set (no `astra`) and a three-agent
  * surface (`Explore`/`General-Purpose`/`reviewer` — no `Plan`): the lead
  * plans directly and reviews the final plan with the Advisor (advisory)
@@ -18,9 +18,9 @@ export const CHEAPEST_PROFILE_MODELS = Object.freeze({
   lead: "gpt-6-luna",
   explore: "gpt-6-luna",
   "General-Purpose": "gpt-6-luna",
-  reviewer: "gpt-6-sol",
-  advisor: "gpt-6-sol",
-  oracle: "gpt-6-sol",
+  reviewer: "gpt-5.6-sol",
+  advisor: "gpt-5.6-sol",
+  oracle: "gpt-5.6-sol",
 } as const)
 
 export const CHEAPEST_PROFILE_NATIVE_AGENT_NAMES = [

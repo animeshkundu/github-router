@@ -170,7 +170,7 @@ Each subcommand sets environment variables so the child process uses the proxy:
 
 | Subcommand | Primary endpoint | Default model (env-var slug) | Fallback chain |
 |---|---|---|---|
-| `codex` | `/v1/responses` | `gpt-6-sol` | `gpt-5.5` → `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex` |
+| `codex` | `/v1/responses` | `gpt-5.6-sol` | `gpt-6-sol` → `gpt-5.5` → `gpt-5.4` → `gpt-5.3-codex` → `gpt-5.2-codex` |
 | `claude` | `/v1/messages` | `claude-opus-5.5` (Anthropic dashed slug and exact Copilot catalog id; single base slug, native 1M) | `claude-opus-4-8` → `claude-opus-4-7` → `claude-opus-4-6` |
 
 ## Authentication Flow
