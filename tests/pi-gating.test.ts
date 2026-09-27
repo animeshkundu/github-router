@@ -96,7 +96,7 @@ describe("pi --no-peers shrinks the surface", () => {
       "gpt-6-luna",
     ])
     expect(piProfileModelIds("balanced", { peers: false })).toEqual([
-      "gpt-6-sol",
+      "gpt-5.6-sol",
     ])
   })
 
@@ -139,7 +139,7 @@ describe("pi --no-peers shrinks the surface", () => {
     })
     expect(
       json.providers["gh-router"].models.map((m) => m.id),
-    ).toEqual(["gpt-6-sol"])
+    ).toEqual(["gpt-5.6-sol"])
   })
 
   test("prereqs validate the lead only", () => {
@@ -158,7 +158,7 @@ describe("pi --no-peers shrinks the surface", () => {
     ).toBe(false)
 
     const solOnly = catalogOf([
-      model("gpt-6-sol", {
+      model("gpt-5.6-sol", {
         context: 500_000,
         efforts: ["high"],
         endpoints: ["/responses"],

@@ -28,7 +28,7 @@ afterEach(() => {
 
 test("DEFAULT_CODEX_MODEL matches Copilot API format", () => {
   // Must match both Copilot's model ID and Codex CLI's bundled catalog entry
-  expect(DEFAULT_CODEX_MODEL).toBe("gpt-6-sol")
+  expect(DEFAULT_CODEX_MODEL).toBe("gpt-5.6-sol")
 })
 
 test("DEFAULT_CLAUDE_MODEL is the Anthropic-published dashed slug", () => {
@@ -53,7 +53,7 @@ test("DEFAULT_CLAUDE_MODEL_FALLBACKS lists older Opus versions (Anthropic slugs)
 
 test("DEFAULT_CODEX_MODEL_FALLBACKS lists older /responses models in order", () => {
   expect(Array.from(DEFAULT_CODEX_MODEL_FALLBACKS)).toEqual([
-    "gpt-5.6-sol",
+    "gpt-6-sol",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.3-codex",

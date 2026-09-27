@@ -25,7 +25,7 @@ function model(id: string, endpoints: string[]) {
 describe("fast endpoint policy", () => {
   test.each([
     ["gpt-6-luna", "responses"],
-    ["gpt-6-sol", "responses"],
+    ["gpt-5.6-sol", "responses"],
     ["grok-4.6", "responses"],
     ["gemini-3.8-flash", "chat"],
     ["claude-opus-5.5", "messages"],
@@ -50,14 +50,14 @@ describe("fast endpoint policy", () => {
   })
 
   test("rejects a missing required endpoint", () => {
-    expect(fastEndpointForModel(model("gpt-6-sol", ["/chat/completions"]))).toBeUndefined()
+    expect(fastEndpointForModel(model("gpt-5.6-sol", ["/chat/completions"]))).toBeUndefined()
     expect(fastEndpointForModel(model("gemini-3.8-flash", ["/responses"]))).toBeUndefined()
   })
 
   test("fast prerequisites use the same policy and fail on wrong endpoints", () => {
     const full = [
       model("gpt-6-luna", ["/responses"]),
-      model("gpt-6-sol", ["/chat/completions"]),
+      model("gpt-5.6-sol", ["/chat/completions"]),
       model("grok-4.6", ["/responses"]),
       model("gemini-3.8-flash", ["/chat/completions"]),
       model("claude-opus-5.5", ["/v1/messages"]),
@@ -65,7 +65,7 @@ describe("fast endpoint policy", () => {
     const result = validateFastProfilePrerequisites({ object: "list", data: full } as never)
     expect(result.ok).toBe(false)
     expect(result.missing).toContain(
-      "gpt-6-sol: does not advertise a supported Responses endpoint",
+      "gpt-5.6-sol: does not advertise a supported Responses endpoint",
     )
   })
 })

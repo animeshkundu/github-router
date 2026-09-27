@@ -105,7 +105,7 @@ export function normalizeMaxDispatchEffort(
 ): Effort | undefined {
   if (effort === undefined || effort === null) return undefined
   if (typeof effort !== "string") return undefined
-  const allowed: ReadonlyArray<Effort> = model === "gpt-6-sol" || model === "gpt-6-sol"
+  const allowed: ReadonlyArray<Effort> = model === "gpt-5.6-sol" || model === "gpt-6-sol"
     ? ["high", "xhigh", "max"]
     : model === "gpt-6-luna"
       ? ["none", "low", "medium", "high", "xhigh", "max"]

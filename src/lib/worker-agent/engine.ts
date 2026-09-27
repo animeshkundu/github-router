@@ -157,7 +157,7 @@ export function resolveDefaultModel(): string {
  *  former Gemini Flash default: lower token cost, faster generation and tool-call
  *  latency, a larger context window, and the full reasoning-effort ladder. `high`
  *  is therefore a real selected tier rather than a clamp. Like `implement`'s
- *  gpt-6-sol this per-mode default is NOT a `workerToolsEnabled` gate input — if
+ *  gpt-5.6-sol this per-mode default is NOT a `workerToolsEnabled` gate input — if
  *  absent on a thin catalog, `explore` errors helpfully at call time rather than
  *  vanishing the whole worker surface. The caller can override model and thinking
  *  per call via the `model` / `thinking` args. */
@@ -169,7 +169,7 @@ export const EXPLORE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 /** Default model + thinking for the READ-ONLY `review` mode.
  *  `gemini-3.1-pro-preview` at `xhigh` (clamped to `high` at call time — gemini
  *  advertises no xhigh). DELIBERATELY DECORRELATED FROM THE IMPLEMENTER: bounded
- *  implementation now defaults to gpt-6-sol (OpenAI) — both the `implement` worker
+ *  implementation now defaults to gpt-5.6-sol (OpenAI) — both the `implement` worker
  *  and the native `implementer` subagent — and the main orchestrator is Opus
  *  (Anthropic), so review runs on a THIRD lab (Google) to maximize blind-spot
  *  diversity. A reviewer sharing the implementer's lab catches a correlated slice
@@ -181,19 +181,19 @@ export const EXPLORE_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 export const REVIEW_DEFAULT_MODEL = "gemini-3.1-pro-preview"
 const REVIEW_DEFAULT_THINKING: WorkerThinkingLevel = "xhigh"
 
-/** Default model + thinking for the READ+WRITE `implement` mode. `gpt-6-sol`
+/** Default model + thinking for the READ+WRITE `implement` mode. `gpt-5.6-sol`
  *  at `high` — a time-to-outcome default for the 1M+ context model, routed
  *  through `/responses` by the stream-fn endpoint split. Any caller can restore
  *  a higher tier per call via `thinking` or per session via `worker_defaults`;
  *  precedence is per-call > session > built-in. */
-export const IMPLEMENT_DEFAULT_MODEL = "gpt-6-sol"
+export const IMPLEMENT_DEFAULT_MODEL = "gpt-5.6-sol"
 const IMPLEMENT_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
 /** `test` starts with the same time-to-outcome built-in pair as `implement`, but
  * remains independent so either mode can restore a higher tier per call via
  * `thinking` or per session via `worker_defaults`. Resolution precedence is
  * per-call > session > built-in. */
-export const TEST_DEFAULT_MODEL = "gpt-6-sol"
+export const TEST_DEFAULT_MODEL = "gpt-5.6-sol"
 const TEST_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 
 /** Default model for `browse` mode. `gpt-6-luna` has the same measured image
@@ -225,7 +225,7 @@ const BROWSE_DEFAULT_THINKING: WorkerThinkingLevel = "low"
  *  does NOT translate the Anthropic dashed slug; `claude-opus-5.5` dotted maps
  *  from dashed `claude-opus-5-5` via `resolveModel` normalization). Falls back to a helpful unknown-model
  *  error at call time if opus-5.5 isn't in the catalog (e.g. a non-enterprise tier),
- *  exactly like `implement`'s `gpt-6-sol`. */
+ *  exactly like `implement`'s `gpt-5.6-sol`. */
 export const PLAN_DEFAULT_MODEL = "claude-opus-5.5"
 const PLAN_DEFAULT_THINKING: WorkerThinkingLevel = "high"
 

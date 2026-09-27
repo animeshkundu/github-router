@@ -97,7 +97,7 @@ const fullCatalog = {
   object: "list" as const,
   data: [
     model("gpt-6-luna", { context: 1_050_000, efforts: ["high", "xhigh", "max"], endpoints: ["/responses"] }),
-    model("gpt-6-sol", { context: 1_050_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
+    model("gpt-5.6-sol", { context: 1_050_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
     model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["medium"], endpoints: ["/responses"] }),
     model("gemini-3.8-flash", { context: 1_000_000, efforts: ["medium", "high"], endpoints: ["/chat/completions"] }),
     {
@@ -160,14 +160,14 @@ describe("Luna aliases", () => {
     expect(resolveModelAlias(LUNA_SONNET_ALIAS_ID)?.absentEffortDefault).toBe("xhigh")
     expect(resolveModelAlias(LUNA_HAIKU_ALIAS_ID)?.absentEffortDefault).toBe("high")
     expect(canonicalizeAliasModel(`${LUNA_SONNET_ALIAS_ID}[1m]`)).toBe(`${LUNA_REAL_MODEL_ID}[1m]`)
-    expect(canonicalizeAliasModel("gpt-6-sol")).toBe("gpt-6-sol")
+    expect(canonicalizeAliasModel("gpt-5.6-sol")).toBe("gpt-5.6-sol")
   })
 
   test("effort precedence is explicit then thinking then alias default", () => {
     expect(resolveEffortWithAliasDefault({ aliasId: LUNA_DRIVER_ALIAS_ID })).toBe("max")
     expect(resolveEffortWithAliasDefault({ aliasId: LUNA_DRIVER_ALIAS_ID, thinkingBucketedEffort: "medium" })).toBe("medium")
     expect(resolveEffortWithAliasDefault({ aliasId: LUNA_DRIVER_ALIAS_ID, thinkingBucketedEffort: "medium", explicitEffort: "low" })).toBe("low")
-    expect(resolveEffortWithAliasDefault({ aliasId: "gpt-6-sol" })).toBeUndefined()
+    expect(resolveEffortWithAliasDefault({ aliasId: "gpt-5.6-sol" })).toBeUndefined()
   })
 })
 
@@ -268,7 +268,7 @@ function cheapCatalog(): typeof fullCatalog {
       // Subagents run at the 200K default window, not the fast 1M per-role
       // windows — the whole cheap cost lever.
       model("gpt-6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
-      model("gpt-6-sol", { context: 500_000, efforts: ["high"], endpoints: ["/responses"] }),
+      model("gpt-5.6-sol", { context: 500_000, efforts: ["high"], endpoints: ["/responses"] }),
       // Reviewer shares the Luna entry above (Luna/max at the 200K default
       // window), so no separate reviewer row is needed here.
       model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["low", "medium"], endpoints: ["/responses"] }),
@@ -322,19 +322,19 @@ describe("cheap-family startup prerequisites", () => {
   test("rejects a subagent whose context window falls below the 200K floor", () => {
     const below = cheapCatalog()
     below.data = below.data.map((entry) =>
-      entry.id === "gpt-6-sol"
+      entry.id === "gpt-5.6-sol"
         ? { ...entry, capabilities: { ...entry.capabilities, limits: { ...entry.capabilities.limits, max_context_window_tokens: 150_000 } } }
         : entry,
     ) as typeof fullCatalog["data"]
     const cheapResult = validateCheapProfilePrerequisites(below as never)
     expect(cheapResult.ok).toBe(false)
     expect(cheapResult.missing).toEqual([
-      "gpt-6-sol: advertised context window is below the 200K subagent floor",
+      "gpt-5.6-sol: advertised context window is below the 200K subagent floor",
     ])
     const cheap1mResult = validateCheap1mProfilePrerequisites(below as never)
     expect(cheap1mResult.ok).toBe(false)
     expect(cheap1mResult.missing).toEqual([
-      "gpt-6-sol: advertised context window is below the 200K subagent floor",
+      "gpt-5.6-sol: advertised context window is below the 200K subagent floor",
     ])
   })
 
@@ -371,9 +371,9 @@ describe("cheap-family startup prerequisites", () => {
         expected: `gpt-6-luna: does not advertise both "high" and "max" reasoning effort`,
       },
       {
-        id: "gpt-6-sol",
+        id: "gpt-5.6-sol",
         mutate: (entry) => ({ ...entry, supported_endpoints: ["/v1/messages"] }),
-        expected: `gpt-6-sol: does not advertise a supported Responses endpoint`,
+        expected: `gpt-5.6-sol: does not advertise a supported Responses endpoint`,
       },
       // Reviewer shares Luna's catalog entry with Explore, so a Luna
       // regression double-reports: once for Explore, once for the reviewer.
@@ -412,7 +412,7 @@ describe("cheap-family startup prerequisites", () => {
     const cheapMessage = formatCheapPrerequisiteFailure(result.missing)
     expect(cheapMessage).toContain("gemini-3.8-flash")
     expect(cheapMessage).toContain("gpt-6-luna")
-    expect(cheapMessage).toContain("gpt-6-sol")
+    expect(cheapMessage).toContain("gpt-5.6-sol")
     // Reviewer shares Luna's entry, so Luna is reported twice on an empty catalog.
     expect(result.missing.filter((m) => m.startsWith("gpt-6-luna:"))).toHaveLength(2)
     expect(cheapMessage).toContain("grok-4.6")
@@ -476,7 +476,7 @@ describe("balanced startup prerequisites", () => {
   const balancedCatalog = () => ({
     object: "list" as const,
     data: [
-      model("gpt-6-sol", { context: 500_000, prompt: 372_000, efforts: ["high"], endpoints: ["/responses"] }),
+      model("gpt-5.6-sol", { context: 500_000, prompt: 372_000, efforts: ["high"], endpoints: ["/responses"] }),
       model("gpt-6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
       model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["low", "medium"], endpoints: ["/responses"] }),
     ],
@@ -491,7 +491,7 @@ describe("balanced startup prerequisites", () => {
     expect(result.ok).toBe(false)
     expect(result.missing).toHaveLength(5)
     const message = formatBalancedPrerequisiteFailure(result.missing)
-    expect(message).toContain("gpt-6-sol")
+    expect(message).toContain("gpt-5.6-sol")
     expect(message).toContain("gpt-6-luna")
     expect(message).toContain("grok-4.6")
     expect(message).toContain("github-router claude -m balanced")

@@ -57,7 +57,7 @@ export function oneMContextDisabled(): boolean {
  * non-Claude gateway models exactly as it does for Opus — verified against the
  * installed 2.1.222 build, where the window resolver returns `1e6` on a bracket
  * match and otherwise falls through to a 200K default. Without the bracket a
- * 1M-context model like `gpt-6-sol` (1,050,000) is budgeted at 200K and
+ * 1M-context model like `gpt-5.6-sol` (1,050,000) is budgeted at 200K and
  * auto-compacts at roughly a fifth of its real window.
  *
  * The bracket never reaches Copilot: `resolveModel` (`./utils`) strips it before

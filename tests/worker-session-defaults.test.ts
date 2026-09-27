@@ -79,7 +79,7 @@ describe("worker session defaults", () => {
 
     expect(ordinary.model).toBe("same-lab-override")
     expect(ordinary.thinking).toBe("low")
-    expect(workflow.model).toBe("gpt-6-sol")
+    expect(workflow.model).toBe("gpt-5.6-sol")
     expect(workflow.thinking).toBe("high")
   })
 

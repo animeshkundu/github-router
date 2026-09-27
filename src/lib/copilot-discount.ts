@@ -3,7 +3,7 @@
  * factors applied to the AIC ledger's billed nano-AIU.
  *
  * Background: GitHub's portal lists per-token rates, but the spend dashboard
- * bills several models well below portal (gpt-6-sol ≈ 0.28x, the Opus /
+ * bills several models well below portal (gpt-5.6-sol ≈ 0.28x, the Opus /
  * Sonnet / Codex cluster ≈ 0.6x, gemini-3.7-flash ≈ 0.29x since Sep 2026),
  * while Luna bills long-context portal tiers and Grok / 3.8-flash bill
  * portal-default exactly. No uniform per-lab factor exists (verified across

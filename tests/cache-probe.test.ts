@@ -63,11 +63,11 @@ describe("selectCacheProbeTargets", () => {
   test("reports missing exact targets honestly rather than substituting", () => {
     const selection = selectCacheProbeTargets([makeModel("claude-opus-5.5", 1_000_000)])
     expect(selection.missing).toContain("claude-haiku-4.5")
-    expect(selection.missing).toContain("gpt-6-sol")
+    expect(selection.missing).toContain("gpt-5.6-sol")
     expect(selection.missing).toContain("gpt-5.6-terra")
     expect(selection.missing).toContain("gpt-6-luna")
     expect(selection.missing).toContain("gemini-3.8-flash")
-    const gptSol = selection.targets.find((t) => t.requestedId === "gpt-6-sol")
+    const gptSol = selection.targets.find((t) => t.requestedId === "gpt-5.6-sol")
     expect(gptSol?.found).toBe(false)
     expect(gptSol?.catalogId).toBeUndefined()
   })
@@ -99,7 +99,7 @@ describe("cacheOracleClassFor", () => {
   test("native Claude and the gpt-5.6 family are strict", () => {
     expect(cacheOracleClassFor("claude-opus-5.5")).toBe("strict")
     expect(cacheOracleClassFor("claude-sonnet-5")).toBe("strict")
-    expect(cacheOracleClassFor("gpt-6-sol")).toBe("strict")
+    expect(cacheOracleClassFor("gpt-5.6-sol")).toBe("strict")
     expect(cacheOracleClassFor("gpt-5.6-terra")).toBe("strict")
     expect(cacheOracleClassFor("gpt-6-luna")).toBe("strict")
     expect(cacheOracleClassFor("gpt-5.6")).toBe("strict")
@@ -339,12 +339,12 @@ describe("buildStreamJsonUserLine / buildCacheProbeTurns", () => {
 describe("buildCacheProbeClaudeArgs", () => {
   test("controlled trial disables tools/MCP and carries the system prefix", () => {
     const args = buildCacheProbeClaudeArgs({
-      modelId: "gpt-6-sol",
+      modelId: "gpt-5.6-sol",
       controlled: true,
       systemPrefix: "PREFIX-TEXT",
     })
     expect(args).toContain("-m")
-    expect(args).toContain("gpt-6-sol")
+    expect(args).toContain("gpt-5.6-sol")
     expect(args).toContain("--no-auto-update")
     expect(args).toContain("--no-self-update")
     expect(args).toContain("--no-update-check")
@@ -392,7 +392,7 @@ describe("systemPrefixCharsFor", () => {
 
   test("gives Opus and every gpt-5.6 tier the default prefix", () => {
     expect(systemPrefixCharsFor("claude-opus-5.5")).toBe(DEFAULT_SYSTEM_PREFIX_CHARS)
-    expect(systemPrefixCharsFor("gpt-6-sol")).toBe(DEFAULT_SYSTEM_PREFIX_CHARS)
+    expect(systemPrefixCharsFor("gpt-5.6-sol")).toBe(DEFAULT_SYSTEM_PREFIX_CHARS)
     expect(systemPrefixCharsFor("gpt-5.6-terra")).toBe(DEFAULT_SYSTEM_PREFIX_CHARS)
     expect(systemPrefixCharsFor("gpt-6-luna")).toBe(DEFAULT_SYSTEM_PREFIX_CHARS)
   })

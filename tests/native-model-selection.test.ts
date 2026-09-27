@@ -12,7 +12,7 @@ import { state } from "../src/lib/state"
 const standardRows = () => selectableModelsInCatalog("standard")
 
 const SEED_TARGET_IDS = [
-  "gpt-6-sol",
+  "gpt-5.6-sol",
   "gpt-6-luna",
   "gemini-3.8-flash",
   "grok-4.6",
@@ -70,7 +70,7 @@ function setCatalogWithWindows(entries: Record<string, number>) {
  *  live window is 500K total (372K max prompt) and is deliberately NEVER
  *  decorated regardless of what a catalog fixture claims here. */
 const LIVE_WINDOWS: Record<string, number> = {
-  "gpt-6-sol": 1_050_000,
+  "gpt-5.6-sol": 1_050_000,
   "gpt-6-luna": 1_050_000,
   "gemini-3.8-flash": 1_000_000,
   "grok-4.6": 500_000,
@@ -147,7 +147,7 @@ describe("selectableModelsInCatalog — [1m] context accounting", () => {
   test("brackets only the ids whose catalog window is >=1M, and NEVER grok-4.6", () => {
     setCatalogWithWindows(LIVE_WINDOWS)
     expect(standardRows().map((m) => m.model)).toEqual([
-      "gpt-6-sol[1m]",
+      "gpt-5.6-sol[1m]",
       "gpt-6-luna[1m]",
       "gemini-3.8-flash[1m]",
       // 500K total / 372K max-prompt — deliberately bare, and deliberately
@@ -169,7 +169,7 @@ describe("selectableModelsInCatalog — [1m] context accounting", () => {
     setCatalogWithWindows(LIVE_WINDOWS)
     const got = standardRows()
     expect(got.map((m) => m.label)).toEqual([
-      "GPT-6 Sol",
+      "GPT-5.6 Sol",
       "GPT-6 Luna",
       "Gemini 3.8 Flash",
       "Grok 4.6",
@@ -185,9 +185,9 @@ describe("selectableModelsInCatalog — [1m] context accounting", () => {
   })
 
   test("a window just under 1M stays bare (threshold is inclusive at 1M)", () => {
-    setCatalogWithWindows({ "gpt-6-luna": 999_999, "gpt-6-sol": 1_000_000 })
+    setCatalogWithWindows({ "gpt-6-luna": 999_999, "gpt-5.6-sol": 1_000_000 })
     expect(standardRows().map((m) => m.model)).toEqual([
-      "gpt-6-sol[1m]",
+      "gpt-5.6-sol[1m]",
       "gpt-6-luna",
     ])
   })
@@ -215,7 +215,7 @@ describe("selectableModelsInCatalog — [1m] context accounting", () => {
     setCatalogWithWindows(LIVE_WINDOWS)
     process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = ""
     expect(standardRows().map((m) => m.model)).toContain(
-      "gpt-6-sol[1m]",
+      "gpt-5.6-sol[1m]",
     )
   })
 })

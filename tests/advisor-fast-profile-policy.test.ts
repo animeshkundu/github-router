@@ -196,7 +196,7 @@ beforeEach(() => {
     object: "list",
     data: [
       catalogModel("gpt-6-luna"),
-      catalogModel("gpt-6-sol"),
+      catalogModel("gpt-5.6-sol"),
       catalogModel("grok-4.6"),
       catalogModel("gemini-3.8-flash"),
       catalogModel("claude-opus-5.5"),
@@ -272,7 +272,7 @@ describe("fast Advisor request policy", () => {
     state.models = {
       object: "list",
       data: [
-        catalogModel("gpt-6-sol"),
+        catalogModel("gpt-5.6-sol"),
         catalogModel("claude-opus-5.5"),
       ] as never,
     }
@@ -317,7 +317,7 @@ describe("fast Advisor request policy", () => {
 
     for (const [agentId, model] of [
       ["Explore", LUNA_SCOUT_ALIAS_ID],
-      ["Plan", "gpt-6-sol"],
+      ["Plan", "gpt-5.6-sol"],
       ["general-purpose", "gpt-6-luna"],
       ["implementer", "gemini-3.8-flash"],
       ["reviewer", "grok-4.6"],
@@ -546,7 +546,7 @@ describe("fast Advisor request policy", () => {
 
   test.each([
     ["missing model", advisorMetadataTool(), "omitted its fixed model"],
-    ["wrong model", advisorMetadataTool("gpt-6-sol-wrong"), "requested"],
+    ["wrong model", advisorMetadataTool("gpt-5.6-sol-wrong"), "requested"],
     ["non-Sol model", advisorMetadataTool("claude-opus-5.5"), "requested"],
   ])("rejects fast native Advisor metadata with %s", async (_label, tool, detail) => {
     const fetchMock = mock(() => Promise.resolve(responsesObjectResponse()))

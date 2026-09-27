@@ -8,6 +8,7 @@ import type { Model } from "~/services/copilot/get-models"
  * Sourced from https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing
  * (per 1M tokens; tiers key on per-request INPUT tokens):
  *   - gpt-6-luna: Default ≤ 272K ($0.10 in) vs Long > 272K ($0.20 in)
+ *   - gpt-5.6-sol:  Default ≤ 272K ($4.00 in) vs Long > 272K ($8.00 in)
  *   - gpt-6-sol:  Default ≤ 272K ($2.00 in) vs Long > 272K ($4.00 in)
  *   - grok-4.6:   Default ≤ 200K ($2.00 in) vs Long > 200K ($4.00 in)
  *
@@ -19,6 +20,7 @@ import type { Model } from "~/services/copilot/get-models"
  */
 export const PI_TIER_THRESHOLDS: Readonly<Record<string, number>> = Object.freeze({
   "gpt-6-luna": 272_000,
+  "gpt-5.6-sol": 272_000,
   "gpt-6-sol": 272_000,
   "grok-4.6": 200_000,
 })
@@ -62,6 +64,7 @@ export function piContextWindowFor(
 const EXPECTED_DEFAULT_INPUT_PER_1M: Readonly<Record<string, number>> =
   Object.freeze({
     "gpt-6-luna": 10,
+    "gpt-5.6-sol": 400,
     "gpt-6-sol": 200,
     "grok-4.6": 200,
   })

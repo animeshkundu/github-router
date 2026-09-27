@@ -6,7 +6,7 @@ fixed, cost-controlled profile. Only two `-m` aliases are supported:
 | Profile | Lead | Roster | Consultants |
 |---|---|---|---|
 | `cheapest` | `gpt-6-luna` / max, 200K bare | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol/high); no Plan | Sol/medium Advisor (plan review), Sol/high Oracle |
-| `balanced` | `gpt-6-sol` / medium, 200K bare | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol/high, may delegate Explore); no Plan | Grok/medium Oracle only — **advisor-free by design** |
+| `balanced` | `gpt-5.6-sol` / medium, 200K bare | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol/high, may delegate Explore); no Plan | Grok/medium Oracle only — **advisor-free by design** |
 
 Every role runs at the bare 200K default window (no `[1m]` accounting
 anywhere) — that is the whole cost lever, same as the Claude
@@ -153,6 +153,7 @@ tokens. Each Pi model row carries its cheap-tier window, so Long-tier
 | Model | Default (cheap) tier | `contextWindow` |
 |---|---|---|
 | `gpt-6-luna` | ≤ 272K ($0.10/1M in) | 272000 |
+| `gpt-5.6-sol` | ≤ 272K ($4.00/1M in) | 272000 |
 | `gpt-6-sol` | ≤ 272K ($2.00/1M in) | 272000 |
 | `grok-4.6` | ≤ 200K ($2.00/1M in) | 200000 |
 | anything else | — | 200000 (fallback) |

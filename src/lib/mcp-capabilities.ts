@@ -77,7 +77,7 @@ export const REVIEW_FAST_DEFAULT_MODEL = "gemini-3.8-flash"
  *
  * Returns true iff Copilot's live catalog (`state.models?.data`) contains
  * ALL THREE peer models the consensus protocol needs:
- *   - an OpenAI frontier model (`gpt-6-sol`, else `gpt-6-sol`, else `gpt-5.5` — see
+ *   - an OpenAI frontier model (`gpt-5.6-sol`, else `gpt-6-sol`, else `gpt-5.5` — see
  *     `resolveOpenAiFrontier`)
  *   - `claude-opus-5.5` (stand_in's Anthropic slot)
  *   - standard/BYO: the preferred Gemini reviewer model
@@ -144,8 +144,8 @@ export function geminiAvailable(source: Pick<State, "models"> = state): boolean 
 }
 
 /**
- * OpenAI frontier reasoning models in preference order. `gpt-6-sol` is the
- * current default; `gpt-5.5` is retained as a fallback. Both share the same
+ * OpenAI frontier reasoning models in preference order. `gpt-5.6-sol` is the
+ * current default; `gpt-6-sol` / `gpt-5.5` are retained as fallbacks. They share similar
  * `pro_plus/business/enterprise/max` restriction tier, so the fallback only
  * matters during a rollout-lag window where the newer slug hasn't yet appeared
  * in the account's catalog.
@@ -198,7 +198,7 @@ export function firstPresentInCatalog(
 
 /**
  * First available OpenAI frontier model in the live catalog (prefer
- * `gpt-6-sol`, fall back to `gpt-6-sol`, then `gpt-5.5`). Returns undefined when neither is
+ * `gpt-5.6-sol`, fall back to `gpt-6-sol`, then `gpt-5.5`). Returns undefined when neither is
  * present. With `requireToolCalls`, only returns a model whose catalog entry
  * advertises `tool_calls`.
  */
@@ -220,11 +220,11 @@ export function standInToolEnabled(opts: { maxProfile?: boolean } = {}): boolean
 }
 
 /** Model for the native subagent that wants the OpenAI frontier coder
- *  (`implementer`) iff it is live with tool calls. Prefers `gpt-6-sol`, falls
- *  back to `gpt-5.5`. Absent → the agent omits its `model:` line and inherits
+ *  (`implementer`) iff it is live with tool calls. Prefers `gpt-5.6-sol`, falls
+ *  back to `gpt-6-sol` / `gpt-5.5`. Absent → the agent omits its `model:` line and inherits
  *  the lead's model.
  *
- *  Public web benchmarks put `gpt-6-sol` (and previously `gpt-6-sol`) ahead of both `gpt-5.6-terra` and
+ *  Public web benchmarks put `gpt-5.6-sol` (and previously `gpt-6-sol`) ahead of both `gpt-5.6-terra` and
  *  `gpt-5.3-codex` on coding (Terminal-Bench 2.1 88.8 vs 87.1; SWE-bench
  *  Verified 96.2 vs ~80 for 5.3-codex, which also trails gpt-5.5 on SWE-bench
  *  Pro). Terra is the cheaper tier at ~98% of the capability, so it is the right
@@ -360,7 +360,7 @@ export function scoutModel(): string | undefined {
 /** Model for `implementer-fast` — the cheaper implementation tier. Absent →
  *  the agent is dropped.
  *
- *  `gpt-6-sol` is deliberately NOT in this chain: changes needing frontier
+ *  `gpt-5.6-sol` is deliberately NOT in this chain: changes needing frontier
  *  judgment already belong to `implementer`, while this agent handles
  *  well-specified, mechanical changes at a lower tier. Both entries are 1M+;
  *  their different speed and effort properties stay out of shared claims. */

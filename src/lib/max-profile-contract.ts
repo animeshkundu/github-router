@@ -23,7 +23,7 @@ function catalogModel(id: string): Model | undefined {
 
 
 export const MAX_PROFILE_MODELS = Object.freeze({
-  sol: "gpt-6-sol",
+  sol: "gpt-5.6-sol",
   luna: "gpt-6-luna",
   gemini: "gemini-3.8-flash",
   grok: "grok-4.6",
@@ -74,7 +74,7 @@ export const MAX_PROFILE_ADVISOR_INSTRUCTIONS = MAX_ADVISOR_TOOL_INSTRUCTIONS
 export function maxAdvisorModelFromPin(pinned: string | undefined, opusModel?: string): string {
   const trimmed = pinned?.trim()
   const base = trimmed ? stripTrailingOneMSuffix(trimmed).base : undefined
-  if (base === MAX_PROFILE_MODELS.sol || base === MAX_PROFILE_MODELS.opus) {
+  if (base === MAX_PROFILE_MODELS.sol || base === "gpt-6-sol" || base === MAX_PROFILE_MODELS.opus) {
     return base
   }
   return opusModel ?? MAX_PROFILE_MODELS.opus
@@ -86,6 +86,7 @@ export function maxAdvisorPinIsValid(pinned: string | undefined): boolean {
   return base === undefined
     || base === ""
     || base === MAX_PROFILE_MODELS.sol
+    || base === "gpt-6-sol"
     || base === MAX_PROFILE_MODELS.opus
 }
 
@@ -111,6 +112,7 @@ export const MAX_PROFILE_NATIVE_MODEL_IDS = Object.freeze([
 
 export const MAX_PROFILE_ALLOWED_LEAD_MODEL_IDS = Object.freeze([
   MAX_PROFILE_MODELS.sol,
+  "gpt-6-sol",
   MAX_PROFILE_MODELS.luna,
   MAX_PROFILE_MODELS.gemini,
   MAX_PROFILE_MODELS.opus,

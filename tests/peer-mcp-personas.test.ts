@@ -69,7 +69,7 @@ describe("PERSONAS_READ", () => {
 
   test("each persona has the correct model + endpoint binding", () => {
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
-    expect(byName["codex-critic"]?.model).toBe("gpt-6-sol")
+    expect(byName["codex-critic"]?.model).toBe("gpt-5.6-sol")
     expect(byName["codex-critic"]?.endpoint).toBe("/v1/responses")
     expect(byName["codex-critic"]?.requiresHttp).toBe(false)
     expect(byName["codex-critic"]?.writeCapable).toBe(false)
@@ -115,7 +115,7 @@ describe("PERSONAS_READ", () => {
 
   test("descriptions surface load-bearing routing signal (model identity)", () => {
     const byName = Object.fromEntries(PERSONAS_READ.map((p) => [p.agentName, p]))
-    expect(byName["codex-critic"]?.description).toContain("gpt-6-sol")
+    expect(byName["codex-critic"]?.description).toContain("gpt-5.6-sol")
     expect(byName["gemini-critic"]?.description).toContain("gemini-3.1-pro")
     expect(byName["codex-reviewer"]?.description).toContain("gpt-5.3-codex")
     expect(byName["gemini-reviewer"]?.description).toContain("gemini-3.1-pro")
@@ -357,7 +357,7 @@ describe("buildAgentPrompt — codex-cli mode", () => {
     const persona = PERSONAS_READ.find((p) => p.agentName === "codex-critic")!
     const prompt = buildAgentPrompt(persona, { codexCli: true, peersKey: "peers" })
     expect(prompt).toContain("mcp__codex-cli__codex")
-    expect(prompt).toContain('"gpt-6-sol"')
+    expect(prompt).toContain('"gpt-5.6-sol"')
     expect(prompt).toContain("base-instructions")
     expect(prompt).toContain('"read-only"')
   })
@@ -475,7 +475,7 @@ describe("buildPeerAwarenessSnippet", () => {
     // repo while the critics are stateless, so that has to be stated where the
     // routing decision is actually made, not only in CLAUDE.md.
     setCatalog([
-      pricedModel("gpt-6-sol", 500, 3000),
+      pricedModel("gpt-5.6-sol", 500, 3000),
       pricedModel("gpt-5.6-terra", 200, 1200),
       pricedModel("gemini-3.1-pro-preview", 200, 1200),
       pricedModel("gpt-6-luna", 20, 120),
@@ -485,7 +485,7 @@ describe("buildPeerAwarenessSnippet", () => {
       standInAvailable: true,
       browseAvailable: false,
       nativeAgentModels: {
-        implementer: "gpt-6-sol",
+        implementer: "gpt-5.6-sol",
         "implementer-fast": "gpt-5.6-terra",
         reviewer: "gemini-3.1-pro-preview",
         brainstorm: "gemini-3.1-pro-preview",
@@ -549,7 +549,7 @@ describe("buildPeerAwarenessSnippet", () => {
   // only building with the flags false proves the omission actually happens.
   test("the summary omits price or speed annotations with either missing figure", () => {
     setCatalog([
-      pricedModel("gpt-6-sol"),
+      pricedModel("gpt-5.6-sol"),
       {
         id: "unmeasured",
         billing: {
@@ -566,7 +566,7 @@ describe("buildPeerAwarenessSnippet", () => {
       standInAvailable: true,
       browseAvailable: false,
       nativeAgentModels: {
-        implementer: "gpt-6-sol",
+        implementer: "gpt-5.6-sol",
         reviewer: "unmeasured",
         brainstorm: "missing-price",
       },
@@ -1142,7 +1142,7 @@ describe("worker tool descriptions state their output contract", () => {
 // not there. Pin BOTH directions, since a fix to either alone re-opens the lie.
 test("the cost/speed preamble appears only when figures actually rendered", () => {
   const nativeAgentModels = {
-    implementer: "gpt-6-sol",
+    implementer: "gpt-5.6-sol",
     "implementer-fast": "gpt-5.6-terra",
     reviewer: "gemini-3.1-pro-preview",
     "reviewer-fast": "gemini-3.8-flash",
@@ -1158,7 +1158,7 @@ test("the cost/speed preamble appears only when figures actually rendered", () =
     nativeAgentModels,
   }
 
-  setCatalog([pricedModel("gpt-6-sol", 500, 3000)])
+  setCatalog([pricedModel("gpt-5.6-sol", 500, 3000)])
   const annotated = buildPeerAwarenessSummary(opts)
   expect(annotated).toContain("Cost is per 1M tokens in/out, tok/s approximate")
   expect(annotated).toMatch(/`implementer` \d+\/\d+ ~\d+t\/s/)
