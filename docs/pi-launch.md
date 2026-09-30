@@ -5,7 +5,7 @@ fixed, cost-controlled profile. Only two `-m` aliases are supported:
 
 | Profile | Lead | Roster | Consultants |
 |---|---|---|---|
-| `cheapest` | `gpt-6-luna` / max, 200K bare | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol/medium Advisor (plan review + capped reviewer consults), Sol/high Oracle |
+| `cheapest` | `gpt-6-luna` / max, 200K bare | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol/medium Advisor (plan review + capped reviewer rounds), Sol/high Oracle |
 | `balanced` | `gpt-5.6-sol` / medium, 200K bare | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol/high, may delegate Explore); no Plan | Grok/medium Oracle only — **advisor-free by design** |
 
 Every role runs at the bare 200K default window (no `[1m]` accounting

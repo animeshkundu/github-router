@@ -976,7 +976,7 @@ function pinnedReviewerDescription(explicit: boolean, isBalanced = false, is200K
       : "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, before done. "
     : "Adversarial evidence-based reviewer for behavior-changing, cross-boundary, or risk-sensitive changes. "
   return head + REVIEWER_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
-    + (protegeAdvisor ? " May consult its Sol advisor (at most 5 consults per review) on consequential uncertainty it cannot settle by evidence." : "")
+    + (protegeAdvisor ? " May consult its Sol advisor (at most 5 advisor rounds per review) on consequential uncertainty it cannot settle by evidence." : "")
 }
 
 /** Protege appendix for the cheapest Luna/max reviewer: the capped Sol-advisor
@@ -985,7 +985,7 @@ function pinnedReviewerDescription(explicit: boolean, isBalanced = false, is200K
 const PROTEGE_ADVISOR_APPENDIX =
   "You have an `advisor` tool backed by Sol, a stronger cross-lab model that sees your full transcript. "
   + "You own the verdict; the advisor is counsel, never authority — it never approves, vetoes, or decides for you. "
-  + "Budget: at most 5 consults per review, each costing latency. Spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle: a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences. "
+  + "Budget: at most 5 advisor rounds per review (code-enforced; one round is one back-and-forth exchange). Spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle: a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences. "
   + "Every consult must state the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict. "
   + "Never consult for routine verification, progress narration, reassurance, or completion ritual — run the check yourself. "
   + "If the advisor disagrees with you, evaluate on the merits: adopt what is right with a one-line reason, defend what is verified with evidence, and record the disagreement in your result. "

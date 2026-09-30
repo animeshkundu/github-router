@@ -564,14 +564,16 @@ export const CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS = `# Advisor Tool
 
 You have access to an \`advisor\` tool backed by Sol, a stronger cross-lab model that sees your full transcript. It takes no parameters and returns non-binding counsel. You own the verdict; the advisor never approves, vetoes, or decides for you.
 
-Budget: at most 5 consults per review. Each one costs latency, so spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle — a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences.
+Budget: at most 5 advisor rounds per review (one round is one back-and-forth exchange; the cap is enforced in code, so a sixth round halts). Each one costs latency, so spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle — a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences.
 
 Every consult must state: the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict.
 
 Never consult for routine verification, progress narration, reassurance, or completion ritual — run the check yourself. If the advisor disagrees with you, evaluate on the merits: adopt what is right with a one-line reason, defend what is verified with evidence, and record the disagreement in your result.`
 
-/** Hard cap on Advisor consults per cheapest-reviewer invocation (vs the
- *  lead-global `ADVISOR_MAX_TURNS`). Enforced in code, not merely prompted. */
+/** Hard cap on Advisor loop rounds per cheapest-reviewer invocation (vs the
+ *  lead-global `ADVISOR_MAX_TURNS`). Enforced in code, not merely prompted:
+ *  a round is one loop iteration, so parallel duplicate calls within a single
+ *  turn share the round — prompts must promise rounds, not consults. */
 export const ADVISOR_REVIEWER_MAX_TURNS = 5
 
 const ADVISOR_OPT_OUT_ENV = "CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
@@ -966,7 +968,7 @@ export function advisorSystemPrompt(
         + "knowledge or verified repository fact, with a concrete validation step (exact command or check) wherever "
         + "external knowledge is consequential. Distrust its stated confidence and re-grade severity yourself. "
         + "Demand execution evidence — never accept that something passes without observed output. "
-        + "The reviewer may consult you at most 5 times per review, so make every response self-contained: never "
+        + "The reviewer may consult you in at most 5 rounds per review (code-enforced cap), so make every response self-contained: never "
         + "answer with a request for more information when you can decide from the transcript plus your own knowledge. "
         + "You are non-binding counsel; the reviewer owns the verdict. "
         + "Structure every response as: Verdict (SHIP / FIX / BLOCK) with confidence; Evidence (transcript cites); "

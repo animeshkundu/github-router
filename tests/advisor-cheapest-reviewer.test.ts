@@ -152,11 +152,11 @@ describe("cheapest reviewer protege grant", () => {
     }).tools
     const reviewerAdvisor = reviewerTools?.find((tool) => tool.name === ADVISOR_INTERNAL_TOOL_NAME)
     expect(reviewerAdvisor?.description).toBe(CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS)
-    expect(reviewerAdvisor?.description).toContain("at most 5 consults")
+    expect(reviewerAdvisor?.description).toContain("at most 5 advisor rounds")
     // Explore: stripped, no advisor tool of either form.
     expect(forwarded[1]).not.toContain(ADVISOR_INTERNAL_TOOL_NAME)
     expect(forwarded[1]).not.toContain("advisor_20260301")
-    expect(forwarded[1]).not.toContain("at most 5 consults")
+    expect(forwarded[1]).not.toContain("at most 5 advisor rounds")
   })
 
   test("teammate-style reviewer id with the reviewer alias is granted (Agent-team spawns)", async () => {
@@ -181,6 +181,24 @@ describe("cheapest reviewer protege grant", () => {
     }).tools
     const reviewerAdvisor = reviewerTools?.find((tool) => tool.name === ADVISOR_INTERNAL_TOOL_NAME)
     expect(reviewerAdvisor?.description).toBe(CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS)
+  })
+
+  test("bracketed reviewer alias is still detected (suffix stripped before lookup)", async () => {
+    const forwarded: Array<string> = []
+    globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
+      forwarded.push(String(init?.body ?? ""))
+      return Promise.resolve(simpleResponsesSse())
+    }) as unknown as typeof fetch
+
+    const reviewer = await server.request(
+      "/v1/messages",
+      cheapestOptions(readToolBody(`${CHEAPEST_REVIEWER_ALIAS_ID}[1m]`), "reviewer-teammate"),
+    )
+    expect(reviewer.status).toBe(200)
+    await reviewer.text()
+
+    expect(forwarded).toHaveLength(1)
+    expect(forwarded[0]).toContain(ADVISOR_INTERNAL_TOOL_NAME)
   })
 
   test("teammate-style id with a non-reviewer alias stays stripped", async () => {
@@ -222,7 +240,7 @@ describe("cheapest reviewer protege grant", () => {
     }).tools
     const leadAdvisor = leadTools?.find((tool) => tool.name === ADVISOR_INTERNAL_TOOL_NAME)
     expect(leadAdvisor?.description).toBe(CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS)
-    expect(leadAdvisor?.description ?? "").not.toContain("at most 5 consults")
+    expect(leadAdvisor?.description ?? "").not.toContain("at most 5 advisor rounds")
   })
 })
 
@@ -230,7 +248,7 @@ describe("advisorSystemPrompt reviewer profile", () => {
   test("reviewer variant names the weaker-executor relationship and the output contract", () => {
     const prompt = advisorSystemPrompt(false, false, false, true)
     expect(prompt).toContain("weaker, faster executor")
-    expect(prompt).toContain("at most 5 times per review")
+    expect(prompt).toContain("at most 5 rounds per review")
     expect(prompt).toContain("Verdict (SHIP / FIX / BLOCK)")
     expect(prompt).toContain("non-binding counsel")
     // Reviewer variant replaces the lead consultant clause, not appends it.
@@ -240,7 +258,7 @@ describe("advisorSystemPrompt reviewer profile", () => {
   test("existing variants are unchanged by the fourth flag default", () => {
     expect(advisorSystemPrompt(false, false, false)).not.toContain("weaker, faster executor")
     expect(advisorSystemPrompt(false, true, false)).toContain("primary lead")
-    expect(advisorSystemPrompt(false, true, false)).not.toContain("at most 5 times per review")
+    expect(advisorSystemPrompt(false, true, false)).not.toContain("at most 5 rounds per review")
   })
 
   test("reviewer turn cap is 5, below the lead-global 16", () => {

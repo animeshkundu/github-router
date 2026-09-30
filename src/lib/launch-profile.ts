@@ -46,7 +46,7 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  contract values; the three gates that differ are the lead slug, the lead
  *  prereq window, and the cheap1m-only `astra` peer. `"cheapest"` is the
  *  all-200K cheapest tier: a Luna/max lead, Luna Explore/GP roles, a Luna/max
- *  reviewer (protege of the Sol Advisor, capped consults), a Sol/medium
+ *  reviewer (protege of the Sol Advisor, capped rounds), a Sol/medium
  *  Advisor, and a Sol/high Oracle — the lead plans
  *  directly and reviews the final plan with the Advisor (advisory) before
  *  presenting it. Oracle-only peer
