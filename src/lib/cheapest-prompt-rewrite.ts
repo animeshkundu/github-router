@@ -174,6 +174,10 @@ export interface CheapestRewriteIO {
   inferSol: (system: string, user: string, signal?: AbortSignal) => Promise<string>
   /** Static repo guidance + structure (read by the caller via fs, capped). */
   staticPack: () => Promise<Omit<StaticContextPack, "prompt" | "searchContext">>
+  /** One-shot flag: true when this session already spent its rewrite. */
+  hasRewriteRun: (sessionId: string) => Promise<boolean>
+  /** Record the spend (attempt-marking: called before running). Idempotent. */
+  markRewriteRun: (sessionId: string) => Promise<void>
   /** Wall-clock budget for search + Sol (default 20s). */
   timeoutMs?: number
 }

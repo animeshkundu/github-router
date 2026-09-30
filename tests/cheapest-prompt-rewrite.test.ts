@@ -5,6 +5,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 
 import { buildStaticPack } from "../src/internal-prompt-submit"
+import { fileRewriteFlagStore } from "../src/lib/orchestration/stop-gate-policy"
 
 import {
   buildSolRewriteSystem,
@@ -30,6 +31,8 @@ function makeRewriteIo(overrides: Partial<CheapestRewriteIO> = {}): {
   io: CheapestRewriteIO
   searchCode: ReturnType<typeof mock<CheapestRewriteIO["searchCode"]>>
   inferSol: ReturnType<typeof mock<CheapestRewriteIO["inferSol"]>>
+  hasRewriteRun: ReturnType<typeof mock<CheapestRewriteIO["hasRewriteRun"]>>
+  markRewriteRun: ReturnType<typeof mock<CheapestRewriteIO["markRewriteRun"]>>
 } {
   const searchCode = mock<CheapestRewriteIO["searchCode"]>(
     overrides.searchCode ?? (async () => ""),
@@ -37,13 +40,21 @@ function makeRewriteIo(overrides: Partial<CheapestRewriteIO> = {}): {
   const inferSol = mock<CheapestRewriteIO["inferSol"]>(
     overrides.inferSol ?? (async () => ""),
   )
+  const hasRewriteRun = mock<CheapestRewriteIO["hasRewriteRun"]>(
+    overrides.hasRewriteRun ?? (async () => false),
+  )
+  const markRewriteRun = mock<CheapestRewriteIO["markRewriteRun"]>(
+    overrides.markRewriteRun ?? (async () => {}),
+  )
   const io: CheapestRewriteIO = {
     searchCode,
     inferSol,
     staticPack: overrides.staticPack ?? (async () => ({ agentsMd: "", claudeMd: "", repoStructure: "" })),
+    hasRewriteRun,
+    markRewriteRun,
   }
   if (overrides.timeoutMs !== undefined) io.timeoutMs = overrides.timeoutMs
-  return { io, searchCode, inferSol }
+  return { io, searchCode, inferSol, hasRewriteRun, markRewriteRun }
 }
 
 function makeV2Io(): PromptSubmitV2IO {
@@ -355,6 +366,124 @@ describe("decidePromptSubmitV2 cheapest branch", () => {
       rewrite,
     })
     expect(result.inject).toBe("")
+    expect(inferSol.mock.calls.length).toBe(0)
+  })
+})
+
+describe("one-shot rewrite flag store", () => {
+  function makeFlagDir(): string {
+    return mkdtempSync(path.join(tmpdir(), "gh-router-rewrite-flag-"))
+  }
+
+  test("missing file reads false; marked reads true; sessions isolated", async () => {
+    const dir = makeFlagDir()
+    try {
+      const store = fileRewriteFlagStore(dir)
+      expect(await store.hasRun("s1")).toBe(false)
+      await store.markRun("s1")
+      expect(await store.hasRun("s1")).toBe(true)
+      expect(await store.hasRun("s2")).toBe(false)
+      // Idempotent re-mark.
+      await store.markRun("s1")
+      expect(await store.hasRun("s1")).toBe(true)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("decidePromptSubmitV2 one-shot rewrite gate", () => {
+  function cheapestV2Input(stdin: string, rewrite: CheapestRewriteIO, lunaGoal = "SCOPE: focused\nGOAL: do X") {
+    const io = makeV2Io()
+    io.infer = async () => lunaGoal
+    return {
+      stdin,
+      steerEnabled: true,
+      searchEnabled: false,
+      io,
+      profile: "cheapest",
+      rewriteDisabled: false,
+      rewrite,
+    } as const
+  }
+
+  test("first substantive prompt rewrites and marks the session", async () => {
+    const { io: rewrite, inferSol, markRewriteRun } = makeRewriteIo({
+      inferSol: async () => "Goal: refactor auth. Steps: 1. Search 2. Edit.",
+    })
+    const result = await decidePromptSubmitV2(
+      cheapestV2Input(JSON.stringify({ session_id: "s1", prompt: SUBSTANTIVE }), rewrite),
+    )
+    expect(result.inject).toContain("LUNA BRIEF")
+    expect(inferSol.mock.calls.length).toBe(1)
+    expect(markRewriteRun.mock.calls.length).toBe(1)
+    expect(markRewriteRun.mock.calls[0]).toEqual(["s1"])
+  })
+
+  test("second substantive prompt skips Sol and uses the Luna path", async () => {
+    const { io: rewrite, inferSol, markRewriteRun } = makeRewriteIo({
+      hasRewriteRun: async () => true,
+      inferSol: async () => "SOL BRIEF SHOULD NOT APPEAR",
+    })
+    const result = await decidePromptSubmitV2(
+      cheapestV2Input(JSON.stringify({ session_id: "s1", prompt: SUBSTANTIVE }), rewrite),
+    )
+    expect(result.inject).toContain("SCOPE: focused")
+    expect(result.inject).not.toContain("SOL BRIEF SHOULD NOT APPEAR")
+    expect(inferSol.mock.calls.length).toBe(0)
+    expect(markRewriteRun.mock.calls.length).toBe(0)
+  })
+
+  test("failed first attempt still consumes the one shot (spend once, fail-open after)", async () => {
+    const { io: rewrite, markRewriteRun } = makeRewriteIo({
+      inferSol: async () => { throw new Error("sol down") },
+    })
+    const lunaGoal = "SCOPE: focused\nGOAL: do X"
+    const result = await decidePromptSubmitV2(
+      cheapestV2Input(JSON.stringify({ session_id: "s1", prompt: SUBSTANTIVE }), rewrite, lunaGoal),
+    )
+    // Failed over to the Luna path, but the session is marked.
+    expect(result.inject).toContain(lunaGoal)
+    expect(markRewriteRun.mock.calls.length).toBe(1)
+  })
+
+  test("trivial first prompt does not consume the shot; later substantive rewrites", async () => {
+    const { io: rewrite, inferSol, markRewriteRun } = makeRewriteIo({
+      inferSol: async () => "Goal: refactor auth.",
+    })
+    const trivial = await decidePromptSubmitV2(
+      cheapestV2Input(JSON.stringify({ session_id: "s1", prompt: "hi" }), rewrite),
+    )
+    expect(trivial.inject).toBe("")
+    expect(markRewriteRun.mock.calls.length).toBe(0)
+    const substantive = await decidePromptSubmitV2(
+      cheapestV2Input(JSON.stringify({ session_id: "s1", prompt: SUBSTANTIVE }), rewrite),
+    )
+    expect(substantive.inject).toContain("LUNA BRIEF")
+    expect(inferSol.mock.calls.length).toBe(1)
+  })
+
+  test("missing session id fails closed: no Sol spend", async () => {
+    const { io: rewrite, inferSol, markRewriteRun } = makeRewriteIo({
+      inferSol: async () => "SHOULD NOT APPEAR",
+    })
+    const result = await decidePromptSubmitV2(
+      cheapestV2Input(JSON.stringify({ prompt: SUBSTANTIVE }), rewrite),
+    )
+    expect(result.inject).not.toContain("SHOULD NOT APPEAR")
+    expect(inferSol.mock.calls.length).toBe(0)
+    expect(markRewriteRun.mock.calls.length).toBe(0)
+  })
+
+  test("flag-store read error fails closed: no Sol spend", async () => {
+    const { io: rewrite, inferSol } = makeRewriteIo({
+      hasRewriteRun: async () => { throw new Error("disk gone") },
+      inferSol: async () => "SHOULD NOT APPEAR",
+    })
+    const result = await decidePromptSubmitV2(
+      cheapestV2Input(JSON.stringify({ session_id: "s1", prompt: SUBSTANTIVE }), rewrite),
+    )
+    expect(result.inject).not.toContain("SHOULD NOT APPEAR")
     expect(inferSol.mock.calls.length).toBe(0)
   })
 })

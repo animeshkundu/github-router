@@ -17,7 +17,9 @@
  *      the prompt + AGENTS.md/CLAUDE.md + repo structure + grounding search
  *      (adaptive 3 turns, up to 5 on Sol's deep-grounding flag) — additive,
  *      never replacing the user prompt — and falls back to (3) on any miss.
- *      Opt out with GH_ROUTER_DISABLE_CHEAPEST_REWRITE=1.
+ *      One-shot per session (first non-trivial prompt only, marked on
+ *      attempt even if Sol fails open). Opt out with
+ *      GH_ROUTER_DISABLE_CHEAPEST_REWRITE=1.
  *
  * ALWAYS exits 0 (never blocks the prompt): the steer is additive context, and a
  * UserPromptSubmit hook that exit-2'd would refuse the user's prompt. The pure
@@ -49,6 +51,7 @@ import {
 import {
   fileFindingsStore,
   fileLastPromptStore,
+  fileRewriteFlagStore,
   stopReviewStateDir,
 } from "./lib/orchestration/stop-gate-policy"
 
@@ -203,6 +206,10 @@ export const internalPromptSubmit = defineCommand({
               }),
             // Lazy: fs reads run only when the cheapest branch actually fires.
             staticPack: async () => buildStaticPack(workspace),
+            // Session-keyed one-shot flag: first non-trivial prompt per
+            // session spends the rewrite; later prompts use the Luna path.
+            hasRewriteRun: (sid) => fileRewriteFlagStore(stopReviewStateDir()).hasRun(sid),
+            markRewriteRun: (sid) => fileRewriteFlagStore(stopReviewStateDir()).markRun(sid),
             timeoutMs: REWRITE_TIMEOUT_MS,
           },
           io: {
