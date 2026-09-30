@@ -278,7 +278,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // for the same static-import-graph reason as the cheap entries above.
   cheapestOracleModel: mock(() => "gpt-5.6-sol"),
   cheapestAdvisorModel: mock(() => "gpt-5.6-sol"),
-  cheapestReviewerModel: mock(() => "gpt-5.6-sol"),
+  cheapestReviewerModel: mock(() => "gpt-6-luna"),
   // Balanced-profile resolvers (only exercised under `-m balanced`); stubbed
   // for the same static-import-graph reason as the cheap entries above.
   balancedOracleModel: mock(() => "grok-4.6"),

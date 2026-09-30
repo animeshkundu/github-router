@@ -607,7 +607,7 @@ export function cheapestOracleModel(): string | undefined {
   return CHEAPEST_PROFILE_ORACLE_MODEL
 }
 
-/** Sol/high reviewer for the cheapest profile at the 200K default window. */
+/** Luna/max reviewer for the cheapest profile at the 200K default window. */
 export function cheapestReviewerModel(): string | undefined {
   const reviewer = state.models?.data.find((m) => m.id === CHEAPEST_PROFILE_MODELS.reviewer)
   if (!reviewer) return undefined

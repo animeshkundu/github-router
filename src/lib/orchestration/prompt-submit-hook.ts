@@ -15,6 +15,11 @@
  * trivial prompt yields an empty injection.
  */
 
+import {
+  isCheapestRewriteEligible,
+  runCheapestRewrite,
+  type CheapestRewriteIO,
+} from "../cheapest-prompt-rewrite"
 import { buildSelfCommand, type SelfInvocation } from "../hook-launcher/self-invocation"
 import { isSubagentContext } from "./stop-gate-policy"
 
@@ -225,6 +230,12 @@ export async function decidePromptSubmitV2(input: {
   searchEnabled?: boolean
   /** Whether Bluebird owns semantic and lexical search for this launch. */
   bluebirdEnabled?: boolean
+  /** Launch profile id; only `"cheapest"` enables the Sol rewrite branch. */
+  profile?: string
+  /** True when `GH_ROUTER_DISABLE_CHEAPEST_REWRITE` opts out of the rewrite. */
+  rewriteDisabled?: boolean
+  /** Sol rewrite IO (cheapest only). Absent = existing Luna scope path. */
+  rewrite?: CheapestRewriteIO
 }): Promise<PromptSubmitDecision> {
   let payload: { session_id?: unknown; prompt?: unknown; agent_type?: unknown; agent_id?: unknown } = {}
   try {
@@ -271,6 +282,39 @@ export async function decidePromptSubmitV2(input: {
   const bluebirdEnabled = input.bluebirdEnabled === true
   const semanticAvailable = searchEnabled || bluebirdEnabled
   const searchTip = getPromptSearchTip(searchEnabled, bluebirdEnabled)
+
+  // Cheapest-only Sol → Luna rewrite: adaptive 3/5-turn grounded brief,
+  // additive and fail-open to the Luna scope path below on null.
+  // One-shot per session (first non-trivial prompt only): the flag is marked
+  // BEFORE running (attempt-marking bounds spend even if Sol fails open), and
+  // a missing session id fails closed (never spend blindly).
+  // NOTE: non-triviality is recomputed here (not assumed from the early
+  // return above) so this branch stays correct if the flow is refactored.
+  if (
+    input.rewrite
+    && isCheapestRewriteEligible({
+      profile: input.profile,
+      promptIsNonTrivial: isNonTrivialPrompt(prompt),
+      steerEnabled: input.steerEnabled,
+      rewriteDisabled: input.rewriteDisabled === true,
+    })
+    && sessionId.length > 0
+    && !(await input.rewrite.hasRewriteRun(sessionId).catch(() => true))
+  ) {
+    await input.rewrite.markRewriteRun(sessionId).catch(() => {})
+    const brief = await runCheapestRewrite({
+      prompt,
+      searchEnabled,
+      bluebirdEnabled,
+      io: input.rewrite,
+    }).catch(() => null)
+    if (brief && brief.length > 0) {
+      decision.inject = joinSections([searchTip, brief, findingsBlock])
+      return decision
+    }
+    // else: fall through to the existing Luna scope enrichment.
+  }
+
   const scopeSystem = getPromptScopeSystem(searchEnabled, bluebirdEnabled)
   const timeoutMs = input.io.timeoutMs ?? 22_000
   let goal = PROMPT_STEER_GOAL // fail-open default.

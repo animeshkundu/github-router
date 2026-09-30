@@ -18,7 +18,7 @@ export const CHEAPEST_PROFILE_MODELS = Object.freeze({
   lead: "gpt-6-luna",
   explore: "gpt-6-luna",
   "General-Purpose": "gpt-6-luna",
-  reviewer: "gpt-5.6-sol",
+  reviewer: "gpt-6-luna",
   advisor: "gpt-5.6-sol",
   oracle: "gpt-5.6-sol",
 } as const)
@@ -43,7 +43,7 @@ export const CHEAPEST_PROFILE_NATIVE_MODELS: Readonly<
 export const CHEAPEST_PROFILE_NATIVE_EFFORTS = Object.freeze({
   Explore: "high",
   "General-Purpose": "max",
-  reviewer: "high",
+  reviewer: "max",
 } as const)
 
 /**

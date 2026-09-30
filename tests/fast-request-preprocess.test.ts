@@ -349,7 +349,7 @@ describe("fast request preprocessing", () => {
       for (const [alias, real, effort] of [
         [CHEAPEST_EXPLORE_ALIAS_ID, "gpt-6-luna", "high"],
         [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, "gpt-6-luna", "max"],
-        [CHEAPEST_REVIEWER_ALIAS_ID, "gpt-5.6-sol", "high"],
+        [CHEAPEST_REVIEWER_ALIAS_ID, "gpt-6-luna", "max"],
       ] as const) {
         for (const wire of [alias, `${alias}[1m]`]) {
           const sub = preprocessFastRequest(

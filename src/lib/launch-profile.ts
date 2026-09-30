@@ -45,8 +45,9 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  available next to Oracle. Both cheap variants share the same `CHEAP_*`
  *  contract values; the three gates that differ are the lead slug, the lead
  *  prereq window, and the cheap1m-only `astra` peer. `"cheapest"` is the
- *  all-200K cheapest tier: a Luna/max lead, Luna Explore/GP roles, a Sol/high
- *  reviewer, a Sol/medium Advisor, and a Sol/high Oracle — the lead plans
+ *  all-200K cheapest tier: a Luna/max lead, Luna Explore/GP roles, a Luna/max
+ *  reviewer (protege of the Sol Advisor, capped rounds), a Sol/medium
+ *  Advisor, and a Sol/high Oracle — the lead plans
  *  directly and reviews the final plan with the Advisor (advisory) before
  *  presenting it. Oracle-only peer
  *  set, no `astra` (see `./cheapest-profile-contract`). `"balanced"` is the
@@ -293,7 +294,7 @@ export const CHEAPEST_EXPLORE_ALIAS_ID = "gh-router-cheapest-explore-high"
 export const CHEAPEST_GENERAL_PURPOSE_ALIAS_ID =
   "gh-router-cheapest-general-purpose-xhigh"
 export const CHEAPEST_IMPLEMENTER_ALIAS_ID = "gh-router-cheapest-implementer-max"
-export const CHEAPEST_REVIEWER_ALIAS_ID = "gh-router-cheapest-reviewer-high"
+export const CHEAPEST_REVIEWER_ALIAS_ID = "gh-router-cheapest-reviewer-max"
 
 /**
  * Balanced-profile subagent aliases (`-m balanced`). Same non-catalog
@@ -416,6 +417,9 @@ const RETIRED_FAST_ALIAS_IDS = new Set([
   // fail loudly as retired instead of resolving with changed semantics.
   "gh-router-balanced-general-purpose-high",
   "gh-router-balanced-reviewer-max",
+  // Pre-swap cheapest reviewer alias: reviewer was Sol/high, now Luna/max.
+  // Same fail-loud rationale as the balanced entries above.
+  "gh-router-cheapest-reviewer-high",
 ])
 
 const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
@@ -481,7 +485,7 @@ const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([
   ],
   [
     CHEAPEST_REVIEWER_ALIAS_ID,
-    { aliasId: CHEAPEST_REVIEWER_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS.reviewer, absentEffortDefault: "high" },
+    { aliasId: CHEAPEST_REVIEWER_ALIAS_ID, realModel: CHEAPEST_PROFILE_MODELS.reviewer, absentEffortDefault: "max" },
   ],
   [
     BALANCED_EXPLORE_ALIAS_ID,
@@ -982,10 +986,10 @@ const CHEAPEST_SUBAGENT_MIN_CONTEXT_TOKENS =
 
 /**
  * Validate the live Copilot catalog for `-m cheapest`: Luna lead at the 200K
- * default window, Luna Explore/GP roles, a Sol/high reviewer, a Sol/high
- * Oracle, and a Sol/medium Advisor — all at the 200K default with
- * their fixed efforts and supported endpoints. There is no `Plan` role: the
- * lead plans directly.
+ * default window, Luna Explore/GP roles, a Luna/max reviewer (protege of the
+ * Sol Advisor), a Sol/high Oracle, and a Sol/medium Advisor — all at the
+ * 200K default with their fixed efforts and supported endpoints. There is no
+ * `Plan` role: the lead plans directly.
  *
  * `opts.peers === false` (the Pi `--no-peers` path) validates the LEAD only:
  * no peer or native-role model is used in that launch, so requiring them

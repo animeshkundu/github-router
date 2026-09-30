@@ -204,8 +204,8 @@ export interface NativeAgentAvailability {
    *  restricted roster prose with the cheap family's oracle identities
    *  (`"cheap1m"` additionally wires the astra peer). `"cheapest"` selects
    *  the same restricted roster prose with the cheapest identities
-   *  (Luna lead, Sol reviewer/Advisor/Oracle; never astra) minus the `Plan`
-   *  role (the lead plans directly).
+   *  (Luna lead and reviewer, Sol Advisor/Oracle; never astra) minus the
+   *  `Plan` role (the lead plans directly).
    *  `"balanced"` selects the same restricted roster prose Sol-led with the
    *  Grok Oracle (never astra), likewise without a `Plan` role. When set,
    *  `buildNativeReachClauses` and
@@ -509,6 +509,7 @@ export function buildOperatingDefaultsDirective(
         + ". Handle trivial, surgical, single-file, or single-command tasks directly; you do not need to justify skipping delegation. "
         + "`Explore` may be used for discovery spanning more than a couple of files; `General-Purpose` for mixed multi-step execution; `reviewer` for behavior-changing or risk-sensitive changes. "
         + "In plan mode, produce the plan and acceptance criteria directly and do not edit files; before presenting the final plan to the user, consult `advisor` once for a framing check — it is non-binding counsel and you retain decision ownership. "
+        + "Work to your strengths as a fast, cost-efficient model: verify by execution rather than memory; before a non-trivial task, write a short plan (steps, files involved, the check settling each step) and execute it; persist through tool failures with a rephrased attempt before asking the user; stop searching when further results stop changing the answer; tag claims verified, inferred, or unverified — never state that something passes, compiles, or is covered without observed output. "
         + "Delegation graph: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
       : isBalanced
         ? `${profileLabel} launch profile. The lead coordinates execution across specialized native roles: `
@@ -656,7 +657,7 @@ export function buildOperatingDefaultsDigest(
       ? `; (4) \`astra\` (GPT-6 Astra 200K/${isCheap ? "medium" : "high"}, lead-only) only as a last resort when direct evidence, Advisor, and Oracle cannot produce a defensible path (at most 1-2 calls per decision).`
       : "."
     const delegation = isCheapest
-      ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. In plan mode, produce the plan and acceptance criteria directly; before presenting the final plan to the user, consult \`advisor\` once for a framing check — non-binding counsel, you retain decision ownership. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
+      ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. In plan mode, produce the plan and acceptance criteria directly; before presenting the final plan to the user, consult \`advisor\` once for a framing check — non-binding counsel, you retain decision ownership. Plan briefly before non-trivial acts, verify by execution, tag unverified claims, and stop searching when results stop changing the answer. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
       : isBalanced
         ? `${profileLabel} launch profile. The lead owns planning, implementation, and verification by default: narrow scope first with \`code_search\` and \`web\` search to rule out hypotheses (cheapest, always first); delegate to \`Explore\` in parallel only when search is insufficient (read directly only files you will act on); delegate to \`General-Purpose\` FREELY for multi-step work combining investigation, tool workflows, and code changes; invoke \`reviewer\` ONLY when the change is genuinely behavior-changing, cross-boundary, or risk-sensitive (\`reviewer\` narrows scope with search first and may invoke \`Explore\` for targeted discovery); handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
         : `${profileLabel} launch profile. The lead coordinates execution across specialized roles: delegate broad discovery to \`Explore\` in parallel and do not sweep the repo yourself (read directly only files you will act on); delegate to \`Plan\` in plan mode or when structuring complex multi-step sequencing (\`Plan\` is an advisory planning capability, not an approval gate, and writes handoff-ready steps for \`General-Purpose\`); delegate mixed multi-step execution and Plan handoffs to \`General-Purpose\` in a fresh context; delegate to \`reviewer\` after behavior-changing or risk-sensitive implementation to verify correctness before declaring done; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`

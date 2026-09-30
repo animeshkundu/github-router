@@ -395,3 +395,43 @@ export function fileLastPromptStore(stateDir: string): LastPromptStore {
     },
   }
 }
+
+/**
+ * One-shot flag for the cheapest Sol prompt rewrite: the hook MARKS the
+ * session when the rewrite branch is entered (attempt-marking, even if Sol
+ * later fails open) and SKIPS the rewrite on every later prompt. Keyed by
+ * sha256(session_id) in the same state dir as the other advisory-layer
+ * stores so the short-lived hook processes agree without env threading.
+ *
+ * Semantics: first NON-TRIVIAL prompt consumes (trivial prompts never reach
+ * the branch, so "hi" followed by a real task still rewrites). A resumed
+ * session shares its session_id and therefore does not rewrite — its
+ * context is already grounded.
+ */
+export interface RewriteFlagStore {
+  /** True when this session already spent its rewrite. Missing file = false. */
+  hasRun: (sessionId: string) => Promise<boolean>
+  /** Record the spend. Idempotent — safe to call twice. */
+  markRun: (sessionId: string) => Promise<void>
+}
+
+export function fileRewriteFlagStore(stateDir: string): RewriteFlagStore {
+  const fileFor = (sid: string): string =>
+    nodePath.join(stateDir, `rewrite-done-${createHash("sha256").update(sid).digest("hex").slice(0, 32)}`)
+  return {
+    async hasRun(sid) {
+      try {
+        await fs.access(fileFor(sid))
+        return true
+      } catch {
+        return false
+      }
+    },
+    async markRun(sid) {
+      await fs.mkdir(stateDir, { recursive: true })
+      const tmp = `${fileFor(sid)}.${process.pid}.tmp`
+      await fs.writeFile(tmp, "1", { mode: 0o600 })
+      await fs.rename(tmp, fileFor(sid))
+    },
+  }
+}

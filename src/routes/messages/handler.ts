@@ -48,6 +48,7 @@ import {
   maxAdvisorPinIsValid,
   maxOpusModel,
 } from "~/lib/max-profile-contract"
+import { CHEAPEST_REVIEWER_ALIAS_ID, resolveModelAlias } from "~/lib/launch-profile"
 import { stripTrailingOneMSuffix } from "~/lib/model-suffix"
 import { salvageOversizedPrompt } from "~/lib/prompt-window-salvage"
 import {
@@ -56,6 +57,9 @@ import {
 } from "~/lib/web-search-context"
 import {
   ADVISOR_INTERNAL_TOOL_NAME,
+  ADVISOR_REVIEWER_MAX_TURNS,
+  CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS,
+  CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
   FAST_ADVISOR_TOOL_INSTRUCTIONS,
   buildAdvisorStream,
   injectAdvisorTool,
@@ -235,6 +239,30 @@ function cheapestAdvisorMetadataMismatch(rawBody: string): string | undefined {
     }
   }
   return undefined
+}
+
+/**
+ * True when the request's `model` is the cheapest reviewer's pinned alias
+ * (bare or `[1m]`-decorated — `resolveModelAlias` strips the bracket).
+ *
+ * Role detection by MODEL rather than by `x-claude-code-agent-id`: classic
+ * Task spawns send the bare role name ("reviewer"), but Agent-team teammates
+ * send stable name-based ids ("reviewer-advisor-only[@team]"), so an
+ * agent-id exact-match misses every teammate spawn. The frontmatter pins the
+ * reviewer to its alias, invocation-level overrides are stripped by the
+ * dispatch ACL, and `/model` switches affect only the lead — so the alias is
+ * the robust discriminator across spawn styles. Fail-closed: unparseable
+ * bodies and non-alias ids (bare Luna = lead, Explore/GP carry their own
+ * aliases) return false.
+ */
+function isCheapestReviewerModel(rawBody: string): boolean {
+  try {
+    const body = JSON.parse(rawBody) as AnyRecord
+    return typeof body.model === "string"
+      && resolveModelAlias(body.model)?.aliasId === CHEAPEST_REVIEWER_ALIAS_ID
+  } catch {
+    return false
+  }
 }
 
 function stripAdvisorTool(rawBody: string): string {
@@ -447,7 +475,8 @@ export async function handleCompletion(c: Context) {
     identity.launch?.profileId === "cheap" || identity.launch?.profileId === "cheap1m"
   const cheapestProfileRequest = identity.launch?.profileId === "cheapest"
   const balancedProfileRequest = identity.launch?.profileId === "balanced"
-  const subagentRequest = Boolean(c.req.header("x-claude-code-agent-id"))
+  const subagentAgentId = (c.req.header("x-claude-code-agent-id") ?? "").trim()
+  const subagentRequest = subagentAgentId.length > 0
   const fastSubagentRequest = fastProfileRequest && subagentRequest
   const maxSubagentRequest = maxProfileRequest && subagentRequest
   const cheapSubagentRequest = cheapProfileRequest && subagentRequest
@@ -457,14 +486,27 @@ export async function handleCompletion(c: Context) {
   const maxLeadAdvisor = maxProfileRequest && !maxSubagentRequest
   const cheapLeadAdvisor = cheapProfileRequest && !cheapSubagentRequest
   const cheapestLeadAdvisor = cheapestProfileRequest && !cheapestSubagentRequest
+  // Cheapest-only protege grant: the Luna/max reviewer may consult the Sol
+  // Advisor (capped, non-binding). Every other subagent stays excluded.
+  // Detected by agent id (classic Task spawns) OR request model alias
+  // (Agent-team teammates carry name-based ids like "reviewer-advisor-only",
+  // so the id alone cannot identify the role — see `isCheapestReviewerModel`).
+  const cheapestReviewerAdvisor = cheapestProfileRequest
+    && (subagentAgentId === "reviewer" || isCheapestReviewerModel(rawBody))
+  if (cheapestProfileRequest && subagentRequest) {
+    consola.debug(
+      `cheapest subagent advisor gate: agentId=${JSON.stringify(subagentAgentId)} reviewerModel=${isCheapestReviewerModel(rawBody)} granted=${cheapestReviewerAdvisor && advisorRequested}`,
+    )
+  }
   // Balanced is advisor-free by design: the lead never gets the Advisor tool,
   // even when the client sends the advisor beta (enforced by the
   // `balancedProfileRequest ? false` branch in `advisorBehaviorEnabled`).
-  const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest && !cheapSubagentRequest && !cheapestSubagentRequest && !balancedSubagentRequest
+  const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest && !cheapSubagentRequest && (!cheapestSubagentRequest || cheapestReviewerAdvisor) && !balancedSubagentRequest
   const fastAdvisorEnabled = fastLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const maxAdvisorEnabled = maxLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const cheapAdvisorEnabled = cheapLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const cheapestAdvisorEnabled = cheapestLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
+  const cheapestReviewerEnabled = cheapestReviewerAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const advisorBehaviorEnabled = balancedProfileRequest
     ? false
     : fastLeadAdvisor
@@ -475,7 +517,9 @@ export async function handleCompletion(c: Context) {
           ? cheapestAdvisorEnabled
           : maxLeadAdvisor
             ? maxAdvisorEnabled
-            : advisorEnabled
+            : cheapestReviewerAdvisor
+              ? cheapestReviewerEnabled
+              : advisorEnabled
   let fastAdvisorChoice: ReturnType<typeof resolveAdvisorModel> | undefined
   let maxAdvisorChoice: { model: string; effort: string } | undefined
   if (maxAdvisorEnabled) {
@@ -601,6 +645,25 @@ export async function handleCompletion(c: Context) {
       )
     }
   }
+  if (cheapestReviewerEnabled && !fastAdvisorChoice) {
+    // Reviewer subagents carry no native advisor metadata to validate (the
+    // proxy injects the tool itself), so skip the mismatch check and resolve
+    // the same fixed Sol advisor. Throws -> 503 like the lead path.
+    try {
+      fastAdvisorChoice = resolveCheapestAdvisorModel()
+    } catch (error) {
+      return c.json(
+        {
+          type: "error",
+          error: {
+            type: "api_error",
+            message: error instanceof Error ? error.message : String(error),
+          },
+        },
+        503,
+      )
+    }
+  }
 
   const fastPreprocess = preprocessFastRequest(
     rawBody,
@@ -643,8 +706,9 @@ export async function handleCompletion(c: Context) {
   // lead's conversation. A Task subagent has a different, narrower transcript,
   // so exposing Advisor there adds cost and conflicting authority without the
   // intended context. Strip both Claude Code's native typed tool and any
-  // replay-injected proxy tool before routing.
-  if (fastSubagentRequest || maxSubagentRequest) {
+  // replay-injected proxy tool before routing. The cheapest reviewer is the
+  // one exception (protege grant): every other cheapest subagent is stripped.
+  if (fastSubagentRequest || maxSubagentRequest || (cheapestSubagentRequest && !cheapestReviewerAdvisor)) {
     finalBody = stripAdvisorTool(finalBody)
   }
 
@@ -677,11 +741,15 @@ export async function handleCompletion(c: Context) {
     // avoid collision with any user MCP server's `advisor`.
     finalBody = injectAdvisorTool(
       finalBody,
-      fastLeadAdvisor
-        ? FAST_ADVISOR_TOOL_INSTRUCTIONS
-        : maxLeadAdvisor
-          ? MAX_PROFILE_ADVISOR_INSTRUCTIONS
-          : undefined,
+      cheapestReviewerAdvisor
+        ? CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS
+        : cheapestLeadAdvisor
+          ? CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS
+          : fastLeadAdvisor
+            ? FAST_ADVISOR_TOOL_INSTRUCTIONS
+            : maxLeadAdvisor
+              ? MAX_PROFILE_ADVISOR_INSTRUCTIONS
+              : undefined,
     )
     consola.info(
       "ADVISOR enabled for this request — injecting __anthropic_advisor tool; will translate tool_use → server_tool_use{advisor} on the SSE stream",
@@ -773,7 +841,7 @@ export async function handleCompletion(c: Context) {
     const wantsStream = parsedBase?.stream === true
 
     if (
-      (fastAdvisorEnabled || cheapAdvisorEnabled || cheapestAdvisorEnabled || maxAdvisorEnabled)
+      (fastAdvisorEnabled || cheapAdvisorEnabled || cheapestAdvisorEnabled || maxAdvisorEnabled || cheapestReviewerEnabled)
       && wantsStream
     ) {
       const initialConversation = Array.isArray(parsedBase!.messages)
@@ -813,12 +881,13 @@ export async function handleCompletion(c: Context) {
             escalated: false,
             fastProfile: false,
           }
-        : cheapAdvisorEnabled || cheapestAdvisorEnabled
+        : cheapAdvisorEnabled || cheapestAdvisorEnabled || cheapestReviewerEnabled
           ? {
-              // Cheap shares fast's fixed Sol identity/effort and cheapest its
-              // fixed Gemini identity/effort; the distinctions (bare client
-              // pin, 200K transcript cap) are carried by `advisorCheapProfile`
-              // below and the client's own pinned tool.
+              // Cheap and cheapest share fast's fixed Sol identity/effort
+              // (the reviewer's protege consults use the same fixed Sol
+              // advisor); the distinctions (bare client pin, 200K transcript
+              // cap) are carried by `advisorCheapProfile` below and the
+              // client's own pinned tool.
               model: fastAdvisorChoice!.model,
               effort: resolveAdvisorEffort(rawBody, fastAdvisorChoice!.model, true),
               escalated: fastAdvisorChoice!.escalated,
@@ -843,9 +912,13 @@ export async function handleCompletion(c: Context) {
           advisorEscalated: advisorChoice.escalated,
           // Fast and max share the non-binding consultant posture while
           // retaining their independent model, effort, and transport policies.
-          advisorFastProfile: advisorChoice.fastProfile,
+          // The cheapest reviewer gets the mentor posture instead (never the
+          // lead consultant clause) plus its per-invocation turn cap.
+          advisorFastProfile: advisorChoice.fastProfile && !cheapestReviewerEnabled,
           advisorMaxProfile: maxAdvisorEnabled,
-          advisorCheapProfile: cheapAdvisorEnabled || cheapestAdvisorEnabled,
+          advisorCheapProfile: cheapAdvisorEnabled || cheapestAdvisorEnabled || cheapestReviewerEnabled,
+          advisorReviewerProfile: cheapestReviewerEnabled,
+          advisorMaxTurns: cheapestReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: advisorChoice.effort,
           externalAborter: translatedAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {
@@ -1115,9 +1188,11 @@ export async function handleCompletion(c: Context) {
           requestHeaders,
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          advisorFastProfile: fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor,
+          advisorFastProfile: (fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor) && !cheapestReviewerEnabled,
           advisorMaxProfile: maxAdvisorEnabled,
-          advisorCheapProfile: cheapLeadAdvisor || cheapestLeadAdvisor,
+          advisorCheapProfile: cheapLeadAdvisor || cheapestLeadAdvisor || cheapestReviewerEnabled,
+          advisorReviewerProfile: cheapestReviewerEnabled,
+          advisorMaxTurns: cheapestReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: maxAdvisorChoice
             ? maxAdvisorChoice.effort
             : resolveAdvisorEffort(

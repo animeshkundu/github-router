@@ -993,6 +993,8 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents.Plan!.mcpServers).toEqual(expect.objectContaining({ peers: expect.anything(), search: expect.anything() }))
       expect(agents.Plan!.prompt).toContain("Oracle")
       expect(agents.reviewer!.prompt).not.toContain("Oracle")
+      // Cheap reviewer has no advisor grant: no protege protocol.
+      expect(agents.reviewer!.prompt).not.toContain("at most 5 advisor rounds")
       // Explore-first under cheap delegation rules: Plan delegates discovery
       // to Explore in parallel and reads directly only what it must act on;
       // it may also invoke reviewer, never any other subagent.
@@ -1040,7 +1042,7 @@ describe("buildPeerAgentDefinitions", () => {
         // to [1m] by the client).
         cheapestExploreModel: "gpt-6-luna",
         cheapestGeneralPurposeModel: "gpt-6-luna",
-        cheapestReviewerModel: "gpt-5.6-sol",
+        cheapestReviewerModel: "gpt-6-luna",
         ...extra,
       })
     }
@@ -1066,10 +1068,17 @@ describe("buildPeerAgentDefinitions", () => {
 
       expect(agents.Explore!.effort).toBe("high")
       expect(agents["General-Purpose"]!.effort).toBe("max")
-      expect(agents.reviewer!.effort).toBe("high")
+      expect(agents.reviewer!.effort).toBe("max")
 
       expect(agents.Explore!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
       expect(agents.reviewer!.tools).toEqual(["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", "mcp__search__*"])
+      // Protege grant: cheapest reviewer carries the capped-advisor protocol
+      // in both prompt and description; other profiles do not.
+      expect(agents.reviewer!.prompt).toContain("at most 5 advisor rounds")
+      expect(agents.reviewer!.prompt).toContain("You own the verdict")
+      expect(agents.reviewer!.description).toContain("Sol advisor")
+      expect(agents.Explore!.prompt).not.toContain("at most 5 advisor rounds")
+      expect(agents["General-Purpose"]!.prompt).not.toContain("at most 5 advisor rounds")
       // Oracle is lead-only: no emitted cheapest native carries the oracle
       // tool or the peers server.
       for (const def of Object.values(agents)) {
@@ -1350,7 +1359,7 @@ describe("buildPeerAgentDefinitions", () => {
         browseAvailable: true,
         cheapestExploreModel: "gpt-6-luna",
         cheapestGeneralPurposeModel: "gpt-6-luna",
-        cheapestReviewerModel: "gpt-5.6-sol",
+        cheapestReviewerModel: "gpt-6-luna",
       }),
       buildPeerAgentDefinitions({
         ...common,
