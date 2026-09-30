@@ -417,6 +417,9 @@ const RETIRED_FAST_ALIAS_IDS = new Set([
   // fail loudly as retired instead of resolving with changed semantics.
   "gh-router-balanced-general-purpose-high",
   "gh-router-balanced-reviewer-max",
+  // Pre-swap cheapest reviewer alias: reviewer was Sol/high, now Luna/max.
+  // Same fail-loud rationale as the balanced entries above.
+  "gh-router-cheapest-reviewer-high",
 ])
 
 const MODEL_ALIAS_TABLE: ReadonlyMap<string, ModelAliasDescriptor> = new Map([

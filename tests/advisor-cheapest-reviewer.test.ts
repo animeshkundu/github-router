@@ -7,7 +7,7 @@ import {
   CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
   advisorSystemPrompt,
 } from "~/services/advisor/advisor"
-import { CHEAPEST_REVIEWER_ALIAS_ID } from "~/lib/launch-profile"
+import { CHEAPEST_EXPLORE_ALIAS_ID, CHEAPEST_REVIEWER_ALIAS_ID } from "~/lib/launch-profile"
 import {
   clearLaunchRegistry,
   registerLaunch,
@@ -157,6 +157,49 @@ describe("cheapest reviewer protege grant", () => {
     expect(forwarded[1]).not.toContain(ADVISOR_INTERNAL_TOOL_NAME)
     expect(forwarded[1]).not.toContain("advisor_20260301")
     expect(forwarded[1]).not.toContain("at most 5 consults")
+  })
+
+  test("teammate-style reviewer id with the reviewer alias is granted (Agent-team spawns)", async () => {
+    const forwarded: Array<string> = []
+    globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
+      forwarded.push(String(init?.body ?? ""))
+      return Promise.resolve(simpleResponsesSse())
+    }) as unknown as typeof fetch
+
+    // Agent-team teammates carry name-based ids ("reviewer-advisor-only"),
+    // not the bare role — detection must key on the pinned model alias.
+    const reviewer = await server.request(
+      "/v1/messages",
+      cheapestOptions(readToolBody(CHEAPEST_REVIEWER_ALIAS_ID), "reviewer-advisor-only"),
+    )
+    expect(reviewer.status).toBe(200)
+    await reviewer.text()
+
+    expect(forwarded).toHaveLength(1)
+    const reviewerTools = (JSON.parse(forwarded[0]) as {
+      tools?: Array<{ name?: string; description?: string }>
+    }).tools
+    const reviewerAdvisor = reviewerTools?.find((tool) => tool.name === ADVISOR_INTERNAL_TOOL_NAME)
+    expect(reviewerAdvisor?.description).toBe(CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS)
+  })
+
+  test("teammate-style id with a non-reviewer alias stays stripped", async () => {
+    const forwarded: Array<string> = []
+    globalThis.fetch = mock((_url: string | URL | Request, init?: RequestInit) => {
+      forwarded.push(String(init?.body ?? ""))
+      return Promise.resolve(simpleResponsesSse())
+    }) as unknown as typeof fetch
+
+    const explore = await server.request(
+      "/v1/messages",
+      cheapestOptions(readToolBody(CHEAPEST_EXPLORE_ALIAS_ID), "explore-helper"),
+    )
+    expect(explore.status).toBe(200)
+    await explore.text()
+
+    expect(forwarded).toHaveLength(1)
+    expect(forwarded[0]).not.toContain(ADVISOR_INTERNAL_TOOL_NAME)
+    expect(forwarded[0]).not.toContain("advisor_20260301")
   })
 
   test("cheapest lead keeps its own (non-protege) advisor instructions", async () => {

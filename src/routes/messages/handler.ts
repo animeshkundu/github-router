@@ -48,6 +48,7 @@ import {
   maxAdvisorPinIsValid,
   maxOpusModel,
 } from "~/lib/max-profile-contract"
+import { CHEAPEST_REVIEWER_ALIAS_ID, resolveModelAlias } from "~/lib/launch-profile"
 import { stripTrailingOneMSuffix } from "~/lib/model-suffix"
 import { salvageOversizedPrompt } from "~/lib/prompt-window-salvage"
 import {
@@ -238,6 +239,30 @@ function cheapestAdvisorMetadataMismatch(rawBody: string): string | undefined {
     }
   }
   return undefined
+}
+
+/**
+ * True when the request's `model` is the cheapest reviewer's pinned alias
+ * (bare or `[1m]`-decorated — `resolveModelAlias` strips the bracket).
+ *
+ * Role detection by MODEL rather than by `x-claude-code-agent-id`: classic
+ * Task spawns send the bare role name ("reviewer"), but Agent-team teammates
+ * send stable name-based ids ("reviewer-advisor-only[@team]"), so an
+ * agent-id exact-match misses every teammate spawn. The frontmatter pins the
+ * reviewer to its alias, invocation-level overrides are stripped by the
+ * dispatch ACL, and `/model` switches affect only the lead — so the alias is
+ * the robust discriminator across spawn styles. Fail-closed: unparseable
+ * bodies and non-alias ids (bare Luna = lead, Explore/GP carry their own
+ * aliases) return false.
+ */
+function isCheapestReviewerModel(rawBody: string): boolean {
+  try {
+    const body = JSON.parse(rawBody) as AnyRecord
+    return typeof body.model === "string"
+      && resolveModelAlias(body.model)?.aliasId === CHEAPEST_REVIEWER_ALIAS_ID
+  } catch {
+    return false
+  }
 }
 
 function stripAdvisorTool(rawBody: string): string {
@@ -463,7 +488,16 @@ export async function handleCompletion(c: Context) {
   const cheapestLeadAdvisor = cheapestProfileRequest && !cheapestSubagentRequest
   // Cheapest-only protege grant: the Luna/max reviewer may consult the Sol
   // Advisor (capped, non-binding). Every other subagent stays excluded.
-  const cheapestReviewerAdvisor = cheapestProfileRequest && subagentAgentId === "reviewer"
+  // Detected by agent id (classic Task spawns) OR request model alias
+  // (Agent-team teammates carry name-based ids like "reviewer-advisor-only",
+  // so the id alone cannot identify the role — see `isCheapestReviewerModel`).
+  const cheapestReviewerAdvisor = cheapestProfileRequest
+    && (subagentAgentId === "reviewer" || isCheapestReviewerModel(rawBody))
+  if (cheapestProfileRequest && subagentRequest) {
+    consola.debug(
+      `cheapest subagent advisor gate: agentId=${JSON.stringify(subagentAgentId)} reviewerModel=${isCheapestReviewerModel(rawBody)} granted=${cheapestReviewerAdvisor && advisorRequested}`,
+    )
+  }
   // Balanced is advisor-free by design: the lead never gets the Advisor tool,
   // even when the client sends the advisor beta (enforced by the
   // `balancedProfileRequest ? false` branch in `advisorBehaviorEnabled`).

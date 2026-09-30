@@ -163,6 +163,14 @@ describe("Luna aliases", () => {
     expect(canonicalizeAliasModel("gpt-5.6-sol")).toBe("gpt-5.6-sol")
   })
 
+  test("pre-swap cheapest reviewer alias is retired (fails loudly, bare and bracketed)", () => {
+    for (const wire of ["gh-router-cheapest-reviewer-high", "gh-router-cheapest-reviewer-high[1m]"]) {
+      expect(isRetiredFastModelAlias(wire)).toBe(true)
+      expect(resolveModelAlias(wire)).toBeUndefined()
+    }
+    expect(isRetiredFastModelAlias(CHEAPEST_REVIEWER_ALIAS_ID)).toBe(false)
+  })
+
   test("effort precedence is explicit then thinking then alias default", () => {
     expect(resolveEffortWithAliasDefault({ aliasId: LUNA_DRIVER_ALIAS_ID })).toBe("max")
     expect(resolveEffortWithAliasDefault({ aliasId: LUNA_DRIVER_ALIAS_ID, thinkingBucketedEffort: "medium" })).toBe("medium")
