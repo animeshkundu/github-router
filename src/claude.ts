@@ -1206,7 +1206,7 @@ export const claude = defineCommand({
         ) {
           if (launchProfileId === "cheapest") {
             throw new Error(
-              "cheapest profile prerequisite drift: exact reviewer (gpt-5.6-sol), oracle (gpt-5.6-sol), or advisor (gpt-5.6-sol) model no longer resolves",
+              "cheapest profile prerequisite drift: exact reviewer (gpt-6-luna), oracle (gpt-5.6-sol), or advisor (gpt-5.6-sol) model no longer resolves",
             )
           }
           if (launchProfileId === "balanced") {
@@ -1531,6 +1531,9 @@ export const claude = defineCommand({
         // whether semantic search is present and would name it unconditionally.
         process.env.GH_ROUTER_SEARCH_ENABLED = state.searchEnabled === true ? "1" : "0"
         process.env.GH_ROUTER_BLUEBIRD_ENABLED = state.bluebirdEnabled === true ? "1" : "0"
+        // Export the launch profile so the short-lived `internal-prompt-submit`
+        // hook can gate cheapest-only behavior (the Sol → Luna rewrite branch).
+        process.env.GH_ROUTER_PROFILE = launchProfileId
         const skillsToWrite = injectedSkillsForLaunch({
           profileId: launchProfileId,
           workerSkillsActive,
@@ -1544,14 +1547,19 @@ export const claude = defineCommand({
           const r = await writeInjectedSkill(s.name, s.md).catch(() => ({ written: false }))
           if (r.written) skillsWritten++
         }
-        if (workerSkillsActive) {
+        // The UserPromptSubmit hook serves standard (budget reset + V2 steer)
+        // and cheapest (same, plus the cheapest-only Sol → Luna rewrite branch
+        // gated inside decidePromptSubmitV2). Other pinned profiles omit it.
+        const promptSubmitHookActive = workerSkillsActive || launchProfileId === "cheapest"
+        if (promptSubmitHookActive) {
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const cmd = buildPromptSubmitHookCommand(selfInvocation)
             // Raise the host hook timeout to 45s (default 30s): the V2 path may
-            // make one gpt-6-luna scope call + grounding code search. The hook's
-            // own enrichment is bounded well under this (≈22s) and fails open,
-            // so 45s is headroom, not a tax the user routinely pays.
+            // make one gpt-6-luna scope call + grounding code search (≈22s),
+            // and cheapest may run the Sol rewrite first (≈18s, fail-open to
+            // the Luna path). All bounded and fail-open, so 45s is headroom,
+            // not a tax the user routinely pays.
             await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 45)
           } catch (err) {
             consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`)

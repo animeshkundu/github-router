@@ -536,6 +536,44 @@ When NOT to consult advisor:
 
 Treat the result as advisory guidance and direction, not dictation. Weigh it against verified repository evidence. You may consult again when materially new evidence creates a distinct question.`
 
+/** Cheapest-lead tool description. FAST-shaped (optional, non-binding,
+ *  discriminator vs Oracle) plus weaker-model framing: the Luna lead leans on
+ *  Sol for what execution cannot settle, with latency honesty so the first
+ *  call carries a precise question. */
+export const CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS = `# Advisor Tool
+
+You have access to an optional, transcript-aware \`advisor\` tool backed by Sol, a stronger model that sees your full conversation. It takes no parameters and returns non-binding counsel. You remain responsible for every decision — you are the faster, cheaper model; the advisor exists to fill gaps you cannot close by execution.
+
+When to consult advisor:
+- Framing check on the final plan before presenting it (once).
+- Conflicting evidence you cannot resolve by running a check.
+- A judgment call where your knowledge may be stale (versions, APIs, security patterns) — ask for the fact plus how to verify it.
+
+When NOT to consult advisor:
+- For anything a search, read, build, test, or run can settle — execution beats advice.
+- For routine progress, reassurance, or completion ritual.
+
+Advisor exchanges cost latency: make the first call count — state the precise question, your evidence with file:line, and what would change your mind. Treat the result as direction, not dictation; weigh it against verified repository evidence. Consult again only when materially new evidence creates a distinct question.
+
+Discriminator vs Oracle: session-trajectory questions go to Advisor; self-contained technical/architectural forks go to Oracle.`
+
+/** Protege-facing tool description for the cheapest Luna/max reviewer.
+ *  Unlike the lead variants, this names the mentor relationship and the hard
+ *  consult budget so the weaker model spends its calls carefully. */
+export const CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS = `# Advisor Tool
+
+You have access to an \`advisor\` tool backed by Sol, a stronger cross-lab model that sees your full transcript. It takes no parameters and returns non-binding counsel. You own the verdict; the advisor never approves, vetoes, or decides for you.
+
+Budget: at most 5 consults per review. Each one costs latency, so spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle — a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences.
+
+Every consult must state: the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict.
+
+Never consult for routine verification, progress narration, reassurance, or completion ritual — run the check yourself. If the advisor disagrees with you, evaluate on the merits: adopt what is right with a one-line reason, defend what is verified with evidence, and record the disagreement in your result.`
+
+/** Hard cap on Advisor consults per cheapest-reviewer invocation (vs the
+ *  lead-global `ADVISOR_MAX_TURNS`). Enforced in code, not merely prompted. */
+export const ADVISOR_REVIEWER_MAX_TURNS = 5
+
 const ADVISOR_OPT_OUT_ENV = "CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
 
 /**
@@ -905,6 +943,7 @@ export function advisorSystemPrompt(
   advisorEscalated = false,
   fastProfile = false,
   maxProfile = false,
+  reviewerProfile = false,
 ): string {
   if (maxProfile) return MAX_ADVISOR_SYSTEM_PROMPT
   return (
@@ -916,7 +955,25 @@ export function advisorSystemPrompt(
     + "is on the right track, say so explicitly. If they're stuck or off-track, "
     + "name the specific assumption or step to revisit. Aim for 2-5 paragraphs "
     + "of substantive guidance."
-    + (fastProfile
+    + (reviewerProfile
+      ? " You are the senior mentor to a weaker, faster executor model (Luna) performing adversarial code review. "
+        + "It is diligent but small: it cannot reliably verify facts, versions, or calculations from memory; "
+        + "its confidence is poorly calibrated and usually overstated; it rarely revises its own conclusions "
+        + "without an external push; and it does not recognize the limits of its own knowledge. You exist to "
+        + "fill exactly these gaps. Be directive — commit to decisions rather than laying out options it is "
+        + "ill-equipped to weigh. Supply frontier knowledge and intuition it lacks (API contracts, version facts, "
+        + "attack patterns, system-level consequences, forgotten constraints), labeling each item as external "
+        + "knowledge or verified repository fact, with a concrete validation step (exact command or check) wherever "
+        + "external knowledge is consequential. Distrust its stated confidence and re-grade severity yourself. "
+        + "Demand execution evidence — never accept that something passes without observed output. "
+        + "The reviewer may consult you at most 5 times per review, so make every response self-contained: never "
+        + "answer with a request for more information when you can decide from the transcript plus your own knowledge. "
+        + "You are non-binding counsel; the reviewer owns the verdict. "
+        + "Structure every response as: Verdict (SHIP / FIX / BLOCK) with confidence; Evidence (transcript cites); "
+        + "Assumptions; Material risk it is underweighting; One credible alternative reading; The single evidence "
+        + "that would reverse your verdict."
+      : "")
+    + (fastProfile && !reviewerProfile
       ? " You are a non-binding consultant to the primary lead. "
         + "Infer the most consequential unresolved uncertainty motivating this call from the transcript "
         + "and state that interpretation briefly before advising. The primary lead is operating in a speed-oriented profile. "
@@ -949,11 +1006,12 @@ async function runAdvisor(
   fastProfile = false,
   maxProfile = false,
   cheapProfile = false,
+  reviewerProfile = false,
 ): Promise<string> {
   if (signal?.aborted) {
     throw new Error("advisor call aborted before dispatch")
   }
-  const advisorSystem = advisorSystemPrompt(advisorEscalated, fastProfile, maxProfile)
+  const advisorSystem = advisorSystemPrompt(advisorEscalated, fastProfile, maxProfile, reviewerProfile)
 
   const resolvedAdvisorModel = resolveModel(advisorModel)
 
@@ -1001,7 +1059,8 @@ async function runAdvisor(
     measure,
     // Fast and cheap profile leaders keep the original user ask pinned even
     // when seat-backward truncation drops everything before the stable window.
-    fastProfile,
+    // The cheapest reviewer keeps the same pin: its brief is the ask.
+    fastProfile || reviewerProfile,
   )
 
   // Route by model family/catalog endpoint — see `advisorTransport` for the
@@ -1393,6 +1452,13 @@ export function buildAdvisorStream(opts: {
    * the 200K `CHEAP_PROFILE_ADVISOR_CONTEXT_TOKENS` (identical value for
    * cheapest) — the cost lever for advisor reads. */
   advisorCheapProfile?: boolean
+  /** True only for the cheapest Luna/max reviewer (protege grant). Selects
+   *  the mentor system prompt instead of the lead consultant prompt, keeping
+   *  the 200K transcript cap via `advisorCheapProfile`. */
+  advisorReviewerProfile?: boolean
+  /** Advisor turn cap for this stream. Defaults to `ADVISOR_MAX_TURNS`; the
+   *  cheapest reviewer passes `ADVISOR_REVIEWER_MAX_TURNS` (per-invocation). */
+  advisorMaxTurns?: number
   externalAborter?: AbortController
   /**
    * Injectable continuation dispatcher for every turn AFTER the first.
@@ -1420,6 +1486,8 @@ export function buildAdvisorStream(opts: {
   const advisorFastProfile = opts.advisorFastProfile ?? false
   const advisorMaxProfile = opts.advisorMaxProfile ?? false
   const advisorCheapProfile = opts.advisorCheapProfile ?? false
+  const advisorReviewerProfile = opts.advisorReviewerProfile ?? false
+  const advisorMaxTurns = opts.advisorMaxTurns ?? ADVISOR_MAX_TURNS
   const continueTurn =
     opts.continueTurn
     ?? ((body: AnyRecord, signal: AbortSignal) =>
@@ -1851,7 +1919,7 @@ export function buildAdvisorStream(opts: {
       try {
         let response: Response = opts.firstResponse
 
-        for (turnsRun = 0; turnsRun < ADVISOR_MAX_TURNS; turnsRun++) {
+        for (turnsRun = 0; turnsRun < advisorMaxTurns; turnsRun++) {
           // Top-of-loop abort check — bail before processing the next
           // turn if the consumer has disconnected. Without this, the
           // outer for-loop kept iterating after a mid-stream cancel,
@@ -1924,6 +1992,7 @@ export function buildAdvisorStream(opts: {
                   advisorFastProfile,
                   advisorMaxProfile,
                   advisorCheapProfile,
+                  advisorReviewerProfile,
                 )
               } catch (err) {
                 // If the failure was the consumer-cancel abort, let the
@@ -2024,7 +2093,7 @@ export function buildAdvisorStream(opts: {
           index: finalIndex,
           delta: {
             type: "text_delta",
-            text: `\n\n[Advisor loop exceeded ${ADVISOR_MAX_TURNS} turns; halting]`,
+            text: `\n\n[Advisor loop exceeded ${advisorMaxTurns} turns; halting]`,
           },
         })
         safeEnqueueEvent("content_block_stop", {

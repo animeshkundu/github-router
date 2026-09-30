@@ -183,7 +183,7 @@ describe("cheap-family subagent aliases", () => {
     [CHEAPEST_EXPLORE_ALIAS_ID, CHEAPEST_PROFILE_MODELS.explore, "high"],
     [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, CHEAPEST_PROFILE_MODELS["General-Purpose"], "max"],
     [CHEAPEST_IMPLEMENTER_ALIAS_ID, CHEAPEST_PROFILE_MODELS["General-Purpose"], "max"],
-    [CHEAPEST_REVIEWER_ALIAS_ID, CHEAPEST_PROFILE_MODELS.reviewer, "high"],
+    [CHEAPEST_REVIEWER_ALIAS_ID, CHEAPEST_PROFILE_MODELS.reviewer, "max"],
   ] as const
   const balancedRows = [
     [BALANCED_EXPLORE_ALIAS_ID, BALANCED_PROFILE_MODELS.explore, "high"],

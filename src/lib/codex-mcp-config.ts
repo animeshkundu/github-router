@@ -220,9 +220,9 @@ interface BuildOpts {
   cheapImplementerModel?: string
   cheapReviewerModel?: string
   /** Cheapest-profile role assignments. Same fixed surface as cheap, but
-   *  Luna-led with a Sol reviewer/Advisor and Oracle — every emitted
-   *  model BARE (200K default window). No `Plan` role: the lead plans
-   *  directly. */
+   *  Luna-led with a Luna reviewer plus Sol Advisor and Oracle — every
+   *  emitted model BARE (200K default window). No `Plan` role: the lead
+   *  plans directly. */
   cheapestProfile?: boolean
   cheapestExploreModel?: string
   cheapestGeneralPurposeModel?: string
@@ -969,18 +969,30 @@ function pinnedGeneralPurposePrompt(opts?: { is200K?: boolean }): string {
 const REVIEWER_DESC_TAIL =
   "Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source."
 
-function pinnedReviewerDescription(explicit: boolean, isBalanced = false, is200K = false): string {
+function pinnedReviewerDescription(explicit: boolean, isBalanced = false, is200K = false, protegeAdvisor = false): string {
   const head = explicit
     ? isBalanced
       ? "Adversarial evidence-based reviewer. Use proactively ONLY when the change is genuinely behavior-changing, cross-boundary, or risk-sensitive, before done. The lead owns verification by default. "
       : "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, before done. "
     : "Adversarial evidence-based reviewer for behavior-changing, cross-boundary, or risk-sensitive changes. "
   return head + REVIEWER_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
+    + (protegeAdvisor ? " May consult its Sol advisor (at most 5 consults per review) on consequential uncertainty it cannot settle by evidence." : "")
 }
+
+/** Protege appendix for the cheapest Luna/max reviewer: the capped Sol-advisor
+ *  protocol. Appended after the delegation paragraph so the adversarial core
+ *  above stays byte-identical across profiles. */
+const PROTEGE_ADVISOR_APPENDIX =
+  "You have an `advisor` tool backed by Sol, a stronger cross-lab model that sees your full transcript. "
+  + "You own the verdict; the advisor is counsel, never authority — it never approves, vetoes, or decides for you. "
+  + "Budget: at most 5 consults per review, each costing latency. Spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle: a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences. "
+  + "Every consult must state the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict. "
+  + "Never consult for routine verification, progress narration, reassurance, or completion ritual — run the check yourself. "
+  + "If the advisor disagrees with you, evaluate on the merits: adopt what is right with a one-line reason, defend what is verified with evidence, and record the disagreement in your result. "
 
 function pinnedReviewerPrompt(
   semanticAvailable = true,
-  opts?: { allowExploreDelegation?: boolean; is200K?: boolean },
+  opts?: { allowExploreDelegation?: boolean; is200K?: boolean; protegeAdvisor?: boolean },
 ): string {
   // Balanced-only: the reviewer narrows scope with search first, then
   // delegates targeted discovery to Explore (permitted by the balanced
@@ -989,6 +1001,9 @@ function pinnedReviewerPrompt(
   const delegation = opts?.allowExploreDelegation === true
     ? "Do not modify source code. Scope first with search, then delegate: use code search (lexical, then semantic when available) and web search to narrow scope and rule out hypotheses before delegating — cheapest, always first. When search is insufficient, delegate targeted discovery to `Explore`: launch one or more `Explore` subagents in parallel with scoped evidence questions (call chains, config patterns, test conventions, boundary conditions) and let them return file:line conclusions; do not sweep the repository yourself. You may invoke only `Explore`; do not invoke any other subagent. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
     : "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
+  // Cheapest-only protege grant: the Luna reviewer may consult Sol. The core
+  // stays identical; only this profile appends the capped-advisor protocol.
+  const protege = opts?.protegeAdvisor === true ? PROTEGE_ADVISOR_APPENDIX : ""
   return "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
     + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
     + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
@@ -996,6 +1011,7 @@ function pinnedReviewerPrompt(
     + "Probe deliberately: boundary and empty inputs, error and early-return paths, concurrency and ordering, resource acquisition and cleanup on the failure path, partial failure and retry, backward compatibility of any changed interface, handling of untrusted input, and whether the new tests would actually fail if the change were reverted. "
     + "Judge against the bar the repository already holds itself to, not an abstract ideal. Do not soften a real finding, and do not manufacture findings to appear thorough. If the change is correct and verified, say so. "
     + delegation
+    + protege
     + "Return a self-contained result the lead can act on immediately.\n\n"
     + "Return format. Line one must be exactly one of:\n"
     + "VERDICT: SHIP\n"
@@ -1262,7 +1278,8 @@ function buildCheapProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
 /** Build the literal `-m cheapest` native roster. Three-agent surface
  * (`Explore`, `General-Purpose`, `reviewer` — no `Plan`: the lead plans
  * directly and reviews the final plan with the Advisor before presenting
- * it), Luna-led with a Sol reviewer — every SUBAGENT model is a BARE
+ * it), Luna-led with a Luna/max reviewer (protege of the Sol Advisor) —
+ * every SUBAGENT model is a BARE
  * router-owned alias (`gh-router-cheapest-*`, no `[1m]`) rather than a real
  * catalog id, for the same client catalog-resolution reason as the cheap
  * builder above: a bare real id is upgraded to `[1m]` accounting by Claude
@@ -1311,8 +1328,8 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description: pinnedReviewerDescription(false, false, true),
-      prompt: pinnedReviewerPrompt(semanticAvailable, { is200K: true }),
+      description: pinnedReviewerDescription(false, false, true, true),
+      prompt: pinnedReviewerPrompt(semanticAvailable, { is200K: true, protegeAdvisor: true }),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,
