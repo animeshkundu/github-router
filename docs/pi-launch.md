@@ -5,12 +5,14 @@ fixed, cost-controlled profile. Only two `-m` aliases are supported:
 
 | Profile | Lead | Roster | Consultants |
 |---|---|---|---|
-| `cheapest` | `gpt-6-luna` / max, 200K bare | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol/medium Advisor (plan review + capped reviewer rounds), Sol/high Oracle |
-| `balanced` | `gpt-5.6-sol` / medium, 200K bare | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol/high, may delegate Explore); no Plan | Grok/medium Oracle only — **advisor-free by design** |
+| `cheapest` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol/medium Advisor (plan review + capped reviewer rounds), Sol/high Oracle |
+| `balanced` | `gpt-5.6-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol/high, may delegate Explore); no Plan | Grok/medium Oracle only — **advisor-free by design** |
 
-Every role runs at the bare 200K default window (no `[1m]` accounting
-anywhere) — that is the whole cost lever, same as the Claude
-`cheap`/`cheapest`/`balanced` family.
+No role runs above its Copilot **Default-tier** window (Luna/Sol 272K, Grok
+200K, anything else 200K) — that is the whole cost lever here, the Pi
+counterpart of the bare-200K default window the Claude `cheap`/`cheapest`/
+`balanced` family relies on. There is no `[1m]` accounting anywhere; see
+[Tier-priced context windows](#tier-priced-context-windows).
 
 Roster notes: our `reviewer`/`oracle` agent files intentionally shadow the
 same-named pi-subagents builtins (pinned models); builtin
@@ -115,13 +117,15 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   guidance lives in skills (`gh-oracle`, `gh-search-first`,
   `gh-delegate`, cheapest-only `gh-advisor`) and `/review`,
   `/parallel-review` (+ cheapest-only `/plan-review`) prompts.
-- **Native compaction stays authoritative.** `contextWindow: 200000`
-  per model row; `compaction.reserveTokens` is derived per launch from
-  live catalog `max_prompt_tokens` ceilings
+- **Native compaction stays authoritative.** Each model row carries its
+  Default-tier `contextWindow` (272K for Luna/Sol, 200K for Grok — never the
+  advertised 1.05M), and `compaction.reserveTokens` is derived per model from
+  that window plus live catalog `max_prompt_tokens` ceilings
   (`derivePiCompactionSettings` in `src/lib/pi-models-settings.ts`:
-  reserve = 200K − min(floor(prompt × 0.85)), clamped to
-  [16384, 100000]) so Pi's own trigger lands below Copilot's ceiling —
-  the Pi-native analogue of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. The
+  `reserve = window − floor(min(prompt, window) × 0.85)`, clamped to
+  [16384, 100000], global reserve = the max, per-model overrides for the
+  rest) so Pi's own trigger lands below both the price cliff and Copilot's
+  ceiling — the Pi-native analogue of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. The
   extension's `session_before_compact` handler observes only and always
   falls back to native.
 - **Pi lifecycle respected.** Version floor Pi ≥ 0.87.1 / Node ≥ 22.19.
@@ -170,7 +174,11 @@ disagree with the table. Refresh the table when the billing doc changes.
 Pi's footer shows `[AIC x.xx]` (this session's AI-credit total) plus
 the discounted actual (`~$`), rendered by the **same
 `internal-aic-status` runner** `github-router claude` drives — one
-renderer, identical segments (`src/lib/default-statusline.ts`).
+renderer, identical segments (`src/lib/default-statusline.ts`). The ctx
+segment carries the window next to the percentage (`[####------] 42%·272K`,
+`--` when a client reports none), so the bar is always readable against a
+real denominator — Pi's 272K Default-tier windows versus the Claude profiles'
+200K, and a `/model` switch into Claude Code's 1M accounting.
 
 How it works: the mode's own `gh-router-pi` extension owns Pi's footer
 (`ctx.ui.setFooter`, refreshed on `session_start`/`turn_end`/

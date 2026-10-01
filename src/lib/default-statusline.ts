@@ -11,7 +11,16 @@
  * Segment order (left = highest priority; narrow terminals drop from the
  * right, `AIC` is never dropped):
  *
- *   `[AIC] | [ctx bar] % | model | dir (branch) | ~$actual | in/out | dur | +a -r`
+ *   `[AIC] | [ctx bar] %·window | model | dir (branch) | ~$actual | in/out | dur | +a -r`
+ *
+ * The `·window` suffix is the session's own context window (`200K`, `272K`,
+ * `1M`, `--` when the client does not report one), so a percentage is always
+ * readable against a real denominator: the cheap 200K cost classes versus Pi's
+ * 272K Copilot Default-tier windows, and a `/model` switch into Claude Code's
+ * 1M accounting are visible at a glance. Both clients already report it
+ * (`context_window.context_window_size`: Claude Code 2.1.285+ resolves it from
+ * the active model, the Pi footer payload forwards `getContextUsage()`'s), so
+ * no launch-time plumbing is involved.
  *
  * The `$` segment is the DISCOUNTED actual (`~$` = factor-discounted
  * session total from `copilot-discount.ts`, capped at AIC × $0.01) — NOT
@@ -51,9 +60,14 @@ const GIT_TIMEOUT_MS = 300
 const WIDTH_FALLBACK = 120
 const SEP_PLAIN = " | "
 const SEP_TEXT = `${DIM} | ${RESET}`
+/** Joins the ctx percentage to its window (`42%·272K`); dimmed in `text`. */
+const WINDOW_JOINER = "·"
+const UNKNOWN_WINDOW = "--"
 
 export interface StatusInput {
   usedPct?: number
+  /** Session context window in tokens (`200000`, `272000`, `1000000`). */
+  windowSize?: number
   totalInputTokens?: number
   totalOutputTokens?: number
   totalDurationMs?: number
@@ -104,6 +118,13 @@ export function parseStatusInput(raw: string): StatusInput {
   if (ctx) {
     const pct = finiteNumber(ctx.used_percentage)
     if (pct !== undefined) out.usedPct = pct
+    // The window is the same number the client's own `used_percentage` is
+    // measured against (Claude Code resolves it from the active model; the Pi
+    // footer forwards `contextUsage.contextWindow`), so it is the honest
+    // denominator for the bar. Non-positive/garbage values stay `undefined`
+    // and render the `--` placeholder.
+    const size = finiteNumber(ctx.context_window_size)
+    if (size !== undefined && size > 0) out.windowSize = Math.floor(size)
     const tIn = finiteNumber(ctx.total_input_tokens)
     if (tIn !== undefined && tIn >= 0) out.totalInputTokens = Math.floor(tIn)
     const tOut = finiteNumber(ctx.total_output_tokens)
@@ -142,6 +163,25 @@ export function compactTokens(n: number): string {
   return `${n}`
 }
 
+/**
+ * Context window, compact and exact where it matters: `200000` → `200K`,
+ * `272000` → `272K`, `1000000` → `1M`, `1048576` → `1.05M`. Trailing zeros
+ * are trimmed so the round client windows stay short. Total: a missing,
+ * non-finite, or non-positive size yields `--` rather than a wrong number.
+ */
+export function formatWindow(tokens: number | undefined): string {
+  if (tokens === undefined || !Number.isFinite(tokens) || tokens <= 0) {
+    return UNKNOWN_WINDOW
+  }
+  if (tokens >= 1_000_000) {
+    return `${String(Number((tokens / 1_000_000).toFixed(2)))}M`
+  }
+  if (tokens >= 1000) {
+    return `${String(Number((tokens / 1000).toFixed(2)))}K`
+  }
+  return `${Math.floor(tokens)}`
+}
+
 /** `45000` → `0m45s`, `198000` → `3m18s`, `3720000` → `1h02m`. */
 export function formatDurationMs(ms: number): string {
   const totalSeconds = Math.floor(ms / 1000)
@@ -161,11 +201,22 @@ export function dirLeaf(cwd: string): string {
   return parts[parts.length - 1] ?? trimmed
 }
 
-export function buildCtxSegment(usedPct: number | undefined): StatusSegment {
+/**
+ * Context segment: `[####------] 42%·200K`. The percentage keeps the
+ * green/yellow/red threshold coloring; the window is dimmed so it reads as
+ * context, not another metric. Both halves are independently optional —
+ * `windowSize` undefined renders `--` (clients that report no window), and
+ * `usedPct` undefined keeps the placeholder bar.
+ */
+export function buildCtxSegment(
+  usedPct: number | undefined,
+  windowSize?: number,
+): StatusSegment {
+  const win = formatWindow(windowSize)
   if (usedPct === undefined || !Number.isFinite(usedPct)) {
     return {
-      text: `${DIM}[----------] --%${RESET}`,
-      plain: "[----------] --%",
+      text: `${DIM}[----------] --%${RESET}${DIM}${WINDOW_JOINER}${win}${RESET}`,
+      plain: `[----------] --%${WINDOW_JOINER}${win}`,
     }
   }
   const u = Math.max(0, Math.min(100, Math.round(usedPct)))
@@ -175,8 +226,10 @@ export function buildCtxSegment(usedPct: number | undefined): StatusSegment {
   const bar = `#`.repeat(filled) + `-`.repeat(CTX_BAR_LEN - filled)
   const color = u < 50 ? GREEN : u < 75 ? YELLOW : RED
   return {
-    text: `${color}[${bar}] ${u}%${RESET}`,
-    plain: `[${bar}] ${u}%`,
+    text:
+      `${color}[${bar}] ${u}%${RESET}`
+      + `${DIM}${WINDOW_JOINER}${win}${RESET}`,
+    plain: `[${bar}] ${u}%${WINDOW_JOINER}${win}`,
   }
 }
 
@@ -328,8 +381,10 @@ export function terminalWidth(env: NodeJS.ProcessEnv = process.env): number {
  * PINNED — it renders even when nothing else fits. `actualUsd` feeds the
  * `~$` segment (the capped factor-discounted total from
  * `discountedUsdForSnapshot`, same snapshot the fragment came from).
- * Droppable segments in priority order: ctx, model, dir/git, ~$, toks,
- * dur, lines.
+ * Droppable segments in priority order: ctx (`%·window`), model, dir/git,
+ * ~$, toks, dur, lines. The window rides inside the ctx segment rather than
+ * taking its own slot, so the added width is ~6 columns instead of a whole
+ * ` | 200K` group.
  */
 export function assembleStatusLine(
   aicFragment: string,
@@ -339,7 +394,9 @@ export function assembleStatusLine(
   const aic = aicFragment.trim()
   const aicText = aic ? `${AIC_COLOR}${aic}${RESET}` : ""
 
-  const droppable: Array<StatusSegment> = [buildCtxSegment(input.usedPct)]
+  const droppable: Array<StatusSegment> = [
+    buildCtxSegment(input.usedPct, input.windowSize),
+  ]
   const model = buildModelSegment(input.modelName)
   if (model) droppable.push(model)
   // Location context sits right after ctx/model: more useful than the
