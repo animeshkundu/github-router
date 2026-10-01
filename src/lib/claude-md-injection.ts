@@ -424,6 +424,21 @@ const OPERATING_DEFAULTS_TAIL =
   + "rather than letting it derail the task the user actually asked for."
 
 /**
+ * Cheapest-only consult contract for the Luna lead.
+ *
+ * Lives in the injected operating-defaults prose (the "when/how") rather than
+ * the advisor tool description (the "what"), per OpenAI guidance that a tool
+ * definition describes what a tool is while the prompt carries usage policy.
+ * Kept to a short, outcome-first paragraph with decision rules, not a step
+ * procedure. Sol reads the lead's last message as `<caller_context>` and a
+ * curated, tool-aware transcript, and any operator `ask` is repeated verbatim
+ * by the proxy as `<operator_focus>` — so the lead's job is only to write a
+ * self-contained brief before calling.
+ */
+export const CHEAPEST_CONSULT_CONTRACT =
+  "Consulting `advisor`: Sol reads a curated view of this session — the user's original ask, your most recent message text, and a bounded transcript that keeps your reasoning but truncates raw tool output. So before you call it, write a short self-contained brief as your own message: the objective, your current job, what you verified / suspect is missing / ruled irrelevant, your confidence and what being wrong would cost, and one neutral question phrased with any competing hypotheses. Call it for a framing check on the final plan, on conflicting evidence a check cannot settle, or on a judgment call where your knowledge may be stale (versions, APIs, security patterns) — ask for the fact and how to verify it. Do not call it for anything a search, read, build, test, or run can settle, or for routine progress and completion ritual: execution beats advice. Never paste raw tool output or ask it to \"review the whole thing\". State your confidence after you have committed to a position, not before, and weigh the reply against verified repository evidence — Sol's counsel is direction, not dictation, and you own the decision.\n\n"
+
+/**
  * Build the operating-defaults directive for one launch, naming only the
  * natives that launch actually emitted.
  *
@@ -511,6 +526,7 @@ export function buildOperatingDefaultsDirective(
         + "In plan mode, produce the plan and acceptance criteria directly and do not edit files; before presenting the final plan to the user, consult `advisor` once for a framing check — it is non-binding counsel and you retain decision ownership. "
         + "Work to your strengths as a fast, cost-efficient model: verify by execution rather than memory; before a non-trivial task, write a short plan (steps, files involved, the check settling each step) and execute it; persist through tool failures with a rephrased attempt before asking the user; stop searching when further results stop changing the answer; tag claims verified, inferred, or unverified — never state that something passes, compiles, or is covered without observed output. "
         + "Delegation graph: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
+        + CHEAPEST_CONSULT_CONTRACT
       : isBalanced
         ? `${profileLabel} launch profile. The lead coordinates execution across specialized native roles: `
         + buildNativeReachClauses(opts)
@@ -658,6 +674,7 @@ export function buildOperatingDefaultsDigest(
       : "."
     const delegation = isCheapest
       ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. In plan mode, produce the plan and acceptance criteria directly; before presenting the final plan to the user, consult \`advisor\` once for a framing check — non-binding counsel, you retain decision ownership. Plan briefly before non-trivial acts, verify by execution, tag unverified claims, and stop searching when results stop changing the answer. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
+        + CHEAPEST_CONSULT_CONTRACT
       : isBalanced
         ? `${profileLabel} launch profile. The lead owns planning, implementation, and verification by default: narrow scope first with \`code_search\` and \`web\` search to rule out hypotheses (cheapest, always first); delegate to \`Explore\` in parallel only when search is insufficient (read directly only files you will act on); delegate to \`General-Purpose\` FREELY for multi-step work combining investigation, tool workflows, and code changes; invoke \`reviewer\` ONLY when the change is genuinely behavior-changing, cross-boundary, or risk-sensitive (\`reviewer\` narrows scope with search first and may invoke \`Explore\` for targeted discovery); handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
         : `${profileLabel} launch profile. The lead coordinates execution across specialized roles: delegate broad discovery to \`Explore\` in parallel and do not sweep the repo yourself (read directly only files you will act on); delegate to \`Plan\` in plan mode or when structuring complex multi-step sequencing (\`Plan\` is an advisory planning capability, not an approval gate, and writes handoff-ready steps for \`General-Purpose\`); delegate mixed multi-step execution and Plan handoffs to \`General-Purpose\` in a fresh context; delegate to \`reviewer\` after behavior-changing or risk-sensitive implementation to verify correctness before declaring done; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
