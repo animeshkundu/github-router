@@ -363,8 +363,37 @@ describe("getClaudeCodeEnvVars", () => {
     expect(value).toBe("816700")
   })
 
-  test("omits the window entirely when catalog limits are unusable", () => {
-    const vars = withCatalog([], () =>
+  test("cheapest lead env is bare 200K even with a 1M opt-in picker row", () => {
+    // The cheapest picker declares a bare default Luna row plus an opt-in
+    // `gpt-6-luna[1m]` row. No lead-capable env var may carry `[1m]`, so the
+    // default session stays bare 200K regardless of the opt-in row's presence.
+    const vars = withCatalog(
+      [
+        catalogModel("gpt-5.6-sol", 1_050_000, 922_000),
+        catalogModel("gpt-6-luna", 1_050_000, 922_000),
+      ],
+      () =>
+        withoutCompactionEnv(() =>
+          getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-6-luna", "cheapest", [
+            "gpt-5.6-sol",
+            "gpt-6-luna",
+            "gpt-6-luna[1m]",
+          ]),
+        ),
+    )
+    for (const key of [
+      "ANTHROPIC_MODEL",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_CUSTOM_MODEL_OPTION",
+    ]) {
+      expect(vars[key] ?? "").not.toMatch(/\[1m\]/i)
+    }
+    expect(vars.ANTHROPIC_MODEL).toBe("gpt-6-luna")
+  })
+
+  test("omits the window entirely when catalog limits are unusable", () => {    const vars = withCatalog([], () =>
       withoutCompactionEnv(() =>
         getClaudeCodeEnvVars("http://127.0.0.1:8787", "claude-opus-5.5[1m]"),
       ),

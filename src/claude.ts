@@ -855,6 +855,31 @@ export const claude = defineCommand({
       consola.info(
         `Pinned launch: profile=${launchProfileId} lead=${chosenSlug} pickerRows=${pickerModels?.length ?? 0}.`,
       )
+      // Cheapest-only default-row breadcrumb (launch makes no model calls, so
+      // this is free): the FIRST Luna picker row must be bare 200K, and no
+      // lead-capable env var may carry the `[1m]` bracket. A decorated first
+      // row would make Claude Code default the session to 1M accounting;
+      // surface that loudly instead of silently.
+      if (launchProfileId === "cheapest") {
+        const rows = pickerModels ?? []
+        const firstLuna = rows.find((id) => id.replace(/(?:\[1m\])+$/i, "") === "gpt-6-luna")
+        const defaultRowBare = firstLuna !== undefined && !/\[1m\]/i.test(firstLuna)
+        const bracketedLeadEnv = [
+          "ANTHROPIC_MODEL",
+          "ANTHROPIC_DEFAULT_OPUS_MODEL",
+          "ANTHROPIC_DEFAULT_SONNET_MODEL",
+          "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+          "ANTHROPIC_CUSTOM_MODEL_OPTION",
+        ].filter((key) => typeof envVars[key] === "string" && /\[1m\]/i.test(envVars[key] as string))
+        consola.info(
+          `Cheapest default-row check: firstLunaRow=${firstLuna ?? "none"} defaultRowBare=${defaultRowBare} bracketedLeadEnv=${bracketedLeadEnv.length === 0 ? "none" : bracketedLeadEnv.join(",")}.`,
+        )
+        if (!defaultRowBare || bracketedLeadEnv.length > 0) {
+          consola.warn(
+            `Cheapest default-row regression: the lead row is not bare 200K — the session may default to 1M accounting.`,
+          )
+        }
+      }
     }
 
     // Forward unrecognized flags (e.g. --print / --output-format / --resume)

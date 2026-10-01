@@ -82,8 +82,17 @@ const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
 
 const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   // Cheapest roster is Luna (lead/GP/reviewer) + Sol (Advisor/Oracle) —
-  // rows are Sol and Luna only. Luna is exempt from the pin so its 1M
-  // row stays an explicit opt-in; the default lead rows stay bare 200K.
+  // rows are Sol and Luna only. Luna appears TWICE, in this order:
+  //   1. a BARE `gpt-6-luna` row (neverOneM:true) — the DEFAULT. Claude Code
+  //      matches the active model to a picker row after stripping `[1m]`, and
+  //      takes the FIRST match, so a bare row declared first guarantees the
+  //      default lead is bare 200K regardless of the bracketed row below.
+  //   2. a `gpt-6-luna[1m]` row (neverOneM:false) — an explicit /model opt-in.
+  //      Decorated only when the live catalog advertises >=1M (bare otherwise),
+  //      so a sub-1M catalog cannot surface a bogus 1M row.
+  // The upstream `[1m]` bracket is stripped by `resolveModel` at request time;
+  // it exists solely to unlock Claude Code's 1M local accounting when a user
+  // deliberately selects the opt-in row.
   {
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
@@ -93,6 +102,12 @@ const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
   {
     id: "gpt-6-luna",
     label: "GPT-6 Luna",
+    behavesAs: "claude-opus-5.5",
+    neverOneM: true,
+  },
+  {
+    id: "gpt-6-luna",
+    label: "GPT-6 Luna (1M)",
     behavesAs: "claude-opus-5.5",
     neverOneM: false,
   },

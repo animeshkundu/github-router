@@ -177,44 +177,39 @@ describe("selectableModelsInCatalog", () => {
     ])
   })
 
-  test("cheapest and balanced also exempt only Luna from the 200K pin", () => {
+  test("cheapest lists a BARE Luna default first, then a 1M opt-in row", () => {
     setCatalog(WINDOWS)
     expect(ids("cheapest")).toEqual([
       "gpt-5.6-sol",
+      "gpt-6-luna",
       "gpt-6-luna[1m]",
     ])
-    expect(ids("balanced")).toEqual([
-      "gpt-5.6-sol",
-      "gpt-6-luna[1m]",
-      "grok-4.6",
-    ])
-    for (const profile of ["cheapest", "balanced"] as const) {
-      expect(ids(profile).filter((id) => /\[1m\]/i.test(id))).toEqual([
-        "gpt-6-luna[1m]",
-      ])
-    }
+    // The default (first Luna) row must be BARE so Claude Code, which matches
+    // the active model to a picker row after stripping `[1m]` and takes the
+    // FIRST match, defaults the session to 200K.
+    const lunaRows = selectableModelsInCatalog("cheapest").filter(
+      (row) => row.model.replace(/\[1m\]$/i, "") === "gpt-6-luna",
+    )
+    expect(lunaRows.map((row) => row.model)).toEqual(["gpt-6-luna", "gpt-6-luna[1m]"])
+    expect(lunaRows.map((row) => row.label)).toEqual(["GPT-6 Luna", "GPT-6 Luna (1M)"])
+    // Balanced keeps its single Luna row (out of scope for this change).
+    expect(ids("balanced")).toEqual(["gpt-5.6-sol", "gpt-6-luna[1m]", "grok-4.6"])
   })
 
-  test("Luna exemption follows the catalog gate and the 1M opt-out", () => {
-    // Luna absent → row omitted everywhere including cheap/balanced.
+  test("cheapest Luna opt-in row follows the catalog gate; default stays bare", () => {
+    // Luna absent → both Luna rows omitted.
     setCatalog({ "gpt-5.6-sol": 1_050_000 })
-    for (const profile of ["cheap", "balanced", "standard"] as const) {
-      expect(ids(profile)).not.toContain("gpt-6-luna")
-      expect(ids(profile)).not.toContain("gpt-6-luna[1m]")
-    }
-    // Luna sub-1M → bare row even where exempt.
+    expect(ids("cheapest")).toEqual(["gpt-5.6-sol"])
+    // Luna sub-1M → the opt-in row degrades to BARE; the default row stays bare,
+    // and there are then two bare Luna rows (no bogus 1M).
     setCatalog({ "gpt-5.6-sol": 1_050_000, "gpt-6-luna": 500_000 })
-    for (const profile of ["cheap", "balanced", "standard"] as const) {
-      expect(ids(profile)).toContain("gpt-6-luna")
-      expect(ids(profile)).not.toContain("gpt-6-luna[1m]")
-    }
-    // Opt-out forces Luna bare everywhere despite the exemption.
+    expect(ids("cheapest")).toEqual(["gpt-5.6-sol", "gpt-6-luna", "gpt-6-luna"])
+    expect(ids("cheapest").every((id) => !/\[1m\]/i.test(id))).toBe(true)
+    // Opt-out forces everything bare.
     setCatalog(WINDOWS)
     process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
-    for (const profile of ["cheap", "cheap1m", "cheapest", "balanced", "standard"] as const) {
-      expect(ids(profile)).toContain("gpt-6-luna")
-      expect(ids(profile)).not.toContain("gpt-6-luna[1m]")
-    }
+    expect(ids("cheapest")).toEqual(["gpt-5.6-sol", "gpt-6-luna", "gpt-6-luna"])
+    expect(ids("cheapest").every((id) => !/\[1m\]/i.test(id))).toBe(true)
     delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
   })
 
@@ -229,11 +224,11 @@ describe("selectableModelsInCatalog", () => {
     }
   })
 
-  test("inject writes the Luna-exempt picker for cheapest and balanced", async () => {
+  test("inject writes the bare-default + 1M-opt-in Luna picker for cheapest", async () => {
     setCatalog(WINDOWS)
     for (
       const [profile, expected] of [
-        ["cheapest", ["gpt-5.6-sol", "gpt-6-luna[1m]"]],
+        ["cheapest", ["gpt-5.6-sol", "gpt-6-luna", "gpt-6-luna[1m]"]],
         ["balanced", ["gpt-5.6-sol", "gpt-6-luna[1m]", "grok-4.6"]],
       ] as const
     ) {
