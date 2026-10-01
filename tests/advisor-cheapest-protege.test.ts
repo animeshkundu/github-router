@@ -388,7 +388,7 @@ describe("layered prompt composition (as runAdvisor assembles it)", () => {
 })
 
 describe("cheapest CLAUDE.md consult contract", () => {
-  test("is injected into the directive for the cheapest profile only", () => {
+  test("full contract is injected into the directive for the cheapest profile only", () => {
     const cheapest = buildOperatingDefaultsDirective({ profile: "cheapest" })
     expect(cheapest).toContain("Consulting `advisor`")
     expect(cheapest).toContain("self-contained brief")
@@ -400,13 +400,34 @@ describe("cheapest CLAUDE.md consult contract", () => {
     }
   })
 
-  test("is injected into the digest for the cheapest profile only", () => {
+  test("digest carries a short POINTER, not the full contract (de-duplicated)", () => {
     const cheapest = buildOperatingDefaultsDigest({ profile: "cheapest" })
-    expect(cheapest).toContain("Consulting `advisor`")
+    // The trigger + budget stay resident...
+    expect(cheapest).toContain("Consulting `advisor`/`oracle`")
+    expect(cheapest).toContain("8-10 calls")
+    // ...but the full contract body must NOT be duplicated in the always-resident
+    // digest (it lives in the mirrored CLAUDE.md).
+    expect(cheapest).not.toContain("Never paste raw tool output")
+    expect(cheapest).not.toContain("self-contained brief as your own message")
 
     for (const profile of ["fast", "cheap", "balanced", "max"] as const) {
       const other = buildOperatingDefaultsDigest({ profile })
-      expect(other).not.toContain("Consulting `advisor`")
+      expect(other).not.toContain("Consulting `advisor`/`oracle`")
     }
+  })
+
+  test("consult contract states the budget, anchors, disqualifiers, and discriminator", () => {
+    const directive = buildOperatingDefaultsDirective({ profile: "cheapest" })
+    // Budget.
+    expect(directive).toContain("8-10 advisor calls")
+    // Anchors.
+    expect(directive).toContain("pre-commit framing check")
+    expect(directive).toContain("unresolvable judgment call")
+    expect(directive).toContain("pre-presentation framing check")
+    // Disqualifiers.
+    expect(directive).toContain("routine progress, reassurance, completion ritual")
+    // Discriminator.
+    expect(directive).toContain("go to `advisor`")
+    expect(directive).toContain("go to `oracle`")
   })
 })
