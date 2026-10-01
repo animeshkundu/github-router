@@ -38,6 +38,7 @@ import {
   CHEAPEST_REWRITE_GUIDANCE_CAP,
   CHEAPEST_REWRITE_MODEL,
   CHEAPEST_REWRITE_STRUCTURE_CAP,
+  CHEAPEST_REWRITE_TEST_CMD_CAP,
   isCheapestRewriteDisabledEnv,
 } from "./lib/cheapest-prompt-rewrite"
 import { parseBoolEnv } from "./lib/exec"
@@ -88,14 +89,16 @@ function workspaceFromStdin(stdin: string): string {
 
 /** Per-call timeout for the grounding search (short — it must not stall the prompt). */
 const SEARCH_TIMEOUT_MS = 8_000
-/** Per-call timeout for the single scope/goal inference. */
-const INFER_TIMEOUT_MS = 18_000
+/** Per-call timeout for a single Sol/Luna inference. */
+const INFER_TIMEOUT_MS = 25_000
 /**
  * Overall budget for the cheapest Sol rewrite (search + Sol, 3 turns default
- * with one adaptive extension to 5). Kept under the 45s host hook timeout
- * even when the Luna fallback enrichment runs afterwards (≈18s + ≈22s).
+ * with one adaptive extension to 5). The hook is registered with a 90s host
+ * timeout. A rewrite timeout is TERMINAL — the orchestrator falls open to the
+ * cheap regex goal and does NOT then run the Luna scope path — so the worst
+ * case is one rewrite (≤30s) OR one Luna scope (≤22s), never both.
  */
-const REWRITE_TIMEOUT_MS = 18_000
+const REWRITE_TIMEOUT_MS = 30_000
 
 /** Read a text file best-effort, capped; missing/unreadable -> "". */
 function readCappedFile(absPath: string, cap: number): string {
@@ -107,15 +110,96 @@ function readCappedFile(absPath: string, cap: number): string {
 }
 
 /**
- * Static repo context for the cheapest rewrite: AGENTS.md (preferred) +
- * CLAUDE.md fallback + top-level structure + package.json scripts snippet.
- * All synchronous (tiny reads) and capped; missing files yield "".
+ * Read the nearest AGENTS.md / CLAUDE.md guidance walking up from a directory
+ * toward (and including) the workspace root. Frontier guidance treats AGENTS.md
+ * as hierarchical: the closest file to the work wins. We collect the workspace
+ * root plus a bounded number of ancestor levels of the given start dir,
+ * preferring AGENTS.md and falling back to CLAUDE.md per level. Returns the
+ * concatenated guidance (capped) and empty strings when none exist.
  */
-export function buildStaticPack(workspace: string): { agentsMd: string; claudeMd: string; repoStructure: string } {
-  const agentsMd = readCappedFile(path.join(workspace, "AGENTS.md"), CHEAPEST_REWRITE_GUIDANCE_CAP)
-  const claudeMd = agentsMd.length > 0
-    ? ""
-    : readCappedFile(path.join(workspace, "CLAUDE.md"), CHEAPEST_REWRITE_GUIDANCE_CAP)
+function readHierarchicalGuidance(
+  workspace: string,
+  startDir: string,
+): { agentsMd: string; claudeMd: string } {
+  const root = path.resolve(workspace)
+  const start = path.resolve(startDir)
+  // Build the chain from the (bounded) start dir up to the workspace root,
+  // then de-duplicate while preserving root-first ordering so the closest
+  // guidance is read LAST (and thus kept preferentially by the caller).
+  const dirs: Array<string> = []
+  let current = start
+  const MAX_LEVELS = 3
+  for (let i = 0; i < MAX_LEVELS; i++) {
+    if (!current.startsWith(root)) break
+    dirs.push(current)
+    if (current === root) break
+    const parent = path.dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  if (!dirs.includes(root)) dirs.push(root)
+  dirs.reverse() // root first, closest last
+
+  const agentsParts: Array<string> = []
+  const claudeParts: Array<string> = []
+  for (const dir of dirs) {
+    const agents = readCappedFile(path.join(dir, "AGENTS.md"), CHEAPEST_REWRITE_GUIDANCE_CAP)
+    if (agents.length > 0) agentsParts.push(agents)
+    // Capture CLAUDE.md independently (per-level fallback is handled by the
+    // caller preferring AGENTS.md when present anywhere).
+    const claude = readCappedFile(path.join(dir, "CLAUDE.md"), CHEAPEST_REWRITE_GUIDANCE_CAP)
+    if (claude.length > 0) claudeParts.push(claude)
+  }
+  return {
+    agentsMd: agentsParts.join("\n").slice(0, CHEAPEST_REWRITE_GUIDANCE_CAP),
+    claudeMd: claudeParts.join("\n").slice(0, CHEAPEST_REWRITE_GUIDANCE_CAP),
+  }
+}
+
+/** Pick test/build/lint scripts into a single VERIFY COMMAND line. */
+function extractVerifyCommand(pkg: {
+  scripts?: Record<string, string>
+  devDependencies?: Record<string, string>
+  dependencies?: Record<string, string>
+}): string {
+  const scripts = pkg.scripts ?? {}
+  // Prefer an explicit end-to-end "test" then the common build/lint commands.
+  const preferred = ["test", "test:unit", "build", "typecheck", "lint"]
+  const picks: Array<string> = []
+  for (const name of preferred) {
+    if (typeof scripts[name] === "string" && scripts[name].trim().length > 0) {
+      picks.push(name)
+    }
+  }
+  if (picks.length === 0) return ""
+  const runner = (pkg.devDependencies?.vitest ?? pkg.devDependencies?.jest ?? pkg.dependencies?.vitest)
+    ? "npx "
+    : ""
+  return `VERIFY COMMAND: ${picks.map((n) => `${runner}${pkgAwareRun(n)}`).join(" ; ")}`
+    .slice(0, CHEAPEST_REWRITE_TEST_CMD_CAP)
+}
+
+/** `npm run <script>` for non-trivial names; bare for `test`. */
+function pkgAwareRun(name: string): string {
+  return name === "test" ? "npm test" : `npm run ${name}`
+}
+
+/**
+ * Static repo context for the cheapest rewrite: hierarchical AGENTS.md
+ * (preferred) / CLAUDE.md (fallback) + top-level structure + package.json
+ * scripts/deps + an extracted VERIFY COMMAND line. All synchronous (tiny
+ * reads) and capped; missing files yield "".
+ */
+export function buildStaticPack(workspace: string): {
+  agentsMd: string
+  claudeMd: string
+  repoStructure: string
+  verifyCommand: string
+} {
+  // The hook runs in the session cwd; walk guidance from there up to the root.
+  const guidance = readHierarchicalGuidance(workspace, workspace)
+  const agentsMd = guidance.agentsMd
+  const claudeMd = agentsMd.length > 0 ? "" : guidance.claudeMd
   let listing: string
   try {
     const entries = readdirSync(workspace, { withFileTypes: true })
@@ -126,12 +210,18 @@ export function buildStaticPack(workspace: string): { agentsMd: string; claudeMd
     listing = ""
   }
   let pkgSnippet: string
+  let verifyCommand = ""
   try {
     const raw = readFileSync(path.join(workspace, "package.json"), "utf8")
-    const pkg = JSON.parse(raw) as { scripts?: Record<string, string>; dependencies?: Record<string, string> }
+    const pkg = JSON.parse(raw) as {
+      scripts?: Record<string, string>
+      dependencies?: Record<string, string>
+      devDependencies?: Record<string, string>
+    }
     const scripts = pkg.scripts ? Object.keys(pkg.scripts).slice(0, 20).join(", ") : ""
     const deps = pkg.dependencies ? Object.keys(pkg.dependencies).slice(0, 20).join(", ") : ""
     pkgSnippet = `scripts: [${scripts}] deps: [${deps}]`
+    verifyCommand = extractVerifyCommand(pkg)
   } catch {
     pkgSnippet = ""
   }
@@ -139,7 +229,7 @@ export function buildStaticPack(workspace: string): { agentsMd: string; claudeMd
     .filter((s) => s.trim().length > 0 && s !== "top-level: ")
     .join("\n")
     .slice(0, CHEAPEST_REWRITE_STRUCTURE_CAP)
-  return { agentsMd, claudeMd, repoStructure }
+  return { agentsMd, claudeMd, repoStructure, verifyCommand }
 }
 
 export const internalPromptSubmit = defineCommand({

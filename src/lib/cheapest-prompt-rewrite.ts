@@ -1,26 +1,34 @@
 /**
  * Cheapest-only Sol → Luna prompt rewrite (additive, fail-open).
  *
- * The cheapest lead (`gpt-6-luna`) is the mini-tier analog: it follows
- * explicit, short, structured briefs far better than vague prompts (see the
- * OpenAI GPT-4.1 / GPT-5-mini prompting guides). This module is the pure
- * decision + formatting layer for that rewrite. It never touches the network
- * itself: all IO is injected so tests run with fakes and no Copilot spend.
+ * The cheapest lead (`gpt-6-luna`) is the mini-tier analog: a stronger model
+ * (Sol) hands it a GROUNDED EXECUTION CONTRACT — repo facts and explicit
+ * constraints it cannot cheaply gather or reliably infer itself. This module
+ * is the pure decision + formatting layer for that rewrite. It never touches
+ * the network itself: all IO is injected so tests run with fakes and no
+ * Copilot spend.
  *
- * Design (per researched plan):
+ * Design (research-grounded):
  *   - cheapest profile only, initial top-level prompt only, non-trivial only
  *     (caller passes the `isNonTrivialPrompt` verdict in — this module does
  *     not import the hook to avoid a dependency cycle).
  *   - static context pack first (user prompt + AGENTS.md/CLAUDE.md + repo
- *     structure + search snippets), all capped for cache-friendliness.
+ *     structure + search snippets), all capped for cache-friendliness EXCEPT
+ *     the user prompt, which is passed through in full.
  *   - rewriter is `gpt-5.6-sol` bare 200K at medium effort (the existing
  *     cheapest Advisor identity), via the caller's `inferSol`.
+ *   - the contract leads with grounding + constraints (small models' documented
+ *     weak spot) and explicitly avoids prescribing step-by-step procedure or
+ *     CoT, which measurably degrade instruction-following; the ordered plan is
+ *     optional.
  *   - adaptive turn budget: 3 tool turns by default, up to 5 only when Sol
  *     self-flags deep grounding. Sol is told the budget and may use zero
  *     tools and rewrite immediately.
- *   - output is an ADDITIVE advisory brief for Luna; the original prompt is
- *     never replaced. Empty/error/timeout yields null and the caller falls
- *     back to the existing V2 scope/goal path.
+ *   - output is an ADDITIVE, non-authoritative contract for Luna; the original
+ *     prompt is never replaced or truncated. A clean miss/empty yields
+ *     `{ brief: null, timedOut: false }` and the caller falls back to the
+ *     existing V2 scope/goal path; a wall-clock timeout yields
+ *     `{ brief: null, timedOut: true }` and is TERMINAL for the prompt.
  */
 
 export const CHEAPEST_REWRITE_MODEL = "gpt-5.6-sol" as const
@@ -32,14 +40,16 @@ export const CHEAPEST_REWRITE_DEFAULT_TURNS = 3
 export const CHEAPEST_REWRITE_MAX_TURNS = 5
 
 /** Wall-clock budget for the whole rewrite (search + Sol), ms. */
-export const CHEAPEST_REWRITE_TIMEOUT_MS = 20_000
+export const CHEAPEST_REWRITE_TIMEOUT_MS = 30_000
 /** Max chars per search-result blob fed to Sol. */
 export const CHEAPEST_REWRITE_SEARCH_CAP = 6 * 1024
 /** Max chars of repo guidance files (AGENTS.md / CLAUDE.md) fed to Sol. */
 export const CHEAPEST_REWRITE_GUIDANCE_CAP = 4 * 1024
+/** Max chars of the extracted verify-command line fed to Sol. */
+export const CHEAPEST_REWRITE_TEST_CMD_CAP = 512
 /** Max chars of structural repo info fed to Sol. */
 export const CHEAPEST_REWRITE_STRUCTURE_CAP = 2 * 1024
-/** Max chars of the wrapped Luna brief (keeps Luna-facing brief short). */
+/** Max chars of the wrapped execution contract (keeps the Luna-facing block short). */
 export const CHEAPEST_REWRITE_BRIEF_CAP = 2_000
 
 /** Flag Sol emits when it needs the extended 5-turn budget. */
@@ -90,10 +100,24 @@ export function parseNeedMoreQuery(solText: string): string {
 }
 
 /**
- * System prompt for the Sol rewriter. Names the turn budget explicitly so
- * Sol knows what it is doing, how many turns it has, that zero-tool
- * immediate rewrite is allowed, and that the output serves Luna (mini-tier:
- * explicit, short, flat, outcome-first with stop rules).
+ * System prompt for the Sol rewriter.
+ *
+ * The job is a GROUNDED EXECUTION CONTRACT for a fast mini-tier executor
+ * (Luna), not a step-by-step procedure. This is the strong-planner /
+ * weak-follower split (a strong model plans, a small one executes), adapted
+ * to Luna's level. Evidence-driven choices:
+ *   - Lead with grounding + explicit constraints: small models' documented
+ *     weak spot is instruction/constraint following, while their biggest gain
+ *     comes from a stronger model handing them repo facts they cannot cheaply
+ *     gather themselves.
+ *   - Anti-CoT: explicit step-by-step reasoning prompts measurably degrade
+ *     instruction-following (models neglect simple constraints and invent
+ *     content), so the brief must NOT prescribe micro-steps, must NOT ask
+ *     Luna to "reason through" anything, and the ordered plan is OPTIONAL.
+ *   - Fidelity is the one hard invariant: never invent requirements or
+ *     acceptance criteria; a stated unknown beats a confident guess.
+ * It also names the turn budget (and that zero tools is allowed) so Sol does
+ * not pad grounding.
  */
 export function buildSolRewriteSystem(opts: {
   searchEnabled: boolean
@@ -106,18 +130,22 @@ export function buildSolRewriteSystem(opts: {
       ? "local lexical + semantic code search"
       : "lexical code search"
   return (
-    `You are a prompt-rewriting advisor for a coding agent. A cheap mini-tier model (Luna) `
-    + `will execute the user's request. Your job is to rewrite it into a SHORT structured brief that lets Luna do its best work.\n`
-    + `Turn budget: you have at most ${opts.turnBudget} tool turns TOTAL (search/read). You may use ZERO tools and rewrite immediately when the static context already suffices — do not pad turns. `
+    `You are a planning advisor for a coding agent. A fast, cheap mini-tier model (Luna) `
+    + `will execute the user's request. Produce a SHORT, GROUNDED EXECUTION CONTRACT that lets Luna do its best work — not a procedure for it to follow blindly.\n`
+    + `Turn budget: you have at most ${opts.turnBudget} tool turns TOTAL (search/read). You may use ZERO tools and write the contract immediately when the static context already suffices — do not pad turns. `
+    + `Stop grounding as soon as you can name exact content to change; prefer acting over more searching.\n`
     + `If the task is large/cross-cutting and the context is genuinely insufficient, you may emit "${DEEP_GROUNDING_FLAG}" plus one line "${NEED_MORE_PREFIX} <single targeted query>" to earn follow-up grounding; otherwise finish now.\n`
     + `Grounding available: ${searchNoun} results, repo guidance (AGENTS.md/CLAUDE.md), and repo structure are in your context. Prefer targeted reads over full-file reads.\n`
-    + `Rules for the brief (tuned for a mini-tier executor):\n`
-    + `1. Outcome-first: state the user's OWN goal as one measurable objective, in their terms. Do NOT invent new requirements or acceptance criteria.\n`
-    + `2. Explicit + literal: flat numbered steps in order; front-load the key constraints; no nested hierarchies; no contradictory instructions.\n`
-    + `3. Tool rules: lexical search first (exact symbols/files/errors, zero model cost), semantic second for intent drift, Explore only when search is insufficient.\n`
-    + `4. Scope: name the files/symbols in play with file:line when known, or state the gap explicitly — never guess.\n`
-    + `5. Stop rules: when Luna is done, what check settles it (build/test/read), and when to ask vs proceed.\n`
-    + `6. Keep it SHORT (under ~300 words). Respond with the brief body only, no preamble.`
+    + `The user's original request is AUTHORITATIVE; your contract is counsel. Preserve the user's intent exactly — NEVER invent requirements, acceptance criteria, or scope the user did not ask for, and never change what "done" means to them. When grounding cannot resolve something, state it as an open question rather than guessing.\n`
+    + `Emit the contract with these sections, in order, using the section names as plain labels:\n`
+    + `- INTENT: the user's goal, in their terms (one or two lines).\n`
+    + `- GROUNDING: the load-bearing repo facts Luna would otherwise have to rediscover — exact files/symbols with file:line, the convention or existing pattern that applies. Name file:line because Luna cannot afford to re-discover it.\n`
+    + `- CONSTRAINTS: scope boundaries, explicit things NOT to do, and the success criterion — the constraints are the highest-value part of this contract.\n`
+    + `- VERIFY: the single check that settles "done" (the exact build/test/read command), or "unknown".\n`
+    + `- OPEN QUESTIONS: anything grounding could not resolve. Never fabricate an answer.\n`
+    + `- PLAN (OPTIONAL): include a short ordered plan ONLY when sequencing genuinely matters; omit it otherwise.\n`
+    + `Do NOT tell Luna to "think step by step" or "reason through" anything, and do NOT write a long procedural recipe — give it facts, constraints, and the check. `
+    + `Keep the contract short and flat. Respond with the contract body only, no preamble.`
   )
 }
 
@@ -126,10 +154,14 @@ export interface StaticContextPack {
   agentsMd: string
   claudeMd: string
   repoStructure: string
+  /** Extracted test/build/lint command line, or "". */
+  verifyCommand: string
   searchContext: string
 }
 
-/** Assemble the capped static pack Sol sees (static-first for cache hits). */
+/** Assemble the capped static pack Sol sees (static-first for cache hits).
+ *  The USER REQUEST is passed through IN FULL (never truncated) — only the
+ *  repo-derived sections are capped. */
 export function buildStaticContextPack(pack: StaticContextPack): string {
   const parts: Array<string> = [`USER REQUEST:\n${pack.prompt}`]
   if (pack.agentsMd.trim().length > 0) {
@@ -141,6 +173,9 @@ export function buildStaticContextPack(pack: StaticContextPack): string {
   if (pack.repoStructure.trim().length > 0) {
     parts.push(`REPO STRUCTURE:\n${pack.repoStructure.slice(0, CHEAPEST_REWRITE_STRUCTURE_CAP)}`)
   }
+  if (pack.verifyCommand.trim().length > 0) {
+    parts.push(pack.verifyCommand.slice(0, CHEAPEST_REWRITE_TEST_CMD_CAP))
+  }
   if (pack.searchContext.trim().length > 0) {
     parts.push(pack.searchContext)
   }
@@ -148,8 +183,13 @@ export function buildStaticContextPack(pack: StaticContextPack): string {
 }
 
 /**
- * Wrap Sol's raw brief as the additive Luna-facing block. Returns "" when
+ * Wrap Sol's raw contract as the additive Luna-facing block. Returns "" when
  * Sol produced nothing usable (caller treats that as fail-open).
+ *
+ * The header states the trust/authority relationship explicitly (mirroring how
+ * prior-turn review findings are framed): this is a stronger model's distilled
+ * counsel about HOW to approach the request, while the user's own request
+ * above remains authoritative.
  */
 export function wrapLunaBrief(solText: string): string {
   const body = solText
@@ -163,7 +203,7 @@ export function wrapLunaBrief(solText: string): string {
     ? `${body.slice(0, CHEAPEST_REWRITE_BRIEF_CAP).trimEnd()}…`
     : body
   return (
-    `LUNA BRIEF (advisory, additive — the original request above still stands):\n${capped}`
+    `EXECUTION BRIEF (a stronger model's distilled guidance — advisory, non-authoritative): how to approach the request above. The user's request remains authoritative; adapt this brief if the repo contradicts it.\n${capped}`
   )
 }
 
@@ -183,16 +223,32 @@ export interface CheapestRewriteIO {
 }
 
 /**
- * Run the adaptive rewrite. Returns the wrapped Luna brief, or null when
- * anything is missing/empty/over-budget so the caller falls back to the
- * existing V2 scope/goal path. Never throws to the orchestrator.
+ * Outcome of a cheapest rewrite attempt. `timedOut` distinguishes a hard
+ * wall-clock timeout from a clean miss (empty/error): the caller treats a
+ * timeout as TERMINAL for the prompt (fall open to the cheap regex goal, no
+ * further model spend), while a clean miss falls through to the Luna scope
+ * path as before.
+ */
+export interface CheapestRewriteResult {
+  /** The wrapped, additive execution brief; null on any miss/timeout. */
+  brief: string | null
+  /** True only when the wall-clock budget elapsed before a result. */
+  timedOut: boolean
+}
+
+/**
+ * Run the adaptive rewrite. Returns `{ brief, timedOut }`: `brief` is the
+ * wrapped additive contract, or null when anything is missing/empty/over-budget
+ * so the caller falls back to the existing V2 scope/goal path; `timedOut` is
+ * true only when the wall-clock budget elapsed first. Never throws to the
+ * orchestrator.
  */
 export async function runCheapestRewrite(input: {
   prompt: string
   searchEnabled: boolean
   bluebirdEnabled: boolean
   io: CheapestRewriteIO
-}): Promise<string | null> {
+}): Promise<CheapestRewriteResult> {
   const timeoutMs = input.io.timeoutMs ?? CHEAPEST_REWRITE_TIMEOUT_MS
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -204,7 +260,7 @@ export async function runCheapestRewrite(input: {
         semanticAvailable
           ? input.io.searchCode(input.prompt, "semantic", controller.signal).catch(() => "")
           : Promise.resolve(""),
-        input.io.staticPack().catch(() => ({ agentsMd: "", claudeMd: "", repoStructure: "" })),
+        input.io.staticPack().catch(() => ({ agentsMd: "", claudeMd: "", repoStructure: "", verifyCommand: "" })),
       ])
       const searchContext = semanticAvailable
         ? `Lexical search results:\n${lexical.slice(0, CHEAPEST_REWRITE_SEARCH_CAP)}\n\nSemantic search results:\n${semantic.slice(0, CHEAPEST_REWRITE_SEARCH_CAP)}`
@@ -214,6 +270,7 @@ export async function runCheapestRewrite(input: {
         agentsMd: statik.agentsMd,
         claudeMd: statik.claudeMd,
         repoStructure: statik.repoStructure,
+        verifyCommand: statik.verifyCommand,
         searchContext,
       })
       const first = await input.io
@@ -232,13 +289,23 @@ export async function runCheapestRewrite(input: {
       // Adaptive extension: only when Sol flags deep grounding AND names a
       // follow-up query AND turns remain (3 used → up to 5). One extra
       // grounding round + one final re-inference, then stop regardless.
+      // Searches are free, so the follow-up round runs lexical AND semantic
+      // (when available) in parallel — the same breadth as the initial round.
       const budget = resolveRewriteTurnBudget(first)
       const followUp = parseNeedMoreQuery(first)
       if (budget !== CHEAPEST_REWRITE_MAX_TURNS || followUp.length === 0) {
         const brief = wrapLunaBrief(first)
         return brief.length > 0 ? brief : null
       }
-      const extra = await input.io.searchCode(followUp, "lexical", controller.signal).catch(() => "")
+      const [extraLexical, extraSemantic] = await Promise.all([
+        input.io.searchCode(followUp, "lexical", controller.signal).catch(() => ""),
+        semanticAvailable
+          ? input.io.searchCode(followUp, "semantic", controller.signal).catch(() => "")
+          : Promise.resolve(""),
+      ])
+      const extra = semanticAvailable
+        ? `Lexical search results:\n${extraLexical.slice(0, CHEAPEST_REWRITE_SEARCH_CAP)}\n\nSemantic search results:\n${extraSemantic.slice(0, CHEAPEST_REWRITE_SEARCH_CAP)}`
+        : `Lexical search results:\n${extraLexical.slice(0, CHEAPEST_REWRITE_SEARCH_CAP)}`
       if (extra.trim().length === 0) {
         const brief = wrapLunaBrief(first)
         return brief.length > 0 ? brief : null
@@ -250,7 +317,7 @@ export async function runCheapestRewrite(input: {
             bluebirdEnabled: input.bluebirdEnabled,
             turnBudget: CHEAPEST_REWRITE_MAX_TURNS,
           }),
-          `${user}\n\nFOLLOW-UP GROUNDING for "${followUp}":\n${extra.slice(0, CHEAPEST_REWRITE_SEARCH_CAP)}\n\nRewrite the brief with this grounding (same rules, short).`,
+          `${user}\n\nFOLLOW-UP GROUNDING for "${followUp}":\n${extra}\n\nRewrite the contract with this grounding (same rules, short).`,
           controller.signal,
         )
         .catch(() => "")
@@ -264,10 +331,11 @@ export async function runCheapestRewrite(input: {
         timer = setTimeout(() => resolve("__timeout__"), timeoutMs)
       }),
     ])
-    if (raced === "__timeout__" || raced === null) return null
-    return raced
+    if (raced === "__timeout__") return { brief: null, timedOut: true }
+    if (raced === null) return { brief: null, timedOut: false }
+    return { brief: raced, timedOut: false }
   } catch {
-    return null
+    return { brief: null, timedOut: false }
   } finally {
     if (timer) clearTimeout(timer)
     controller.abort()

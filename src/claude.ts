@@ -1555,12 +1555,14 @@ export const claude = defineCommand({
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const cmd = buildPromptSubmitHookCommand(selfInvocation)
-            // Raise the host hook timeout to 45s (default 30s): the V2 path may
-            // make one gpt-6-luna scope call + grounding code search (≈22s),
-            // and cheapest may run the Sol rewrite first (≈18s, fail-open to
-            // the Luna path). All bounded and fail-open, so 45s is headroom,
-            // not a tax the user routinely pays.
-            await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 45)
+            // Raise the host hook timeout to 90s (default 30s): the V2 path may
+            // make one gpt-6-luna scope call + grounding code search (≈22s), and
+            // cheapest may instead run the Sol rewrite (≤30s). The two are
+            // mutually exclusive — a rewrite success OR timeout is terminal, a
+            // clean miss falls to the Luna path — so the host ceiling is the
+            // max of the two, with generous headroom. All bounded and fail-open,
+            // so 90s is not a tax the user routinely pays.
+            await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 90)
           } catch (err) {
             consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`)
           }
