@@ -283,8 +283,12 @@ export async function decidePromptSubmitV2(input: {
   const semanticAvailable = searchEnabled || bluebirdEnabled
   const searchTip = getPromptSearchTip(searchEnabled, bluebirdEnabled)
 
-  // Cheapest-only Sol → Luna rewrite: adaptive 3/5-turn grounded brief,
-  // additive and fail-open to the Luna scope path below on null.
+  // Cheapest-only Sol → Luna rewrite: adaptive 3/5-turn grounded contract,
+  // additive. Outcome is `{ brief, timedOut }`:
+  //   - brief present      -> inject it and STOP (one voice; no Luna call).
+  //   - clean miss/empty   -> fall through to the Luna scope path below.
+  //   - timedOut           -> TERMINAL: inject the cheap regex goal only (no
+  //                           second model call).
   // One-shot per session (first non-trivial prompt only): the flag is marked
   // BEFORE running (attempt-marking bounds spend even if Sol fails open), and
   // a missing session id fails closed (never spend blindly).
@@ -302,17 +306,25 @@ export async function decidePromptSubmitV2(input: {
     && !(await input.rewrite.hasRewriteRun(sessionId).catch(() => true))
   ) {
     await input.rewrite.markRewriteRun(sessionId).catch(() => {})
-    const brief = await runCheapestRewrite({
+    const rewrite = await runCheapestRewrite({
       prompt,
       searchEnabled,
       bluebirdEnabled,
       io: input.rewrite,
-    }).catch(() => null)
-    if (brief && brief.length > 0) {
-      decision.inject = joinSections([searchTip, brief, findingsBlock])
+    }).catch(() => ({ brief: null, timedOut: false }))
+    if (rewrite.brief && rewrite.brief.length > 0) {
+      decision.inject = joinSections([searchTip, rewrite.brief, findingsBlock])
       return decision
     }
-    // else: fall through to the existing Luna scope enrichment.
+    if (rewrite.timedOut) {
+      // Wall-clock timeout is TERMINAL for this prompt: fall open to the cheap
+      // regex goal only (no second model call). A timed-out rewrite already
+      // spent its one shot; running the Luna scope path would stack a second
+      // model call under a budget we just exhausted.
+      decision.inject = joinSections([searchTip, PROMPT_STEER_GOAL, findingsBlock])
+      return decision
+    }
+    // else: a clean miss/empty — fall through to the existing Luna scope path.
   }
 
   const scopeSystem = getPromptScopeSystem(searchEnabled, bluebirdEnabled)

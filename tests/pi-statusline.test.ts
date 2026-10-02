@@ -169,6 +169,7 @@ describe("Pi → Claude rendering parity", () => {
     })
     const input = parseStatusInput(JSON.stringify(payload))
     expect(input.usedPct).toBe(42)
+    expect(input.windowSize).toBe(272000)
     expect(input.totalInputTokens).toBe(15234)
     expect(input.totalOutputTokens).toBe(4521)
     expect(input.totalDurationMs).toBe(213000)
@@ -196,6 +197,38 @@ describe("Pi → Claude rendering parity", () => {
     ]) {
       expect(plain).toContain(token)
     }
+    // The Copilot Default-tier window rides inside the ctx segment, so Pi's
+    // 272K reads as `42%·272K` while the Claude paths show their bare 200K.
+    expect(plain).toContain("42%·272K")
+  })
+
+  test("a Grok row renders the 200K tier window", () => {
+    const payload = buildPiStatusPayload(
+      {
+        cwd: "/tmp/x",
+        model: { id: "grok-4.6", contextWindow: 200000 },
+        contextUsage: { tokens: 50_000, contextWindow: 200000, percent: 25 },
+        entries: [],
+      },
+      { nowMs: NOW },
+    )
+    const line = buildRichStatusLine(JSON.stringify(payload), "", {
+      width: 500,
+      branchOverride: "",
+    })
+    expect(stripAnsiForParity(line)).toContain("25%·200K")
+  })
+
+  test("an early Pi session with no percent still shows its window", () => {
+    const payload = buildPiStatusPayload(
+      { cwd: "/tmp/x", model: { id: "gpt-6-luna", contextWindow: 272000 } },
+      { nowMs: NOW },
+    )
+    const line = buildRichStatusLine(JSON.stringify(payload), "", {
+      width: 500,
+      branchOverride: "",
+    })
+    expect(stripAnsiForParity(line)).toContain("--%·272K")
   })
 })
 

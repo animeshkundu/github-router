@@ -279,10 +279,10 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
   if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
     if (opts.profile === "cheapest") {
       return joinClauses([
-        "`Explore` for broad repository discovery, dependency mapping, and convention tracking",
-        "`General-Purpose` for mixed, iterative, or multi-step execution tasks",
-        "`reviewer` for independent adversarial verification, reproduction, and root-causing",
-      ]) + ". All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
+        "`Explore` (Luna/high, cheap breadth) for discovery, dependency mapping, and convention tracking spanning more than a couple of files",
+        "`General-Purpose` (Luna/max, the heavy execution tier) for mixed, iterative, or multi-step execution",
+        "`reviewer` (Luna/max, the heavy verification tier) for independent adversarial verification, reproduction, and root-causing",
+      ]) + ". Delegate by value — cheap breadth to `Explore`, heavy execution to `General-Purpose`, verification to `reviewer`. All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
     }
     // Balanced: lead owns planning, implementation, verification by default —
     // only the reviewer is gated behind genuine need.
@@ -424,6 +424,35 @@ const OPERATING_DEFAULTS_TAIL =
   + "rather than letting it derail the task the user actually asked for."
 
 /**
+ * Cheapest-only consult contract for the Luna lead (the FULL "when/how" copy,
+ * mirrored into CLAUDE.md).
+ *
+ * Lives in the injected operating-defaults prose rather than the advisor tool
+ * description (the "what"), per OpenAI guidance. Outcome-first decision rules,
+ * not a step procedure. Covers the four things a weak, over-confident model
+ * needs to place consults well:
+ *   1. a small, stated budget (8-10 calls) so each feels costly;
+ *   2. ANCHORS (when to spend) — genuine uncertainty, before committing, before
+ *      presenting a plan;
+ *   3. DISQUALIFIERS (never spend) — anything evidence settles, or a moment
+ *      owned by reviewer/oracle;
+ *   4. a DISCRIMINATOR assigning each moment to the right consultant.
+ * The digest carries only a short pointer (`CHEAPEST_CONSULT_CONTRACT_POINTER`)
+ * so the always-resident copy does not duplicate this block every turn.
+ */
+export const CHEAPEST_CONSULT_CONTRACT =
+  "Consulting `advisor` and `oracle` (a small budget — choose wisely): you have roughly 8-10 advisor calls for this session, and each costs real time and money, so spend them only where direction changes the outcome. Advisor and Oracle give you COUNSEL on HOW — and sometimes WHAT — to do: the shortest path, what to consider or look at, planning, strategy, and direction. They never replace evidence you can gather yourself: anything a search, read, build, test, or run can settle, settle it yourself — never spend a consult on it. Spend a consult on: (1) a pre-commit framing check, after you have oriented but before you lock an approach on a non-trivial task; (2) an unresolvable judgment call — conflicting evidence, or a stale-knowledge / high-consequence risk or severity call; (3) a pre-presentation framing check on the final plan. Do NOT spend one on routine progress, reassurance, completion ritual, or a moment that belongs to `reviewer` (verify/reproduce a change) or `oracle` (a self-contained technical/algorithmic/spec/architectural trade-off). Discriminator: session-trajectory / framing / momentum questions and how-to-approach go to `advisor`; self-contained technical/architectural trade-offs go to `oracle`; verification and reproduction go to `reviewer`; facts go to direct evidence. How to call: Sol reads a curated view of this session — the user's original ask, your most recent message text, and a bounded transcript that keeps your reasoning but truncates raw tool output — so before you call, write a short self-contained brief as your own message: the objective, your current job, what you verified / suspect is missing / ruled irrelevant, your confidence and what being wrong would cost, and one neutral question phrased with any competing hypotheses. Never paste raw tool output or ask it to \"review the whole thing\". State your confidence after you have committed to a position, not before, and weigh the reply against verified repository evidence — counsel is direction, not dictation, and you own the decision.\n\n"
+
+/**
+ * Short, always-resident pointer to the consult contract, injected into the
+ * digest (`--append-system-prompt`) instead of the full block. Keeps the
+ * trigger + budget visible at top salience without duplicating the ~250-word
+ * contract every turn; the full how-to lives in the mirrored CLAUDE.md.
+ */
+export const CHEAPEST_CONSULT_CONTRACT_POINTER =
+  "Consulting `advisor`/`oracle` (small budget, ~8-10 calls — choose wisely): use them for how/what — shortest path, what to consider, planning, strategy, direction — never for anything a search, read, or run settles, nor for routine progress, reassurance, or completion ritual; do not spend one where `reviewer` (verification) or `oracle` (a self-contained technical trade-off) owns the moment. Full how-to (when to spend, the call brief, the discriminator) is in your CLAUDE.md project instructions.\n\n"
+
+/**
  * Build the operating-defaults directive for one launch, naming only the
  * natives that launch actually emitted.
  *
@@ -508,9 +537,10 @@ export function buildOperatingDefaultsDirective(
         + buildNativeReachClauses(opts)
         + ". Handle trivial, surgical, single-file, or single-command tasks directly; you do not need to justify skipping delegation. "
         + "`Explore` may be used for discovery spanning more than a couple of files; `General-Purpose` for mixed multi-step execution; `reviewer` for behavior-changing or risk-sensitive changes. "
-        + "In plan mode, produce the plan and acceptance criteria directly and do not edit files; before presenting the final plan to the user, consult `advisor` once for a framing check — it is non-binding counsel and you retain decision ownership. "
+        + "In plan mode, produce the plan and acceptance criteria directly and do not edit files; before presenting the final plan to the user, consult `advisor` once for a framing check. "
         + "Work to your strengths as a fast, cost-efficient model: verify by execution rather than memory; before a non-trivial task, write a short plan (steps, files involved, the check settling each step) and execute it; persist through tool failures with a rephrased attempt before asking the user; stop searching when further results stop changing the answer; tag claims verified, inferred, or unverified — never state that something passes, compiles, or is covered without observed output. "
         + "Delegation graph: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
+        + CHEAPEST_CONSULT_CONTRACT
       : isBalanced
         ? `${profileLabel} launch profile. The lead coordinates execution across specialized native roles: `
         + buildNativeReachClauses(opts)
@@ -560,7 +590,7 @@ export function buildOperatingDefaultsDirective(
       ? "Consultation guidance: funnel unknowns cheapest-first. (1) `code_search` and `web` search narrow scope and rule out hypotheses — always first. (2) `Explore` subagents for targeted breadth only when search is insufficient. "
         + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle; available to the lead; \`reviewer\` and other subagents cannot call Oracle. Optimize for accuracy, intelligence, and correctness at the lowest cost — prefer direct evidence over delegation when the question is narrow. `
       : "Consultation guidance: Follow an evidence-first escalation ladder. Direct empirical evidence (search, code, tests, builds) settles factual questions first. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance or framing checks (direction, not dictation), and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
-        + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, an expert consultant ${oracleLeadOnly ? "available to the lead" : "available to the lead and `Plan`"}, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle.${isCheapest ? "" : " `Plan` may consult Oracle on unresolved trade-offs, and reports any remaining tie-breaking gap to the lead."}${astraClause} `
+        + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, an expert consultant ${oracleLeadOnly ? "available to the lead" : "available to the lead and `Plan`"}, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. Discriminator: transcript-aware trajectory/framing/momentum → advisor; a self-contained technical/architectural trade-off → Oracle.${isCheapest ? "" : " `Plan` may consult Oracle on unresolved trade-offs, and reports any remaining tie-breaking gap to the lead."}${astraClause} `
     return (
       "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + pipeline
@@ -657,7 +687,8 @@ export function buildOperatingDefaultsDigest(
       ? `; (4) \`astra\` (GPT-6 Astra 200K/${isCheap ? "medium" : "high"}, lead-only) only as a last resort when direct evidence, Advisor, and Oracle cannot produce a defensible path (at most 1-2 calls per decision).`
       : "."
     const delegation = isCheapest
-      ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. In plan mode, produce the plan and acceptance criteria directly; before presenting the final plan to the user, consult \`advisor\` once for a framing check — non-binding counsel, you retain decision ownership. Plan briefly before non-trivial acts, verify by execution, tag unverified claims, and stop searching when results stop changing the answer. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
+      ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. In plan mode, produce the plan and acceptance criteria directly; before presenting the final plan to the user, consult \`advisor\` once for a framing check. Plan briefly before non-trivial acts, verify by execution, tag unverified claims, and stop searching when results stop changing the answer. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
+        + CHEAPEST_CONSULT_CONTRACT_POINTER
       : isBalanced
         ? `${profileLabel} launch profile. The lead owns planning, implementation, and verification by default: narrow scope first with \`code_search\` and \`web\` search to rule out hypotheses (cheapest, always first); delegate to \`Explore\` in parallel only when search is insufficient (read directly only files you will act on); delegate to \`General-Purpose\` FREELY for multi-step work combining investigation, tool workflows, and code changes; invoke \`reviewer\` ONLY when the change is genuinely behavior-changing, cross-boundary, or risk-sensitive (\`reviewer\` narrows scope with search first and may invoke \`Explore\` for targeted discovery); handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
         : `${profileLabel} launch profile. The lead coordinates execution across specialized roles: delegate broad discovery to \`Explore\` in parallel and do not sweep the repo yourself (read directly only files you will act on); delegate to \`Plan\` in plan mode or when structuring complex multi-step sequencing (\`Plan\` is an advisory planning capability, not an approval gate, and writes handoff-ready steps for \`General-Purpose\`); delegate mixed multi-step execution and Plan handoffs to \`General-Purpose\` in a fresh context; delegate to \`reviewer\` after behavior-changing or risk-sensitive implementation to verify correctness before declaring done; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
@@ -669,7 +700,7 @@ export function buildOperatingDefaultsDigest(
         + " as a second opinion for precise, self-contained technical/architectural trade-offs that search and `Explore` cannot settle. Optimize for accuracy, intelligence, and correctness at the lowest cost."
       : "Verify claims against real evidence: run relevant commands and tests. Follow a disciplined consultation ladder for unresolved decisions: (1) direct code inspection, search, builds, and tests settle factual questions; (2) `advisor` "
         + advisorDescriptor
-        + " for transcript-aware framing checks or trajectory guidance; (3) `oracle` "
+        + " for transcript-aware framing checks or trajectory guidance (session momentum/trajectory); (3) `oracle` "
         + oracleDescriptor
         + " for self-contained technical/architectural trade-offs"
         + astraStep

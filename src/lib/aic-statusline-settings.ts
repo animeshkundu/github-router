@@ -4,7 +4,7 @@
  *
  * `github-router claude` writes `{ statusLine: { type: "command", command } }`
  * into the mirrored settings.json so the status bar shows
- * `[AIC 12.42] [####------] 42% | model | dir (branch) | ...`,
+ * `[AIC 12.42] [####------] 42%·200K | model | dir (branch) | ...`,
  * updating as the ledger file grows. The command itself
  * (`internal-aic-status`) reads the ledger path from `GH_ROUTER_AIC_LEDGER`
  * in the spawned child's env — never a path baked into settings — so the

@@ -8,8 +8,13 @@
  *
  * Default-on rich status line: Claude Code's stdin JSON is rendered natively
  * (see `src/lib/default-statusline.ts`) as
- * `[ctx bar] % | model | dir (branch) | ~$actual | in/out | dur | +a -r`,
+ * `[ctx bar] %·window | model | dir (branch) | ~$actual | in/out | dur | +a -r`,
  * with this launch's AIC ledger total PINNED ahead of it: `[AIC 12.42] ...`.
+ * The `%·window` half is the session's own context window (`200K` for the
+ * cheap Claude profiles, `272K` on Pi's Copilot Default-tier rows, `1M` after
+ * a `/model` switch into Claude Code's 1M accounting, `--` when a client
+ * reports none) — both clients ship it in
+ * `context_window.context_window_size`, so the denominator is never guessed.
  * The `~$` segment is the factor-discounted actual (per-model static
  * factors over ledger nano, capped at AIC × $0.01 — see
  * `src/lib/copilot-discount.ts`), not Claude's list-price `total_cost_usd`.

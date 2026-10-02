@@ -9,6 +9,7 @@ import {
   compactTokens,
   dirLeaf,
   formatDurationMs,
+  formatWindow,
   parseStatusInput,
   resolveGitBranch,
   terminalWidth,
@@ -26,6 +27,7 @@ const FULL_JSON = JSON.stringify({
     used_percentage: 42,
     total_input_tokens: 15234,
     total_output_tokens: 4521,
+    context_window_size: 200000,
   },
   cost: {
     total_duration_ms: 213_000,
@@ -39,6 +41,7 @@ describe("parseStatusInput", () => {
   test("extracts all fields from full JSON", () => {
     const in_ = parseStatusInput(FULL_JSON)
     expect(in_.usedPct).toBe(42)
+    expect(in_.windowSize).toBe(200000)
     expect(in_.totalInputTokens).toBe(15234)
     expect(in_.totalOutputTokens).toBe(4521)
     expect(in_.totalDurationMs).toBe(213_000)
@@ -80,6 +83,30 @@ describe("parseStatusInput", () => {
       }),
     )
     expect(in_.usedPct).toBeUndefined()
+    expect(in_.windowSize).toBeUndefined()
+  })
+
+  test("context_window_size: 272K Pi window and 1M Claude window parse", () => {
+    expect(
+      parseStatusInput(
+        JSON.stringify({ context_window: { context_window_size: 272000 } }),
+      ).windowSize,
+    ).toBe(272000)
+    expect(
+      parseStatusInput(
+        JSON.stringify({ context_window: { context_window_size: 1000000 } }),
+      ).windowSize,
+    ).toBe(1000000)
+  })
+
+  test("garbage window sizes stay unknown (never a wrong number)", () => {
+    for (const size of [0, -200000, null, "272000", true, {}, Number.NaN, Infinity]) {
+      expect(
+        parseStatusInput(
+          JSON.stringify({ context_window: { context_window_size: size } }),
+        ).windowSize,
+      ).toBeUndefined()
+    }
   })
 })
 
@@ -103,21 +130,60 @@ describe("compactTokens / formatDurationMs / dirLeaf", () => {
     expect(dirLeaf("C:\\Users\\me\\my-proj")).toBe("my-proj")
     expect(dirLeaf("C:\\Users\\me\\my-proj\\")).toBe("my-proj")
   })
+
+  test("formatWindow: exact cheap/Pi/1M windows, compact otherwise", () => {
+    // The three real denominators the router produces.
+    expect(formatWindow(200_000)).toBe("200K")
+    expect(formatWindow(272_000)).toBe("272K")
+    expect(formatWindow(1_000_000)).toBe("1M")
+    expect(formatWindow(1_048_576)).toBe("1.05M")
+    expect(formatWindow(999)).toBe("999")
+    expect(formatWindow(1000)).toBe("1K")
+    expect(formatWindow(123_456)).toBe("123.46K")
+  })
+
+  test("formatWindow is total: unknown/invalid never invents a number", () => {
+    expect(formatWindow(undefined)).toBe("--")
+    expect(formatWindow(0)).toBe("--")
+    expect(formatWindow(-1)).toBe("--")
+    expect(formatWindow(Number.NaN)).toBe("--")
+    expect(formatWindow(Number.POSITIVE_INFINITY)).toBe("--")
+  })
 })
 
 describe("segment builders", () => {
   test("ctx thresholds + placeholder", () => {
-    expect(stripAnsi(buildCtxSegment(10).plain)).toMatch(/\[#+.*\] 10%/)
-    expect(buildCtxSegment(10).text).toContain("\x1b[32m")
-    expect(buildCtxSegment(60).text).toContain("\x1b[33m")
-    expect(buildCtxSegment(90).text).toContain("\x1b[31m")
-    expect(buildCtxSegment(undefined).plain).toBe("[----------] --%")
+    expect(stripAnsi(buildCtxSegment(10, 200_000).plain)).toMatch(
+      /\[#+.*\] 10%·200K/,
+    )
+    expect(buildCtxSegment(10, 200_000).text).toContain("\x1b[32m")
+    expect(buildCtxSegment(60, 200_000).text).toContain("\x1b[33m")
+    expect(buildCtxSegment(90, 200_000).text).toContain("\x1b[31m")
+    expect(buildCtxSegment(undefined, 272_000).plain).toBe(
+      "[----------] --%·272K",
+    )
   })
 
   test("ctx bar is 10 wide and clamped", () => {
-    expect(buildCtxSegment(0).plain).toBe("[----------] 0%")
-    expect(buildCtxSegment(100).plain).toBe("[##########] 100%")
-    expect(buildCtxSegment(1000).plain).toBe("[##########] 100%")
+    expect(buildCtxSegment(0, 200_000).plain).toBe("[----------] 0%·200K")
+    expect(buildCtxSegment(100, 200_000).plain).toBe(
+      "[##########] 100%·200K",
+    )
+    expect(buildCtxSegment(1000, 200_000).plain).toBe(
+      "[##########] 100%·200K",
+    )
+  })
+
+  test("ctx window is optional and never doubles the percentage", () => {
+    // No window reported → explicit placeholder, not a bare `42%`.
+    expect(buildCtxSegment(42).plain).toBe("[####------] 42%·--")
+    expect(buildCtxSegment(undefined).plain).toBe("[----------] --%·--")
+    // 1M accounting after a `/model` switch is visible at a glance.
+    expect(buildCtxSegment(42, 1_000_000).plain).toBe("[####------] 42%·1M")
+    // The joiner is dimmed: it must not inherit the threshold color.
+    const text = buildCtxSegment(90, 1_000_000).text
+    expect(text.endsWith("\x1b[90m·1M\x1b[0m")).toBe(true)
+    expect(text).toContain("\x1b[31m")
   })
 
   test("~$ actuals: discounted total in, placeholder until first priced response", () => {
@@ -164,6 +230,7 @@ describe("resolveGitBranch", () => {
 describe("assembleStatusLine", () => {
   const input = {
     usedPct: 42,
+    windowSize: 200000,
     totalInputTokens: 15234,
     totalOutputTokens: 4521,
     totalDurationMs: 213_000,
@@ -182,7 +249,7 @@ describe("assembleStatusLine", () => {
     const plain = stripAnsi(line)
     for (const token of [
       "[AIC 12.42]",
-      "42%",
+      "42%·200K",
       "Opus",
       "my-proj",
       "main",
@@ -195,7 +262,7 @@ describe("assembleStatusLine", () => {
     }
     const order = [
       "[AIC 12.42]",
-      "42%",
+      "42%·200K",
       "Opus",
       "my-proj",
       "~$0.12",
@@ -206,6 +273,13 @@ describe("assembleStatusLine", () => {
     expect([...order].sort((a, b) => a - b)).toEqual(order)
   })
 
+  test("the window rides inside the ctx segment, not as its own group", () => {
+    const plain = stripAnsi(
+      assembleStatusLine("", input, { width: 500, branch: "main" }),
+    )
+    expect(plain.startsWith("[####------] 42%·200K | ")).toBe(true)
+  })
+
   test("narrow: AIC survives when nothing else fits", () => {
     const line = assembleStatusLine("[AIC 12.42]", input, {
       width: "[AIC 12.42]".length,
@@ -214,6 +288,20 @@ describe("assembleStatusLine", () => {
     const plain = stripAnsi(line)
     expect(plain).toContain("[AIC 12.42]")
     expect(plain).not.toContain("+156")
+  })
+
+  test("narrow: the ctx segment (window included) still fits its budget", () => {
+    // Exact width for AIC + ctx + model: those three survive, dir is dropped.
+    const aic = "[AIC 12.42]"
+    const ctx = stripAnsi(buildCtxSegment(42, 272_000).plain)
+    const model = "Opus"
+    const fits = aic.length + 3 + ctx.length + 3 + model.length
+    const line = stripAnsi(
+      assembleStatusLine(aic, input, { width: fits, branch: "main" }),
+    )
+    expect(line).toContain("42%·200K")
+    expect(line).toContain("Opus")
+    expect(line).not.toContain("my-proj")
   })
 
   test("no AIC + over-wide keeps the top segment instead of empty", () => {
@@ -231,7 +319,7 @@ describe("assembleStatusLine", () => {
     // No AIC and no branch/dir/model: droppables still include placeholder
     // segments, so this asserts the shape rather than emptiness.
     const line = assembleStatusLine("", {}, { width: 500 })
-    expect(stripAnsi(line)).toContain("--%")
+    expect(stripAnsi(line)).toContain("--%·--")
   })
 })
 
@@ -244,6 +332,7 @@ describe("buildRichStatusLine", () => {
     })
     const plain = stripAnsi(line)
     expect(plain).toContain("[AIC 12.42]")
+    expect(plain).toContain("42%·200K")
     expect(plain).toContain("Opus")
     expect(plain).toContain("my-proj (main)")
     expect(plain).toContain("~$0.12")

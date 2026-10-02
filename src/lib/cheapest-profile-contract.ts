@@ -71,6 +71,23 @@ export const CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL =
 /** Advisor context window for cheapest mode (tokens). */
 export const CHEAPEST_PROFILE_ADVISOR_CONTEXT_TOKENS =
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS
+
+/**
+ * Curated-transcript token budget for the cheapest Advisor (the protégé
+ * consult). Unlike every other advisor profile, the cheapest lead CURATES the
+ * window: the proxy renders a small, tool-aware transcript and the lead's
+ * pre-call brief (`<caller_context>`) leads, so the advisor reads signal
+ * rather than a 200K dump of raw tool output.
+ *
+ * This is deliberately much smaller than the 200K client budget: the point is
+ * to bound advisor read cost and focus attention, not to maximize context.
+ * Default 24K, clamped to [16K, 32K], overridable via
+ * `GH_ROUTER_ADVISOR_TRANSCRIPT_TOKENS` (see `resolveCheapestAdvisorTranscriptTokens`).
+ */
+export const CHEAPEST_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_DEFAULT = 24_000 as const
+export const CHEAPEST_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_MIN = 16_000 as const
+export const CHEAPEST_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_MAX = 32_000 as const
+
 export const CHEAPEST_PROFILE_ADVISOR_EFFORT = "medium" as const
 export const CHEAPEST_PROFILE_ORACLE_MODEL = CHEAPEST_PROFILE_MODELS.oracle
 export const CHEAPEST_PROFILE_ORACLE_EFFORT = "high" as const

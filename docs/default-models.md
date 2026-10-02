@@ -261,7 +261,7 @@ The literal raw alias `balanced` selects the Sol-led 200K tier: a `gpt-5.6-sol`/
 | Lead | `gpt-5.6-sol` | medium | 200K |
 | `Explore` | `gpt-6-luna` | high | 200K |
 | `General-Purpose` | `gpt-6-luna` | max | 200K |
-| `reviewer` | `gemini-3.8-flash` | high | 200K |
+| `reviewer` | `gpt-5.6-sol` | high | 200K |
 | `oracle` | `grok-4.6` | medium | 200K |
 
 Two deliberate divergences from the fast/cheap delegation graph:

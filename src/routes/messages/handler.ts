@@ -917,6 +917,10 @@ export async function handleCompletion(c: Context) {
           advisorFastProfile: advisorChoice.fastProfile && !cheapestReviewerEnabled,
           advisorMaxProfile: maxAdvisorEnabled,
           advisorCheapProfile: cheapAdvisorEnabled || cheapestAdvisorEnabled || cheapestReviewerEnabled,
+          // Cheapest-only structured protégé consult: curated transcript +
+          // tool-aware rendering + XML-tagged layered prompt. Distinct from
+          // `advisorCheapProfile` (which also covers `-m cheap`).
+          advisorCheapestProfile: cheapestAdvisorEnabled || cheapestReviewerEnabled,
           advisorReviewerProfile: cheapestReviewerEnabled,
           advisorMaxTurns: cheapestReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: advisorChoice.effort,
@@ -1191,6 +1195,8 @@ export async function handleCompletion(c: Context) {
           advisorFastProfile: (fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor) && !cheapestReviewerEnabled,
           advisorMaxProfile: maxAdvisorEnabled,
           advisorCheapProfile: cheapLeadAdvisor || cheapestLeadAdvisor || cheapestReviewerEnabled,
+          // Cheapest-only structured protégé consult (lead or reviewer).
+          advisorCheapestProfile: cheapestAdvisorEnabled || cheapestReviewerEnabled,
           advisorReviewerProfile: cheapestReviewerEnabled,
           advisorMaxTurns: cheapestReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: maxAdvisorChoice

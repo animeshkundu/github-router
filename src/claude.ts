@@ -855,6 +855,31 @@ export const claude = defineCommand({
       consola.info(
         `Pinned launch: profile=${launchProfileId} lead=${chosenSlug} pickerRows=${pickerModels?.length ?? 0}.`,
       )
+      // Cheapest-only default-row breadcrumb (launch makes no model calls, so
+      // this is free): the FIRST Luna picker row must be bare 200K, and no
+      // lead-capable env var may carry the `[1m]` bracket. A decorated first
+      // row would make Claude Code default the session to 1M accounting;
+      // surface that loudly instead of silently.
+      if (launchProfileId === "cheapest") {
+        const rows = pickerModels ?? []
+        const firstLuna = rows.find((id) => id.replace(/(?:\[1m\])+$/i, "") === "gpt-6-luna")
+        const defaultRowBare = firstLuna !== undefined && !/\[1m\]/i.test(firstLuna)
+        const bracketedLeadEnv = [
+          "ANTHROPIC_MODEL",
+          "ANTHROPIC_DEFAULT_OPUS_MODEL",
+          "ANTHROPIC_DEFAULT_SONNET_MODEL",
+          "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+          "ANTHROPIC_CUSTOM_MODEL_OPTION",
+        ].filter((key) => typeof envVars[key] === "string" && /\[1m\]/i.test(envVars[key] as string))
+        consola.info(
+          `Cheapest default-row check: firstLunaRow=${firstLuna ?? "none"} defaultRowBare=${defaultRowBare} bracketedLeadEnv=${bracketedLeadEnv.length === 0 ? "none" : bracketedLeadEnv.join(",")}.`,
+        )
+        if (!defaultRowBare || bracketedLeadEnv.length > 0) {
+          consola.warn(
+            `Cheapest default-row regression: the lead row is not bare 200K — the session may default to 1M accounting.`,
+          )
+        }
+      }
     }
 
     // Forward unrecognized flags (e.g. --print / --output-format / --resume)
@@ -1555,12 +1580,14 @@ export const claude = defineCommand({
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const cmd = buildPromptSubmitHookCommand(selfInvocation)
-            // Raise the host hook timeout to 45s (default 30s): the V2 path may
-            // make one gpt-6-luna scope call + grounding code search (≈22s),
-            // and cheapest may run the Sol rewrite first (≈18s, fail-open to
-            // the Luna path). All bounded and fail-open, so 45s is headroom,
-            // not a tax the user routinely pays.
-            await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 45)
+            // Raise the host hook timeout to 90s (default 30s): the V2 path may
+            // make one gpt-6-luna scope call + grounding code search (≈22s), and
+            // cheapest may instead run the Sol rewrite (≤30s). The two are
+            // mutually exclusive — a rewrite success OR timeout is terminal, a
+            // clean miss falls to the Luna path — so the host ceiling is the
+            // max of the two, with generous headroom. All bounded and fail-open,
+            // so 90s is not a tax the user routinely pays.
+            await injectStopHookIntoSettingsFile(settingsPath, cmd, "UserPromptSubmit", 90)
           } catch (err) {
             consola.warn(`Could not register the UserPromptSubmit hook: ${String(err)}`)
           }

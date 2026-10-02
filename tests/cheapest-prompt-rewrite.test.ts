@@ -11,6 +11,7 @@ import {
   buildSolRewriteSystem,
   buildStaticContextPack,
   CHEAPEST_REWRITE_BRIEF_CAP,
+  CHEAPEST_REWRITE_GUIDANCE_CAP,
   CHEAPEST_REWRITE_MAX_TURNS,
   CHEAPEST_REWRITE_DEFAULT_TURNS,
   DEEP_GROUNDING_FLAG,
@@ -24,6 +25,7 @@ import {
 } from "../src/lib/cheapest-prompt-rewrite"
 import {
   decidePromptSubmitV2,
+  PROMPT_STEER_GOAL,
   type PromptSubmitV2IO,
 } from "../src/lib/orchestration/prompt-submit-hook"
 
@@ -49,7 +51,7 @@ function makeRewriteIo(overrides: Partial<CheapestRewriteIO> = {}): {
   const io: CheapestRewriteIO = {
     searchCode,
     inferSol,
-    staticPack: overrides.staticPack ?? (async () => ({ agentsMd: "", claudeMd: "", repoStructure: "" })),
+    staticPack: overrides.staticPack ?? (async () => ({ agentsMd: "", claudeMd: "", repoStructure: "", verifyCommand: "" })),
     hasRewriteRun,
     markRewriteRun,
   }
@@ -106,12 +108,34 @@ describe("adaptive turn budget", () => {
 })
 
 describe("system prompt + pack + wrap", () => {
-  test("system prompt states budget, zero-tool exit, and Luna rules", () => {
+  test("system prompt states budget, zero-tool exit, and the contract framing", () => {
     const sys = buildSolRewriteSystem({ searchEnabled: true, bluebirdEnabled: false, turnBudget: 3 })
     expect(sys).toContain("at most 3 tool turns")
     expect(sys).toContain("ZERO tools")
     expect(sys).toContain("mini-tier")
     expect(sys).toContain(DEEP_GROUNDING_FLAG)
+    // Grounded execution contract: the sections it must emit.
+    for (const label of ["INTENT", "GROUNDING", "CONSTRAINTS", "VERIFY", "OPEN QUESTIONS", "PLAN"]) {
+      expect(sys).toContain(label)
+    }
+    // Authority + fidelity invariant.
+    expect(sys).toContain("AUTHORITATIVE")
+    expect(sys.toLowerCase()).toContain("never invent")
+    // Optional plan.
+    expect(sys).toContain("OPTIONAL")
+  })
+
+  test("system prompt is anti-CoT: no step-by-step / reasoning scaffold", () => {
+    const sys = buildSolRewriteSystem({ searchEnabled: true, bluebirdEnabled: false, turnBudget: 3 })
+    const lower = sys.toLowerCase()
+    // It must NOT instruct Luna to reason step-by-step. (The prompt does mention
+    // the phrase inside a negation — "do NOT tell Luna to 'think step by
+    // step'" — so assert on the absence of affirmative scaffold phrasing.)
+    expect(lower).not.toMatch(/step[- ]by[- ]step[,.]?\s*(then|and|first|before)/)
+    expect(lower).not.toContain("think step by step and")
+    // It explicitly forbids prescribing a procedure.
+    expect(lower).toContain("do not tell luna")
+    expect(lower).toContain("procedural recipe")
   })
 
   test("static pack omits empty sections and caps guidance", () => {
@@ -120,6 +144,7 @@ describe("system prompt + pack + wrap", () => {
       agentsMd: "",
       claudeMd: "",
       repoStructure: "",
+      verifyCommand: "",
       searchContext: "",
     })
     expect(pack).toBe("USER REQUEST:\ndo X")
@@ -128,79 +153,112 @@ describe("system prompt + pack + wrap", () => {
       agentsMd: "a".repeat(99_999),
       claudeMd: "b".repeat(99_999),
       repoStructure: "c".repeat(99_999),
+      verifyCommand: "",
       searchContext: "s",
     })
     expect(long.length).toBeLessThan(99_999)
     expect(long).toContain("AGENTS.md")
   })
 
-  test("wrap strips control lines, adds advisory header, caps length", () => {
+  test("static pack passes the user prompt through in full (never truncates)", () => {
+    const hugePrompt = `User wants: ${"x".repeat(20_000)} END_OF_PROMPT`
+    const pack = buildStaticContextPack({
+      prompt: hugePrompt,
+      agentsMd: "a".repeat(99_999),
+      claudeMd: "",
+      repoStructure: "",
+      verifyCommand: "",
+      searchContext: "",
+    })
+    expect(pack).toContain(hugePrompt)
+    expect(pack).toContain("END_OF_PROMPT")
+  })
+
+  test("static pack includes the verify command line when present", () => {
+    const pack = buildStaticContextPack({
+      prompt: "do X",
+      agentsMd: "",
+      claudeMd: "",
+      repoStructure: "",
+      verifyCommand: "VERIFY COMMAND: npm test",
+      searchContext: "",
+    })
+    expect(pack).toContain("VERIFY COMMAND: npm test")
+  })
+
+  test("wrap strips control lines, adds authority framing, caps length", () => {
     expect(wrapLunaBrief("   ")).toBe("")
-    const wrapped = wrapLunaBrief(`Goal: do X\n${DEEP_GROUNDING_FLAG}\nNEED_MORE: something\nSteps: 1. a`)
-    expect(wrapped).toContain("LUNA BRIEF (advisory, additive")
+    const wrapped = wrapLunaBrief(`INTENT: do X\n${DEEP_GROUNDING_FLAG}\nNEED_MORE: something\nCONSTRAINTS: 1. a`)
+    expect(wrapped).toContain("EXECUTION BRIEF")
+    expect(wrapped).toContain("non-authoritative")
+    expect(wrapped).toContain("remains authoritative")
     expect(wrapped).not.toContain(DEEP_GROUNDING_FLAG)
     expect(wrapped).not.toContain("NEED_MORE:")
-    expect(wrapped).toContain("Goal: do X")
+    expect(wrapped).toContain("INTENT: do X")
     const huge = wrapLunaBrief("x".repeat(99_999))
-    expect(huge.length).toBeLessThanOrEqual(CHEAPEST_REWRITE_BRIEF_CAP + 200)
+    expect(huge.length).toBeLessThanOrEqual(CHEAPEST_REWRITE_BRIEF_CAP + 300)
   })
 })
 
 describe("runCheapestRewrite", () => {
-  test("success path returns additive brief from a single Sol call", async () => {
+  test("success path returns additive contract from a single Sol call", async () => {
     const { io, inferSol, searchCode } = makeRewriteIo({
       searchCode: async (_q, mode) => `${mode}-hit`,
-      inferSol: async () => "Goal: refactor auth. Steps: 1. Search 2. Edit 3. Test.",
+      inferSol: async () => "INTENT: refactor auth.\nCONSTRAINTS: behavior-preserving.",
     })
-    const brief = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: true, bluebirdEnabled: false, io })
+    const { brief, timedOut } = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: true, bluebirdEnabled: false, io })
+    expect(timedOut).toBe(false)
     expect(brief).not.toBeNull()
-    expect(brief ?? "").toContain("LUNA BRIEF")
+    expect(brief ?? "").toContain("EXECUTION BRIEF")
     expect(brief ?? "").toContain("refactor auth")
     expect(inferSol.mock.calls.length).toBe(1)
     expect(searchCode.mock.calls.map((c) => c[1]).sort()).toEqual(["lexical", "semantic"])
   })
 
-  test("fail-open: Sol rejection yields null (caller falls back to Luna path)", async () => {
+  test("fail-open: Sol rejection yields { brief: null, timedOut: false }", async () => {
     const { io } = makeRewriteIo({
       inferSol: async () => { throw new Error("sol down") },
     })
-    const brief = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: true, bluebirdEnabled: false, io })
-    expect(brief).toBeNull()
+    const result = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: true, bluebirdEnabled: false, io })
+    expect(result).toEqual({ brief: null, timedOut: false })
   })
 
-  test("fail-open: empty Sol output yields null", async () => {
+  test("fail-open: empty Sol output yields { brief: null, timedOut: false }", async () => {
     const { io } = makeRewriteIo({ inferSol: async () => "   " })
-    const brief = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: false, bluebirdEnabled: false, io })
-    expect(brief).toBeNull()
+    const result = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: false, bluebirdEnabled: false, io })
+    expect(result).toEqual({ brief: null, timedOut: false })
   })
 
-  test("adaptive extension: flag + NEED_MORE triggers one follow-up round", async () => {
-    const seen: Array<string> = []
+  test("adaptive extension: flag + NEED_MORE triggers one follow-up round (parallel lexical+semantic)", async () => {
+    const seen: Array<[string, string]> = []
     const { io, inferSol, searchCode } = makeRewriteIo({
-      searchCode: async (q) => { seen.push(q); return `result-for-${q}` },
+      searchCode: async (q, mode) => { seen.push([q, mode]); return `result-for-${q}` },
       inferSol: mock(async (_system: string, user: string) => {
-        if (user.includes("FOLLOW-UP GROUNDING")) return "Goal: final grounded brief."
-        return `${DEEP_GROUNDING_FLAG}\nNEED_MORE: auth middleware\nGoal: draft.`
+        if (user.includes("FOLLOW-UP GROUNDING")) return "INTENT: final grounded contract."
+        return `${DEEP_GROUNDING_FLAG}\nNEED_MORE: auth middleware\nINTENT: draft.`
       }),
     })
-    const brief = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: false, bluebirdEnabled: false, io })
+    // semantic enabled -> follow-up must search BOTH modes in parallel.
+    const { brief } = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: true, bluebirdEnabled: false, io })
     expect(brief).not.toBeNull()
-    expect(brief ?? "").toContain("final grounded brief")
-    expect(seen).toContain("auth middleware")
+    expect(brief ?? "").toContain("final grounded contract")
+    const followUpModes = seen.filter(([q]) => q === "auth middleware").map(([, m]) => m).sort()
+    expect(followUpModes).toEqual(["lexical", "semantic"])
     expect(inferSol.mock.calls.length).toBe(2)
-    expect(searchCode.mock.calls.length).toBe(2) // initial lexical + follow-up
+    // initial lexical + semantic, then follow-up lexical + semantic = 4.
+    expect(searchCode.mock.calls.length).toBe(4)
   })
 
-  test("no extension without flag: single Sol call even with NEED_MORE-like text absent", async () => {
+  test("no extension without flag: single Sol call", async () => {
     const { io, inferSol } = makeRewriteIo({
-      inferSol: async () => "Goal: simple brief, no flag.",
+      inferSol: async () => "INTENT: simple contract, no flag.",
     })
-    const brief = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: false, bluebirdEnabled: false, io })
+    const { brief } = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: false, bluebirdEnabled: false, io })
     expect(brief).not.toBeNull()
     expect(inferSol.mock.calls.length).toBe(1)
   })
 
-  test("timeout fail-open: hung Sol falls back to null quickly", async () => {
+  test("timeout is TERMINAL: hung Sol yields { brief: null, timedOut: true } quickly", async () => {
     const { io } = makeRewriteIo({
       inferSol: () => new Promise<string>((resolve) => {
         const t = setTimeout(() => resolve("late"), 5_000)
@@ -209,8 +267,8 @@ describe("runCheapestRewrite", () => {
       timeoutMs: 50,
     })
     const start = performance.now()
-    const brief = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: false, bluebirdEnabled: false, io })
-    expect(brief).toBeNull()
+    const result = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: false, bluebirdEnabled: false, io })
+    expect(result).toEqual({ brief: null, timedOut: true })
     expect(performance.now() - start).toBeLessThan(1_000)
   })
 })
@@ -269,9 +327,330 @@ describe("buildStaticPack", () => {
     }
   })
 
+  test("extracts a VERIFY COMMAND from package.json test/build/lint scripts", () => {
+    const dir = makeWorkspace({
+      "package.json": JSON.stringify({
+        scripts: { test: "vitest run", build: "tsc", lint: "eslint" },
+        dependencies: {},
+      }),
+    })
+    try {
+      const pack = buildStaticPack(dir)
+      expect(pack.verifyCommand).toContain("VERIFY COMMAND:")
+      expect(pack.verifyCommand).toContain("npm run test")
+      expect(pack.verifyCommand).toContain("npm run build")
+      expect(pack.verifyCommand).toContain("npm run lint")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("verify command is empty when no recognized scripts exist", () => {
+    const dir = makeWorkspace({ "package.json": JSON.stringify({ scripts: { start: "node ." } }) })
+    try {
+      const pack = buildStaticPack(dir)
+      expect(pack.verifyCommand).toBe("")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("missing workspace yields empty strings (fail-open)", () => {
     const pack = buildStaticPack(path.join(tmpdir(), "gh-router-does-not-exist-12345"))
-    expect(pack).toEqual({ agentsMd: "", claudeMd: "", repoStructure: "" })
+    expect(pack).toEqual({ agentsMd: "", claudeMd: "", repoStructure: "", verifyCommand: "" })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// VERIFY COMMAND — ecosystem generic. The line is handed to Luna as *the*
+// command that verifies the work, so a wrong guess is worse than no guess.
+// These pin the runner resolution, the monorepo ascent, the .NET tier, and the
+// marker ladder (including the honest "" cases).
+// ---------------------------------------------------------------------------
+
+describe("buildStaticPack VERIFY COMMAND runner resolution", () => {
+  function makeWorkspace(files: Record<string, string>): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "gh-router-verify-"))
+    for (const [name, content] of Object.entries(files)) {
+      const abs = path.join(dir, name)
+      mkdirSync(path.dirname(abs), { recursive: true })
+      writeFileSync(abs, content)
+    }
+    return dir
+  }
+
+  const pkg = (
+    extra: Record<string, unknown>,
+    scripts: Record<string, string> = { test: "x" },
+  ) => JSON.stringify({ scripts, ...extra })
+
+  test("bun lockfile yields `bun run test`, never `bun test`", () => {
+    // `bun test` invokes Bun's BUILT-IN runner and ignores the `test` script,
+    // which here is a build + orchestrator chain — so the `run` form is the
+    // only correct one.
+    const dir = makeWorkspace({
+      "bun.lock": "",
+      "package.json": pkg({}, { test: "bun run build && bun scripts/run-tests.ts" }),
+    })
+    try {
+      const pack = buildStaticPack(dir)
+      expect(pack.verifyCommand).toBe("VERIFY COMMAND: bun run test")
+      expect(pack.verifyCommand).not.toContain("bun test ")
+      expect(pack.repoStructure).toContain("ecosystem: node (bun)")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("yarn lockfile yields yarn commands", () => {
+    const dir = makeWorkspace({
+      "yarn.lock": "",
+      "package.json": pkg({}, { test: "jest", lint: "eslint ." }),
+    })
+    try {
+      const pack = buildStaticPack(dir)
+      expect(pack.verifyCommand).toBe("VERIFY COMMAND: yarn run test ; yarn run lint")
+      expect(pack.repoStructure).toContain("ecosystem: node (yarn)")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("versioned packageManager is read as a NAME, not a version", () => {
+    const dir = makeWorkspace({ "package.json": pkg({ packageManager: "pnpm@9.1.0" }) })
+    try {
+      expect(buildStaticPack(dir).verifyCommand).toBe("VERIFY COMMAND: pnpm run test")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("lockfile-less repos infer the runner from script bodies", () => {
+    const dir = makeWorkspace({ "package.json": pkg({}, { test: "bun run test" }) })
+    try {
+      expect(buildStaticPack(dir).verifyCommand).toBe("VERIFY COMMAND: bun run test")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a vitest/jest dependency never produces `npx npm …`", () => {
+    const dir = makeWorkspace({
+      "package.json": pkg({ devDependencies: { vitest: "^1" } }, { test: "vitest" }),
+    })
+    try {
+      const pack = buildStaticPack(dir)
+      expect(pack.verifyCommand).toBe("VERIFY COMMAND: npm run test")
+      expect(pack.verifyCommand).not.toContain("npx")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a monorepo sub-package uses the workspace root scripts and says where to run them", () => {
+    const dir = makeWorkspace({
+      ".git/HEAD": "ref: refs/heads/main\n",
+      "pnpm-lock.yaml": "",
+      "package.json": pkg({}, { test: "turbo test", build: "turbo build" }),
+      "packages/web/package.json": JSON.stringify({ name: "web", devDependencies: {} }),
+    })
+    const sub = path.join(dir, "packages/web")
+    try {
+      const pack = buildStaticPack(sub)
+      expect(pack.verifyCommand).toContain(`VERIFY COMMAND (run from ${dir}):`)
+      expect(pack.verifyCommand).toContain("pnpm run test")
+      expect(pack.verifyCommand).toContain("pnpm run build")
+      expect(pack.repoStructure).toContain("ecosystem: node (pnpm, workspace root)")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("buildStaticPack VERIFY COMMAND .NET tier", () => {
+  function makeWorkspace(files: Record<string, string>): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "gh-router-dotnet-"))
+    for (const [name, content] of Object.entries(files)) {
+      const abs = path.join(dir, name)
+      mkdirSync(path.dirname(abs), { recursive: true })
+      writeFileSync(abs, content)
+    }
+    return dir
+  }
+
+  test("a solution yields dotnet build/test, plus format when .editorconfig exists", () => {
+    const dir = makeWorkspace({
+      "Fake.sln": "Microsoft Visual Studio Solution File\n",
+      ".editorconfig": "root = true\n",
+      "src/App/App.csproj": "<Project/>\n",
+    })
+    try {
+      const pack = buildStaticPack(dir)
+      expect(pack.verifyCommand).toBe(
+        "VERIFY COMMAND: dotnet build ; dotnet test ; dotnet format --verify-no-changes",
+      )
+      expect(pack.repoStructure).toContain("ecosystem: dotnet (Fake.sln)")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("a nested csproj alone yields dotnet without the format check", () => {
+    const dir = makeWorkspace({ "src/App/App.csproj": "<Project/>\n" })
+    try {
+      const pack = buildStaticPack(dir)
+      expect(pack.verifyCommand).toBe("VERIFY COMMAND: dotnet build ; dotnet test")
+      expect(pack.repoStructure).toContain("ecosystem: dotnet (App.csproj)")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("buildStaticPack VERIFY COMMAND marker ladder", () => {
+  function makeWorkspace(files: Record<string, string>): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "gh-router-marker-"))
+    for (const [name, content] of Object.entries(files)) {
+      const abs = path.join(dir, name)
+      mkdirSync(path.dirname(abs), { recursive: true })
+      writeFileSync(abs, content)
+    }
+    return dir
+  }
+
+  const cases: Array<[string, Record<string, string>, string]> = [
+    ["go", { "go.mod": "module x\n" }, "VERIFY COMMAND: go build ./... ; go test ./... ; go vet ./..."],
+    ["rust", { "Cargo.toml": "[package]\n" }, "VERIFY COMMAND: cargo build ; cargo test"],
+    ["elixir", { "mix.exs": "defmodule X do\nend\n" }, "VERIFY COMMAND: mix test"],
+    ["ruby", { Gemfile: "source 'x'\n" }, "VERIFY COMMAND: bundle exec rake test"],
+    ["ruby with spec/", { Gemfile: "source 'x'\n", "spec/x_spec.rb": "" }, "VERIFY COMMAND: bundle exec rspec"],
+    ["deno", { "deno.json": JSON.stringify({ tasks: { test: "t" } }) }, "VERIFY COMMAND: deno task test"],
+    ["make", { Makefile: "test:\n\tgo test\n\nbuild:\n\tgo build\n" }, "VERIFY COMMAND: make test ; make build"],
+  ]
+
+  for (const [name, files, expected] of cases) {
+    test(`${name} yields its canonical command`, () => {
+      const dir = makeWorkspace(files)
+      try {
+        expect(buildStaticPack(dir).verifyCommand).toBe(expected)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  test("python picks the runner from its lockfile and appends only configured linters", () => {
+    const dir = makeWorkspace({
+      "uv.lock": "",
+      "pyproject.toml": "[project]\nname='x'\n[tool.ruff]\n",
+      "tests/test_x.py": "",
+    })
+    try {
+      const pack = buildStaticPack(dir)
+      expect(pack.verifyCommand).toBe("VERIFY COMMAND: uv run pytest ; ruff check .")
+      expect(pack.repoStructure).toContain("ecosystem: python (pyproject.toml)")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("poetry is detected without a uv lockfile", () => {
+    const dir = makeWorkspace({
+      "poetry.lock": "",
+      "pyproject.toml": "[project]\nname='x'\n[tool.mypy]\n",
+      "tests/test_x.py": "",
+    })
+    try {
+      expect(buildStaticPack(dir).verifyCommand).toBe(
+        "VERIFY COMMAND: poetry run pytest ; mypy .",
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  const noCommand: Array<[string, Record<string, string>]> = [
+    ["a Makefile with no known target", { Makefile: "deploy:\n\techo hi\n" }],
+    ["a deno.json with no test task", { "deno.json": JSON.stringify({ tasks: { build: "b" } }) }],
+    ["a python project with no tests", { "pyproject.toml": "[project]\nname='x'\n" }],
+    ["an empty project", { "README.md": "hi\n" }],
+  ]
+
+  for (const [name, files] of noCommand) {
+    test(`${name} yields no command rather than a guess`, () => {
+      const dir = makeWorkspace(files)
+      try {
+        expect(buildStaticPack(dir).verifyCommand).toBe("")
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  }
+})
+
+describe("buildStaticPack hierarchical guidance", () => {
+  function makeWorkspace(files: Record<string, string>): string {
+    const dir = mkdtempSync(path.join(tmpdir(), "gh-router-guidance-"))
+    for (const [name, content] of Object.entries(files)) {
+      const abs = path.join(dir, name)
+      mkdirSync(path.dirname(abs), { recursive: true })
+      writeFileSync(abs, content)
+    }
+    return dir
+  }
+
+  test("a subdirectory session picks up the repo root's AGENTS.md", () => {
+    const dir = makeWorkspace({
+      ".git/HEAD": "ref: refs/heads/main\n",
+      "AGENTS.md": "ROOT AGENTS\n",
+      "sub/AGENTS.md": "SUB AGENTS\n",
+      "sub/package.json": JSON.stringify({ scripts: { test: "vitest" } }),
+    })
+    try {
+      const pack = buildStaticPack(path.join(dir, "sub"))
+      expect(pack.agentsMd).toContain("SUB AGENTS")
+      expect(pack.agentsMd).toContain("ROOT AGENTS")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("closest guidance wins the shared cap (head truncation keeps the head)", () => {
+    // Root-first ordering plus a head-truncating slice would silently starve
+    // the nearest file — the exact bug this pins.
+    const dir = makeWorkspace({
+      ".git/HEAD": "ref: refs/heads/main\n",
+      "AGENTS.md": "ROOT AGENTS\n",
+      "sub/AGENTS.md": `SUB AGENTS\n${"S".repeat(3900)}\n`,
+    })
+    try {
+      const pack = buildStaticPack(path.join(dir, "sub"))
+      expect(pack.agentsMd.length).toBeLessThanOrEqual(CHEAPEST_REWRITE_GUIDANCE_CAP)
+      expect(pack.agentsMd.startsWith("SUB AGENTS")).toBe(true)
+      expect(pack.agentsMd).toContain("ROOT AGENTS")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("guidance ABOVE the repo root is never read", () => {
+    // The parent-of-repo case is the real hazard: a user's ~/CLAUDE.md must not
+    // be injected into an unrelated project's rewrite.
+    const outer = makeWorkspace({
+      "CLAUDE.md": "PARENT CLAUDE\n",
+      "AGENTS.md": "PARENT AGENTS\n",
+      "repo/.git/HEAD": "ref: refs/heads/main\n",
+      "repo/AGENTS.md": "REPO AGENTS\n",
+      "repo/sub/package.json": JSON.stringify({ scripts: { test: "vitest" } }),
+    })
+    try {
+      const pack = buildStaticPack(path.join(outer, "repo/sub"))
+      expect(pack.agentsMd).toContain("REPO AGENTS")
+      expect(pack.agentsMd).not.toContain("PARENT AGENTS")
+      expect(pack.claudeMd).toBe("")
+    } finally {
+      rmSync(outer, { recursive: true, force: true })
+    }
   })
 })
 
@@ -289,7 +668,7 @@ describe("decidePromptSubmitV2 cheapest branch", () => {
       rewriteDisabled: false,
       rewrite,
     })
-    expect(result.inject).toContain("LUNA BRIEF")
+    expect(result.inject).toContain("EXECUTION BRIEF")
     expect(result.inject).toContain("refactor auth")
   })
 
@@ -414,7 +793,7 @@ describe("decidePromptSubmitV2 one-shot rewrite gate", () => {
     const result = await decidePromptSubmitV2(
       cheapestV2Input(JSON.stringify({ session_id: "s1", prompt: SUBSTANTIVE }), rewrite),
     )
-    expect(result.inject).toContain("LUNA BRIEF")
+    expect(result.inject).toContain("EXECUTION BRIEF")
     expect(inferSol.mock.calls.length).toBe(1)
     expect(markRewriteRun.mock.calls.length).toBe(1)
     expect(markRewriteRun.mock.calls[0]).toEqual(["s1"])
@@ -447,6 +826,24 @@ describe("decidePromptSubmitV2 one-shot rewrite gate", () => {
     expect(markRewriteRun.mock.calls.length).toBe(1)
   })
 
+  test("rewrite timeout is TERMINAL: cheap regex goal only, no Luna fallback call", async () => {
+    const lunaGoal = "SCOPE: focused\nGOAL: SHOULD NOT APPEAR"
+    const { io: rewrite, markRewriteRun } = makeRewriteIo({
+      inferSol: () => new Promise<string>((resolve) => {
+        const t = setTimeout(() => resolve("late"), 5_000)
+        t.unref?.()
+      }),
+      timeoutMs: 50,
+    })
+    const result = await decidePromptSubmitV2(
+      cheapestV2Input(JSON.stringify({ session_id: "s1", prompt: SUBSTANTIVE }), rewrite, lunaGoal),
+    )
+    // Falls open to the cheap regex goal, NOT the Luna scope path.
+    expect(result.inject).toContain(PROMPT_STEER_GOAL)
+    expect(result.inject).not.toContain(lunaGoal)
+    expect(markRewriteRun.mock.calls.length).toBe(1)
+  })
+
   test("trivial first prompt does not consume the shot; later substantive rewrites", async () => {
     const { io: rewrite, inferSol, markRewriteRun } = makeRewriteIo({
       inferSol: async () => "Goal: refactor auth.",
@@ -459,7 +856,7 @@ describe("decidePromptSubmitV2 one-shot rewrite gate", () => {
     const substantive = await decidePromptSubmitV2(
       cheapestV2Input(JSON.stringify({ session_id: "s1", prompt: SUBSTANTIVE }), rewrite),
     )
-    expect(substantive.inject).toContain("LUNA BRIEF")
+    expect(substantive.inject).toContain("EXECUTION BRIEF")
     expect(inferSol.mock.calls.length).toBe(1)
   })
 

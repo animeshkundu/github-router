@@ -1327,7 +1327,10 @@ test("cheapest directive has the lead plan directly with an advisory Advisor rev
   expect(directive).not.toContain("`Plan`")
   expect(directive).toContain("produce the plan and acceptance criteria directly and do not edit files")
   expect(directive).toContain("consult `advisor` once for a framing check")
-  expect(directive).toContain("it is non-binding counsel and you retain decision ownership")
+  // Ownership framing moved from the pipeline sentence into the consult contract
+  // (which also carries the budget/anchors/discriminator).
+  expect(directive).toContain("you own the decision")
+  expect(directive).toContain("8-10 advisor calls")
   expect(directive).toContain("the lead may invoke all three")
   expect(directive).toContain("available to the lead, preferred over advisor")
 })
