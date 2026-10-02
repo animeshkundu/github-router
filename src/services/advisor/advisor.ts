@@ -1130,8 +1130,18 @@ export function advisorSystemPrompt(
     + "actionable advice on the next step or course-correction. Be specific — "
     + "cite the parts of the transcript you're responding to. If the assistant "
     + "is on the right track, say so explicitly. If they're stuck or off-track, "
-    + "name the specific assumption or step to revisit. Aim for 2-5 paragraphs "
-    + "of substantive guidance."
+    + "name the specific assumption or step to revisit."
+    // The paragraph-count sentence is a FORMAT instruction, and the structured
+    // clauses below (the cheapest lead's JUDGMENT/FLIPS_IF shape, the reviewer's
+    // Verdict shape) each install a different one. Because it lived in the base
+    // prompt it survived every flag combination, so the cheapest lead received
+    // three competing format instructions — with the generic prose format
+    // appended last, where a decoder is most likely to weight it. Suppress it
+    // whenever a structured shape is present; the fast/standard clauses below
+    // are prose guidance, not a reply shape, and keep it.
+    + (cheapestProfile || reviewerProfile
+      ? ""
+      : " Aim for 2-5 paragraphs of substantive guidance.")
     + (reviewerProfile
       ? " You are the senior mentor to a weaker, faster executor model (Luna) performing adversarial code review. "
         + "It is diligent but small: it cannot reliably verify facts, versions, or calculations from memory; "
@@ -1168,7 +1178,14 @@ export function advisorSystemPrompt(
         + "Respond directly, without preamble, with these labeled sections: "
         + "JUDGMENT (one decisive line); WHY (2-4 sentences citing the transcript turns you rely on); ASSUMPTIONS (what your judgment rests on); RISK (the material risk Luna is underweighting); ALTERNATIVE (one credible alternative reading); FLIPS_IF (the single piece of evidence that would reverse your judgment); CONFIDENCE (high | medium | low)."
       : "")
-    + (fastProfile && !reviewerProfile
+    // The cheap/cheapest lead runs with BOTH `fastProfile` and
+    // `cheapestProfile` (see the handler), so this clause was appended after
+    // the structured one above and re-stated the same content (assumptions,
+    // risks, alternatives, confidence) in prose — a second format instruction
+    // in the highest-recency position. The cheapest clause already covers all
+    // of it inside its labeled shape, so exclude it there. `reviewerProfile`
+    // already excluded it: the reviewer's verdict shape is its own.
+    + (fastProfile && !reviewerProfile && !cheapestProfile
       ? " You are a non-binding consultant to the primary lead. "
         + "Infer the most consequential unresolved uncertainty motivating this call from the transcript "
         + "and state that interpretation briefly before advising. The primary lead is operating in a speed-oriented profile. "
@@ -1526,7 +1543,8 @@ async function runAdvisor(
   // enforce this — probe `advisor_claude_streaming_cap_accepted` measured a 200
   // at 64000 with stream:false — so this is staying inside the advertised
   // contract by choice rather than working around a rejection. 16000 is ample
-  // for the 2-5 paragraphs the system prompt asks for, and it keeps working if
+  // for the prose reply the system prompt asks for (the structured
+  // cheapest profiles are bounded by their own section list), and it keeps working if
   // Copilot ever starts enforcing what it advertises. The old 4096 remains the
   // floor for a catalog-less path.
   const maxTokens =

@@ -107,6 +107,16 @@ structured *reply* is fully proxy-controlled via the advisor system prompt.
 - **Advisor system prompt** — a cheapest clause giving Sol the structured reply
   shape (`JUDGMENT` / `WHY` / `ASSUMPTIONS` / `RISK` / `ALTERNATIVE` /
   `FLIPS_IF` / `CONFIDENCE`) plus Luna-awareness decision rules.
+  **The cheapest clause solely owns the lead's reply format.** The base
+  prompt's "Aim for 2-5 paragraphs" is suppressed whenever a structured shape
+  is present (`cheapestProfile || reviewerProfile`), and the fast consultant
+  clause is excluded for `cheapestProfile`: the cheap/cheapest lead runs with
+  both flags, which previously stacked three format instructions — with the
+  generic prose format appended last, where a decoder is most likely to weight
+  it, and restating assumptions/risks/alternatives/confidence that the labeled
+  sections already cover. `tests/advisor-cheapest-protege.test.ts` pins
+  "exactly one reply-format instruction" across every profile combination; the
+  `fast`/`standard` prompts are unchanged.
 
 ## 6. Isolation guarantee
 
@@ -121,3 +131,20 @@ and prompts are byte-identical to before.
 tool-aware truncation modes, the extraction helpers, the layered prompt, the
 system-prompt and tool-description content, and the injected consult contract —
 including that non-cheapest profiles do not receive the contract.
+
+The lead-side grounding (`buildStaticPack` in `src/internal-prompt-submit.ts`)
+is ecosystem-generic for the same reason: its `VERIFY COMMAND` line is shown to
+Luna as *the* command that verifies the work, so a wrong guess is worse than no
+guess. Tier 0 covers first-class toolchains — `package.json` scripts at the
+session cwd (runner from `packageManager` → lockfile at cwd/root → script bodies
+→ `npm`, always via `<runner> run <name>`, because `bun test` invokes Bun's
+built-in runner and ignores the `test` script), an ancestor workspace manifest
+for monorepo sub-packages (labeled with the directory to run it in), and .NET
+(`*.sln`/`*.csproj`). Tier 1 is a marker ladder: go, rust, python (runner from
+`uv`/`poetry`/`pipenv` lockfiles, linters only when configured), elixir, ruby,
+deno, make. Unrecognized layouts yield `""`, never a guess, and
+`repoStructure` gains an `ecosystem:` line so an empty command is
+interpretable. Guidance is read closest-first from the session cwd up to the
+project root — closest-first is load-bearing because the join is truncated at
+the head — and never above the root, so a user's `~/CLAUDE.md` can't leak into
+an unrelated project.
