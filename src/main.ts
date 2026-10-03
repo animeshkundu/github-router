@@ -34,6 +34,7 @@ const isInternalHook =
   || argv[0] === "internal-prompt-submit"
   || argv[0] === "internal-stop-review"
   || argv[0] === "internal-plan-review"
+  || argv[0] === "internal-rebrief"
   || argv[0] === "internal-session-bind"
   || argv[0] === "internal-workspace-header"
   || argv[0] === "internal-artifact-open"
@@ -95,6 +96,8 @@ const main = defineCommand({
       import("./internal-stop-review").then((m) => m.internalStopReview),
     "internal-plan-review": () =>
       import("./internal-plan-review").then((m) => m.internalPlanReview),
+    "internal-rebrief": () =>
+      import("./internal-rebrief").then((m) => m.internalRebrief),
     "internal-session-bind": () =>
       import("./internal-session-bind").then((m) => m.internalSessionBind),
     "internal-workspace-header": () =>

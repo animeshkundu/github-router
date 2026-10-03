@@ -17,6 +17,7 @@ import { buildImplementSkill, IMPLEMENT_SKILL } from "./implement-skill"
 import { buildOrchestrateSkill, ORCHESTRATE_SKILL } from "./orchestrate-skill"
 import { buildPlanSkill, PLAN_SKILL, type PlanSkillProfile } from "./plan-skill"
 import { buildResearchSkill, RESEARCH_SKILL } from "./research-skill"
+import { buildRebriefSkill } from "./rebrief-skill"
 import { buildSwePipelineSkill, SWE_PIPELINE_SKILL } from "./swe-pipeline-skill"
 import { buildWorkerSkill, WORKER_SKILL } from "./worker-skill"
 import { isPipelineSkillProfile } from "~/lib/skill-model-contract"
@@ -32,6 +33,7 @@ export { buildImplementSkill, IMPLEMENT_SKILL } from "./implement-skill"
 export { buildOrchestrateSkill, ORCHESTRATE_SKILL } from "./orchestrate-skill"
 export { buildPlanSkill, PLAN_SKILL, type PlanSkillProfile } from "./plan-skill"
 export { buildResearchSkill, RESEARCH_SKILL } from "./research-skill"
+export { buildRebriefSkill, REBRIEF_SKILL } from "./rebrief-skill"
 export { buildSwePipelineSkill, SWE_PIPELINE_SKILL } from "./swe-pipeline-skill"
 export { buildWorkerSkill, WORKER_SKILL } from "./worker-skill"
 export { writeInjectedSkill, type WriteInjectedSkillResult } from "./write"
@@ -170,6 +172,12 @@ export function injectedSkillsForLaunch(
       if (selection.profileId === "max" && selection.firstMateEnabled) {
         return allSkills.filter((skill) => skill.name.startsWith("gh-first-mate"))
       }
+      // Cheapest keeps its user-only rebrief escape hatch without --swe:
+      // the first-prompt rewrite is one-shot, and a drifted mid-session has
+      // no other on-demand re-grounding path. Other pinned profiles get none.
+      if (selection.profileId === "cheapest") {
+        return [buildRebriefSkill(searchEnabled, bluebirdEnabled)]
+      }
       return []
     }
     if (selection.profileId === "max") {
@@ -181,6 +189,9 @@ export function injectedSkillsForLaunch(
         ]
       }
       return pipeline
+    }
+    if (selection.profileId === "cheapest") {
+      return [...pipelineSkills.slice(), buildRebriefSkill(searchEnabled, bluebirdEnabled)]
     }
     return pipelineSkills.slice()
   }

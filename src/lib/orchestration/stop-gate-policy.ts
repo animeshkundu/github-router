@@ -435,3 +435,64 @@ export function fileRewriteFlagStore(stateDir: string): RewriteFlagStore {
     },
   }
 }
+
+/**
+ * Per-workspace rebrief binding (cwd-keyed): the UserPromptSubmit hook
+ * records {sessionId, transcriptPath} so skill-spawned `internal-rebrief`
+ * processes — which carry NO hook stdin — can locate the live transcript
+ * and findings store for their workspace. A 24h freshness window guards
+ * against resuming a dead session's binding.
+ */
+export interface RebriefBinding {
+  sessionId: string
+  transcriptPath: string
+  cwd: string
+  atMs: number
+}
+
+export interface RebriefBindingStore {
+  write: (binding: RebriefBinding) => Promise<void>
+  read: (cwd: string) => Promise<RebriefBinding | null>
+}
+
+export function rebriefBindingFileFor(stateDir: string, cwd: string): string {
+  return nodePath.join(
+    stateDir,
+    `rebrief-binding-${createHash("sha256").update(cwd).digest("hex").slice(0, 32)}.json`,
+  )
+}
+
+/** Stale bindings (>24h old) are ignored. */
+export const REBRIEF_BINDING_TTL_MS = 24 * 60 * 60 * 1000
+
+export function fileRebriefBindingStore(stateDir: string): RebriefBindingStore {
+  return {
+    async write(binding) {
+      await fs.mkdir(stateDir, { recursive: true })
+      const target = rebriefBindingFileFor(stateDir, binding.cwd)
+      const tmp = `${target}.${process.pid}.tmp`
+      await fs.writeFile(tmp, JSON.stringify(binding), { mode: 0o600 })
+      await fs.rename(tmp, target)
+    },
+    async read(cwd) {
+      try {
+        const raw = await fs.readFile(rebriefBindingFileFor(stateDir, cwd), "utf8")
+        const parsed: unknown = JSON.parse(raw)
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
+        const rec = parsed as RebriefBinding
+        if (
+          typeof rec.sessionId !== "string"
+          || typeof rec.transcriptPath !== "string"
+          || typeof rec.cwd !== "string"
+          || typeof rec.atMs !== "number"
+        ) {
+          return null
+        }
+        if (Date.now() - rec.atMs > REBRIEF_BINDING_TTL_MS) return null
+        return rec
+      } catch {
+        return null
+      }
+    },
+  }
+}
