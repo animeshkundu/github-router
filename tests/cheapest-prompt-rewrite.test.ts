@@ -56,6 +56,7 @@ function makeRewriteIo(overrides: Partial<CheapestRewriteIO> = {}): {
     markRewriteRun,
   }
   if (overrides.timeoutMs !== undefined) io.timeoutMs = overrides.timeoutMs
+  if (overrides.buildSystemPrompt !== undefined) io.buildSystemPrompt = overrides.buildSystemPrompt
   return { io, searchCode, inferSol, hasRewriteRun, markRewriteRun }
 }
 
@@ -256,6 +257,30 @@ describe("runCheapestRewrite", () => {
     const { brief } = await runCheapestRewrite({ prompt: SUBSTANTIVE, searchEnabled: false, bluebirdEnabled: false, io })
     expect(brief).not.toBeNull()
     expect(inferSol.mock.calls.length).toBe(1)
+  })
+
+  test("rebrief path: buildSystemPrompt override + sessionContext flow through both rounds", async () => {
+    const seenSystems: Array<string> = []
+    const { io, inferSol } = makeRewriteIo({
+      searchCode: async (q) => `result-for-${q}`,
+      inferSol: async (system) => {
+        seenSystems.push(system)
+        if (seenSystems.length === 1) return `${DEEP_GROUNDING_FLAG}\nNEED_MORE: auth middleware\n<course_correction>draft</course_correction>`
+        return "<course_correction>INTENT: final</course_correction>"
+      },
+      buildSystemPrompt: (opts) => `REBRIEF-SYS turns=${opts.turnBudget} session=${opts.hasSessionContext === true ? "yes" : "no"}`,
+    })
+    const { brief } = await runCheapestRewrite({
+      prompt: SUBSTANTIVE,
+      searchEnabled: false,
+      bluebirdEnabled: false,
+      sessionContext: "extractive transcript excerpt",
+      io,
+    })
+    expect(inferSol.mock.calls.length).toBe(2)
+    expect(seenSystems[0]).toContain("REBRIEF-SYS turns=3 session=yes")
+    expect(seenSystems[1]).toContain("REBRIEF-SYS turns=5 session=yes")
+    expect(brief ?? "").toContain("final")
   })
 
   test("timeout is TERMINAL: hung Sol yields { brief: null, timedOut: true } quickly", async () => {

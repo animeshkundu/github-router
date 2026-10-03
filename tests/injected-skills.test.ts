@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { ARTIFACT_REVIEW_SKILL, buildArtifactReviewSkill, buildGatherContextSkill, buildOrchestrateSkill, buildResearchSkill, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, getInjectedSkills, getPipelineSkills, INJECTED_SKILLS, injectedSkillsForLaunch, SWE_PIPELINE_SKILL, writeInjectedSkill } from "../src/lib/injected-skills"
+import { ARTIFACT_REVIEW_SKILL, buildArtifactReviewSkill, buildGatherContextSkill, buildOrchestrateSkill, buildResearchSkill, FIRST_MATE_CONDUCT_SKILL, FIRST_MATE_OPERATE_SKILL, FIRST_MATE_SETUP_SKILL, FIRST_MATE_SKILL, getInjectedSkills, getPipelineSkills, INJECTED_SKILLS, injectedSkillsForLaunch, REBRIEF_SKILL, SWE_PIPELINE_SKILL, writeInjectedSkill } from "../src/lib/injected-skills"
 import { CONDENSED_OPERATING_SEQUENCE, DEFINITION_OF_GREATNESS } from "../src/lib/first-mate/operating-protocol"
 
 function frontmatterFor(md: string): string {
@@ -35,7 +35,7 @@ describe("INJECTED_SKILLS", () => {
   })
 
   test("each skill frontmatter name exactly matches the registry name and includes a description", () => {
-    for (const skill of INJECTED_SKILLS) {
+    for (const skill of [...INJECTED_SKILLS, ARTIFACT_REVIEW_SKILL, REBRIEF_SKILL]) {
       const frontmatter = frontmatterFor(skill.md)
       const lines = frontmatter.split(/\r?\n/)
       expect(lines).toContain(`name: ${skill.name}`)
@@ -44,7 +44,7 @@ describe("INJECTED_SKILLS", () => {
   })
 
   test("each injected skill description stays concise, third-person, and triggerable", () => {
-    for (const skill of [...INJECTED_SKILLS, ARTIFACT_REVIEW_SKILL]) {
+    for (const skill of [...INJECTED_SKILLS, ARTIFACT_REVIEW_SKILL, REBRIEF_SKILL]) {
       const description = descriptionFor(skill.md)
       expect(description.length).toBeLessThanOrEqual(1024)
       expect(description).not.toMatch(/^(?:I|You)\s/)
@@ -91,7 +91,7 @@ describe("INJECTED_SKILLS", () => {
       "gh-swe-pipeline",
     ])
 
-    for (const profileId of ["cheap", "cheap1m", "cheapest", "balanced"] as const) {
+    for (const profileId of ["cheap", "cheap1m", "balanced"] as const) {
       expect(injectedSkillsForLaunch({
         profileId,
         workerSkillsActive: false,
@@ -104,9 +104,23 @@ describe("INJECTED_SKILLS", () => {
         "gh-swe-pipeline",
       ])
     }
+    // Cheapest with --swe keeps the pipeline plus its user-only rebrief hatch.
+    expect(injectedSkillsForLaunch({
+      profileId: "cheapest",
+      workerSkillsActive: false,
+      firstMateEnabled: false,
+      sweEnabled: true,
+    }).map((skill) => skill.name)).toEqual([
+      "gh-gather-context",
+      "gh-plan",
+      "gh-implement",
+      "gh-swe-pipeline",
+      "gh-rebrief",
+    ])
 
     // --swe absent (or explicitly false): no pipeline slash commands.
-    for (const profileId of ["fast", "cheap", "cheap1m", "cheapest", "balanced"] as const) {
+    // Exception: cheapest keeps its user-only /gh-rebrief escape hatch.
+    for (const profileId of ["fast", "cheap", "cheap1m", "balanced"] as const) {
       expect(injectedSkillsForLaunch({
         profileId,
         workerSkillsActive: false,
@@ -119,6 +133,17 @@ describe("INJECTED_SKILLS", () => {
         sweEnabled: false,
       })).toEqual([])
     }
+    expect(injectedSkillsForLaunch({
+      profileId: "cheapest",
+      workerSkillsActive: false,
+      firstMateEnabled: false,
+    }).map((skill) => skill.name)).toEqual(["gh-rebrief"])
+    expect(injectedSkillsForLaunch({
+      profileId: "cheapest",
+      workerSkillsActive: false,
+      firstMateEnabled: false,
+      sweEnabled: false,
+    }).map((skill) => skill.name)).toEqual(["gh-rebrief"])
 
     const max = injectedSkillsForLaunch({
       profileId: "max",

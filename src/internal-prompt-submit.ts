@@ -53,6 +53,7 @@ import {
 import {
   fileFindingsStore,
   fileLastPromptStore,
+  fileRebriefBindingStore,
   fileRewriteFlagStore,
   stopReviewStateDir,
 } from "./lib/orchestration/stop-gate-policy"
@@ -706,6 +707,28 @@ export const internalPromptSubmit = defineCommand({
       } else {
         // Proxy URL/nonce not wired -> the LLM layer is off; use the pure v1 path.
         decision = decidePromptSubmit({ stdin, steerEnabled })
+      }
+
+      // Per-workspace rebrief binding: the only way skill-spawned
+      // internal-rebrief (no hook stdin) can locate the live transcript, the
+      // session id (for findings), and the stored prompt. Refreshed on EVERY
+      // prompt so it always tracks the current session, surviving /resume and
+      // /clear within the session (same cwd key).
+      try {
+        const parsed = JSON.parse(stdin) as Record<string, unknown>
+        const sid = typeof parsed.session_id === "string" ? parsed.session_id : ""
+        const tp = typeof parsed.transcript_path === "string" ? parsed.transcript_path : ""
+        if (sid && tp) {
+          const ws = workspaceFromStdin(stdin)
+          await fileRebriefBindingStore(stopReviewStateDir()).write({
+            sessionId: sid,
+            transcriptPath: tp,
+            cwd: ws,
+            atMs: Date.now(),
+          }).catch(() => {})
+        }
+      } catch {
+        /* binding refresh is best-effort */
       }
 
       if (decision.resetSession) {
