@@ -76,8 +76,18 @@ therefore maps Sol/Luna to `claude-opus-5.5` and Gemini/Grok to
 `claude-sonnet-5`, the closest available client-side prompt/capability/effort
 profiles. The setting changes neither the row label nor the model id sent, and
 the profile request preprocessors remain authoritative for actual upstream
-effort. The `[1m]` marker remains the explicit context-accounting signal; Grok
+effort. The `[1m]` marker remains the explicit context-accounting signal on
+profiles where the 1M unlock is live; Grok
 has no marker and stays conservatively budgeted below its 500K backend.
+**Caveat (verified against Claude Code 2.1.288):** a bare id alone does NOT
+deliver 200K accounting, because every `behavesAs` target above is native-1M in
+the client's catalog — a bare `gpt-6-luna` lead reports `contextWindow:
+1000000`, and neither `CLAUDE_CODE_MAX_CONTEXT_TOKENS` nor
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` moves it. The pinned-200K profiles
+(`cheap`, `cheapest`, `balanced`) therefore additionally seed
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, which gates both the literal `[1m]`
+unlock and the native-1M resolution path; those profiles carry no decorated
+picker rows at all.
 
 The write is additive (`replaceBuiltInOptions: false`) and preserves unrelated
 settings. If the mirrored user settings already define `modelPicker`, that value
@@ -114,7 +124,10 @@ Sol slug. They differ only on the leader: `-m cheap` runs Gemini 3.8 Flash
 `[1m]` leader window and gains the gpt-6-astra peer, still at bare 200K/medium.
 The family accepts the same model set, efforts, and privately allocated Luna
 aliases as Fast (identical roster identities). `-m cheap` never emits the
-`[1m]`-decorated forms anywhere in its wiring; `-m cheap1m` decorates only its
-leader slug. The curated picker marks every cheap/cheap1m row `neverOneM` and
-the agent/mcp wiring produces bare slugs for every non-lead role, so the 200K
+`[1m]`-decorated forms anywhere in its wiring and seeds
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` so the bare ids actually budget 200K;
+`-m cheap1m` decorates only its
+leader slug. The curated picker marks every cheap row `neverOneM` (cheap1m
+keeps the historical Luna opt-in row decoratable)
+and the agent/mcp wiring produces bare slugs for every non-lead role, so the 200K
 roles get no local 1M accounting at all.

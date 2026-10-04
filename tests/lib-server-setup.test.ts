@@ -147,6 +147,7 @@ describe("getClaudeCodeEnvVars", () => {
     // model the developer happened to start this test session with.
     const keys = [
       "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+      "CLAUDE_CODE_DISABLE_1M_CONTEXT",
       "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
       "ANTHROPIC_DEFAULT_OPUS_MODEL",
       "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -343,30 +344,39 @@ describe("getClaudeCodeEnvVars", () => {
     expect(value).toBe("816700")
   })
 
-  test("cheap-family launches derive the bound from the Luna 1M picker row", () => {
-    // The Luna row is the only decorated picker row in 200K-lead profiles.
-    // The bound covers a later `/model` switch to it and is harmless to the
-    // bare 200K rows via the client's Math.min.
-    const value = withCatalog(
-      [
-        catalogModel("gpt-5.6-sol", 1_050_000, 922_000),
-        catalogModel("gpt-6-luna", 1_050_000, 922_000),
-        catalogModel("gemini-3.8-flash", 1_000_000, 983_040, 65_536),
-        catalogModel("grok-4.6", 500_000, 372_000),
-      ],
-      () =>
-        withoutCompactionEnv(() =>
-          getClaudeCodeEnvVars("http://127.0.0.1:8787", undefined, "cheap")
-            .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
-        ),
+  test("cheap1m still derives the bound from the Luna 1M picker row; cheap does not", () => {
+    // Cheap1m keeps the historical surface: the Luna row is the decorated
+    // picker row, and the bound covers a later `/model` switch to it. Cheap
+    // is strict-200K now (CLAUDE_CODE_DISABLE_1M_CONTEXT=1, no decorated
+    // rows), so with no `[1m]`-decorated id reachable the bound is omitted
+    // and the client holds its 200K default.
+    const catalog = [
+      catalogModel("gpt-5.6-sol", 1_050_000, 922_000),
+      catalogModel("gpt-6-luna", 1_050_000, 922_000),
+      catalogModel("gemini-3.8-flash", 1_000_000, 983_040, 65_536),
+      catalogModel("grok-4.6", 500_000, 372_000),
+    ]
+    const cheap1m = withCatalog(catalog, () =>
+      withoutCompactionEnv(() =>
+        getClaudeCodeEnvVars("http://127.0.0.1:8787", undefined, "cheap1m")
+          .CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+      ),
     )
-    expect(value).toBe("816700")
+    expect(cheap1m).toBe("816700")
+    const cheap = withCatalog(catalog, () =>
+      withoutCompactionEnv(() =>
+        getClaudeCodeEnvVars("http://127.0.0.1:8787", undefined, "cheap"),
+      ),
+    )
+    expect(cheap).not.toHaveProperty("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+    expect(cheap.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe("1")
   })
 
-  test("cheapest lead env is bare 200K even with a 1M opt-in picker row", () => {
-    // The cheapest picker declares a bare default Luna row plus an opt-in
-    // `gpt-6-luna[1m]` row. No lead-capable env var may carry `[1m]`, so the
-    // default session stays bare 200K regardless of the opt-in row's presence.
+  test("cheapest lead env is bare 200K with the 1M-context disable flag", () => {
+    // The cheapest picker is Sol plus one bare Luna row — no `[1m]` opt-in
+    // row anywhere (a "(1M)" label would lie under the disable flag). No
+    // lead-capable env var may carry `[1m]`, the compaction bound is omitted,
+    // and the flag is seeded so the bare lead actually budgets 200K.
     const vars = withCatalog(
       [
         catalogModel("gpt-5.6-sol", 1_050_000, 922_000),
@@ -377,7 +387,6 @@ describe("getClaudeCodeEnvVars", () => {
           getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-6-luna", "cheapest", [
             "gpt-5.6-sol",
             "gpt-6-luna",
-            "gpt-6-luna[1m]",
           ]),
         ),
     )
@@ -391,6 +400,54 @@ describe("getClaudeCodeEnvVars", () => {
       expect(vars[key] ?? "").not.toMatch(/\[1m\]/i)
     }
     expect(vars.ANTHROPIC_MODEL).toBe("gpt-6-luna")
+    expect(vars.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe("1")
+    expect(vars).not.toHaveProperty("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+  })
+
+  test("seeds the 1M-context disable flag only on pinned-200K profiles", () => {
+    const catalog = [catalogModel("gpt-6-luna", 1_050_000, 922_000)]
+    for (const profile of ["cheap", "cheapest", "balanced"] as const) {
+      const vars = withCatalog(catalog, () =>
+        withoutCompactionEnv(() =>
+          getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-6-luna", profile),
+        ),
+      )
+      expect(vars.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe("1")
+    }
+    // fast / cheap1m / max / standard intentionally run 1M and must not
+    // receive the flag.
+    for (
+      const [model, profile] of [
+        ["gemini-3.8-flash[1m]", "fast"],
+        ["gemini-3.8-flash[1m]", "cheap1m"],
+        ["gpt-5.6-sol[1m]", "max"],
+        ["claude-opus-5.5[1m]", "standard"],
+      ] as const
+    ) {
+      const vars = withCatalog(catalog, () =>
+        withoutCompactionEnv(() =>
+          getClaudeCodeEnvVars("http://127.0.0.1:8787", model, profile),
+        ),
+      )
+      expect(vars).not.toHaveProperty("CLAUDE_CODE_DISABLE_1M_CONTEXT")
+    }
+  })
+
+  test("preserves a parent-set 1M-context disable value", () => {
+    // Presence guard: an operator-set value always wins, even on a profile
+    // that would otherwise seed the flag. withoutCompactionEnv would clear
+    // it, so this test manages the parent env itself.
+    const prior = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "0"
+    try {
+      const vars = withCatalog([catalogModel("gpt-6-luna", 1_050_000, 922_000)], () =>
+        getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-6-luna", "cheapest"))
+      expect(vars).not.toHaveProperty("CLAUDE_CODE_DISABLE_1M_CONTEXT")
+      expect(process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe("0")
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+      else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = prior
+    }
   })
 
   test("omits the window entirely when catalog limits are unusable", () => {    const vars = withCatalog([], () =>

@@ -821,10 +821,11 @@ export const claude = defineCommand({
     // `[1m]` accounting bracket on any selectable id (lead, tier rows, or
     // picker rows) — warn loud if one slipped through so it gets fixed at
     // the seeding layer rather than silently relying on the request-time
-    // backstop. `fast`/`cheap1m` leads intentionally keep 1M. The Luna picker
-    // row is exempt: it is intentionally decorated so Luna 1M stays
-    // selectable, with the request preprocessor stripping `[1m]` on 200K-lead
-    // traffic and the compaction bound covering a switch to it.
+    // backstop. `fast`/`cheap1m` leads intentionally keep 1M. These profiles
+    // also seed CLAUDE_CODE_DISABLE_1M_CONTEXT=1, which gates the client's
+    // `[1m]` unlock entirely — so a decorated row here would be doubly wrong
+    // (a "(1M)" label that still budgets 200K). No exemptions: every picker
+    // row in these profiles is bare.
     if (launchProfileId === "cheap" || launchProfileId === "cheapest" || launchProfileId === "balanced") {
       const suspectKeys = [
         "ANTHROPIC_MODEL",
@@ -833,15 +834,22 @@ export const claude = defineCommand({
         "ANTHROPIC_DEFAULT_HAIKU_MODEL",
         "ANTHROPIC_CUSTOM_MODEL_OPTION",
       ].filter((key) => typeof envVars[key] === "string" && /\[1m\]/i.test(envVars[key] as string))
-      // The Luna row is intentionally decorated (selectable 1M opt-in);
-      // anything else bracketed here is a seeding bug.
-      const suspectPicker = (pickerModels ?? []).filter(
-        (id) => /\[1m\]/i.test(id) && id.replace(/(?:\[1m\])+$/i, "") !== "gpt-6-luna",
-      )
+      const suspectPicker = (pickerModels ?? []).filter((id) => /\[1m\]/i.test(id))
       if (suspectKeys.length > 0 || suspectPicker.length > 0) {
         consola.warn(
           `Pinned-profile context leak (${launchProfileId} must be bare 200K): `
           + [...suspectKeys.map((key) => `env:${key}`), ...suspectPicker.map((id) => `picker:${id}`)].join(", "),
+        )
+      }
+      // The 200K accounting itself comes from CLAUDE_CODE_DISABLE_1M_CONTEXT=1
+      // (bare ids alone don't deliver it: every row maps via `behavesAs` onto
+      // a known Claude model whose client-side profile is native-1M — verified
+      // against Claude Code 2.1.288). If the seed is ever skipped (e.g. a
+      // parent-set value), the session silently budgets ~1M, so say so loudly.
+      if (envVars.CLAUDE_CODE_DISABLE_1M_CONTEXT !== "1") {
+        consola.warn(
+          `Pinned-profile context leak (${launchProfileId} must be bare 200K): `
+          + "CLAUDE_CODE_DISABLE_1M_CONTEXT is not seeded to 1 — the lead may budget ~1M despite bare ids.",
         )
       }
     }
@@ -856,10 +864,13 @@ export const claude = defineCommand({
         `Pinned launch: profile=${launchProfileId} lead=${chosenSlug} pickerRows=${pickerModels?.length ?? 0}.`,
       )
       // Cheapest-only default-row breadcrumb (launch makes no model calls, so
-      // this is free): the FIRST Luna picker row must be bare 200K, and no
-      // lead-capable env var may carry the `[1m]` bracket. A decorated first
-      // row would make Claude Code default the session to 1M accounting;
-      // surface that loudly instead of silently.
+      // this is free): the FIRST Luna picker row must be bare 200K, no
+      // lead-capable env var may carry the `[1m]` bracket, and the 1M-context
+      // disable flag must be seeded (bare ids alone do NOT deliver 200K —
+      // every row's `behavesAs` target is native-1M in the client catalog).
+      // A decorated first row, a decorated env value, or a missing flag would
+      // make Claude Code default the session to ~1M accounting; surface that
+      // loudly instead of silently.
       if (launchProfileId === "cheapest") {
         const rows = pickerModels ?? []
         const firstLuna = rows.find((id) => id.replace(/(?:\[1m\])+$/i, "") === "gpt-6-luna")
@@ -871,10 +882,11 @@ export const claude = defineCommand({
           "ANTHROPIC_DEFAULT_HAIKU_MODEL",
           "ANTHROPIC_CUSTOM_MODEL_OPTION",
         ].filter((key) => typeof envVars[key] === "string" && /\[1m\]/i.test(envVars[key] as string))
+        const disableSeeded = envVars.CLAUDE_CODE_DISABLE_1M_CONTEXT === "1"
         consola.info(
-          `Cheapest default-row check: firstLunaRow=${firstLuna ?? "none"} defaultRowBare=${defaultRowBare} bracketedLeadEnv=${bracketedLeadEnv.length === 0 ? "none" : bracketedLeadEnv.join(",")}.`,
+          `Cheapest default-row check: firstLunaRow=${firstLuna ?? "none"} defaultRowBare=${defaultRowBare} bracketedLeadEnv=${bracketedLeadEnv.length === 0 ? "none" : bracketedLeadEnv.join(",")} disable1m=${disableSeeded}.`,
         )
-        if (!defaultRowBare || bracketedLeadEnv.length > 0) {
+        if (!defaultRowBare || bracketedLeadEnv.length > 0 || !disableSeeded) {
           consola.warn(
             `Cheapest default-row regression: the lead row is not bare 200K — the session may default to 1M accounting.`,
           )

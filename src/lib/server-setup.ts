@@ -905,6 +905,33 @@ export function getClaudeCodeEnvVars(
   // and max launches keep the presence guard (user value wins).
   const routerWinsTiers = isFastProfile || isCheapProfile
 
+  // Pinned 200K profiles (`cheap`, `cheapest`, `balanced` — never `cheap1m`,
+  // whose Gemini lead intentionally runs 1M): the bare-id strategy alone
+  // cannot deliver 200K accounting. Every Sol/Luna/Gemini row maps via
+  // `behavesAs` onto a known Claude model whose client-side profile is
+  // native-1M (verified against Claude Code 2.1.288: a bare `gpt-6-luna`
+  // lead reports contextWindow 1M, and neither CLAUDE_CODE_MAX_CONTEXT_TOKENS
+  // nor CLAUDE_CODE_AUTO_COMPACT_WINDOW moves it — the former is ignored once
+  // the id canonicalizes to a `claude-*` model, the latter only lowers the
+  // compaction trigger without changing the reported model window).
+  // `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` gates BOTH the literal `[1m]` unlock
+  // and the native-1M resolution path, so the whole pinned session budgets at
+  // the 200K default. That necessarily also clamps `[1m]`-decorated rows,
+  // which is why these profiles drop the decorated opt-in rows from their
+  // picker inventory (see model-picker-settings): a row labelled "(1M)" that
+  // still budgets 200K would be a lie. `cheap1m`/`fast`/`max`/`standard`
+  // intentionally run 1M and must NOT receive this. Presence-guarded like
+  // every other seed here: an operator-set value always wins.
+  if (
+    launchProfileId === "cheap"
+    || launchProfileId === "cheapest"
+    || launchProfileId === "balanced"
+  ) {
+    if (process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === undefined) {
+      vars.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
+    }
+  }
+
   const smallFastModel =
     isMaxProfile
       ? MAX_LUNA_HIGH_ALIAS_ID
