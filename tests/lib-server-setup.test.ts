@@ -148,6 +148,7 @@ describe("getClaudeCodeEnvVars", () => {
     const keys = [
       "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
       "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+      "CLAUDE_CODE_EFFORT_LEVEL",
       "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
       "ANTHROPIC_DEFAULT_OPUS_MODEL",
       "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -474,6 +475,89 @@ describe("getClaudeCodeEnvVars", () => {
       if (prior === undefined) delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
       else process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = prior
     }
+  })
+
+  test("seeds the contracted lead effort only on cheapest and balanced", () => {
+    // The client stamps its session-default `high` onto lead requests and the
+    // proxy keeps explicit lead effort, so without this seed the wire would
+    // run high regardless of contract. `cheap`/`cheap1m`/`fast`/`max`/
+    // `standard` leads already run at the client default and must not
+    // receive it. Gated explicitly per profile — never via `pinStrict200K`,
+    // which also covers `cheap`.
+    const catalog = [catalogModel("gpt-6-luna", 1_050_000, 922_000)]
+    for (
+      const [model, profile, expected] of [
+        ["gpt-6-luna", "cheapest", "max"],
+        ["gpt-5.6-sol", "balanced", "medium"],
+      ] as const
+    ) {
+      const vars = withCatalog(catalog, () =>
+        withoutCompactionEnv(() =>
+          getClaudeCodeEnvVars("http://127.0.0.1:8787", model, profile),
+        ),
+      )
+      expect(vars.CLAUDE_CODE_EFFORT_LEVEL).toBe(expected)
+    }
+    for (
+      const [model, profile] of [
+        ["gemini-3.8-flash", "cheap"],
+        ["gemini-3.8-flash[1m]", "cheap1m"],
+        ["gemini-3.8-flash[1m]", "fast"],
+        ["gpt-5.6-sol[1m]", "max"],
+        ["claude-opus-5.5[1m]", "standard"],
+      ] as const
+    ) {
+      const vars = withCatalog(catalog, () =>
+        withoutCompactionEnv(() =>
+          getClaudeCodeEnvVars("http://127.0.0.1:8787", model, profile),
+        ),
+      )
+      expect(vars).not.toHaveProperty("CLAUDE_CODE_EFFORT_LEVEL")
+    }
+  })
+
+  test("preserves a parent-set effort level; whitespace-only reseeds", () => {
+    // Any real operator value wins (the seed only fills unset/blank), and a
+    // whitespace-only value is treated as unset — it would otherwise split
+    // brain the session (truthy client-side, trimmed-absent proxy-side).
+    // Covered for both seeded profiles (cheapest/max, balanced/medium).
+    const prior = process.env.CLAUDE_CODE_EFFORT_LEVEL
+    try {
+      process.env.CLAUDE_CODE_EFFORT_LEVEL = "low"
+      const kept = withCatalog([catalogModel("gpt-6-luna", 1_050_000, 922_000)], () =>
+        getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-6-luna", "cheapest"))
+      expect(kept).not.toHaveProperty("CLAUDE_CODE_EFFORT_LEVEL")
+      expect(process.env.CLAUDE_CODE_EFFORT_LEVEL).toBe("low")
+
+      process.env.CLAUDE_CODE_EFFORT_LEVEL = "high"
+      const keptBalanced = withCatalog([catalogModel("gpt-5.6-sol", 1_050_000, 922_000)], () =>
+        getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-5.6-sol", "balanced"))
+      expect(keptBalanced).not.toHaveProperty("CLAUDE_CODE_EFFORT_LEVEL")
+      expect(process.env.CLAUDE_CODE_EFFORT_LEVEL).toBe("high")
+
+      process.env.CLAUDE_CODE_EFFORT_LEVEL = "   "
+      const reseeded = withCatalog([catalogModel("gpt-6-luna", 1_050_000, 922_000)], () =>
+        getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-6-luna", "cheapest"))
+      expect(reseeded.CLAUDE_CODE_EFFORT_LEVEL).toBe("max")
+      const reseededBalanced = withCatalog([catalogModel("gpt-5.6-sol", 1_050_000, 922_000)], () =>
+        getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-5.6-sol", "balanced"))
+      expect(reseededBalanced.CLAUDE_CODE_EFFORT_LEVEL).toBe("medium")
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CODE_EFFORT_LEVEL
+      else process.env.CLAUDE_CODE_EFFORT_LEVEL = prior
+    }
+  })
+
+  test("seeds lead effort without any catalog (seed is catalog-independent)", () => {
+    // Unlike the `[1m]` decoration, the effort seed never consults the live
+    // catalog — a thin or not-yet-populated catalog must still pin the
+    // contracted lead effort.
+    const vars = withCatalog([], () =>
+      withoutCompactionEnv(() =>
+        getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-6-luna", "cheapest"),
+      ),
+    )
+    expect(vars.CLAUDE_CODE_EFFORT_LEVEL).toBe("max")
   })
 
   test("omits the window entirely when catalog limits are unusable", () => {    const vars = withCatalog([], () =>

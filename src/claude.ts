@@ -210,7 +210,7 @@ import {
 } from "./lib/cheapest-advisor-client"
 import { CHEAP_PROFILE_NATIVE_MODELS } from "./lib/cheap-profile-contract"
 import { CHEAPEST_PROFILE_NATIVE_MODELS } from "./lib/cheapest-profile-contract"
-import { BALANCED_PROFILE_NATIVE_MODELS } from "./lib/balanced-profile-contract"
+import { BALANCED_PROFILE_LEAD_EFFORT, BALANCED_PROFILE_NATIVE_MODELS } from "./lib/balanced-profile-contract"
 
 export const claudeArgs = {
   ...sharedServerArgs,
@@ -874,18 +874,25 @@ export const claude = defineCommand({
       consola.info(
         `Pinned launch: profile=${launchProfileId} lead=${chosenSlug} pickerRows=${pickerModels?.length ?? 0}.`,
       )
-      // Cheapest-only default-row breadcrumb (launch makes no model calls, so
+      // Cheapest/balanced default-row breadcrumb (launch makes no model calls, so
       // this is free): the FIRST Luna picker row must be bare 200K, no
-      // lead-capable env var may carry the `[1m]` bracket, and the 1M-context
+      // lead-capable env var may carry the `[1m]` bracket, the 1M-context
       // disable flag must be seeded (bare ids alone do NOT deliver 200K —
-      // every row's `behavesAs` target is native-1M in the client catalog).
-      // A decorated first row, a decorated env value, or a missing flag would
-      // make Claude Code default the session to ~1M accounting; surface that
-      // loudly instead of silently.
-      if (launchProfileId === "cheapest") {
+      // every row's `behavesAs` target is native-1M in the client catalog),
+      // and the session effort must resolve to the contracted lead effort
+      // (`max` — the client stamps its `high` default onto lead requests and
+      // the proxy keeps explicit lead effort, so without the seed the wire
+      // runs high; verified by live capture). A decorated first row, a
+      // decorated env value, a missing flag, or an unrecognized effort value
+      // would make Claude Code default the session to ~1M accounting or
+      // off-contract effort; surface that loudly instead of silently.
+      if (launchProfileId === "cheapest" || launchProfileId === "balanced") {
         const rows = pickerModels ?? []
         const firstLuna = rows.find((id) => id.replace(/(?:\[1m\])+$/i, "") === "gpt-6-luna")
-        const defaultRowBare = firstLuna !== undefined && !/\[1m\]/i.test(firstLuna)
+        // When picker injection was skipped (pickerModels undefined) the
+        // default row cannot be verified — report, don't fail the check.
+        const rowsVerified = pickerModels !== undefined
+        const defaultRowBare = !rowsVerified || (firstLuna !== undefined && !/\[1m\]/i.test(firstLuna))
         const bracketedLeadEnv = [
           "ANTHROPIC_MODEL",
           "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -897,13 +904,44 @@ export const claude = defineCommand({
           envVars.CLAUDE_CODE_DISABLE_1M_CONTEXT
             ?? process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT,
         )
-        consola.info(
-          `Cheapest default-row check: firstLunaRow=${firstLuna ?? "none"} defaultRowBare=${defaultRowBare} bracketedLeadEnv=${bracketedLeadEnv.length === 0 ? "none" : bracketedLeadEnv.join(",")} disable1m=${disableSeeded}.`,
+        const effectiveEffort = (
+          envVars.CLAUDE_CODE_EFFORT_LEVEL
+          ?? process.env.CLAUDE_CODE_EFFORT_LEVEL
+          ?? ""
+        ).trim()
+        // Exact match against the canonical lowercase contract values: client
+        // case-sensitivity is unverified, so "MAX" warns (actionable — use
+        // "max") rather than assuming it works. A recognized-but-off-contract
+        // level is an operator override (presence guard respected it), so it
+        // gets an info note, not the regression warn; only an unrecognized or
+        // empty value means the contract is actually broken.
+        const contractedEffort = launchProfileId === "cheapest"
+          ? "max"
+          : BALANCED_PROFILE_LEAD_EFFORT
+        const effortOk = effectiveEffort === contractedEffort
+        const effortRecognized = ["low", "medium", "high", "xhigh", "max"].includes(
+          effectiveEffort.toLowerCase(),
         )
-        if (!defaultRowBare || bracketedLeadEnv.length > 0 || !disableSeeded) {
-          consola.warn(
-            `Cheapest default-row regression: the lead row is not bare 200K — the session may default to 1M accounting.`,
-          )
+        consola.info(
+          `Pinned default-row check (${launchProfileId}): firstLunaRow=${firstLuna ?? "none"} defaultRowBare=${rowsVerified ? defaultRowBare : "unverified"} bracketedLeadEnv=${bracketedLeadEnv.length === 0 ? "none" : bracketedLeadEnv.join(",")} disable1m=${disableSeeded} leadEffort=${effectiveEffort || "none"}.`,
+        )
+        if (!defaultRowBare || bracketedLeadEnv.length > 0 || !disableSeeded || !effortOk) {
+          if (effortOk || effortRecognized) {
+            if (!effortOk) {
+              consola.info(
+                `Operator lead-effort override (${launchProfileId}): session runs at ${effectiveEffort} instead of contracted ${contractedEffort}; subagent/advisor/oracle efforts are unaffected.`,
+              )
+            }
+            if (!defaultRowBare || bracketedLeadEnv.length > 0 || !disableSeeded) {
+              consola.warn(
+                `Pinned default-row regression (${launchProfileId}): the lead row is not bare 200K — the session may default to 1M accounting.`,
+              )
+            }
+          } else {
+            consola.warn(
+              `Pinned default-row regression (${launchProfileId}): the lead row is not bare 200K at contracted effort — the session may default to 1M accounting or off-contract effort.`,
+            )
+          }
         }
       }
     }

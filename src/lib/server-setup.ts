@@ -19,6 +19,7 @@ import {
   type LaunchProfileId,
 } from "./launch-profile"
 import { MAX_PROFILE_MODELS, maxOpusModel } from "./max-profile-contract"
+import { BALANCED_PROFILE_LEAD_EFFORT } from "./balanced-profile-contract"
 import { catalogAdvertises1M, oneMContextDisabled, withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
 import {
   BUDGET_SMALL_FAST_CATALOG_ID,
@@ -935,6 +936,38 @@ export function getClaudeCodeEnvVars(
       || process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === ""
     ) {
       vars.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
+    }
+  }
+
+  // Pinned lead effort (`cheapest` → max, `balanced` → medium — never any
+  // other profile): the client's session effort is what gets stamped as
+  // explicit `output_config.effort` on lead-loop requests, and the proxy's
+  // preprocessor keeps explicit lead effort (`leadCallerControlled`). The
+  // client default for these rows is `high` (via the `behavesAs` Opus
+  // profile), so without this seed the wire runs high no matter what the
+  // profile contract says — verified by live capture against Claude Code
+  // 2.1.289 (first turn omits effort and lands the fixed max/medium, every
+  // later turn stamps `high`). The seed makes the picker readout, the
+  // statusline, and the wire all agree with the contract. Subagents are
+  // unaffected: their frontmatter pins model+effort per role and the
+  // preprocessor forces the fixed mapping on all subagent-flagged traffic.
+  // Known accepted consequence: background-tier ops (session titles,
+  // summaries — unflagged lead-loop traffic) inherit the session level, and
+  // `/effort` changes report "not applied" while the var is set (session
+  // lock-in, consistent with fixed-effort contracts).
+  //
+  // Explicit gate per profile — never reuse `pinStrict200K`/`routerWinsTiers`
+  // here: `cheap`'s de-facto lead effort is `high` (contract constant
+  // reconciled in `cheap-profile-contract.ts`), so it must NOT receive this.
+  // Guarded on trim-empty-or-unset; any other operator-set value wins.
+  const pinLeadEffort = launchProfileId === "cheapest"
+    ? "max"
+    : launchProfileId === "balanced"
+      ? BALANCED_PROFILE_LEAD_EFFORT
+      : undefined
+  if (pinLeadEffort !== undefined) {
+    if ((process.env.CLAUDE_CODE_EFFORT_LEVEL ?? "").trim() === "") {
+      vars.CLAUDE_CODE_EFFORT_LEVEL = pinLeadEffort
     }
   }
 

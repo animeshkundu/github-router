@@ -16,6 +16,7 @@ live catalog?
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5.5` (catalog-gated `[1m]`, except pinned-200K profiles which seed it bare) | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
 | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | catalog-derived decimal integer; omitted on pinned-200K profiles (no `[1m]` ids reachable) | `applyAutoCompactWindow` in `src/lib/server-setup.ts` | parent value wins; omitted when catalog limits are unusable |
 | `CLAUDE_CODE_DISABLE_1M_CONTEXT` | `1` on `cheap`/`cheapest`/`balanced` only | `getClaudeCodeEnvVars` in `src/lib/server-setup.ts` | set in parent shell (any non-empty value wins; empty string is re-seeded) |
+| `CLAUDE_CODE_EFFORT_LEVEL` | `max` on `cheapest`, `medium` on `balanced` only | `getClaudeCodeEnvVars` in `src/lib/server-setup.ts` | set in parent shell (trimmed; whitespace-only is re-seeded; unrecognized values warn at launch) |
 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | never set | n/a | deliberately unset; see note below |
 | Design doc | `docs/default-models.md` | | |
 
