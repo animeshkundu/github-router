@@ -757,11 +757,16 @@ export const claude = defineCommand({
     // the operator's real `~/.claude/` — it just keeps a stale custom
     // picker/guard/subagent from surviving into the pinned session.
     // Router hook/agent injection below re-adds the profile's own rows.
+    // (Kept in lockstep with `routerWinsPicker` in model-picker-settings:
+    // every profile whose picker the router overwrites gets its mirror
+    // purged too, so a stale `[1m]`-frontmatter custom agent cannot survive
+    // into a strict-200K session.)
     if (
       launchProfileId === "fast"
       || launchProfileId === "cheap"
       || launchProfileId === "cheap1m"
       || launchProfileId === "cheapest"
+      || launchProfileId === "balanced"
     ) {
       try {
         const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
@@ -844,12 +849,18 @@ export const claude = defineCommand({
       // The 200K accounting itself comes from CLAUDE_CODE_DISABLE_1M_CONTEXT=1
       // (bare ids alone don't deliver it: every row maps via `behavesAs` onto
       // a known Claude model whose client-side profile is native-1M — verified
-      // against Claude Code 2.1.288). If the seed is ever skipped (e.g. a
-      // parent-set value), the session silently budgets ~1M, so say so loudly.
-      if (envVars.CLAUDE_CODE_DISABLE_1M_CONTEXT !== "1") {
+      // against Claude Code 2.1.288). The check reads the EFFECTIVE value
+      // (seeded vars, else the inherited parent env) because the client's
+      // gate is a raw truthiness read: a parent "0" also disables 1M, so only
+      // a falsy effective value (unset or "") means ~1M accounting. If the
+      // seed is ever skipped, the session silently budgets ~1M, so say so
+      // loudly.
+      const effectiveDisable1M = envVars.CLAUDE_CODE_DISABLE_1M_CONTEXT
+        ?? process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+      if (!effectiveDisable1M) {
         consola.warn(
           `Pinned-profile context leak (${launchProfileId} must be bare 200K): `
-          + "CLAUDE_CODE_DISABLE_1M_CONTEXT is not seeded to 1 — the lead may budget ~1M despite bare ids.",
+          + "CLAUDE_CODE_DISABLE_1M_CONTEXT is not effectively set — the lead may budget ~1M despite bare ids.",
         )
       }
     }
@@ -882,7 +893,10 @@ export const claude = defineCommand({
           "ANTHROPIC_DEFAULT_HAIKU_MODEL",
           "ANTHROPIC_CUSTOM_MODEL_OPTION",
         ].filter((key) => typeof envVars[key] === "string" && /\[1m\]/i.test(envVars[key] as string))
-        const disableSeeded = envVars.CLAUDE_CODE_DISABLE_1M_CONTEXT === "1"
+        const disableSeeded = Boolean(
+          envVars.CLAUDE_CODE_DISABLE_1M_CONTEXT
+            ?? process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT,
+        )
         consola.info(
           `Cheapest default-row check: firstLunaRow=${firstLuna ?? "none"} defaultRowBare=${defaultRowBare} bracketedLeadEnv=${bracketedLeadEnv.length === 0 ? "none" : bracketedLeadEnv.join(",")} disable1m=${disableSeeded}.`,
         )

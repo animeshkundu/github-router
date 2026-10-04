@@ -204,7 +204,9 @@ describe("selectableModelsInCatalog", () => {
     setCatalog({ "gpt-5.6-sol": 1_050_000, "gpt-6-luna": 500_000 })
     expect(ids("cheapest")).toEqual(["gpt-5.6-sol", "gpt-6-luna"])
     expect(ids("cheapest").every((id) => !/\[1m\]/i.test(id))).toBe(true)
-    // Opt-out changes nothing for these profiles (already all bare).
+    // Opt-out changes nothing for these profiles: every row is `neverOneM`,
+    // so this pins the row declarations (not the flag interaction — the
+    // flag itself is seeded in server-setup and covered there).
     setCatalog(WINDOWS)
     process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
     expect(ids("cheapest")).toEqual(["gpt-5.6-sol", "gpt-6-luna"])

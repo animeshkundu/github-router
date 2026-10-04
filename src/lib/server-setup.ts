@@ -920,14 +920,20 @@ export function getClaudeCodeEnvVars(
   // which is why these profiles drop the decorated opt-in rows from their
   // picker inventory (see model-picker-settings): a row labelled "(1M)" that
   // still budgets 200K would be a lie. `cheap1m`/`fast`/`max`/`standard`
-  // intentionally run 1M and must NOT receive this. Presence-guarded like
-  // every other seed here: an operator-set value always wins.
-  if (
-    launchProfileId === "cheap"
+  // intentionally run 1M and must NOT receive this.
+  //
+  // Guarded on unset-or-empty rather than strictly undefined: the client's
+  // gate is a raw truthiness read, so an inherited empty string is falsy on
+  // both sides (i.e. 1M stays live) and must not suppress the seed. Any other
+  // operator-set value (including "0", which IS truthy client-side) wins.
+  const pinStrict200K = launchProfileId === "cheap"
     || launchProfileId === "cheapest"
     || launchProfileId === "balanced"
-  ) {
-    if (process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === undefined) {
+  if (pinStrict200K) {
+    if (
+      process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === undefined
+      || process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === ""
+    ) {
       vars.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
     }
   }
@@ -1011,7 +1017,12 @@ export function getClaudeCodeEnvVars(
     bareSlug: string,
   ): void => {
     if (process.env[modelKey] !== undefined) return
-    vars[modelKey] = withOneMSuffixForLead(bareSlug)
+    // Strict-200K profiles (cheap/cheapest/balanced) never decorate tier rows:
+    // a `[1m]` value here would trip the pinned-profile guarantee check in
+    // `claude.ts` and feed `applyAutoCompactWindow` a decorated candidate the
+    // profile claims is unreachable. Under the seeded
+    // CLAUDE_CODE_DISABLE_1M_CONTEXT=1 the bare row still budgets 200K.
+    vars[modelKey] = pinStrict200K ? bareSlug : withOneMSuffixForLead(bareSlug)
     if (process.env[nameKey] === undefined) vars[nameKey] = bareSlug
   }
   // Fast profile: the Sonnet/Haiku tier rows are the router-owned Luna
