@@ -12,6 +12,7 @@ import {
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
 } from "./cheapest-profile-contract"
 import {
+  BALANCED_PROFILE_LEAD_EFFORT,
   BALANCED_PROFILE_MODELS,
   BALANCED_PROFILE_NATIVE_AGENT_NAMES,
   BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS,
@@ -50,10 +51,11 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  Advisor, and a Sol/high Oracle — the lead plans
  *  directly and reviews the final plan with the Advisor (advisory) before
  *  presenting it. Oracle-only peer
- *  set, no `astra` (see `./cheapest-profile-contract`). `"balanced"` is the
- *  most-complex-tasks tier: a Sol/high lead at the 200K default window, a
- *  three-agent surface (no `Plan`: the lead owns planning), and the
- *  Grok/medium Oracle-only peer set (see `./balanced-profile-contract`).
+  *  set, no `astra` (see `./cheapest-profile-contract`). `"balanced"` is the
+  *  most-complex-tasks tier: a Sol/medium lead (`BALANCED_PROFILE_LEAD_EFFORT`)
+  *  at the 200K default window, a three-agent surface (no `Plan`: the lead
+  *  owns planning), and the Grok/medium Oracle-only peer set (see
+  *  `./balanced-profile-contract`).
  *
  *  Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
  *  from the resolved lead model id — so `-m gpt-6-luna` (a direct pin of
@@ -166,12 +168,12 @@ export const CHEAPEST_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
- * The `-m balanced` roster: the most-complex-tasks tier. A Sol/high lead at
- * the 200K default window, a three-agent surface (`Explore`/
- * `General-Purpose`/`reviewer`, every role at 200K — no `Plan`: the lead
- * owns planning), and the Grok-4.6/medium Oracle-only peer set. Hard-denies
- * match fast's: core workers, `orchestrate`, `decide`, `fleet`, and
- * `first-mate`.
+ * The `-m balanced` roster: the most-complex-tasks tier. A Sol/medium lead
+ * (`BALANCED_PROFILE_LEAD_EFFORT`) at the 200K default window, a three-agent
+ * surface (`Explore`/`General-Purpose`/`reviewer`, every role at 200K — no
+ * `Plan`: the lead owns planning), and the Grok-4.6/medium Oracle-only peer
+ * set. Hard-denies match fast's: core workers, `orchestrate`, `decide`,
+ * `fleet`, and `first-mate`.
  */
 export const BALANCED_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "balanced",
@@ -1143,6 +1145,15 @@ export function validateBalancedProfilePrerequisites(
     }
     if (!supportsEffort(sol, "high")) {
       missing.push(`${BALANCED_PROFILE_MODELS.lead}: does not advertise a "high" reasoning effort`)
+    }
+    // The launcher seeds the session effort to the contracted lead effort
+    // (`BALANCED_PROFILE_LEAD_EFFORT`, medium), so the gate must require it
+    // too: a catalog entry advertising `high` but not `medium` would pass
+    // launch and then clamp or reject every lead turn.
+    if (!supportsEffort(sol, BALANCED_PROFILE_LEAD_EFFORT)) {
+      missing.push(
+        `${BALANCED_PROFILE_MODELS.lead}: does not advertise a "${BALANCED_PROFILE_LEAD_EFFORT}" reasoning effort (the contracted lead effort)`,
+      )
     }
     if (!supportsEndpoint(sol, "responses")) {
       missing.push(`${BALANCED_PROFILE_MODELS.lead}: does not advertise a supported Responses endpoint`)

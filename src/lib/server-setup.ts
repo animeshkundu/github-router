@@ -19,6 +19,7 @@ import {
   type LaunchProfileId,
 } from "./launch-profile"
 import { MAX_PROFILE_MODELS, maxOpusModel } from "./max-profile-contract"
+import { BALANCED_PROFILE_LEAD_EFFORT } from "./balanced-profile-contract"
 import { catalogAdvertises1M, oneMContextDisabled, withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
 import {
   BUDGET_SMALL_FAST_CATALOG_ID,
@@ -905,6 +906,71 @@ export function getClaudeCodeEnvVars(
   // and max launches keep the presence guard (user value wins).
   const routerWinsTiers = isFastProfile || isCheapProfile
 
+  // Pinned 200K profiles (`cheap`, `cheapest`, `balanced` — never `cheap1m`,
+  // whose Gemini lead intentionally runs 1M): the bare-id strategy alone
+  // cannot deliver 200K accounting. Every Sol/Luna/Gemini row maps via
+  // `behavesAs` onto a known Claude model whose client-side profile is
+  // native-1M (verified against Claude Code 2.1.288: a bare `gpt-6-luna`
+  // lead reports contextWindow 1M, and neither CLAUDE_CODE_MAX_CONTEXT_TOKENS
+  // nor CLAUDE_CODE_AUTO_COMPACT_WINDOW moves it — the former is ignored once
+  // the id canonicalizes to a `claude-*` model, the latter only lowers the
+  // compaction trigger without changing the reported model window).
+  // `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` gates BOTH the literal `[1m]` unlock
+  // and the native-1M resolution path, so the whole pinned session budgets at
+  // the 200K default. That necessarily also clamps `[1m]`-decorated rows,
+  // which is why these profiles drop the decorated opt-in rows from their
+  // picker inventory (see model-picker-settings): a row labelled "(1M)" that
+  // still budgets 200K would be a lie. `cheap1m`/`fast`/`max`/`standard`
+  // intentionally run 1M and must NOT receive this.
+  //
+  // Guarded on unset-or-empty rather than strictly undefined: the client's
+  // gate is a raw truthiness read, so an inherited empty string is falsy on
+  // both sides (i.e. 1M stays live) and must not suppress the seed. Any other
+  // operator-set value (including "0", which IS truthy client-side) wins.
+  const pinStrict200K = launchProfileId === "cheap"
+    || launchProfileId === "cheapest"
+    || launchProfileId === "balanced"
+  if (pinStrict200K) {
+    if (
+      process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === undefined
+      || process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === ""
+    ) {
+      vars.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
+    }
+  }
+
+  // Pinned lead effort (`cheapest` → max, `balanced` → medium — never any
+  // other profile): the client's session effort is what gets stamped as
+  // explicit `output_config.effort` on lead-loop requests, and the proxy's
+  // preprocessor keeps explicit lead effort (`leadCallerControlled`). The
+  // client default for these rows is `high` (via the `behavesAs` Opus
+  // profile), so without this seed the wire runs high no matter what the
+  // profile contract says — verified by live capture against Claude Code
+  // 2.1.289 (first turn omits effort and lands the fixed max/medium, every
+  // later turn stamps `high`). The seed makes the picker readout, the
+  // statusline, and the wire all agree with the contract. Subagents are
+  // unaffected: their frontmatter pins model+effort per role and the
+  // preprocessor forces the fixed mapping on all subagent-flagged traffic.
+  // Known accepted consequence: background-tier ops (session titles,
+  // summaries — unflagged lead-loop traffic) inherit the session level, and
+  // `/effort` changes report "not applied" while the var is set (session
+  // lock-in, consistent with fixed-effort contracts).
+  //
+  // Explicit gate per profile — never reuse `pinStrict200K`/`routerWinsTiers`
+  // here: `cheap`'s de-facto lead effort is `high` (contract constant
+  // reconciled in `cheap-profile-contract.ts`), so it must NOT receive this.
+  // Guarded on trim-empty-or-unset; any other operator-set value wins.
+  const pinLeadEffort = launchProfileId === "cheapest"
+    ? "max"
+    : launchProfileId === "balanced"
+      ? BALANCED_PROFILE_LEAD_EFFORT
+      : undefined
+  if (pinLeadEffort !== undefined) {
+    if ((process.env.CLAUDE_CODE_EFFORT_LEVEL ?? "").trim() === "") {
+      vars.CLAUDE_CODE_EFFORT_LEVEL = pinLeadEffort
+    }
+  }
+
   const smallFastModel =
     isMaxProfile
       ? MAX_LUNA_HIGH_ALIAS_ID
@@ -984,7 +1050,12 @@ export function getClaudeCodeEnvVars(
     bareSlug: string,
   ): void => {
     if (process.env[modelKey] !== undefined) return
-    vars[modelKey] = withOneMSuffixForLead(bareSlug)
+    // Strict-200K profiles (cheap/cheapest/balanced) never decorate tier rows:
+    // a `[1m]` value here would trip the pinned-profile guarantee check in
+    // `claude.ts` and feed `applyAutoCompactWindow` a decorated candidate the
+    // profile claims is unreachable. Under the seeded
+    // CLAUDE_CODE_DISABLE_1M_CONTEXT=1 the bare row still budgets 200K.
+    vars[modelKey] = pinStrict200K ? bareSlug : withOneMSuffixForLead(bareSlug)
     if (process.env[nameKey] === undefined) vars[nameKey] = bareSlug
   }
   // Fast profile: the Sonnet/Haiku tier rows are the router-owned Luna

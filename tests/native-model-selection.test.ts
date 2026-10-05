@@ -140,9 +140,14 @@ describe("selectableModelsInCatalog standard rows", () => {
 })
 
 // Claude Code budgets a modelPicker row off the model id, and its 1M detector
-// (`/\[1m\]/i`) has no vendor gate. Without the suffix a 1,050,000-token model
-// is accounted at the 200K default and auto-compacts at roughly a fifth of its
-// real window.
+// (`/\[1m\]/i`) has no vendor gate. On a profile WITHOUT the 1M-context
+// disable flag, a bare id alone does NOT guarantee 200K accounting: every row
+// maps via `behavesAs` onto a known Claude model whose client-side profile is
+// native-1M (verified against Claude Code 2.1.288 — a bare `gpt-6-luna` lead
+// reports contextWindow 1M), so the pinned-200K profiles additionally seed
+// CLAUDE_CODE_DISABLE_1M_CONTEXT=1. The bracket still matters there: it is the
+// only per-row 1M signal on profiles where the flag is absent, and the
+// request preprocessor strips it before upstream dispatch.
 describe("selectableModelsInCatalog — [1m] context accounting", () => {
   test("brackets only the ids whose catalog window is >=1M, and NEVER grok-4.6", () => {
     setCatalogWithWindows(LIVE_WINDOWS)

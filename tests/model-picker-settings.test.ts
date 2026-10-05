@@ -131,13 +131,15 @@ describe("selectableModelsInCatalog", () => {
     ])
   })
 
-  test("cheap rows stay BARE except Luna even when their catalog entries serve 1M", () => {
+  test("cheap rows stay BARE; cheap1m keeps the decorated Luna opt-in", () => {
     // WINDOWS advertises every cheap row as 1M-capable (sol/luna 1.05M,
     // gemini 1M) — Standard decorates them with `[1m]`, but cheap's whole
-    // cost lever is pinning every non-lead role to the 200K default window,
-    // so a `/model` switch must never hand the session a 1M budget again.
-    // Luna is exempt so its 1M row stays selectable; enforcement still holds
-    // at the request layer (bare lead strip + bare subagent aliases).
+    // cost lever is pinning every role to the 200K default window, and these
+    // launches seed CLAUDE_CODE_DISABLE_1M_CONTEXT=1, which gates the
+    // client's `[1m]` unlock entirely. A decorated row here would be a "(1M)"
+    // label that still budgets 200K, so cheap carries none. Cheap1m (whose
+    // Gemini lead intentionally runs 1M and which does NOT seed the flag)
+    // keeps the historical surface: only Luna decorated.
     setCatalog(WINDOWS)
     expect(ids("standard")).toEqual([
       "gpt-5.6-sol[1m]",
@@ -145,21 +147,24 @@ describe("selectableModelsInCatalog", () => {
       "gemini-3.8-flash[1m]",
       "grok-4.6",
     ])
-    const cheapWithLuna1M = [
+    expect(ids("cheap")).toEqual([
+      "gpt-5.6-sol",
+      "gpt-6-luna",
+      "gemini-3.8-flash",
+      "grok-4.6",
+    ])
+    expect(ids("cheap").some((id) => /\[1m\]/i.test(id))).toBe(false)
+    const cheap1mWithLuna1M = [
       "gpt-5.6-sol",
       "gpt-6-luna[1m]",
       "gemini-3.8-flash",
       "grok-4.6",
     ]
-    expect(ids("cheap")).toEqual(cheapWithLuna1M)
-    expect(ids("cheap").filter((id) => /\[1m\]/i.test(id))).toEqual([
-      "gpt-6-luna[1m]",
-    ])
-    // `cheap1m` shares cheap's picker surface exactly: same rows with only
+    // `cheap1m` keeps cheap's old picker surface exactly: same rows with only
     // Luna decorated. Its 1M lead difference lives in the LAUNCH lead slug
     // (`-m cheap1m` → gemini [1m]); a Luna `/model` switch additionally keeps
     // 1M there by design (lead traffic is not bare-stripped on cheap1m).
-    expect(ids("cheap1m")).toEqual(cheapWithLuna1M)
+    expect(ids("cheap1m")).toEqual(cheap1mWithLuna1M)
     expect(ids("cheap1m").filter((id) => /\[1m\]/i.test(id))).toEqual([
       "gpt-6-luna[1m]",
     ])
@@ -177,38 +182,34 @@ describe("selectableModelsInCatalog", () => {
     ])
   })
 
-  test("cheapest lists a BARE Luna default first, then a 1M opt-in row", () => {
+  test("cheapest lists Sol plus a single BARE Luna row; balanced is all bare", () => {
     setCatalog(WINDOWS)
-    expect(ids("cheapest")).toEqual([
-      "gpt-5.6-sol",
-      "gpt-6-luna",
-      "gpt-6-luna[1m]",
-    ])
-    // The default (first Luna) row must be BARE so Claude Code, which matches
-    // the active model to a picker row after stripping `[1m]` and takes the
-    // FIRST match, defaults the session to 200K.
-    const lunaRows = selectableModelsInCatalog("cheapest").filter(
-      (row) => row.model.replace(/\[1m\]$/i, "") === "gpt-6-luna",
-    )
-    expect(lunaRows.map((row) => row.model)).toEqual(["gpt-6-luna", "gpt-6-luna[1m]"])
-    expect(lunaRows.map((row) => row.label)).toEqual(["GPT-6 Luna", "GPT-6 Luna (1M)"])
-    // Balanced keeps its single Luna row (out of scope for this change).
-    expect(ids("balanced")).toEqual(["gpt-5.6-sol", "gpt-6-luna[1m]", "grok-4.6"])
+    expect(ids("cheapest")).toEqual(["gpt-5.6-sol", "gpt-6-luna"])
+    // No decorated rows anywhere in the pinned-200K profiles: these launches
+    // seed CLAUDE_CODE_DISABLE_1M_CONTEXT=1, which gates the client's `[1m]`
+    // unlock entirely, so a "(1M)" label would lie about the actual budget.
+    // (Bare ids alone do NOT deliver 200K — every row's `behavesAs` target is
+    // native-1M in the client catalog — which is why the flag exists.)
+    for (const profile of ["cheap", "cheapest", "balanced"] as const) {
+      expect(ids(profile).some((id) => /\[1m\]/i.test(id))).toBe(false)
+    }
+    expect(ids("balanced")).toEqual(["gpt-5.6-sol", "gpt-6-luna", "grok-4.6"])
   })
 
-  test("cheapest Luna opt-in row follows the catalog gate; default stays bare", () => {
-    // Luna absent → both Luna rows omitted.
+  test("cheapest never decorates Luna regardless of the catalog gate", () => {
+    // Luna absent → omitted.
     setCatalog({ "gpt-5.6-sol": 1_050_000 })
     expect(ids("cheapest")).toEqual(["gpt-5.6-sol"])
-    // Luna sub-1M → the opt-in row degrades to BARE; the default row stays bare,
-    // and there are then two bare Luna rows (no bogus 1M).
+    // Luna sub-1M → still a single bare row (no bogus 1M, no duplicate).
     setCatalog({ "gpt-5.6-sol": 1_050_000, "gpt-6-luna": 500_000 })
-    expect(ids("cheapest")).toEqual(["gpt-5.6-sol", "gpt-6-luna", "gpt-6-luna"])
+    expect(ids("cheapest")).toEqual(["gpt-5.6-sol", "gpt-6-luna"])
     expect(ids("cheapest").every((id) => !/\[1m\]/i.test(id))).toBe(true)
-    // Opt-out forces everything bare.
+    // Opt-out changes nothing for these profiles: every row is `neverOneM`,
+    // so this pins the row declarations (not the flag interaction — the
+    // flag itself is seeded in server-setup and covered there).
     setCatalog(WINDOWS)
     process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1"
-    expect(ids("cheapest")).toEqual(["gpt-5.6-sol", "gpt-6-luna", "gpt-6-luna"])
+    expect(ids("cheapest")).toEqual(["gpt-5.6-sol", "gpt-6-luna"])
     expect(ids("cheapest").every((id) => !/\[1m\]/i.test(id))).toBe(true)
     delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
   })
@@ -224,17 +225,19 @@ describe("selectableModelsInCatalog", () => {
     }
   })
 
-  test("inject writes the bare-default + 1M-opt-in Luna picker for cheapest", async () => {
+  test("inject writes the all-bare pickers for cheap/cheapest/balanced", async () => {
     setCatalog(WINDOWS)
     for (
       const [profile, expected] of [
-        ["cheapest", ["gpt-5.6-sol", "gpt-6-luna", "gpt-6-luna[1m]"]],
-        ["balanced", ["gpt-5.6-sol", "gpt-6-luna[1m]", "grok-4.6"]],
+        ["cheap", ["gpt-5.6-sol", "gpt-6-luna", "gemini-3.8-flash", "grok-4.6"]],
+        ["cheapest", ["gpt-5.6-sol", "gpt-6-luna"]],
+        ["balanced", ["gpt-5.6-sol", "gpt-6-luna", "grok-4.6"]],
       ] as const
     ) {
       const result = await injectModelPickerSettingsFile(settingsPath, profile)
       expect(result.written).toBe(true)
       expect(result.models).toEqual([...expected])
+      expect(result.models.some((id) => /\[1m\]/i.test(id))).toBe(false)
     }
   })
 
@@ -289,24 +292,22 @@ describe("injectModelPickerSettingsFile", () => {
     }
   })
 
-  test("writes a cheap picker whose only [1m] row is Luna", async () => {
+  test("writes an all-bare cheap picker (no 1M rows under the disable flag)", async () => {
     setCatalog(WINDOWS)
     const result = await injectModelPickerSettingsFile(settingsPath, "cheap")
     expect(result.written).toBe(true)
     expect(result.models).toEqual([
       "gpt-5.6-sol",
-      "gpt-6-luna[1m]",
+      "gpt-6-luna",
       "gemini-3.8-flash",
       "grok-4.6",
     ])
-    expect(result.models.filter((id) => /\[1m\]/i.test(id))).toEqual([
-      "gpt-6-luna[1m]",
-    ])
+    expect(result.models.some((id) => /\[1m\]/i.test(id))).toBe(false)
     const settings = await read()
     const options = (settings.modelPicker as { options: Array<Record<string, unknown>> }).options
     expect(options.map((option) => option.model)).toEqual([
       "gpt-5.6-sol",
-      "gpt-6-luna[1m]",
+      "gpt-6-luna",
       "gemini-3.8-flash",
       "grok-4.6",
     ])

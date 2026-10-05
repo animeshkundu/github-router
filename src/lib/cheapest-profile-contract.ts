@@ -9,6 +9,16 @@
  * plans directly and reviews the final plan with the Advisor (advisory)
  * before presenting it.
  *
+ * "max" on the lead is enforced at two layers: the launcher seeds
+ * `CLAUDE_CODE_EFFORT_LEVEL=max` (so the client stamps max instead of its
+ * `high` default on lead requests) and the request preprocessor defaults
+ * bare-Luna lead traffic to max when no explicit effort is present.
+ *
+ * The "200K window" here is enforced client-side by the launcher-seeded
+ * `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` (see `getClaudeCodeEnvVars`), not by
+ * the bare slugs alone: every row maps via `behavesAs` onto a known Claude
+ * model whose client-side profile is native-1M.
+ *
  * This module is deliberately dependency-free, including its own delegation
  * graph literal: each pinned profile owns its graph so tuning one roster
  * cannot silently retune another.

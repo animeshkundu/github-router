@@ -160,7 +160,7 @@ describe("pi --no-peers shrinks the surface", () => {
     const solOnly = catalogOf([
       model("gpt-5.6-sol", {
         context: 500_000,
-        efforts: ["high"],
+        efforts: ["medium", "high"],
         endpoints: ["/responses"],
       }),
     ])

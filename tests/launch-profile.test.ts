@@ -49,6 +49,7 @@ import { CHEAP_PROFILE_DELEGATION_GRAPH } from "../src/lib/cheap-profile-contrac
 import {
   CHEAP_PROFILE_NATIVE_EFFORTS,
   CHEAP_PROFILE_MODELS,
+  CHEAP_PROFILE_LEAD_EFFORT,
 } from "../src/lib/cheap-profile-contract"
 import {
   CHEAPEST_PROFILE_DELEGATION_GRAPH,
@@ -59,6 +60,7 @@ import {
   BALANCED_PROFILE_NATIVE_EFFORTS,
   BALANCED_PROFILE_MODELS,
   BALANCED_PROFILE_DELEGATION_GRAPH,
+  BALANCED_PROFILE_LEAD_EFFORT,
 } from "../src/lib/balanced-profile-contract"
 import { FAST_PROFILE_DELEGATION_GRAPH } from "../src/lib/fast-profile-contract"
 
@@ -238,6 +240,16 @@ describe("cheap-family subagent aliases", () => {
     expect(canonicalizeAliasModel(`${BROWSE_LOW_ALIAS_ID}[1m]`)).toBe(`${LUNA_REAL_MODEL_ID}[1m]`)
     expect(isRetiredFastModelAlias(BROWSE_LOW_ALIAS_ID)).toBe(false)
     expect(isMaxModelAlias(BROWSE_LOW_ALIAS_ID)).toBe(false)
+  })
+  test("pinned lead-effort contracts agree with the de-facto wire behavior", () => {
+    // Cheap's de-facto lead effort is `high` (preprocessor mapping + client
+    // default + docs table all agree); the contract constant records exactly
+    // that after reconciling the stale `medium`. Balanced's `medium` is the
+    // contract the launcher seeds as session effort. Cheapest has no lead
+    // constant — its max comes from the preprocessor's bare-Luna mapping plus
+    // the seeded session effort — so this pins the two that exist.
+    expect(CHEAP_PROFILE_LEAD_EFFORT).toBe("high")
+    expect(BALANCED_PROFILE_LEAD_EFFORT).toBe("medium")
   })
 })
 
@@ -484,7 +496,7 @@ describe("balanced startup prerequisites", () => {
   const balancedCatalog = () => ({
     object: "list" as const,
     data: [
-      model("gpt-5.6-sol", { context: 500_000, prompt: 372_000, efforts: ["high"], endpoints: ["/responses"] }),
+      model("gpt-5.6-sol", { context: 500_000, prompt: 372_000, efforts: ["medium", "high"], endpoints: ["/responses"] }),
       model("gpt-6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
       model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["low", "medium"], endpoints: ["/responses"] }),
     ],
@@ -492,6 +504,29 @@ describe("balanced startup prerequisites", () => {
 
   test("accepts the Sol-led 200K catalog", () => {
     expect(validateBalancedProfilePrerequisites(balancedCatalog() as never)).toEqual({ ok: true, missing: [] })
+  })
+
+  test("requires the contracted medium effort on the Sol lead", () => {
+    // The launcher seeds the session effort to medium, so the gate must
+    // require it: a catalog advertising only `high` would pass launch and
+    // then clamp or reject every lead turn.
+    const catalog = balancedCatalog()
+    catalog.data = catalog.data.map((entry) =>
+      entry.id === "gpt-5.6-sol"
+        ? {
+            ...entry,
+            capabilities: {
+              ...entry.capabilities,
+              supports: { ...entry.capabilities.supports, reasoning_effort: ["high"] },
+            },
+          }
+        : entry,
+    ) as typeof catalog.data
+    const result = validateBalancedProfilePrerequisites(catalog as never)
+    expect(result.ok).toBe(false)
+    expect(result.missing).toContain(
+      'gpt-5.6-sol: does not advertise a "medium" reasoning effort (the contracted lead effort)',
+    )
   })
 
   test("reports every missing role and the rollback command", () => {

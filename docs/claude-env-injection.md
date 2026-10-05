@@ -12,7 +12,7 @@ See [`../CLAUDE.md`](../CLAUDE.md) for project overview.
 
 The injection uses a **presence-based guard** in `getClaudeCodeEnvVars` (`src/lib/server-setup.ts`): if the parent env has set ANY value for these keys (including `0`, `false`, `no`, `off`, or any unrecognized value), the proxy preserves the user's intent — it only injects `1` when the key is unset. The parent env survives `buildLaunchCommand`'s sanitize because none of these keys are in `STRIPPED_PARENT_ENV_KEYS`.
 
-Every `github-router claude` launch also presence-guards `CLAUDE_CODE_AUTO_COMPACT_WINDOW` with a catalog-derived **decimal integer**. It derives the complete client window for each reachable `[1m]` active/tier/custom/gateway model — `floor(max_prompt_tokens * 0.85) + min(max_output_tokens, 20_000) + 13_000` — and exports the minimum. This is not fast-only. `/model` does not mutate the process env, but Claude Code resolves the effective value as `Math.min(locallyRecognizedModelWindow, launchValue)`, so one launch-global minimum remains safe after a switch. Native subagents inherit it; 1M roles use the launch value, true 200K roles remain about 200K, and Grok's bare 500K id is conservatively treated as about 200K because Claude Code has no 500K declaration. The value must be a plain integer: that env path is `parseInt`-based, not the suffix-aware `/config` parser, so `"1m"` would parse to `1`, be floored to the client's 100,000 minimum, and compact a 1M session roughly every 52K tokens. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is deliberately not set. See the "Context-window safety" section of [`default-models.md`](default-models.md).
+Every `github-router claude` launch also presence-guards `CLAUDE_CODE_AUTO_COMPACT_WINDOW` with a catalog-derived **decimal integer**. It derives the complete client window for each reachable `[1m]` active/tier/custom/gateway model — `floor(max_prompt_tokens * 0.85) + min(max_output_tokens, 20_000) + 13_000` — and exports the minimum. This is not fast-only. `/model` does not mutate the process env, but Claude Code resolves the effective value as `Math.min(locallyRecognizedModelWindow, launchValue)`, so one launch-global minimum remains safe after a switch. Native subagents inherit it; 1M roles use the launch value, true 200K roles remain about 200K, and Grok's bare 500K id is conservatively treated as about 200K because Claude Code has no 500K declaration. The value must be a plain integer: that env path is `parseInt`-based, not the suffix-aware `/config` parser, so `"1m"` would parse to `1`, be floored to the client's 100,000 minimum, and compact a 1M session roughly every 52K tokens. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is deliberately not set. Pinned lead effort rides the same presence-guarded pattern: `cheapest` seeds `CLAUDE_CODE_EFFORT_LEVEL=max` and `balanced` seeds `medium` (its `BALANCED_PROFILE_LEAD_EFFORT`), because the client stamps its session-default `high` onto lead requests and the proxy keeps explicit lead effort — without the seed the wire runs high regardless of contract. Subagent, Advisor, and Oracle efforts are proxy-enforced per role and unaffected; background-tier ops inherit the session level, and `/effort` changes report "not applied" while the var is set. See the "Context-window safety" section of [`default-models.md`](default-models.md).
 
 This closes the failure observed on 2026-08-26: a top-level (`isSidechain:false`) Luna turn reached about 919,814 input tokens, then Copilot rejected the `/responses` request because Luna's 1.05M total window exposes only a 922K prompt ceiling after reserving 128K output. The failing call was not a planner/reviewer/scout/critic or `/responses/compact` request. Current live Opus/Sonnet rows expose 1M total / 936K prompt, while Gemini 3.8 exposes 1,048,576 total / 983,040 prompt. The defect class is any locally 1M-accounted model whose provider prompt ceiling lies below Claude Code's uncorrected ~967K trigger; Gemini 3.8 is above that trigger but still participates in the launch-wide minimum.
 
@@ -76,8 +76,18 @@ therefore maps Sol/Luna to `claude-opus-5.5` and Gemini/Grok to
 `claude-sonnet-5`, the closest available client-side prompt/capability/effort
 profiles. The setting changes neither the row label nor the model id sent, and
 the profile request preprocessors remain authoritative for actual upstream
-effort. The `[1m]` marker remains the explicit context-accounting signal; Grok
+effort. The `[1m]` marker remains the explicit context-accounting signal on
+profiles where the 1M unlock is live; Grok
 has no marker and stays conservatively budgeted below its 500K backend.
+**Caveat (verified against Claude Code 2.1.288):** a bare id alone does NOT
+deliver 200K accounting, because every `behavesAs` target above is native-1M in
+the client's catalog — a bare `gpt-6-luna` lead reports `contextWindow:
+1000000`, and neither `CLAUDE_CODE_MAX_CONTEXT_TOKENS` nor
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` moves it. The pinned-200K profiles
+(`cheap`, `cheapest`, `balanced`) therefore additionally seed
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, which gates both the literal `[1m]`
+unlock and the native-1M resolution path; those profiles carry no decorated
+picker rows at all.
 
 The write is additive (`replaceBuiltInOptions: false`) and preserves unrelated
 settings. If the mirrored user settings already define `modelPicker`, that value
@@ -114,7 +124,10 @@ Sol slug. They differ only on the leader: `-m cheap` runs Gemini 3.8 Flash
 `[1m]` leader window and gains the gpt-6-astra peer, still at bare 200K/medium.
 The family accepts the same model set, efforts, and privately allocated Luna
 aliases as Fast (identical roster identities). `-m cheap` never emits the
-`[1m]`-decorated forms anywhere in its wiring; `-m cheap1m` decorates only its
-leader slug. The curated picker marks every cheap/cheap1m row `neverOneM` and
-the agent/mcp wiring produces bare slugs for every non-lead role, so the 200K
+`[1m]`-decorated forms anywhere in its wiring and seeds
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` so the bare ids actually budget 200K;
+`-m cheap1m` decorates only its
+leader slug. The curated picker marks every cheap row `neverOneM` (cheap1m
+keeps the historical Luna opt-in row decoratable)
+and the agent/mcp wiring produces bare slugs for every non-lead role, so the 200K
 roles get no local 1M accounting at all.

@@ -13,8 +13,10 @@ live catalog?
 | `ANTHROPIC_SMALL_FAST_MODEL` | `claude-sonnet-5` | `getClaudeCodeEnvVars` in `src/lib/server-setup.ts` | set in parent shell (presence-guarded); NOT stripped from parent |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `claude-sonnet-5` | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `claude-sonnet-5` (NOT a Haiku slug) | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5.5` (catalog-gated `[1m]`) | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
-| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | catalog-derived decimal integer, every profile | `applyAutoCompactWindow` in `src/lib/server-setup.ts` | parent value wins; omitted when catalog limits are unusable |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` | `claude-opus-5.5` (catalog-gated `[1m]`, except pinned-200K profiles which seed it bare) | tier seeding in `getClaudeCodeEnvVars` | set in parent shell (presence-guarded) |
+| `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | catalog-derived decimal integer; omitted on pinned-200K profiles (no `[1m]` ids reachable) | `applyAutoCompactWindow` in `src/lib/server-setup.ts` | parent value wins; omitted when catalog limits are unusable |
+| `CLAUDE_CODE_DISABLE_1M_CONTEXT` | `1` on `cheap`/`cheapest`/`balanced` only | `getClaudeCodeEnvVars` in `src/lib/server-setup.ts` | set in parent shell (any non-empty value wins; empty string is re-seeded) |
+| `CLAUDE_CODE_EFFORT_LEVEL` | `max` on `cheapest`, `medium` on `balanced` only | `getClaudeCodeEnvVars` in `src/lib/server-setup.ts` | set in parent shell (trimmed; whitespace-only is re-seeded; unrecognized values warn at launch) |
 | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | never set | n/a | deliberately unset; see note below |
 | Design doc | `docs/default-models.md` | | |
 
@@ -44,7 +46,7 @@ live catalog?
   private aliases use the same one-suffix normalization, and the marker is removed
   before Copilot dispatch. The Haiku row is deliberately seeded to `claude-sonnet-5`
   in a standard Opus session to match the small/fast default.
-- **Compaction window.** Every profile injects one derived integer window when unset.
+- **Compaction window.** Every profile with a reachable `[1m]` id injects one derived integer window when unset.
   For each reachable `[1m]` candidate (lead, tier/custom rows, and settings-injected
   picker rows), compute `floor(prompt * 0.85) + min(output, 20_000) + 13_000`; export the
   minimum complete expression. Current Luna/Sol rows bind at `816700`; current live
@@ -53,7 +55,10 @@ live catalog?
   so the minimum remains safe and only slightly conservative after a switch. Native
   subagents inherit it; true 200K models stay about 200K. Grok 4.6 advertises 500K but
   remains bare because the client has no 500K declaration, so it is conservatively
-  treated as about 200K and compacts early. The env value MUST be a decimal integer:
+  treated as about 200K and compacts early. The pinned-200K profiles
+  (`cheap`/`cheapest`/`balanced`) reach no `[1m]` id — picker rows are all bare and
+  tier rows are seeded bare — so the variable is omitted there and the client holds
+  its 200K default under the seeded `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`. The env value MUST be a decimal integer:
   its `parseInt` path turns `"1m"` into `1`, floors to 100,000, and compacts a 1M
   session every ~52K tokens. `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` remains unset.
 

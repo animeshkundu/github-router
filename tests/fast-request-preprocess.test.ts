@@ -365,6 +365,28 @@ describe("fast request preprocessing", () => {
       }
     })
 
+    test("session-stamped max never leaks into cheapest subagent effort", () => {
+      // With CLAUDE_CODE_EFFORT_LEVEL=max seeded, the client stamps `max` on
+      // every request including subagent turns. Subagent-flagged traffic must
+      // still resolve to the fixed per-role mapping — Explore stays high.
+      for (
+        const [model, expected] of [
+          [CHEAPEST_EXPLORE_ALIAS_ID, "high"],
+          ["gpt-6-luna", "max"],
+          ["gpt-5.6-sol", "high"],
+        ] as const
+      ) {
+        const sub = JSON.parse(
+          preprocessFastRequest(
+            body(model, { output_config: { effort: "max" } }),
+            cheapestLaunch,
+            true,
+          ).body,
+        )
+        expect(sub.output_config.effort).toBe(expected)
+      }
+    })
+
     test("shared browse alias resolves Luna at low effort on every pinned non-max launch", () => {
       for (const launch of [fastLaunch, cheapLaunch, cheap1mLaunch, cheapestLaunch, balancedLaunch]) {
         const sub = preprocessFastRequest(body(BROWSE_LOW_ALIAS_ID), launch, true)
@@ -424,6 +446,29 @@ describe("fast request preprocessing", () => {
         ).body,
       )
       expect(sub.output_config.effort).toBe("high")
+    })
+
+    test("session-stamped medium never leaks into balanced subagent effort", () => {
+      // With CLAUDE_CODE_EFFORT_LEVEL=medium seeded, the client stamps
+      // `medium` on every request including subagent turns. Subagent-flagged
+      // traffic must still resolve to the fixed per-role mapping.
+      for (
+        const [model, expected] of [
+          ["gpt-5.6-sol", "high"],
+          ["gpt-6-luna", "max"],
+          [BALANCED_GENERAL_PURPOSE_ALIAS_ID, "max"],
+          [BALANCED_REVIEWER_ALIAS_ID, "high"],
+        ] as const
+      ) {
+        const sub = JSON.parse(
+          preprocessFastRequest(
+            body(model, { output_config: { effort: "medium" } }),
+            balancedLaunch,
+            true,
+          ).body,
+        )
+        expect(sub.output_config.effort).toBe(expected)
+      }
     })
 
     test("balanced GP/reviewer aliases canonicalize bare with alias effort on subagents", () => {

@@ -45,15 +45,14 @@ const MAX_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   { id: MAX_PROFILE_MODELS.opus, label: "Claude Opus 5.5", behavesAs: "claude-opus-5.5" },
 ])
 
-const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
-  // Cheap reuses Standard's rows but pins every one except Luna to the 200K
-  // default window (`neverOneM`), because the profile's whole cost lever is
-  // the reduced context budget on every non-fixed role. Luna is exempt so a
-  // 1M Luna row stays an explicit `/model` opt-in: selecting it gives the
-  // session Luna 1M accounting (effort max) by user choice, while the
-  // default lead rows stay bare 200K. On 200K-lead traffic the request
-  // preprocessor still strips `[1m]` upstream and subagents run on bare
-  // aliases, and the launch compaction bound covers a switch to Luna 1M.
+const CHEAP1M_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
+  // Cheap1m keeps the historical cheap rows: every row except Luna is pinned
+  // to the 200K default window (`neverOneM`), while the Luna row stays a
+  // decorated opt-in (`gpt-6-luna[1m]`) — selecting it gives the session Luna
+  // 1M accounting (effort max) by user choice, consistent with the profile's
+  // 1M Gemini lead. No CLAUDE_CODE_DISABLE_1M_CONTEXT seed on this profile,
+  // so the `[1m]` unlock stays live. The launch compaction bound covers a
+  // switch to it.
   {
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
@@ -80,19 +79,16 @@ const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   },
 ])
 
-const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
-  // Cheapest roster is Luna (lead/GP/reviewer) + Sol (Advisor/Oracle) —
-  // rows are Sol and Luna only. Luna appears TWICE, in this order:
-  //   1. a BARE `gpt-6-luna` row (neverOneM:true) — the DEFAULT. Claude Code
-  //      matches the active model to a picker row after stripping `[1m]`, and
-  //      takes the FIRST match, so a bare row declared first guarantees the
-  //      default lead is bare 200K regardless of the bracketed row below.
-  //   2. a `gpt-6-luna[1m]` row (neverOneM:false) — an explicit /model opt-in.
-  //      Decorated only when the live catalog advertises >=1M (bare otherwise),
-  //      so a sub-1M catalog cannot surface a bogus 1M row.
-  // The upstream `[1m]` bracket is stripped by `resolveModel` at request time;
-  // it exists solely to unlock Claude Code's 1M local accounting when a user
-  // deliberately selects the opt-in row.
+const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
+  // Cheap pins every row to the 200K default window (`neverOneM`), because
+  // the profile's whole cost lever is the reduced context budget on every
+  // non-fixed role. There is deliberately NO decorated Luna opt-in row here:
+  // these launches seed CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (see server-setup),
+  // which gates the client's `[1m]` unlock entirely — a row labelled "(1M)"
+  // that still budgets 200K would be a lie. Luna at a real 1M stays available
+  // via `-m fast` / `-m cheap1m`. On 200K-lead traffic the request
+  // preprocessor still strips `[1m]` upstream and subagents run on bare
+  // aliases.
   {
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
@@ -106,19 +102,54 @@ const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
     neverOneM: true,
   },
   {
-    id: "gpt-6-luna",
-    label: "GPT-6 Luna (1M)",
+    id: "gemini-3.8-flash",
+    label: "Gemini 3.8 Flash",
+    behavesAs: "claude-sonnet-5",
+    neverOneM: true,
+  },
+  {
+    id: "grok-4.6",
+    label: "Grok 4.6",
+    behavesAs: "claude-sonnet-5",
+    neverOneM: true,
+  },
+])
+
+const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
+  // Cheapest roster is Luna (lead/GP/reviewer) + Sol (Advisor/Oracle) —
+  // rows are Sol and Luna only, ALL bare 200K (`neverOneM`). There is
+  // deliberately no decorated `gpt-6-luna[1m]` opt-in row: these launches
+  // seed CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (see server-setup), which gates the
+  // client's `[1m]` unlock entirely — a row labelled "(1M)" that still
+  // budgets 200K would be a lie. Verified against Claude Code 2.1.288: with
+  // the flag, the bare lead reports contextWindow 200000 while every
+  // `behavesAs` target in the client's catalog is native-1M, so the flag is
+  // the only lever that delivers the 200K default. Luna at a real 1M stays
+  // available via `-m fast`.
+  // The upstream `[1m]` bracket (when present on other profiles' rows) is
+  // stripped by `resolveModel` at request time; it exists solely to unlock
+  // Claude Code's 1M local accounting when a user deliberately selects the
+  // opt-in row — which cheapest no longer offers.
+  {
+    id: "gpt-5.6-sol",
+    label: "GPT-5.6 Sol",
     behavesAs: "claude-opus-5.5",
-    neverOneM: false,
+    neverOneM: true,
+  },
+  {
+    id: "gpt-6-luna",
+    label: "GPT-6 Luna",
+    behavesAs: "claude-opus-5.5",
+    neverOneM: true,
   },
 ])
 
 const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
-  // Balanced reuses cheap's 200K pinning (`neverOneM`) with Sol leading:
-  // rows are Sol (lead/reviewer), Luna (Explore/General-Purpose), and
-  // Grok 4.6 (Oracle). Luna is exempt from the pin so
-  // its 1M row stays an explicit opt-in; the default lead rows stay bare
-  // 200K (bare lead strip + bare subagent aliases still apply).
+  // Balanced pins every row to the 200K default window (`neverOneM`) with Sol
+  // leading: rows are Sol (lead/reviewer), Luna (Explore/General-Purpose), and
+  // Grok 4.6 (Oracle). There is deliberately no decorated opt-in row: these
+  // launches seed CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (see server-setup), which
+  // gates the client's `[1m]` unlock entirely.
   {
     id: "gpt-5.6-sol",
     label: "GPT-5.6 Sol",
@@ -129,7 +160,7 @@ const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze
     id: "gpt-6-luna",
     label: "GPT-6 Luna",
     behavesAs: "claude-opus-5.5",
-    neverOneM: false,
+    neverOneM: true,
   },
   {
     id: "grok-4.6",
@@ -162,13 +193,15 @@ export function selectableModelsInCatalog(
   const declared =
     profile === "max"
       ? MAX_PICKER_MODELS
-      : profile === "cheap" || profile === "cheap1m"
+      : profile === "cheap"
         ? CHEAP_PICKER_MODELS
-        : profile === "cheapest"
-          ? CHEAPEST_PICKER_MODELS
-          : profile === "balanced"
-            ? BALANCED_PICKER_MODELS
-            : STANDARD_PICKER_MODELS
+        : profile === "cheap1m"
+          ? CHEAP1M_PICKER_MODELS
+          : profile === "cheapest"
+            ? CHEAPEST_PICKER_MODELS
+            : profile === "balanced"
+              ? BALANCED_PICKER_MODELS
+              : STANDARD_PICKER_MODELS
   return declared
     .filter((entry) => present.has(entry.id))
     .map((entry) => ({
