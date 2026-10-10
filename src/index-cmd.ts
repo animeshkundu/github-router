@@ -2,14 +2,16 @@
  * `github-router index` — build the semantic code-search index in the
  * foreground, without starting the proxy (`start`/`claude`/`codex`).
  *
- * Phase 4a: drives the CURRENT colbert backend (foreground `init` with
- * progress). Phase 5: `auto` (default) prefers the persistent service
- * backend — foreground all-core encode with CUDA when a GPU is visible —
- * with TRUE DELTA indexing (only changed files are re-embedded); falls
- * back to colbert when the service is not actionable. `--backend` forces
- * `service` or `colbert`. The explicit invocation IS the opt-in — `--search` is not
- * required — but `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1` still hard-disables
- * (building an index that can never be served is pointless).
+ * Default backend is colgrep (CLI-per-invocation `init` with progress):
+ * no persistent process, no memory accumulation across encodes, and TRUE
+ * DELTA indexing (only changed files are re-embedded) via per-file content
+ * hashes. Foreground encodes run at full CPU parallelism (all cores, capped
+ * at colgrep's max of 16 sessions). `--backend=service` opts into the
+ * persistent `next-plaid-api` server instead (foreground encode capped at 8
+ * ONNX sessions, CUDA when a GPU is visible). The explicit invocation IS the
+ * opt-in — `--search` is not required — but
+ * `GH_ROUTER_DISABLE_SEMANTIC_SEARCH=1` still hard-disables (building an
+ * index that can never be served is pointless).
  *
  * Exit codes: 0 = fresh or successfully built; 1 = provision/build
  * failure; 2 = usage error (bad workspace, hard-disabled).
@@ -17,10 +19,12 @@
 
 import { defineCommand } from "citty";
 import consola from "consola";
+import { existsSync } from "node:fs";
 import * as os from "node:os";
 import process from "node:process";
 
 import { validateWorkspace } from "~/lib/code-search";
+import { ServerCrashedError } from "~/lib/colbert/service";
 import {
   colbertProjectDir,
   completedIndexOnDisk,
@@ -30,14 +34,19 @@ import {
   validateIndexIntegrity,
 } from "~/lib/colbert/index-store";
 import { registerColbertExitHandlers } from "~/lib/colbert/lifecycle";
-import { provisionColbert, provisionNextPlaidServer } from "~/lib/colbert/provision";
+import {
+  canonicalColbertModelDir,
+  colbertOrtDylibPath,
+  colgrepBinaryPath,
+  provisionColbert,
+  provisionNextPlaidServer,
+} from "~/lib/colbert/provision";
 import { kickBackgroundInit, waitForInit } from "~/lib/colbert/runner";
 import {
   ensureServerForeground,
   populateWorkspace,
   selectServerVariant,
   semanticBackend,
-  serviceBackendProvisionable,
   serviceFreshness,
   stopServiceServer,
 } from "~/lib/colbert/service-backend";
@@ -148,16 +157,16 @@ function resolveIndexBackend(requested: unknown): { backend: IndexBackend; expli
   if (raw !== "auto" && raw !== "service" && raw !== "colgrep") {
     return { error: `index: --backend must be auto, service, or colgrep (got ${String(requested)})` };
   }
-  // Explicit opt-in (flag or env) always means service.
+  // Explicit service request (flag or env) still means service (persistent
+  // server, CUDA when a GPU is visible). Everything else — auto AND
+  // colgrep — is colgrep: CLI-per-invocation, no persistent process, no
+  // memory accumulation across encodes, true delta indexing via per-file
+  // content hashes. The service backend's ONNX Runtime arena leak makes it
+  // unsuitable as the default for large repos.
   if (raw === "service" || (raw === "auto" && semanticBackend() === "service")) {
     return { backend: "service", explicit: true };
   }
-  if (raw === "colgrep") return { backend: "colgrep", explicit: false };
-  // Auto: service when provisionable (binary on disk or promoted
-  // download + model present), else the colgrep fallback.
-  return serviceBackendProvisionable()
-    ? { backend: "service", explicit: false }
-    : { backend: "colgrep", explicit: false };
+  return { backend: "colgrep", explicit: raw === "colgrep" };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -190,7 +199,7 @@ export const indexCmd = defineCommand({
     },
     backend: {
       type: "string",
-      description: "Index backend: auto (service with CUDA/CPU autodetect, colgrep fallback), service, or colgrep (default auto)",
+      description: "Index backend: auto (colgrep, full CPU parallelism), service (persistent server with CUDA/CPU autodetect), or colgrep (default auto)",
     },
     full: {
       type: "boolean",
@@ -230,7 +239,7 @@ export const indexCmd = defineCommand({
       process.exitCode = 2;
       return;
     }
-    const { backend, explicit: backendExplicit } = backendSelection;
+    const { backend } = backendSelection;
 
     if (args.status === true) {
       if (backend === "service") {
@@ -257,13 +266,15 @@ export const indexCmd = defineCommand({
         ? Date.now() + timeoutMin * 60_000
         : Number.POSITIVE_INFINITY;
 
-    // Foreground dedicated build: use all cores unless the operator capped
-    // explicitly. Background auto-indexing stays at 25% (the colbert
-    // default); an explicit `index` invocation expects speed.
+    // Foreground dedicated build: use all cores (capped at colgrep's max
+    // of 16 sessions) unless the operator capped explicitly. Background
+    // auto-indexing stays at 25% (the colbert default); an explicit `index`
+    // invocation expects maximum speed.
     if (process.env.GH_ROUTER_COLBERT_PARALLEL === undefined) {
-      process.env.GH_ROUTER_COLBERT_PARALLEL = String(cpuCount());
+      const sessions = Math.max(1, Math.min(cpuCount(), 16));
+      process.env.GH_ROUTER_COLBERT_PARALLEL = String(sessions);
       consola.debug(
-        `index: parallelism defaulted to ${cpuCount()} sessions (override with GH_ROUTER_COLBERT_PARALLEL)`,
+        `index: parallelism defaulted to ${sessions} sessions (override with GH_ROUTER_COLBERT_PARALLEL)`,
       );
     }
 
@@ -287,47 +298,28 @@ export const indexCmd = defineCommand({
       return;
     }
 
-    // Auto resolves the backend AFTER provisioning (the model dir must
-    // exist before provisionability can report actionable). An
-    // explicit service request that cannot provision the server binary
-    // fails closed; auto silently falls back to colgrep.
+    // The service path is only reachable via explicit request (flag or
+    // env), so it fails closed: an unavailable server binary is an error,
+    // never a silent fallback.
     if (backend === "service") {
       let variant: Awaited<ReturnType<typeof selectServerVariant>> | undefined;
       try {
         variant = await selectServerVariant();
         const server = await provisionNextPlaidServer(variant);
-        if (server.path) {
-          consola.info(`index: service backend ready (${variant}: ${server.path})`);
-        } else if (backendExplicit) {
+        if (!server.path) {
           consola.error(
             `index: service binary unavailable (${server.reason ?? "unknown"}) — retry with --backend=colgrep`,
           );
           process.exitCode = 1;
           return;
-        } else {
-          consola.warn(
-            `index: service binary unavailable (${server.reason ?? "unknown"}) — falling back to colgrep`,
-          );
-    if (args.full === true || args.dryRun === true) {
-      consola.warn(
-        "index: --full/--dry-run apply to the service backend only; ignored for colgrep",
-      );
-    }
-
-    await runColbertIndex(workspace, deadlineMs, timeoutMin);
-          return;
         }
+        consola.info(`index: service backend ready (${variant}: ${server.path})`);
       } catch (err) {
-        if (backendExplicit) {
-          consola.error("index: service provision threw:", err);
-          process.exitCode = 1;
-          return;
-        }
-        consola.warn("index: service provision skipped:", err);
-        await runColbertIndex(workspace, deadlineMs, timeoutMin);
+        consola.error("index: service provision threw:", err);
+        process.exitCode = 1;
         return;
       }
-      // Foreground service build (all-core encode; CUDA when detected).
+      // Foreground service build (capped encode parallelism; CUDA when detected).
       if (variant === undefined) {
         consola.error("index: no service variant resolved");
         process.exitCode = 1;
@@ -343,9 +335,45 @@ export const indexCmd = defineCommand({
       return;
     }
 
+    if (args.full === true || args.dryRun === true) {
+      consola.warn(
+        "index: --full/--dry-run apply to the service backend only; ignored for colgrep",
+      );
+    }
+
     await runColbertIndex(workspace, deadlineMs, timeoutMin);
   },
 });
+
+/**
+ * Print a server crash with the captured stderr tail and actionable
+ * mitigations. Replaces the bare `fetch failed / ECONNREFUSED` the client
+ * used to surface when the `next-plaid-api` child died mid-encode.
+ */
+function printServerCrash(err: ServerCrashedError): void {
+  const where =
+    err.exitCode !== null && err.exitCode !== undefined
+      ? ` (exit code ${err.exitCode}${err.signal ? ` / ${err.signal}` : ""})`
+      : err.signal
+        ? ` (signal ${err.signal})`
+        : "";
+  consola.error(`index: service server crashed during encode${where}`);
+  if (err.detail) consola.error(`Context: ${err.detail}`);
+  const tail = err.stderrTail.trim().slice(-1500);
+  if (tail.length > 0) {
+    consola.error("Server stderr (last lines):");
+    for (const line of tail.split("\n").slice(-30)) {
+      consola.error(`  ${line}`);
+    }
+  } else {
+    consola.error("Server stderr: (empty — the process died without logging)");
+  }
+  consola.info("Suggestions:");
+  consola.info("  • Reduce parallelism: GH_ROUTER_NP_PARALLEL=4 github-router index --backend=service");
+  consola.info("  • Use the colgrep backend: github-router index --backend=colgrep");
+  consola.info("  • On Windows: increase the page file (System → Advanced → Virtual Memory)");
+  consola.info("  • For full logs, run the server manually with RUST_LOG=info");
+}
 
 async function runServiceIndex(
   workspace: string,
@@ -426,6 +454,14 @@ async function runServiceIndex(
       consola.error(
         `index: timed out after ${opts.timeoutMin}min — retry or raise --timeout`,
       );
+    } else if (
+      err instanceof ServerCrashedError ||
+      (err as { name?: unknown })?.name === "ServerCrashedError"
+    ) {
+      // Name fallback: tsdown code-splitting could (in theory) duplicate
+      // the class across chunks, breaking instanceof while the shape stays
+      // identical. Either way the formatted output is correct.
+      printServerCrash(err as ServerCrashedError);
     } else {
       consola.error("index: service build failed:", err);
     }
@@ -454,10 +490,33 @@ async function runColbertIndex(
     );
   }
 
+  // Pre-flight: surface missing artifacts BEFORE kicking a build that
+  // would fail in 5s with a bare `init error`. The background init logs
+  // only the failure class, so a missing binary/ORT/model here would
+  // otherwise look like a colgrep bug.
+  const colgrepChecks = [
+    { name: "colgrep binary", path: colgrepBinaryPath() },
+    { name: "ORT runtime", path: colbertOrtDylibPath() },
+    { name: "model dir", path: canonicalColbertModelDir() },
+  ];
+  const missing = colgrepChecks.filter((c) => !existsSync(c.path));
+  if (missing.length > 0) {
+    for (const m of missing) {
+      consola.error(`index: missing ${m.name}: ${m.path}`);
+    }
+    consola.error(
+      "index: provisioning incomplete — re-run provisioning, then retry. " +
+        "On Windows, also verify vc_redist.x64 is installed and the AV has not quarantined colgrep.exe.",
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   consola.info(
     `Building semantic index for ${workspace} (freshness: ${first.verdict})…`,
   );
-  kickBackgroundInit(workspace);
+  // Foreground: full CPU parallelism for maximum encode speed.
+  kickBackgroundInit(workspace, { foreground: true });
   const startMs = Date.now();
 
   for (;;) {
@@ -483,9 +542,19 @@ async function runColbertIndex(
       v.verdict === "crashed" ||
       v.verdict === "corrupt"
     ) {
+      const meta = await readColbertMeta(workspace).catch(() => null);
+      const cls = meta?.failureClass ? ` (class=${meta.failureClass})` : "";
+      const attempts =
+        typeof meta?.failedAttempts === "number" ? ` after ${meta.failedAttempts} attempt(s)` : "";
       consola.error(
-        `index: build ended ${v.verdict} — lexical code search still works; see the proxy error log for the failure class`,
+        `index: build ended ${v.verdict}${cls}${attempts} — lexical code search still works; see ${PATHS.ERROR_LOG_PATH} for details`,
       );
+      if (meta?.failureClass === "launch") {
+        consola.error(
+          `index: launch failure — verify colgrep binary runs (${colgrepBinaryPath()} --version), ` +
+            `ORT runtime loads (${colbertOrtDylibPath()}), and model dir exists (${canonicalColbertModelDir()})`,
+        );
+      }
       process.exitCode = 1;
       return;
     }
@@ -499,6 +568,6 @@ async function runColbertIndex(
     );
     await sleep(POLL_MS);
     // Re-kick if nothing owns the build (crash between kick and track).
-    kickBackgroundInit(workspace);
+    kickBackgroundInit(workspace, { foreground: true });
   }
 }

@@ -122,8 +122,14 @@ runs as long as it needs; a hung one dies fast. A generous absolute
 FULL thread count, so a background index build saturates the box — the
 opposite of what a background build should do during a long interactive
 session (the proxy even holds a keep-awake assertion so those sessions run
-unattended). Before each `init` the runner caps it at **25% of threads with
-a floor of 2** (16 threads → 4 sessions; a 4-thread box → 2, not 1).
+unattended). Before each background `init` the runner caps it at **25% of
+threads with a floor of 2** (16 threads → 4 sessions; a 4-thread box → 2,
+not 1). An explicit `github-router index` is a **foreground** build and
+gets **all threads, capped at colgrep's max of 16 sessions** — maximum
+speed while the operator watches. `github-router index` defaults to the
+colgrep backend for this reason (no persistent process, no memory
+accumulation across encodes); `--backend=service` opts into the
+persistent server instead.
 
 `--parallel` exists only on colgrep's `settings` subcommand — there is no
 per-run flag and no env var — and it writes `parallel_sessions` into
@@ -341,9 +347,35 @@ cpu fallback → router-owned dir → PATH (cpu only). Detection is
 | `GH_ROUTER_NEXTPLAID_BIN=<path>` | Use this server binary as-is (skips provisioning). |
 | `GH_ROUTER_NEXTPLAID_VARIANT=cpu\|cuda` | Force a variant (skips GPU probing; test/operator seam). |
 | `GH_ROUTER_NEXTPLAID_CUDA=1` | Pass `--cuda` to an explicit binary (provisioned cuda binaries get it automatically; never passed without `--model`). |
-| `GH_ROUTER_NP_PARALLEL=<n>` | ONNX sessions (default: 25% of CPUs; encode sessions duplicate model state). |
+| `GH_ROUTER_NP_PARALLEL=<n>` | ONNX sessions (default: 25% of CPUs background, min(all cores, 8) foreground; encode sessions duplicate model state). |
+| `GH_ROUTER_SERVICE_HEALTH_TTL_MS=<n>` | Health-check cache TTL for the query path (default 30000; 0 = always re-check). |
+| `GH_ROUTER_SERVICE_MAX_RSS_MB=<n>` | Server RSS threshold for proactive restart (default 4096). |
+| `GH_ROUTER_SERVICE_MAX_COMMIT_MB=<n>` | Server commit-charge threshold for proactive restart, Windows (default 6144). |
+| `GH_ROUTER_SERVICE_MAX_QUERIES=<n>` | Queries per server lifetime before transparent recycle (default 500; 0 = never). |
+| `GH_ROUTER_SERVICE_MAX_QUERY_MS=<n>` | Slow-search warn threshold (default 5000). |
 
 Minimum NVIDIA driver for the cuda variant: 570+ (CUDA 12.8).
+
+### Query-time stability (service backend)
+
+The persistent server outlives any single query, and ONNX Runtime arenas
+grow per encode without fully returning pages to the OS — so the query
+path recycles the server proactively instead of waiting for an OOM:
+
+- **Pre-flight health**: every search first passes a cached (30s TTL)
+  health check and degrades to colgrep/lexical when the server is dead or
+  wedged, instead of timing out mid-search.
+- **Memory-pressure restart**: the singleton is sampled (RSS everywhere,
+  commit charge on Windows; at most once per 60s) and restarted when it
+  exceeds `GH_ROUTER_SERVICE_MAX_RSS_MB` /
+  `GH_ROUTER_SERVICE_MAX_COMMIT_MB`. The on-disk PLAID index survives the
+  restart (mmap), so the recycle is transparent to callers.
+- **Query-budget recycle**: the server is restarted every
+  `GH_ROUTER_SERVICE_MAX_QUERIES` searches (default 500; 0 disables),
+  bounding arena growth across long proxy sessions.
+- **Accounting**: restart counts/reasons are tracked process-wide
+  (`recordServerRestart`/`getServerStats` in `service.ts`); slow searches
+  warn above `GH_ROUTER_SERVICE_MAX_QUERY_MS`.
 
 ### Promotion (supply-chain)
 

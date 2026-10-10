@@ -46,7 +46,10 @@ import {
 import { nextPlaidServerPromoted, MODEL_REVISION, type NextPlaidServerVariant } from "./manifest"
 import {
   indexNameForWorkspace,
+  isServerMemoryOverLimit,
+  recordServerRestart,
   serverParallelSessions,
+  ServerCrashedError,
   ServiceBusyError,
   startManagedServer,
   type ManagedServer,
@@ -172,21 +175,87 @@ export function __resetServiceSingletonForTests(): void {
   _starting = null
 }
 
+/**
+ * Bounded batch-queue env for the managed server. Only sets a var when the
+ * operator has NOT set it explicitly (explicit wins). Foreground `index`
+ * gets tighter bounds than a background server: a 12K-file encode with
+ * upstream defaults (300 docs/batch, 256-slot encode queue) can grow
+ * queues faster than the merge worker drains them.
+ */
+export function serviceTuningEnv(foreground: boolean): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {}
+  const set = (key: string, fg: string, bg: string): void => {
+    if (process.env[key] !== undefined) return
+    out[key] = foreground ? fg : bg
+  }
+  set("MAX_BATCH_DOCUMENTS", "50", "100")
+  set("BATCH_CHANNEL_SIZE", "20", "50")
+  set("ENCODE_BATCH_CHANNEL_SIZE", "32", "64")
+  set("MAX_QUEUED_TASKS_PER_INDEX", "5", "10")
+  return out
+}
+
+/**
+ * Queries served since the last server (re)start. At the budget the server
+ * is proactively recycled: ONNX Runtime arenas grow per encode and never
+ * fully return pages to the OS, so a bounded lifetime keeps commit charge
+ * flat across long proxy sessions. `0` disables the budget.
+ */
+let _serviceQueryCount = 0
+
+/** Test-only: reset the query counter. */
+export function __resetServiceQueryCountForTests(): void {
+  _serviceQueryCount = 0
+}
+
+/** Max queries per server lifetime (`0` = never recycle). */
+export function serviceMaxQueries(): number {
+  const raw = Number(process.env.GH_ROUTER_SERVICE_MAX_QUERIES)
+  if (raw === 0) return Number.POSITIVE_INFINITY
+  if (Number.isSafeInteger(raw) && raw > 0) return raw
+  return 500
+}
+
+/** Slow-query warn threshold (ms). */
+function serviceMaxQueryMs(): number {
+  const raw = Number(process.env.GH_ROUTER_SERVICE_MAX_QUERY_MS)
+  if (Number.isSafeInteger(raw) && raw > 0) return raw
+  return 5000
+}
+
 /** Start (once) and health-check the server; null when unavailable. */
 export async function ensureServer(opts: { foreground?: boolean } = {}): Promise<ManagedServer | null> {
   if (_server) {
+    let healthy = false
     try {
-      const h = await _server.client.health()
-      if (h.ok) return _server
+      healthy = (await _server.client.health()).ok
     } catch {
-      // fall through to restart
+      // stays false — fall through to stop + fresh start below
     }
-    try {
-      await _server.stop()
-    } catch {
-      // best effort
+    if (healthy) {
+      // Health passed but memory may still be leaking underneath (the
+      // ONNX arena failure mode): recycle proactively. The sample is
+      // cached 60s, so the hot query path rarely pays for it.
+      if (await isServerMemoryOverLimit(_server)) {
+        consola.warn("service-backend: memory pressure — restarting server")
+        recordServerRestart("memory")
+        try {
+          await _server.stop()
+        } catch {
+          // best effort
+        }
+        _server = null
+      } else {
+        return _server
+      }
+    } else {
+      try {
+        await _server.stop()
+      } catch {
+        // best effort
+      }
+      _server = null
     }
-    _server = null
   }
   if (_starting) return _starting.catch(() => null)
   const resolved = await resolveServerBinaryWithVariant(await selectServerVariant())
@@ -202,6 +271,13 @@ export async function ensureServer(opts: { foreground?: boolean } = {}): Promise
       env: {
         ORT_DYLIB_PATH: colbertOrtDylibPath(),
         PATH: `${ortDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        // Bound server-side batch queues for long foreground encodes.
+        // Upstream defaults (300 docs / 100-slot channels) let queues grow
+        // unbounded on 10K-file repos, which surfaces as RADAR_PRE_LEAK_64
+        // on Windows and eventual OOM. Smaller batches = lower peak memory
+        // at the cost of more merge rounds (throughput-neutral on CPU).
+        // Explicit GH_ROUTER_* overrides win (operator/test seam).
+        ...serviceTuningEnv(opts.foreground === true),
       },
       startupTimeoutMs: 120_000,
     })
@@ -644,6 +720,15 @@ export async function populateWorkspace(
   const timeout = setTimeout(() => ac.abort(), 30 * 60 * 1000)
   timeout.unref?.()
   const signal = opts.signal ? anySignal([opts.signal, ac.signal]) : ac.signal
+  const populateStartMs = Date.now()
+  let detachServerExit: (() => void) | null = null
+  let clearHeartbeat: (() => void) | null = null
+  // Crash context for ServerCrashedError. Assigned once the encode-phase
+  // counters exist; defaults to elapsed-only so early throws (ensureIndex)
+  // still carry timing. A closure (not direct counter reads) avoids TDZ
+  // issues: throwIfServerCrashed is defined before the counters are.
+  let crashDetail: () => string = () =>
+    `elapsed=${Math.round((Date.now() - populateStartMs) / 1000)}s`
   try {
     const files = await enumerateSourceFiles(rgPath, canonical, signal)
     const parseable = files.filter((f) => getLanguageKeyForPath(f) !== null)
@@ -700,7 +785,89 @@ export async function populateWorkspace(
 
     const svc = await ensureServer(opts.foreground === true ? { foreground: true } : undefined)
     if (!svc) throw new Error("service server unavailable")
-    await svc.client.ensureIndex(index, { nbits: 4 })
+
+    // Crash monitor: the server passed health at startup, but a 10K-file
+    // encode runs for minutes — long enough to OOM / hit Windows commit
+    // limits / trip RADAR_PRE_LEAK_64. Without this, a dead server
+    // surfaces as bare `fetch failed / ECONNREFUSED` with zero context.
+    let serverExit: { code: number | null; signal: string | null } | null = null
+    const onServerExit = (code: number | null, signal: string | null): void => {
+      serverExit ??= { code, signal }
+    }
+    svc.process?.once("exit", onServerExit)
+    detachServerExit = () => {
+      try {
+        svc.process?.off("exit", onServerExit)
+      } catch {
+        // best effort — listener cleanup must never throw
+      }
+    }
+    const serverStderr = (): string => {
+      try {
+        return svc.stderrTail?.() ?? ""
+      } catch {
+        return ""
+      }
+    }
+    const throwIfServerCrashed = (): void => {
+      if (serverExit) {
+        throw new ServerCrashedError({
+          exitCode: serverExit.code,
+          signal: serverExit.signal ?? undefined,
+          stderrTail: serverStderr(),
+          detail: crashDetail(),
+        })
+      }
+      if (svc.process && svc.process.exitCode !== null && svc.process.exitCode !== undefined) {
+        throw new ServerCrashedError({
+          exitCode: svc.process.exitCode,
+          signal: svc.process.signalCode ?? undefined,
+          stderrTail: serverStderr(),
+          detail: crashDetail(),
+        })
+      }
+    }
+    let lastContactAt = Date.now()
+    /**
+     * Run a server call; convert a dead server into ServerCrashedError.
+     *
+     * Race note: a loopback fetch fails in milliseconds while Node delivers
+     * the child's `exit` event / sets `exitCode` afterwards — so a bare
+     * re-check on catch LOSES to the fetch error every time (observed live:
+     * heartbeats passing, then `Unable to connect` from the next flush).
+     * On connection-shaped failures we therefore wait 1s for the exit
+     * bookkeeping to catch up, then confirm with a direct health probe: a
+     * live server means transient blip (rethrow original), a failing one
+     * means dead/wedged (formatted crash error, even when no exit was
+     * ever observed).
+     */
+    const guarded = async <T>(fn: () => Promise<T>): Promise<T> => {
+      throwIfServerCrashed()
+      try {
+        const out = await fn()
+        lastContactAt = Date.now()
+        return out
+      } catch (err) {
+        if (isConnectionError(err)) {
+          await delay(1000)
+          // Throws when the exit has now been observed.
+          throwIfServerCrashed()
+          const alive = await svc.client.health().then((h) => h.ok).catch(() => false)
+          if (!alive) {
+            throw new ServerCrashedError({
+              exitCode: svc.process?.exitCode ?? null,
+              signal: svc.process?.signalCode ?? undefined,
+              stderrTail: serverStderr(),
+              detail: `${crashDetail()} (exit not observed; server not responding)`,
+            })
+          }
+        } else {
+          throwIfServerCrashed()
+        }
+        throw err
+      }
+    }
+    await guarded(() => svc.client.ensureIndex(index, { nbits: 4 }))
 
     // Anchor: a hashes-match verdict is only trustworthy when the server
     // actually holds this index. A wiped server data dir with a surviving
@@ -774,27 +941,34 @@ export async function populateWorkspace(
     // unknown counts (hand-edited sidecars only — hashes and units are
     // always written together) are SKIPPED: stale units beat lost units.
     if (!hasBaseline) {
-      const existing = await svc.client
-        .health()
-        .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
-        .catch(() => undefined)
+      const existing = await guarded(() =>
+        svc.client
+          .health()
+          .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
+          .catch(() => undefined),
+      )
       if ((existing ?? 0) > 0) {
-        const dropped = await svc.client.dropIndex(index).catch(() => false)
+        const dropped = await guarded(() => svc.client.dropIndex(index)).catch(() => false)
         if (dropped) {
-          await svc.client.ensureIndex(index, { nbits: 4 })
+          await guarded(() => svc.client.ensureIndex(index, { nbits: 4 }))
         } else {
           consola.warn(`service-backend: index drop unsupported, per-file reset for ${canonical}`)
           for (const rel of changed) {
             if (signal.aborted) throw new Error("populate aborted")
-            await svc.client.deleteDocuments(index, "file = ?", [rel])
+            await guarded(() => svc.client.deleteDocuments(index, "file = ?", [rel]))
           }
-          await waitForIndexSettled(
-            svc.client,
-            index,
-            false,
-            { minWaitMs: 5000, ...(opts.settle ?? {}) },
-            signal,
-          )
+          try {
+            await waitForIndexSettled(
+              svc.client,
+              index,
+              false,
+              { minWaitMs: 5000, ...(opts.settle ?? {}) },
+              signal,
+            )
+          } catch (err) {
+            throwIfServerCrashed()
+            throw err
+          }
         }
       }
       if (signal.aborted) throw new Error("populate aborted")
@@ -802,24 +976,31 @@ export async function populateWorkspace(
       const deleteTargets = [...changed, ...removed].filter((rel) => (prevUnits[rel] ?? 0) > 0)
       const expectedDrop = deleteTargets.reduce((sum, rel) => sum + (prevUnits[rel] ?? 0), 0)
       if (deleteTargets.length > 0) {
-        const before = await svc.client
-          .health()
-          .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
-          .catch(() => undefined)
+        const before = await guarded(() =>
+          svc.client
+            .health()
+            .then((h) => h.indices.find((i) => i.name === index)?.num_documents)
+            .catch(() => undefined),
+        )
         for (const rel of deleteTargets) {
           if (signal.aborted) throw new Error("populate aborted")
-          await svc.client.deleteDocuments(index, "file = ?", [rel])
+          await guarded(() => svc.client.deleteDocuments(index, "file = ?", [rel]))
         }
         // Fail closed on timeout (no sidecar write below): a late delete
         // merging after the updates would wipe the new units.
         if (expectedDrop > 0 && before !== undefined) {
-          await waitForDocCountDrop(
-            svc.client,
-            index,
-            before - expectedDrop,
-            { timeoutMs: 120_000, ...(opts.settle ?? {}) },
-            signal,
-          )
+          try {
+            await waitForDocCountDrop(
+              svc.client,
+              index,
+              before - expectedDrop,
+              { timeoutMs: 120_000, ...(opts.settle ?? {}) },
+              signal,
+            )
+          } catch (err) {
+            throwIfServerCrashed()
+            throw err
+          }
         }
         if (signal.aborted) throw new Error("populate aborted")
       }
@@ -836,17 +1017,55 @@ export async function populateWorkspace(
       opts.foreground === true ? Math.max(4, Math.min(16, cpus)) : POPULATE_PARSE_CONCURRENCY
     let units: Array<{ text: string; metadata: Record<string, unknown> }> = []
     let unitTotal = 0
+    let filesParsed = 0
     const fileUnitCounts: Record<string, number> = {}
+    crashDetail = () =>
+      `units sent=${unitTotal} files parsed=${filesParsed}/${changed.length} ` +
+      `elapsed=${Math.round((Date.now() - populateStartMs) / 1000)}s ` +
+      `last contact ${Math.round((Date.now() - lastContactAt) / 1000)}s ago`
+    // Heartbeat during the extract phase: tree-sitter parsing of 10K files
+    // takes minutes and logs NOTHING (progress fires only on batch flush),
+    // so a server that died early went unnoticed until the next flush —
+    // the ~5-minute silent gap in every crash log. The tick re-checks the
+    // exit listener (synchronous, no polling needed) and aborts parsing
+    // immediately so the in-flight guarded call throws ServerCrashedError
+    // instead of chewing through thousands more files first. Foreground
+    // only logs; background populates stay quiet.
+    const heartbeat = setInterval(() => {
+      try {
+        throwIfServerCrashed()
+      } catch {
+        ac.abort()
+        return
+      }
+      if (opts.foreground === true) {
+        consola.info(
+          `… encode heartbeat: ${filesParsed}/${changed.length} files parsed, ${unitTotal} units sent`,
+        )
+      }
+    }, 30_000)
+    heartbeat.unref?.()
+    clearHeartbeat = () => clearInterval(heartbeat)
+    let flushCount = 0
     const flush = async (): Promise<void> => {
       if (units.length === 0) return
       const batch = units
       units = []
-      await svc.client.updateDocuments(
-        index,
-        batch.map((u) => u.text),
-        batch.map((u) => u.metadata),
+      await guarded(() =>
+        svc.client.updateDocuments(
+          index,
+          batch.map((u) => u.text),
+          batch.map((u) => u.metadata),
+        ),
       )
       unitTotal += batch.length
+      flushCount += 1
+      // Periodic liveness probe on long encodes: a server that died
+      // mid-encode would otherwise surface 10 minutes later as a bare
+      // ECONNREFUSED. Probe every ~10 batches (~1K units).
+      if (flushCount % 10 === 0) {
+        await guarded(() => svc.client.health().then(() => undefined))
+      }
       opts.onProgress?.({
         phase: "encode",
         scanned: parseable.length,
@@ -884,8 +1103,10 @@ export async function populateWorkspace(
               })
               if (units.length >= POPULATE_BATCH_UNITS) await flush()
             }
+            filesParsed += 1
           } catch {
             // per-file failure: skip, keep going
+            filesParsed += 1
           }
         }
       },
@@ -897,13 +1118,19 @@ export async function populateWorkspace(
     // The server merges accepted writes asynchronously: wait for the queue
     // to settle before recording docCount, or searches served off this
     // populate observe the pre-merge state.
-    const docCount = await waitForIndexSettled(
-      svc.client,
-      index,
-      unitTotal > 0,
-      opts.settle ?? {},
-      signal,
-    )
+    let docCount: number | undefined
+    try {
+      docCount = await waitForIndexSettled(
+        svc.client,
+        index,
+        unitTotal > 0,
+        opts.settle ?? {},
+        signal,
+      )
+    } catch (err) {
+      throwIfServerCrashed()
+      throw err
+    }
     if (signal.aborted) throw new Error("populate aborted")
     // Merge sidecar state: current hashes/units for successfully processed
     // files, carried-over entries for files unreadable this run (retry
@@ -957,7 +1184,37 @@ export async function populateWorkspace(
     }
   } finally {
     clearTimeout(timeout)
+    try {
+      detachServerExit?.()
+    } catch {
+      // best effort — listener cleanup must never throw
+    }
+    try {
+      clearHeartbeat?.()
+    } catch {
+      // best effort — timer cleanup must never throw
+    }
   }
+}
+
+/** True for loopback-connection failures (server gone), not HTTP errors. */
+function isConnectionError(err: unknown): boolean {
+  const cause = (err as { cause?: unknown })?.cause
+  const text = [
+    err instanceof Error ? err.message : String(err),
+    cause instanceof Error ? cause.message : "",
+  ].join(" ")
+  return /econnrefused|unable to connect|fetch failed|econnreset|socket hang up|network[^a-z]*unreachable/i.test(
+    text,
+  )
+}
+
+/** Sleep that never keeps the event loop alive. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms)
+    t.unref?.()
+  })
 }
 
 /** Combine abort signals (cleanup listeners once settled). */
@@ -1018,7 +1275,35 @@ export async function runServiceSearch(opts: {
   }
   const svc = await ensureServer()
   if (!svc) return { status: "unavailable" }
+  // Pre-flight: fail fast to colgrep/lexical when the server is dead or
+  // wedged, instead of timing out mid-search. Cached (30s TTL) so the
+  // hot query path pays no extra round trip.
+  try {
+    await svc.client.ensureHealthy()
+  } catch {
+    return { status: "unavailable" }
+  }
   const index = indexNameForWorkspace(canonical)
+
+  // Query budget: recycle the server every N searches so ONNX arena
+  // growth never accumulates across a long proxy session. The recycle is
+  // transparent — the fresh server re-mmaps the same on-disk index.
+  _serviceQueryCount += 1
+  let client = svc.client
+  if (_serviceQueryCount >= serviceMaxQueries()) {
+    consola.info(`service-backend: query budget reached (${_serviceQueryCount}) — restarting server`)
+    recordServerRestart("query-budget")
+    await stopServiceServer()
+    _serviceQueryCount = 0
+    const fresh = await ensureServer()
+    if (!fresh) return { status: "unavailable" }
+    try {
+      await fresh.client.ensureHealthy()
+    } catch {
+      return { status: "unavailable" }
+    }
+    client = fresh.client
+  }
 
   // Freshness vs git state (mirrors the colbert newly-dirty rule), computed
   // against THIS backend's sidecar — never the colgrep verdict, which
@@ -1048,12 +1333,20 @@ export async function runServiceSearch(opts: {
     }
   }
 
+  const queryStartMs = Date.now()
   try {
-    const hits = await svc.client.search(index, query, {
+    const hits = await client.search(index, query, {
       topK: limit,
       textQuery: query,
       alpha: 0.75,
     })
+    const elapsedMs = Date.now() - queryStartMs
+    if (elapsedMs > serviceMaxQueryMs()) {
+      consola.warn(`service-backend: slow search (${elapsedMs}ms for "${query.slice(0, 60)}")`)
+    }
+    consola.debug(
+      `service-backend: search ok (${elapsedMs}ms, query #${_serviceQueryCount}, ${hits.length} hits)`,
+    )
     return {
       status: "ready",
       results: hits.map((h) => ({
