@@ -114,7 +114,7 @@ export const FAST_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "fast",
   nativeRoster: new Set(FAST_PROFILE_NATIVE_AGENT_NAMES),
   personaAllowlist: new Set(["oracle", "astra"]),
-  allowedGroups: new Set(["peers", "search", "workers", "browser"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser", "ado", "kusto"]),
   hasCoordinator: false,
 })
 
@@ -130,7 +130,7 @@ export const CHEAP1M_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "cheap1m",
   nativeRoster: new Set(CHEAP_PROFILE_NATIVE_AGENT_NAMES),
   personaAllowlist: new Set(["oracle", "astra"]),
-  allowedGroups: new Set(["peers", "search", "workers", "browser"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser", "ado", "kusto"]),
   hasCoordinator: false,
 })
 
@@ -146,7 +146,7 @@ export const CHEAP_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "cheap",
   nativeRoster: new Set(CHEAP_PROFILE_NATIVE_AGENT_NAMES),
   personaAllowlist: new Set(["oracle"]),
-  allowedGroups: new Set(["peers", "search", "workers", "browser"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser", "ado", "kusto"]),
   hasCoordinator: false,
 })
 
@@ -163,7 +163,7 @@ export const CHEAPEST_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "cheapest",
   nativeRoster: new Set(CHEAPEST_PROFILE_NATIVE_AGENT_NAMES),
   personaAllowlist: new Set(["oracle"]),
-  allowedGroups: new Set(["peers", "search", "workers", "browser"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser", "ado", "kusto"]),
   hasCoordinator: false,
 })
 
@@ -179,7 +179,7 @@ export const BALANCED_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "balanced",
   nativeRoster: new Set(BALANCED_PROFILE_NATIVE_AGENT_NAMES),
   personaAllowlist: new Set(["oracle"]),
-  allowedGroups: new Set(["peers", "search", "workers", "browser"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser", "ado", "kusto"]),
   hasCoordinator: false,
 })
 
@@ -202,7 +202,7 @@ export const MAX_PROFILE: LaunchProfileDescriptor = Object.freeze({
     "grok_critic",
     "grok_reviewer",
   ]),
-  allowedGroups: new Set(["peers", "search", "workers", "browser", "decide", "fleet", "first-mate"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser", "decide", "fleet", "first-mate", "ado", "kusto"]),
   hasCoordinator: true,
 })
 

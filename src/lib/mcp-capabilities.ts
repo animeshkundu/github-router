@@ -874,3 +874,33 @@ export function semanticSearchEnabled(): boolean {
   return colbertSearchEnabled()
 }
 
+
+/**
+ * Gate for the Azure DevOps MCP group (`mcp__ado__*`).
+ *
+ * Returns true iff `setupAndServe` resolved the group ON. The flag is the
+ * whole predicate: unlike `browserToolsEnabled()` there is no separate
+ * installed-dependency probe, because the launch path already performed the
+ * only availability check that matters — it fetched the upstream `tools/list`
+ * and turned the group off when that failed (see `provisionAdoTools` in
+ * `~/lib/ado-tools`). Re-deriving reachability here would either duplicate a
+ * network call on every `tools/list` or disagree with the snapshot that
+ * `tools/list` is about to serve.
+ */
+export function adoToolsEnabled(): boolean {
+  return state.adoEnabled
+}
+
+/**
+ * Gate for the Kusto MCP group (`mcp__kusto__*`).
+ *
+ * Returns true iff a cluster is configured. `state.kustoEnabled` is already
+ * resolved from the cluster plus the opt-out flags, and `kustoCluster` is
+ * carried alongside so the gate stays meaningful for startup paths that set
+ * the cluster without going through `setupAndServe` (tests, embedded use) —
+ * a group whose tools would all fail with "no cluster configured" is the
+ * empty-server smell this predicate exists to prevent.
+ */
+export function kustoToolsEnabled(): boolean {
+  return state.kustoEnabled && state.kustoCluster !== null
+}

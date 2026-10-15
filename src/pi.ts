@@ -7,7 +7,15 @@ import process from "node:process"
 import { defineCommand, type ArgsDef } from "citty"
 import consola from "consola"
 
-import { ensurePiInstalled, getInstalledPiVersion, meetsPiMinVersion, refreshPiInBackground, updatePi } from "./lib/pi-version-check"
+import {
+  ensurePiInstalled,
+  getInstalledPiVersion,
+  meetsPiMinVersion,
+  PI_MIN_VERSION,
+  refreshPiInBackground,
+  resolvePiRegistry,
+  updatePi,
+} from "./lib/pi-version-check"
 import { warnOnTierPriceDriftForModels } from "./lib/pi-tier-windows"
 import {
   AIC_LEDGER_ENV,
@@ -298,7 +306,7 @@ export const pi = defineCommand({
         installedVersion = await pendingInstall.promise
       } catch (err) {
         consola.error(
-          `Pi is not installed and automatic install failed (${err instanceof Error ? err.message : String(err)}). Install it with \`npm install -g @earendil-works/pi-coding-agent\`, then retry.`,
+          `Pi is not installed and automatic install failed (${err instanceof Error ? err.message : String(err)}). Install it with \`npm install -g @earendil-works/pi-coding-agent --registry=${resolvePiRegistry()}\`, then retry.`,
         )
         process.exit(1)
       } finally {
@@ -318,14 +326,14 @@ export const pi = defineCommand({
             installedVersion = await getInstalledPiVersion()
           } catch (err) {
             consola.error(
-              `Installed Pi v${installedVersion} is below the supported floor and auto-upgrade failed (${err instanceof Error ? err.message : String(err)}). Upgrade manually: \`npm install -g @earendil-works/pi-coding-agent@latest\`.`,
+              `Installed Pi v${installedVersion} is below the supported floor and auto-upgrade failed (${err instanceof Error ? err.message : String(err)}). Upgrade manually: \`npm install -g @earendil-works/pi-coding-agent@latest --registry=${resolvePiRegistry()}\`.`,
             )
             process.exit(1)
           }
         }
         if (!meetsPiMinVersion(installedVersion)) {
           consola.error(
-            `Installed Pi v${installedVersion} is below the supported floor. Upgrade: \`npm install -g @earendil-works/pi-coding-agent@latest\`.`,
+            `Installed Pi v${installedVersion} is below the supported floor (v${PI_MIN_VERSION}). Upgrade: \`npm install -g @earendil-works/pi-coding-agent@latest --registry=${resolvePiRegistry()}\`.`,
           )
           process.exit(1)
         }
@@ -664,6 +672,7 @@ export const pi = defineCommand({
     }
 
     const { disposeBluebirdClients } = await import("./lib/bluebird-client")
+    const { disposeAdoClients } = await import("./lib/ado-tools")
     launchChild(
       {
         kind: "pi",
@@ -694,6 +703,7 @@ export const pi = defineCommand({
           unregisterLaunch(entry.launchId)
           await stopKeepAwake()
           await disposeBluebirdClients()
+          await disposeAdoClients()
           // Persist this launch's installed <mirror>/npm for the next
           // launch's pre-seed (keyed by the exact packages[] slice), then
           // remove the per-launch mirror as before. Best-effort, never

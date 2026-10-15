@@ -15,6 +15,10 @@ import {
   buildPiSettingsJson,
   piProfileModelIds,
 } from "~/lib/pi-models-settings"
+import {
+  CHEAPEST_CONSULT_CONTRACT,
+  CHEAPEST_CONSULT_CONTRACT_POINTER,
+} from "~/lib/claude-md-injection"
 import type { ModelsResponse } from "~/services/copilot/get-models"
 
 const model = (id: string, opts: {
@@ -242,6 +246,36 @@ describe("pi --search owns search prose and tool together", () => {
       "gh-search-first",
     ])
     expect(extOn).toContain("code_search")
+  })
+})
+
+describe("pi cheapest digest carries the shared consult contract", () => {
+  test("the contract text is the same constant the Claude directive uses", () => {
+    const digest = buildPiAppendSystem("cheapest")
+    // Asserting the IMPORT rather than a copy: the two front-ends must not be
+    // able to drift, and a re-typed sentence here would pass a containment
+    // check while quietly diverging from the Claude side.
+    expect(digest).toContain(CHEAPEST_CONSULT_CONTRACT.trimEnd())
+    expect(digest).toContain("the shortest path, what to consider")
+    // The pointer is Claude-specific: it ends by telling the reader the full
+    // how-to is in their CLAUDE.md, which Pi does not load. If it ever appears
+    // in a Pi digest, the lead is being sent after a file that is not there.
+    expect(digest).not.toContain(CHEAPEST_CONSULT_CONTRACT_POINTER)
+  })
+
+  test("balanced stays floor-free and peerless cheapest carries no consults", () => {
+    // Balanced has no advisor, so it has no consult budget to describe.
+    expect(buildPiAppendSystem("balanced")).not.toContain(CHEAPEST_CONSULT_CONTRACT)
+    // Peerless cheapest has no advisor either.
+    const peerless = buildPiAppendSystem("cheapest", { peers: false })
+    expect(peerless).not.toContain(CHEAPEST_CONSULT_CONTRACT)
+  })
+
+  test("the cheapest digest still names only tools the launch emits", () => {
+    const digest = buildPiAppendSystem("cheapest")
+    expect(digest).toContain("`advisor`")
+    expect(digest).toContain("`oracle`")
+    expect(digest).toContain("`reviewer`")
   })
 })
 

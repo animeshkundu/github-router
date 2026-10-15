@@ -3,6 +3,11 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import * as os from "node:os"
 import * as path from "node:path"
 
+// Value import: since the Pi v1.3.0 agent core the `StreamFn` contract takes a
+// normalized `TranscriptContext`, which only `normalizeContext` produces. The
+// fixtures stay in the natural `Context` shape and are normalized at each call
+// boundary, so the image-hoisting assertions still run the real path.
+import { normalizeContext } from "@earendil-works/pi-ai"
 import type { Context, Model as PiModel } from "@earendil-works/pi-ai"
 
 import { firstText } from "~/lib/attachments"
@@ -359,7 +364,7 @@ describe("tool-result images reach the model", () => {
     const resolved: ResolvedModel = { modelId, thinking: "high" }
     const stream = await createCopilotStreamFn({ resolved })(
       { id: modelId } as unknown as PiModel<"openai-completions">,
-      ctxWithImageToolResult(),
+      normalizeContext(ctxWithImageToolResult()),
       undefined,
     )
     for await (const ev of stream) {
@@ -512,7 +517,11 @@ describe("parallel tool calls keep their tool messages contiguous", () => {
     globalThis.fetch = fetchMock as unknown as typeof fetch
     const stream = await createCopilotStreamFn({
       resolved: { modelId, thinking: "high" } as ResolvedModel,
-    })({ id: modelId } as unknown as PiModel<"openai-completions">, parallelCtx(), undefined)
+    })(
+      { id: modelId } as unknown as PiModel<"openai-completions">,
+      normalizeContext(parallelCtx()),
+      undefined,
+    )
     for await (const ev of stream) {
       if (ev.type === "error") break
     }

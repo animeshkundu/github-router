@@ -222,6 +222,13 @@ const browserCompoundToolsEnabledMock = mock(() => false)
 const fleetToolsEnabledMock = mock(() => false)
 const agentToolsEnabledMock = mock(() => false)
 const artifactToolsEnabledMock = mock(() => false)
+// Azure groups: pinned OFF by default so a launch under test resolves the
+// same enabled-group set regardless of the machine's git remotes. A test that
+// exercises either gate rebinds the matching mock per case — without these,
+// `setupAndServe` would still run the real git-remote discovery and the
+// enabled-group assertion would depend on where the repo was cloned.
+const adoToolsEnabledMock = mock(() => false)
+const kustoToolsEnabledMock = mock(() => false)
 const geminiState: { current: { models?: { data?: Array<{ id?: unknown }> } } | undefined } = { current: undefined }
 const geminiAvailableMock = mock(() =>
   Boolean(geminiState.current?.models?.data?.some(
@@ -230,6 +237,8 @@ const geminiAvailableMock = mock(() =>
 )
 mock.module("~/lib/mcp-capabilities", () => ({
   workerToolsEnabled: workerToolsEnabledMock,
+  adoToolsEnabled: adoToolsEnabledMock,
+  kustoToolsEnabled: kustoToolsEnabledMock,
   standInToolEnabled: standInToolEnabledMock,
   browserToolsEnabled: browserToolsEnabledMock,
   browserCompoundToolsEnabled: browserCompoundToolsEnabledMock,

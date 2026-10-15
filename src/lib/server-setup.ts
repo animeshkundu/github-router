@@ -3,6 +3,13 @@ import { serve, type ServerHandler } from "srvx"
 import { createBodyTooLargeError, limitRequestBody } from "srvx/body-limit"
 
 import { PATHS, ensurePaths } from "./paths"
+import {
+  azureDiscoveryNeeded,
+  discoverAzureRepo,
+  resolveAzureMcpFlags,
+  type AzureMcpInputs,
+} from "./azure-mcp-flags"
+import { provisionAdoTools } from "./ado-tools"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
 import { deriveAutoCompactWindowTokens } from "./grok-context"
@@ -247,7 +254,22 @@ export interface ServerSetupOptions {
   powerBrowseEnabled: boolean
   humanlikeEnabled: boolean
   searchEnabled: boolean
-  bluebirdEnabled: boolean
+  /**
+   * Tri-state: `true` = `--bluebird`, `false` = `--no-bluebird`, `undefined`
+   * = the flag was absent. The third state is what lets the Azure-repository
+   * auto-enable distinguish "unspecified" from "refused".
+   */
+  bluebirdEnabled?: boolean | undefined
+  /** Tri-state, as `bluebirdEnabled`. */
+  adoEnabled?: boolean | undefined
+  adoOrganization?: string | undefined
+  adoToolsets?: string | undefined
+  adoAllToolsets?: boolean | undefined
+  adoWriteEnabled?: boolean | undefined
+  /** Tri-state, as `bluebirdEnabled`. */
+  kustoEnabled?: boolean | undefined
+  kustoCluster?: string | undefined
+  kustoDatabase?: string | undefined
   silent: boolean
 }
 
@@ -372,7 +394,63 @@ export async function setupAndServe(
     bluebirdEnabled: options.bluebirdEnabled,
   })
   state.searchEnabled = searchFlags.searchEnabled
-  state.bluebirdEnabled = searchFlags.bluebirdEnabled
+  // The three Azure-backed surfaces (Bluebird code search, the ADO MCP group,
+  // the Kusto MCP group) are resolved together because they share one
+  // discovery signal: the workspace's git remotes. `resolveSearchFlags` above
+  // folds in the `GH_ROUTER_ENABLE_BLUEBIRD` positive; the negative travels
+  // separately because `--no-bluebird` and an absent flag both reach
+  // `resolveSearchFlags` as `false` and only the raw tri-state can tell them
+  // apart.
+  const azureInputs: AzureMcpInputs = {
+    bluebirdFlag: searchFlags.bluebirdEnabled
+      ? true
+      : options.bluebirdEnabled === false
+        ? false
+        : undefined,
+    adoFlag: options.adoEnabled,
+    kustoFlag: options.kustoEnabled,
+    adoOrganization: options.adoOrganization,
+    adoToolsets: options.adoToolsets,
+    adoAllToolsets: options.adoAllToolsets,
+    kustoCluster: options.kustoCluster,
+    kustoDatabase: options.kustoDatabase,
+  }
+  const discovered = azureDiscoveryNeeded(azureInputs)
+    ? await discoverAzureRepo({})
+    : null
+  const azureFlags = resolveAzureMcpFlags(azureInputs, discovered)
+  state.bluebirdEnabled = azureFlags.bluebird
+  state.adoEnabled = azureFlags.ado
+  state.adoOrganization = azureFlags.adoOrganization
+  state.adoToolsets = azureFlags.adoToolsets ?? []
+  state.adoReadOnly = options.adoWriteEnabled !== true
+  state.kustoEnabled = azureFlags.kusto
+  state.kustoCluster = azureFlags.kustoCluster
+  state.kustoDatabase = azureFlags.kustoDatabase
+  for (const reason of azureFlags.reasons) {
+    consola.info(`Azure MCP auto-enabled (${reason}). Suppress with --no-bluebird / --no-ado / --no-kusto, or GH_ROUTER_AZURE_MCPS=off.`)
+  }
+  for (const warning of azureFlags.warnings) consola.warn(`Azure MCP: ${warning}`)
+  if (state.adoEnabled && options.adoWriteEnabled === true) {
+    consola.warn(
+      "Azure DevOps MCP is running WITHOUT X-MCP-Readonly (--ado-write). "
+      + "Mutating tools are reachable from this session.",
+    )
+  }
+  // The `ado` group is the one MCP group whose tool set comes from an upstream
+  // server, so its `tools/list` has to be resolved before anything downstream
+  // reads it — `toolEntries()` is synchronous and the group's config entry is
+  // written before the child spawns. AWAITED on purpose: a launch that
+  // advertised the group and then discovered it had no tools would serve an
+  // empty server, which is worse than not serving it at all. Bounded and
+  // non-fatal inside (see `provisionAdoTools`), so a network failure costs a
+  // warning and a disabled group, never a failed launch. The Kusto group needs
+  // no equivalent: its five tools are static and its reachability is proven by
+  // the first tool call, which carries an actionable error.
+  if (state.adoEnabled) {
+    const result = await provisionAdoTools()
+    if (result.ok) consola.info(`Azure DevOps MCP: ${result.toolCount} tool(s) exposed.`)
+  }
   state.fleetEnabled =
     options.fleetEnabled || process.env.GH_ROUTER_ENABLE_FLEET === "1"
   // --agents + GH_ROUTER_ENABLE_AGENTS=1 enable the first-mate
@@ -628,9 +706,63 @@ export const sharedServerArgs = {
   },
   bluebird: {
     type: "boolean" as const,
+    // Tri-state on purpose: absent (undefined), asked for (true), refused
+    // (false via `--no-bluebird`). `default: false` would erase the difference
+    // between "not mentioned" and "explicitly off", which is the difference
+    // that lets Azure-repo auto-enable stay safe — see azure-mcp-flags.ts.
+    default: undefined,
+    description:
+      "Route semantic + lexical `code` tool search through the Bluebird Azure DevOps MCP server (exact/regex/ast stay local). Requires an Azure DevOps git remote plus `az login`. Can also be enabled with GH_ROUTER_ENABLE_BLUEBIRD=1. Auto-enabled when the workspace's git remotes resolve to an Azure DevOps repository; --no-bluebird or GH_ROUTER_AZURE_MCPS=off suppresses that.",
+    negativeDescription:
+      "Never route through Bluebird, even when an Azure DevOps remote is discovered.",
+  },
+  ado: {
+    type: "boolean" as const,
+    default: undefined,
+    description:
+      "Expose the Azure DevOps remote MCP group (mcp__ado__*), read-only by default. Requires `az login` and an organization from --ado-org or an Azure DevOps git remote. Auto-enabled on Azure DevOps remote discovery; GH_ROUTER_ENABLE_ADO=1 is the env equivalent.",
+    negativeDescription:
+      "Never expose the Azure DevOps MCP group, even when an Azure DevOps remote is discovered.",
+  },
+  "ado-org": {
+    type: "string" as const,
+    description:
+      "Azure DevOps organization name for the `ado` group. Overrides the organization derived from the git remote. Falls back to GH_ROUTER_ADO_ORG.",
+  },
+  "ado-toolsets": {
+    type: "string" as const,
+    description:
+      "Comma-separated Azure DevOps MCP toolsets to request (all, repos, advsec, wit, pipelines, wiki, work, testplan, elm). Default repos,wit,pipelines,wiki. Falls back to GH_ROUTER_ADO_TOOLSETS.",
+  },
+  "ado-all-toolsets": {
+    type: "boolean" as const,
     default: false,
     description:
-      "Route semantic + lexical `code` tool search through the Bluebird Azure DevOps MCP server (exact/regex/ast stay local). Requires an Azure DevOps git remote plus `az login`. Can also be enabled with GH_ROUTER_ENABLE_BLUEBIRD=1.",
+      "Request every Azure DevOps MCP toolset (sends no X-MCP-Toolsets header). Independent of read-only: this cannot produce a write tool. Falls back to GH_ROUTER_ADO_ALL_TOOLSETS=1.",
+  },
+  "ado-write": {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Let the Azure DevOps MCP group call mutating tools by omitting X-MCP-Readonly. Off by default and never implied by repository discovery; a banner line marks the elevated session.",
+  },
+  kusto: {
+    type: "boolean" as const,
+    default: undefined,
+    description:
+      "Expose the Kusto (Azure Data Explorer) MCP group (mcp__kusto__*), read-only. Requires --kusto-cluster. GH_ROUTER_ENABLE_KUSTO=1 is the env equivalent.",
+    negativeDescription:
+      "Never expose the Kusto MCP group, even when a cluster is configured.",
+  },
+  "kusto-cluster": {
+    type: "string" as const,
+    description:
+      "Kusto cluster URI, e.g. https://example.kusto.windows.net. Naming a cluster enables the `kusto` group and is its own opt-in. Falls back to GH_ROUTER_KUSTO_CLUSTER.",
+  },
+  "kusto-database": {
+    type: "string" as const,
+    description:
+      "Default Kusto database for calls that do not name one. Falls back to GH_ROUTER_KUSTO_DATABASE.",
   },
 } as const
 
@@ -643,7 +775,13 @@ const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
  */
 export function resolveSearchFlags(opts: {
   searchEnabled: boolean
-  bluebirdEnabled: boolean
+  /**
+   * Tri-state on the way in. The return value is a plain boolean by design:
+   * `--no-bluebird` and an absent flag both resolve to `false` here, and the
+   * negative is re-read from the raw option by `azure-mcp-flags.ts`, which is
+   * the only consumer that has to tell the two apart.
+   */
+  bluebirdEnabled?: boolean | undefined
 }): { searchEnabled: boolean; bluebirdEnabled: boolean } {
   const bluebirdEnabled =
     opts.bluebirdEnabled === true || process.env.GH_ROUTER_ENABLE_BLUEBIRD === "1"
@@ -671,7 +809,15 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   powerBrowseEnabled: boolean
   humanlikeEnabled: boolean
   searchEnabled: boolean
-  bluebirdEnabled: boolean
+  bluebirdEnabled?: boolean | undefined
+  adoEnabled?: boolean | undefined
+  adoOrganization?: string | undefined
+  adoToolsets?: string | undefined
+  adoAllToolsets?: boolean | undefined
+  adoWriteEnabled?: boolean | undefined
+  kustoEnabled?: boolean | undefined
+  kustoCluster?: string | undefined
+  kustoDatabase?: string | undefined
 } {
   const portRaw = args.port as string | undefined
   let port: number | undefined
@@ -723,7 +869,18 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     powerBrowseEnabled: args["power-browse"] as boolean,
     humanlikeEnabled: args.humanlike as boolean,
     searchEnabled: args.search as boolean,
-    bluebirdEnabled: args.bluebird as boolean,
+    // Tri-state, not a boolean: `--no-<capability>` must survive as `false`
+    // so it can outrank both the env positive and repo discovery. citty sets
+    // `false` for `--no-x` and leaves the value `undefined` otherwise.
+    bluebirdEnabled: args.bluebird as boolean | undefined,
+    adoEnabled: args.ado as boolean | undefined,
+    adoOrganization: args["ado-org"] as string | undefined,
+    adoToolsets: args["ado-toolsets"] as string | undefined,
+    adoAllToolsets: args["ado-all-toolsets"] as boolean | undefined,
+    adoWriteEnabled: args["ado-write"] as boolean | undefined,
+    kustoEnabled: args.kusto as boolean | undefined,
+    kustoCluster: args["kusto-cluster"] as string | undefined,
+    kustoDatabase: args["kusto-database"] as string | undefined,
   }
 }
 

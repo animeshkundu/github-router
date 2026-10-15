@@ -23,7 +23,7 @@ import consola from "consola"
 import type {
   Api,
   AssistantMessage,
-  Context,
+  TranscriptContext,
   Message as PiMessage,
   Model,
   ProviderId,
@@ -39,6 +39,15 @@ import type {
 // barrel re-exports `AssistantMessageEventStream` as a type-only alias via
 // `types.ts`, which `verbatimModuleSyntax` then refuses to treat as a value.
 import { AssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream.ts"
+// Value imports: since the Pi v1.3.0 agent core the `StreamFn` contract passes a
+// normalized `TranscriptContext`, in which the system prompt and the tool
+// declarations live in the transcript's SYSTEM MESSAGES rather than on the
+// context object. These two replay them back into the single prompt and tool
+// list this module puts on the wire. Reading `context.systemPrompt` /
+// `context.tools` here would compile (they are optional on the wider `Context`
+// this parameter is contravariantly assignable from) and silently send every
+// request with NO system prompt and NO tools, so the derivation is deliberate.
+import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai"
 import type { StreamFn } from "@earendil-works/pi-agent-core"
 
 import { HTTPError } from "~/lib/error"
@@ -118,7 +127,7 @@ export function createCopilotStreamFn(
 ): StreamFn {
   return (
     _model: Model<Api>,
-    context: Context,
+    context: TranscriptContext,
     options?: SimpleStreamOptions,
   ): AssistantMessageEventStream => {
     const stream = new AssistantMessageEventStream()
@@ -240,7 +249,7 @@ async function runModelCallAttempts(
 
 async function runStreamLoop(
   stream: AssistantMessageEventStream,
-  context: Context,
+  context: TranscriptContext,
   opts: CreateCopilotStreamFnOptions,
   options: SimpleStreamOptions | undefined,
 ): Promise<void> {
@@ -557,16 +566,21 @@ async function runChatAttempt(
 // ----- payload construction --------------------------------------------------
 
 function buildPayload(
-  context: Context,
+  context: TranscriptContext,
   resolved: ResolvedModel,
 ): ChatCompletionsPayload {
   const messages: Array<OAIMessage> = []
-  if (context.systemPrompt) {
-    messages.push({ role: "system", content: context.systemPrompt })
+  // The replayed system prompt, not `context.systemPrompt`: the agent loop hands
+  // this module a `TranscriptContext`, where the prompt is the transcript's
+  // system message(s). `getCurrentSystemPrompt` replays them into the one string
+  // a chat-completions `system` message carries.
+  const systemPrompt = getCurrentSystemPrompt(context.messages)
+  if (systemPrompt) {
+    messages.push({ role: "system", content: systemPrompt })
   }
   messages.push(...translateMessages(context.messages))
 
-  const tools = translateTools(context.tools)
+  const tools = translateTools(getCurrentTools(context.messages))
   const payload: ChatCompletionsPayload = {
     model: resolved.modelId,
     messages,
@@ -632,6 +646,12 @@ function translateMessages(
     // Any non-tool message ends the run: flush before it so the images land
     // after the last tool message rather than in the middle of the run.
     flushImages()
+    // System messages are DELIBERATELY dropped here: `buildPayload` emits one
+    // `system` message built from the replayed prompt, and replaying the
+    // transcript's own system messages as well would send it twice. Since Pi
+    // v1.3.0 the leading system message is always present in the transcript, so
+    // the fall-through this replaces would have been a silent double-send.
+    if (m.role === "system") continue
     if (m.role === "user") out.push(translateUser(m))
     else if (m.role === "assistant") out.push(translateAssistant(m))
   }
@@ -866,7 +886,7 @@ function mapResponsesUsage(
  */
 async function runResponsesStreamLoop(
   stream: AssistantMessageEventStream,
-  context: Context,
+  context: TranscriptContext,
   opts: CreateCopilotStreamFnOptions,
   options: SimpleStreamOptions | undefined,
 ): Promise<void> {
@@ -1229,15 +1249,15 @@ async function runResponsesAttempt(
 // function_call / function_call_output / reasoning.effort mapping.
 
 function buildResponsesPayload(
-  context: Context,
+  context: TranscriptContext,
   resolved: ResolvedModel,
 ): ResponsesPayload {
   const messages: Array<NeutralMessage> = piMessagesToNeutral(context.messages)
   return assembleResponsesPayload({
     model: resolved.modelId,
-    instructions: context.systemPrompt || undefined,
+    instructions: getCurrentSystemPrompt(context.messages) || undefined,
     messages,
-    tools: piToolsToNeutral(context.tools),
+    tools: piToolsToNeutral(getCurrentTools(context.messages)),
     reasoningEffort: resolved.thinking,
     cachePolicy: { workload: "conversation" },
     stream: true,
@@ -1548,10 +1568,10 @@ function pushTerminalError(
  * by ~45× and false-positives the backstop on any screenshot. Counting text
  * parts by their bytes keeps it consistent with the compactor. Never throws.
  */
-function estimateContextBytes(context: Context): number {
-  let bytes = Buffer.byteLength(context.systemPrompt ?? "", "utf8")
+function estimateContextBytes(context: TranscriptContext): number {
+  let bytes = Buffer.byteLength(getCurrentSystemPrompt(context.messages), "utf8")
   try {
-    bytes += Buffer.byteLength(JSON.stringify(context.tools ?? []), "utf8")
+    bytes += Buffer.byteLength(JSON.stringify(getCurrentTools(context.messages)), "utf8")
   } catch {
     /* tool schemas are bounded + base64-free; a stringify failure is non-fatal */
   }

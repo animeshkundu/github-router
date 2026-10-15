@@ -7,6 +7,7 @@ import consola from "consola"
 
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import { disposeBluebirdClients } from "./lib/bluebird-client"
+import { disposeAdoClients } from "./lib/ado-tools"
 import { provisionAndIndexColbert } from "./lib/colbert"
 import { resolveCodexCliBackend } from "./lib/codex-mcp-config"
 import { killChildProcessTree } from "./lib/exec"
@@ -205,6 +206,16 @@ export const serve = defineCommand({
       default: false,
       description: "Expose the fleet MCP (drives remote coding sessions with your fleet credentials) even when tunnel-exposed (only with fully-trusted tunnel access)",
     },
+    "ado-over-tunnel": {
+      type: "boolean",
+      default: false,
+      description: "Expose the Azure DevOps MCP group (reads organization data with your az identity) even when tunnel-exposed (only with fully-trusted tunnel access)",
+    },
+    "kusto-over-tunnel": {
+      type: "boolean",
+      default: false,
+      description: "Expose the Kusto MCP group (queries data with your az identity) even when tunnel-exposed (only with fully-trusted tunnel access)",
+    },
     "no-install": {
       type: "boolean",
       default: false,
@@ -373,6 +384,16 @@ export const serve = defineCommand({
         "Fleet MCP is disabled over the tunnel (it drives remote coding sessions with your fleet credentials). Pass --fleet-over-tunnel to enable it for fully-trusted access.",
       )
     }
+    if (tunnelExposed && state.adoEnabled && args["ado-over-tunnel"] !== true) {
+      consola.info(
+        "Azure DevOps MCP is disabled over the tunnel (it reads organization data with your az identity). Pass --ado-over-tunnel to enable it for fully-trusted access.",
+      )
+    }
+    if (tunnelExposed && state.kustoEnabled && args["kusto-over-tunnel"] !== true) {
+      consola.info(
+        "Kusto MCP is disabled over the tunnel (it queries data with your az identity). Pass --kusto-over-tunnel to enable it for fully-trusted access.",
+      )
+    }
 
     // 2b. wire the github-router enhancement layer (MCP servers + peer/worker
     //     subagents + gh-* skills) into the mirror so CloudCLI-spawned Claude
@@ -391,6 +412,8 @@ export const serve = defineCommand({
       browseOverTunnel: args["browse-over-tunnel"] === true,
       agentsOverTunnel: args["agents-over-tunnel"] === true,
       fleetOverTunnel: args["fleet-over-tunnel"] === true,
+      adoOverTunnel: args["ado-over-tunnel"] === true,
+      kustoOverTunnel: args["kusto-over-tunnel"] === true,
     })
 
     // 3. filtered child env: the vetted secret-stripping allowlist (buildEnv,
@@ -471,6 +494,7 @@ export const serve = defineCommand({
       }
       await stopKeepAwake().catch(() => {})
       await disposeBluebirdClients().catch(() => {})
+      await disposeAdoClients().catch(() => {})
       await enhancements.cleanup().catch(() => {})
       await removeOwnClaudeConfigMirror().catch(() => {})
     }

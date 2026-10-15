@@ -397,6 +397,10 @@ export function buildPiExtensionSource(opts: {
 }): string {
   const peers = opts.peers !== false
   const advisor = peers ? piAdvisorModel(opts.profileId) : undefined
+  // Cheapest-only, like the advisor: the brief is the front-end half of the
+  // same floor-raising surface `buildPiAppendSystem` writes the consult contract
+  // for, and `balanced` is deliberately floor-free on both counts.
+  const promptBrief = opts.profileId === "cheapest"
   const lines: Array<string> = []
   lines.push(
     `// gh-router-pi extension (${opts.profileId} mode). Generated per launch; do not edit.`,
@@ -482,6 +486,16 @@ export function buildPiExtensionSource(opts: {
     `const MCP_URL = (process.env.GH_ROUTER_HOOK_MCP_URL ?? "").replace(/\\/+$/, "");`,
     `const MCP_NONCE = process.env.GH_ROUTER_HOOK_NONCE ?? "";`,
     `const PI_WORKSPACE = (process.env.GH_ROUTER_WORKSPACE ?? "").trim();`,
+    ...(promptBrief
+      ? [
+          // Backstop only. The proxy bounds its own rewrite at
+          // CHEAPEST_REWRITE_TIMEOUT_MS (30s) and answers with an empty text
+          // block on a timeout, so this is what catches a hung socket rather
+          // than the normal slow path. Kept above the proxy's bound on purpose:
+          // below it we would abort work the proxy was about to return.
+          `const BRIEF_TIMEOUT_MS = 45000;`,
+        ]
+      : []),
     `const LEAD_MODEL = ${JSON.stringify(`${PI_PROVIDER_NAME}/${piLeadModel(opts.profileId)}`)};`,
     `const LEAD_THINKING = ${JSON.stringify(piLeadThinking(opts.profileId))};`,
     `void LEAD_MODEL; void LEAD_THINKING;`,
@@ -662,6 +676,65 @@ export function buildPiExtensionSource(opts: {
     `      return undefined;`,
     `    }`,
     `  });`,
+    ...(promptBrief
+      ? [
+          // The Claude front-end for this is the `UserPromptSubmit` hook
+          // (`internal-prompt-submit`), which runs in its own process and can
+          // import the rewrite code. This extension cannot: it is a generated
+          // STRING whose only imports are typebox and node:child_process. So the
+          // rewrite runs in the PROXY and this handler is a thin relay.
+          `  // Cheapest-profile execution brief, injected ABOVE the model's turn.`,
+          `  // Produced server-side; this only relays the prompt and re-emits the`,
+          `  // result as a custom message. Additive: the user prompt stays the user`,
+          `  // turn and systemPrompt is never replaced.`,
+          `  let briefShapeWarned = false;`,
+          `  pi.on("before_agent_start", async (event, ctx) => {`,
+          `    try {`,
+          `      if (!event || typeof event !== "object") return undefined;`,
+          `      // Shape probe: Pi 1.3 carries messageType; the older flat shape does`,
+          `      // not, and a missing discriminator would make the brief silently`,
+          `      // never fire. Report once rather than no-op forever.`,
+          `      if (!("messageType" in event)) {`,
+          `        if (!briefShapeWarned) {`,
+          `          briefShapeWarned = true;`,
+          `          try { ctx.ui.notify("gh-router: this Pi build's before_agent_start has no messageType, so the cheapest prompt brief is inactive. Re-run github-router pi to update Pi.", "warning"); } catch {}`,
+          `        }`,
+          `        return undefined;`,
+          `      }`,
+          `      if (event.messageType !== "user") return undefined;`,
+          `      // Stand down inside a pi-subagents async runner: that process hosts`,
+          `      // CHILD sessions which load this extension too, and every child would`,
+          `      // otherwise spend a brief of its own. pi-subagents marks the process`,
+          `      // with PI_SUBAGENT_CHILD=1 (subagent-runner.js). Foreground subagents`,
+          `      // run with ambient extensions off, so they never reach here.`,
+          `      if (process.env.PI_SUBAGENT_CHILD === "1") return undefined;`,
+          `      const prompt = String(event.prompt || "").trim();`,
+          `      if (!prompt) return undefined;`,
+          `      const sm = ctx && ctx.sessionManager;`,
+          `      const sid = sm && typeof sm.getSessionId === "function" ? sm.getSessionId() : "";`,
+          `      if (typeof sid !== "string" || !sid) return undefined;`,
+          `      const ac = new AbortController();`,
+          `      const timer = setTimeout(() => { try { ac.abort(); } catch {} }, BRIEF_TIMEOUT_MS);`,
+          `      let reply = "";`,
+          `      try {`,
+          `        reply = await callMcp("search", "prompt_brief", PI_WORKSPACE ? { prompt, session_id: sid, workspace: PI_WORKSPACE } : { prompt, session_id: sid }, ac.signal);`,
+          `      } finally { clearTimeout(timer); }`,
+          `      const text = stripNul(String(reply || "")).trim();`,
+          `      // Fail open: a miss, a refusal, or a transport error injects NOTHING`,
+          `      // and never blocks the prompt. callMcp returns an "Error: " string`,
+          `      // for a JSON-RPC error and throws on a non-OK HTTP status. The`,
+          `      // proxy answers a decline (wrong profile, trivial prompt, already`,
+          `      // spent, rewrite timeout) with an empty text block.`,
+          `      if (!text || text.indexOf("Error: ") === 0 || text.indexOf("prompt_brief") === 0) return undefined;`,
+          `      // display:false keeps it context, not conversation (convertToLlm maps`,
+          `      // every custom message to a user message regardless of display).`,
+          `      return { message: { customType: "gh-router-prompt-brief", content: text, display: false } };`,
+          `    } catch {`,
+          `      return undefined;`,
+          `    }`,
+          `  });`,
+        ]
+      : []),
     `}`,
     ``,
   )

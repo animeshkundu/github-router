@@ -13,8 +13,55 @@ import { queueDetachedGlobalInstall } from "./self-update"
 import { withInstallLock } from "./update-lock"
 
 export const PI_NPM_PACKAGE = "@earendil-works/pi-coding-agent"
-/** Minimum Pi version the `pi` launcher supports. */
-export const PI_MIN_VERSION = "0.87.1"
+/**
+ * Minimum Pi version the `pi` launcher supports.
+ *
+ * The floor is pinned to the first release whose `before_agent_start` event
+ * carries the `messageType` discriminator (present at 1.3.0, absent at 1.1.0).
+ * The generated extension's prompt hook stands down for non-user events using
+ * that field, and without it the hook would fire on subagent and system turns
+ * the user never typed — a wrong brief rather than a missing one. Below-floor
+ * Pi hard-exits at the launcher (`src/pi.ts`) rather than degrading quietly.
+ */
+export const PI_MIN_VERSION = "1.3.0"
+
+/**
+ * Registry used for the PI PACKAGE ONLY.
+ *
+ * Pi must come from a registry that actually carries it. A corporate npm mirror
+ * can lag npmjs far enough that its `latest` sits below `PI_MIN_VERSION`, and
+ * the launcher then fail-closes on an upgrade command the user cannot satisfy
+ * (their `npm install -g` resolves through the same lagging mirror). Pointing
+ * the Pi probe and install at npmjs by default keeps the floor reachable;
+ * `GH_ROUTER_NPM_REGISTRY` overrides it for a mirror that does carry the
+ * package. Everything else this repo installs still resolves through the user's
+ * configured registry.
+ */
+export const PI_DEFAULT_REGISTRY = "https://registry.npmjs.org/"
+
+/**
+ * Resolve the registry for Pi package operations. Accepts `GH_ROUTER_NPM_REGISTRY`
+ * when it is an http(s) URL and falls back to `PI_DEFAULT_REGISTRY` with a
+ * warning otherwise, so a typo degrades to the working default rather than
+ * bricking the launcher.
+ */
+export function resolvePiRegistry(): string {
+  const raw = process.env.GH_ROUTER_NPM_REGISTRY?.trim()
+  if (!raw) return PI_DEFAULT_REGISTRY
+  if (!/^https?:\/\//i.test(raw)) {
+    consola.warn(
+      `Ignoring GH_ROUTER_NPM_REGISTRY=${JSON.stringify(raw)}: expected an http(s) URL. Using ${PI_DEFAULT_REGISTRY}.`,
+    )
+    return PI_DEFAULT_REGISTRY
+  }
+  return raw.endsWith("/") ? raw : `${raw}/`
+}
+
+/** `npm` args that pin an operation to the resolved Pi registry. */
+export function piRegistryArgs(registry: string = resolvePiRegistry()): string[] {
+  return [`--registry=${registry}`]
+}
+
 const THROTTLE_HOURS = 1
 const NPM_VIEW_TIMEOUT_MS = 5000
 const PI_VERSION_TIMEOUT_MS = 3000
@@ -107,7 +154,14 @@ async function getLatestPiVersion(): Promise<string | null> {
   if (!npmPath) return null
   try {
     const { stdout, code } = await runCommandCapture(
-      [npmPath, "view", PI_NPM_PACKAGE, "version", "--silent"],
+      [
+        npmPath,
+        "view",
+        PI_NPM_PACKAGE,
+        "version",
+        "--silent",
+        ...piRegistryArgs(),
+      ],
       { timeoutMs: NPM_VIEW_TIMEOUT_MS },
     )
     if (code !== 0) return null
@@ -246,9 +300,16 @@ export function updatePi(version: string, opts: { signal?: AbortSignal } = {}): 
     throw new Error("npm not found on PATH; cannot install Pi automatically")
   }
   return withInstallLock("pi-install.lock", async () => {
-    consola.info(`Installing ${PI_NPM_PACKAGE}@${version}...`)
+    const registry = resolvePiRegistry()
+    consola.info(`Installing ${PI_NPM_PACKAGE}@${version} from ${registry}...`)
     await runCommandVoid(
-      [npmPath, "install", "-g", `${PI_NPM_PACKAGE}@${version}`],
+      [
+        npmPath,
+        "install",
+        "-g",
+        `${PI_NPM_PACKAGE}@${version}`,
+        ...piRegistryArgs(registry),
+      ],
       { timeoutMs: NPM_INSTALL_TIMEOUT_MS, signal: opts.signal },
     )
   })
@@ -304,7 +365,11 @@ export function refreshPiInBackground(opts: { autoUpdate: boolean }): void {
       if (!npmPath) return
       if (!latestVersion || !isPiNewer(installedVersion, latestVersion)) return
       const queued = await withInstallLock("pi-install.lock", async () => {
-        queueDetachedGlobalInstall(npmPath, `${PI_NPM_PACKAGE}@${latestVersion}`)
+        queueDetachedGlobalInstall(
+          npmPath,
+          `${PI_NPM_PACKAGE}@${latestVersion}`,
+          piRegistryArgs(),
+        )
       })
       if (queued) {
         consola.info(

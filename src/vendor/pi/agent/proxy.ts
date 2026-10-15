@@ -7,28 +7,15 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
-	type Context,
-	EventStream,
+	type AssistantMessageEventStream,
+	createAssistantMessageEventStream,
 	type Model,
 	parseStreamingJson,
 	type SimpleStreamOptions,
 	type StopReason,
 	type ToolCall,
+	type TranscriptContext,
 } from "@earendil-works/pi-ai";
-
-// Create stream class matching ProxyMessageEventStream
-class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
 
 /**
  * Proxy event types - server sends these with partial field stripped to reduce bandwidth.
@@ -43,22 +30,25 @@ export type ProxyAssistantMessageEvent =
 	| { type: "thinking_end"; contentIndex: number; contentSignature?: string }
 	| { type: "toolcall_start"; contentIndex: number; id: string; toolName: string }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string }
-	| { type: "toolcall_end"; contentIndex: number }
+	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall }
 	| {
 			type: "done";
 			reason: Extract<StopReason, "stop" | "length" | "toolUse">;
 			usage: AssistantMessage["usage"];
+			providerThinkingLevel?: string;
 	  }
 	| {
 			type: "error";
 			reason: Extract<StopReason, "aborted" | "error">;
 			errorMessage?: string;
 			usage: AssistantMessage["usage"];
+			providerThinkingLevel?: string;
 	  };
 
 type ProxySerializableStreamOptions = Pick<
 	SimpleStreamOptions,
 	| "temperature"
+	| "samplingParams"
 	| "maxTokens"
 	| "reasoning"
 	| "cacheRetention"
@@ -101,6 +91,7 @@ export interface ProxyStreamOptions extends ProxySerializableStreamOptions {
 function buildProxyRequestOptions(options: ProxyStreamOptions): ProxySerializableStreamOptions {
 	return {
 		temperature: options.temperature,
+		samplingParams: options.samplingParams,
 		maxTokens: options.maxTokens,
 		reasoning: options.reasoning,
 		cacheRetention: options.cacheRetention,
@@ -113,14 +104,18 @@ function buildProxyRequestOptions(options: ProxyStreamOptions): ProxySerializabl
 	};
 }
 
-export function streamProxy(model: Model<any>, context: Context, options: ProxyStreamOptions): ProxyMessageEventStream {
-	const stream = new ProxyMessageEventStream();
+export function streamProxy(
+	model: Model<any>,
+	context: TranscriptContext,
+	options: ProxyStreamOptions,
+): AssistantMessageEventStream {
+	const stream = createAssistantMessageEventStream();
 
 	(async () => {
 		// Initialize the partial message that we'll build up from events
 		const partial: AssistantMessage = {
 			role: "assistant",
-			stopReason: "stop",
+			stopReason: "pending",
 			content: [],
 			api: model.api,
 			provider: model.provider,
@@ -136,12 +131,11 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 			timestamp: Date.now(),
 		};
 
-		// VENDOR PATCH (github-router): upstream annotates `reader` as
-		// `ReadableStreamDefaultReader<Uint8Array>`, but under Bun the typed reader
-		// requires a `readMany` method that DOM-lib `response.body!.getReader()`
-		// doesn't expose, producing TS2741. We widen to `unknown`-elements and
-		// narrow at the read-site below; runtime behavior is unchanged. See
-		// `src/vendor/pi/PROVENANCE.md`.
+		// VENDOR PATCH (github-router): widened to `unknown`. Bun's runtime reader
+		// implements `ReadableStreamDefaultReader` with a `readMany` member that
+		// DOM-lib's `getReader()` return type does not expose, so the narrow type
+		// does not describe the value actually returned under this runtime.
+		// Runtime behavior is unchanged. See `src/vendor/pi/PROVENANCE.md`.
 		let reader: ReadableStreamDefaultReader<unknown> | undefined;
 
 		const abortHandler = () => {
@@ -182,13 +176,24 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 				throw new Error(errorMessage);
 			}
 
-			// VENDOR PATCH (github-router): cast through `unknown` because Bun's
-			// lib types model `ReadableStreamDefaultReader` with a `readMany` member
-			// that DOM-lib's `getReader()` return type does not expose. Runtime
-			// behavior is unchanged. See `src/vendor/pi/PROVENANCE.md`.
+			// VENDOR PATCH (github-router): cast through `unknown` to the widened
+			// reader type declared above. See `src/vendor/pi/PROVENANCE.md`.
 			reader = response.body!.getReader() as unknown as ReadableStreamDefaultReader<unknown>;
 			const decoder = new TextDecoder();
 			let buffer = "";
+			let sawTerminalEvent = false;
+
+			const processLine = (line: string): void => {
+				if (!line.startsWith("data: ")) return;
+				const data = line.slice(6).trim();
+				if (!data) return;
+				const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
+				const event = processProxyEvent(proxyEvent, partial);
+				if (event) {
+					if (event.type === "done" || event.type === "error") sawTerminalEvent = true;
+					stream.push(event);
+				}
+			};
 
 			while (true) {
 				// VENDOR PATCH (github-router): control-flow analysis loses the
@@ -208,21 +213,32 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 				buffer = lines.pop() || "";
 
 				for (const line of lines) {
-					if (line.startsWith("data: ")) {
-						const data = line.slice(6).trim();
-						if (data) {
-							const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
-							const event = processProxyEvent(proxyEvent, partial);
-							if (event) {
-								stream.push(event);
-							}
-						}
-					}
+					processLine(line);
 				}
 			}
 
 			if (options.signal?.aborted) {
 				throw new Error("Request aborted by user");
+			}
+
+			// The final event may not be newline-terminated; flush the decoder and
+			// process whatever is left in the buffer.
+			buffer += decoder.decode();
+			if (buffer) {
+				processLine(buffer);
+			}
+
+			if (!sawTerminalEvent) {
+				// A clean EOF without a done/error event means the server dropped the
+				// response mid-stream. Surface it as an error instead of leaving
+				// consumers waiting on a result that never arrives.
+				partial.stopReason = "error";
+				partial.errorMessage = "Connection closed by proxy server before the response completed";
+				stream.push({
+					type: "error",
+					reason: "error",
+					error: partial,
+				});
 			}
 
 			stream.end();
@@ -351,6 +367,7 @@ function processProxyEvent(
 		case "toolcall_end": {
 			const content = partial.content[proxyEvent.contentIndex];
 			if (content?.type === "toolCall") {
+				Object.assign(content, proxyEvent.toolCall);
 				delete (content as any).partialJson;
 				return {
 					type: "toolcall_end",
@@ -365,19 +382,25 @@ function processProxyEvent(
 		case "done":
 			partial.stopReason = proxyEvent.reason;
 			partial.usage = proxyEvent.usage;
+			if (proxyEvent.providerThinkingLevel !== undefined) {
+				partial.providerThinkingLevel = proxyEvent.providerThinkingLevel;
+			}
 			return { type: "done", reason: proxyEvent.reason, message: partial };
 
 		case "error":
 			partial.stopReason = proxyEvent.reason;
 			partial.errorMessage = proxyEvent.errorMessage;
 			partial.usage = proxyEvent.usage;
+			if (proxyEvent.providerThinkingLevel !== undefined) {
+				partial.providerThinkingLevel = proxyEvent.providerThinkingLevel;
+			}
 			return { type: "error", reason: proxyEvent.reason, error: partial };
 
 		default: {
-			// VENDOR PATCH (github-router): upstream binds the exhaustiveness
-			// witness to `_exhaustiveCheck` and never reads it. Our tsconfig
-			// turns on `noUnusedLocals`, so we use `satisfies never` for the
-			// same compile-time check without an unused binding.
+			// VENDOR PATCH (github-router): `satisfies never` instead of
+			// `const _exhaustiveCheck: never = proxyEvent` — the binding is only a
+			// compile-time witness and is never read, and this repo's tsconfig turns
+			// on `noUnusedLocals`.
 			proxyEvent satisfies never;
 			console.warn(`Unhandled proxy event type: ${(proxyEvent as any).type}`);
 			return undefined;

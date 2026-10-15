@@ -12,6 +12,7 @@ import {
   __resetInFlightForTests,
   applySessionWorkspace,
 } from "../src/routes/mcp/handler"
+import { __setAdoToolSnapshotForTests, resetAdoToolsForTesting } from "../src/lib/ado-tools"
 import { MAX_INFLIGHT_TOOLS_CALL } from "../src/lib/mcp-inflight"
 import { state } from "../src/lib/state"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
@@ -97,6 +98,7 @@ afterEach(() => {
   state.peerMcpNonce = undefined
   state.serveMode = undefined
   state.models = undefined
+  resetAdoToolsForTesting()
   if (savedDisableSemantic === undefined) {
     delete process.env.GH_ROUTER_DISABLE_SEMANTIC_SEARCH
   } else {
@@ -771,6 +773,103 @@ describe("/mcp scoped endpoints (/mcp/:group)", () => {
     expect(names).toContain("web")
     // decide group (gpt-5.5 + opus-4-7 + gemini present in base catalog).
     expect(names).toContain("stand_in")
+  })
+})
+
+describe("/mcp prompt_brief (hook channel)", () => {
+  // The Pi extension's `before_agent_start` handler calls this over
+  // `/mcp/search` with the launch nonce, because the generated extension is a
+  // STRING with no import surface and cannot reach `runCheapestRewrite`. Two
+  // properties matter and neither is visible from the tool registry:
+  //
+  //   1. the CALL must work end-to-end on a cheapest launch (the whole point);
+  //   2. a non-cheapest launch must answer with an EMPTY text block, not an
+  //      error — the extension injects nothing on empty, while `isError` would
+  //      make it log a failure for the ordinary case.
+  //
+  // The list-side property (the model never sees `prompt_brief`) is pinned by
+  // the exact `["code", "web"]` assertion on `/mcp/search` above: a listed
+  // tool would have broken that array the moment this tool was added.
+  const WORKSPACE = mkdtempSync(join(tmpdir(), "gh-router-brief-ws-"))
+  writeFileSync(join(WORKSPACE, "render.ts"), "export const render = () => 1" + String.fromCharCode(10))
+
+  function mockBriefUpstream(text: string): { calls: number } {
+    const captured = { calls: 0 }
+    globalThis.fetch = mock(async () => {
+      captured.calls++
+      return new Response(
+        JSON.stringify({
+          id: "resp_brief",
+          object: "response",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text }],
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }) as unknown as typeof globalThis.fetch
+    return captured
+  }
+
+  async function callBrief(auth: string, sessionId: string) {
+    const { status, json } = await scopedRpc(
+      "search",
+      {
+        jsonrpc: "2.0",
+        id: 880,
+        method: "tools/call",
+        params: {
+          name: "prompt_brief",
+          arguments: {
+            prompt: "implement a caching layer across the render module and its tests",
+            session_id: sessionId,
+            workspace: WORKSPACE,
+          },
+        },
+      },
+      { auth },
+    )
+    const result = json.result as { content: Array<{ type: string; text: string }>; isError?: boolean }
+    return { status, result, text: result?.content?.[0]?.text ?? "" }
+  }
+
+  test("a cheapest launch gets the wrapped brief back", async () => {
+    const BRIEF_NONCE = "e".repeat(64)
+    const launch = registerLaunch({
+      profileId: "cheapest",
+      nonce: BRIEF_NONCE,
+      secret: "brief-secret",
+      allowedGroups: new Set(["peers", "search"]),
+    })
+    const upstream = mockBriefUpstream("1. Read render.ts" + String.fromCharCode(10) + "2. Memoize render")
+    try {
+      const { status, result, text } = await callBrief(
+        `Bearer ${BRIEF_NONCE}`,
+        `sess-${Date.now()}-ok`,
+      )
+      expect(status).toBe(200)
+      expect(result.isError).toBeFalsy()
+      expect(text).toContain("EXECUTION BRIEF")
+      expect(text).toContain("Memoize render")
+      expect(upstream.calls).toBe(1)
+    } finally {
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
+  test("a non-cheapest launch answers empty, not an error, and spends nothing", async () => {
+    // The default (standard) launch owns NONCE.
+    const upstream = mockBriefUpstream("SHOULD NOT BE USED")
+    const { status, result, text } = await callBrief(AUTH_HEADER, `sess-${Date.now()}-std`)
+    expect(status).toBe(200)
+    expect(result.isError).toBeFalsy()
+    expect(text).toBe("")
+    expect(upstream.calls).toBe(0)
   })
 })
 
@@ -3889,6 +3988,174 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
     } finally {
       state.models = saved
       unregisterLaunch(cheapLaunch.launchId)
+    }
+  })
+})
+
+describe("/mcp ado + kusto groups — scoping and gating", () => {
+  const SYNTHETIC_ADO_TOOLS = [
+    {
+      toolNameHttp: "repo_pull_request",
+      group: "ado" as const,
+      capability: "ado" as const,
+      description: "Recorded Azure DevOps fixture.",
+      inputSchema: { type: "object", properties: { action: { type: "string" } } },
+      handler: async () => ({ content: [{ type: "text" as const, text: "ado ok" }] }),
+    },
+  ]
+
+  function enableAdo(): void {
+    state.adoEnabled = true
+    state.adoOrganization = "contoso"
+    __setAdoToolSnapshotForTests(SYNTHETIC_ADO_TOOLS)
+  }
+
+  function disableAzure(): void {
+    state.adoEnabled = false
+    state.adoOrganization = null
+    state.adoToolsets = []
+    state.adoReadOnly = true
+    state.kustoEnabled = false
+    state.kustoCluster = null
+    state.kustoDatabase = null
+    __setAdoToolSnapshotForTests([])
+  }
+
+  afterEach(() => {
+    disableAzure()
+  })
+
+  test("kusto tools/list is exactly the five static tools, and only when a cluster is set", async () => {
+    state.kustoEnabled = true
+    state.kustoCluster = "https://example.kusto.windows.net"
+    const { json } = await scopedRpc("kusto", { jsonrpc: "2.0", id: 900, method: "tools/list" })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name).sort()
+    expect(names).toEqual(["databases", "query", "sample", "schema", "tables"])
+  })
+
+  test("kusto is invisible without a cluster even when the flag is on", async () => {
+    // The cluster is the capability: `--kusto` alone is a request the resolver
+    // refuses to satisfy by guessing one, so the group must not advertise.
+    state.kustoEnabled = true
+    state.kustoCluster = null
+    const { json } = await scopedRpc("kusto", { jsonrpc: "2.0", id: 901, method: "tools/list" })
+    expect((json.result as { tools: Array<unknown> }).tools).toEqual([])
+  })
+
+  test("kusto is invisible by default", async () => {
+    const { json } = await scopedRpc("kusto", { jsonrpc: "2.0", id: 902, method: "tools/list" })
+    expect((json.result as { tools: Array<unknown> }).tools).toEqual([])
+  })
+
+  test("ado tools/list is the upstream snapshot, and empty when the group is off", async () => {
+    enableAdo()
+    const on = await scopedRpc("ado", { jsonrpc: "2.0", id: 903, method: "tools/list" })
+    expect((on.json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name))
+      .toEqual(["repo_pull_request"])
+    disableAzure()
+    const off = await scopedRpc("ado", { jsonrpc: "2.0", id: 904, method: "tools/list" })
+    expect((off.json.result as { tools: Array<unknown> }).tools).toEqual([])
+  })
+
+  test("the ado group does not leak onto another group's scope, nor the reverse", async () => {
+    enableAdo()
+    state.kustoEnabled = true
+    state.kustoCluster = "https://example.kusto.windows.net"
+    const search = await scopedRpc("search", { jsonrpc: "2.0", id: 905, method: "tools/list" })
+    const searchNames = (search.json.result as { tools: Array<{ name: string }> }).tools
+      .map((t) => t.name)
+      .sort()
+    expect(searchNames).toEqual(["code", "web"])
+    const ado = await scopedRpc("ado", { jsonrpc: "2.0", id: 906, method: "tools/list" })
+    const adoNames = (ado.json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+    expect(adoNames).not.toContain("query")
+    expect(adoNames).not.toContain("code")
+  })
+
+  test("the unscoped union carries both groups when both are enabled", async () => {
+    enableAdo()
+    state.kustoEnabled = true
+    state.kustoCluster = "https://example.kusto.windows.net"
+    const { json } = await rpc({ jsonrpc: "2.0", id: 907, method: "tools/list" })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+    expect(names).toContain("repo_pull_request")
+    expect(names).toContain("databases")
+  })
+
+  test("calling a kusto tool on /mcp/ado is -32601, like an unknown tool", async () => {
+    enableAdo()
+    state.kustoEnabled = true
+    state.kustoCluster = "https://example.kusto.windows.net"
+    const { json } = await scopedRpc("ado", {
+      jsonrpc: "2.0",
+      id: 908,
+      method: "tools/call",
+      params: { name: "databases", arguments: {} },
+    })
+    expect((json.error as { code: number }).code).toBe(-32601)
+  })
+
+  test("a hard-coded ado call on a launch that never enabled the group is -32601", async () => {
+    // Defense in depth: the client can skip tools/list entirely.
+    disableAzure()
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 909,
+      method: "tools/call",
+      params: { name: "repo_pull_request", arguments: { action: "list" } },
+    })
+    expect((json.error as { code: number }).code).toBe(-32601)
+  })
+
+  test("a hard-coded kusto call with no cluster is -32601", async () => {
+    state.kustoEnabled = true
+    state.kustoCluster = null
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 910,
+      method: "tools/call",
+      params: { name: "databases", arguments: {} },
+    })
+    expect((json.error as { code: number }).code).toBe(-32601)
+  })
+
+  test("an enabled ado tool routes to its snapshot handler", async () => {
+    enableAdo()
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 911,
+      method: "tools/call",
+      params: { name: "repo_pull_request", arguments: { action: "list" } },
+    })
+    const result = json.result as { content: Array<{ text: string }>; isError?: boolean }
+    expect(result.isError).toBeUndefined()
+    expect(result.content[0]!.text).toBe("ado ok")
+  })
+
+  test("the ado group joins the launch allow-list on the standard profile", async () => {
+    enableAdo()
+    state.kustoEnabled = true
+    state.kustoCluster = "https://example.kusto.windows.net"
+    const nonce = "a".repeat(64)
+    const launch = registerLaunch({
+      profileId: "standard",
+      nonce,
+      secret: "ado-allowlist-secret",
+      allowedGroups: new Set(["ado", "kusto"]),
+    })
+    try {
+      const { json } = await rpc({
+        jsonrpc: "2.0",
+        id: 912,
+        method: "tools/list",
+      }, { auth: `Bearer ${nonce}` })
+      const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+      expect(names).toContain("repo_pull_request")
+      expect(names).toContain("databases")
+      // A group outside the allow-list stays off even though it is enabled.
+      expect(names).not.toContain("code")
+    } finally {
+      unregisterLaunch(launch.launchId)
     }
   })
 })

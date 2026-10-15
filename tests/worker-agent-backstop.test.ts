@@ -17,6 +17,10 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
+// Value import: since the Pi v1.3.0 agent core the `StreamFn` contract takes a
+// normalized `TranscriptContext`, which only `normalizeContext` produces.
+import { normalizeContext } from "@earendil-works/pi-ai"
+
 import { state } from "~/lib/state"
 import { makeContextBudget } from "~/lib/worker-agent/context-budget"
 import { runWorkerAgent } from "~/lib/worker-agent/engine"
@@ -123,11 +127,16 @@ test("fallback window overflow warns but proceeds to upstream", async () => {
   })
   const stream = await streamFn(
     {} as never,
-    {
+    // Normalized, because since the Pi v1.3.0 agent core the `StreamFn` contract
+    // takes a `TranscriptContext`: the prompt travels as a leading system
+    // message, and `estimateContextBytes` replays it out of the transcript. A
+    // raw `Context` here would reach the backstop with an empty transcript and
+    // the oversized-prompt assertion below would pass for the wrong reason.
+    normalizeContext({
       systemPrompt: "X".repeat(400_000),
       tools: [],
       messages: [],
-    },
+    }),
   )
   await Array.fromAsync(stream)
   const final = await stream.result()

@@ -73,10 +73,17 @@ function contentBytes(content: unknown): number {
 /** Conservative UTF-8 byte length of all model-visible text in a message. */
 function messageTextBytes(m: AgentMessage): number {
   const msg = m as { role: string; content?: unknown }
+  // `system` joined this group at the Pi v1.3.0 agent core, where the prompt
+  // moved off the `Context` and into the transcript as a leading system
+  // message. It is therefore now part of the list this function walks, and
+  // counting it keeps the byte accounting honest; the `default` branch below
+  // would have scored it 0, so every trigger and prune threshold would have
+  // been computed against a transcript volume that excluded the prompt.
   switch (msg.role) {
     case "user":
     case "custom":
     case "toolResult":
+    case "system":
       return contentBytes(msg.content)
     case "assistant": {
       const content = msg.content

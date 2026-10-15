@@ -47,6 +47,8 @@ import {
   generalPurposeFastModel,
   standInToolEnabled,
   workerToolsEnabled,
+  adoToolsEnabled,
+  kustoToolsEnabled,
 } from "../mcp-capabilities"
 import { buildPlanReviewHookCommand, planReviewEnabled } from "../orchestration/plan-review-hook"
 import { buildPromptSubmitHookCommand } from "../orchestration/prompt-submit-hook"
@@ -92,6 +94,16 @@ export interface ServeEnhancementOpts {
    *  (fleet drives remote coding sessions with the operator's stored fleet
    *  credentials — an equal-or-higher blast radius than the browser MCP). */
   fleetOverTunnel?: boolean
+  /** Operator opt-in to expose the Azure DevOps MCP group over the tunnel.
+   *  It reads organization data (pull requests, work items, wiki, builds) with
+   *  the operator's `az` identity, so a remotely reachable control plane would
+   *  widen every tunnel client to that data. Read-only is not the same as
+   *  public. */
+  adoOverTunnel?: boolean
+  /** Operator opt-in to expose the Kusto MCP group over the tunnel. Same
+   *  reasoning as `adoOverTunnel`: the queries run with the operator's `az`
+   *  identity against private telemetry data. */
+  kustoOverTunnel?: boolean
 }
 
 const NOOP: ServeEnhancementsHandle = { cleanup: async () => {} }
@@ -149,6 +161,13 @@ export async function provisionServeEnhancements(
     if (browseAllowed) enabledGroups.push("browser")
     if (fleetAllowed) enabledGroups.push("fleet")
     if (firstMateAllowed) enabledGroups.push("first-mate")
+    // Azure read-only lookups. `serve` is a Standard-profile surface, so it
+    // takes them unconditionally when they are on — but NOT over a tunnel:
+    // both reach live organizational data with the operator's `az` identity,
+    // so they follow browse/fleet/first-mate and stay local unless explicitly
+    // opted in for tunnel exposure.
+    if (adoToolsEnabled() && (!tunnelExposed || opts.adoOverTunnel === true)) enabledGroups.push("ado")
+    if (kustoToolsEnabled() && (!tunnelExposed || opts.kustoOverTunnel === true)) enabledGroups.push("kusto")
 
     const gem = geminiAvailable()
     const { keys: groupKeys } = await resolveGroupKeysFromMirror(enabledGroups)

@@ -174,7 +174,16 @@ export const codex = defineCommand({
       {
         onShutdown: async () => {
           await stopKeepAwake()
+          // Dynamic, like `claude.ts` and `pi.ts` do for the same call: a
+          // static import of `ado-tools` would pull the whole non-persona MCP
+          // registry (and the worker/orchestration modules behind it) into the
+          // Codex CLI's import graph for one shutdown-time call. The client
+          // module has a second, static importer in `serve.ts`, which already
+          // loads that registry — this import is the one that would be pure
+          // weight.
+          const { disposeAdoClients } = await import("./lib/ado-tools")
           await disposeBluebirdClients()
+          await disposeAdoClients()
         },
       },
     )

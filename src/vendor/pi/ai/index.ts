@@ -20,5 +20,6 @@ export * from "./utils/json-parse.ts";
 export * from "./utils/provider-env.ts";
 export * from "./utils/retry.ts";
 export * from "./utils/text.ts";
+export * from "./utils/transcript.ts";
 export * from "./utils/uuid.ts";
 export * from "./utils/validation.ts";

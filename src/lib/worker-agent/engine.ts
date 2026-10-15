@@ -650,7 +650,15 @@ async function runWorkerAgentOnce(
       // Hard caps block the triggering tool so the model receives the terse
       // halt result, then stop the loop after that turn before another provider
       // request. The repeated-call guard does not latch a hard stop.
-      shouldStopAfterTurn: () => budget.hardStopReason !== null,
+      //
+      // `finishTurn` replaces the pre-v1.3.0 `shouldStopAfterTurn` boolean. The
+      // two are not interchangeable: `{action:"continue"}` FORCES one more
+      // provider request, while `undefined` preserves normal scheduling. This
+      // hook only ever latches a stop, never a continuation, so the not-latched
+      // branch returns `undefined` — returning `"continue"` would add an extra
+      // model call on any turn the budget has already allowed.
+      finishTurn: () =>
+        budget.hardStopReason !== null ? { action: "end" } : undefined,
       afterToolCall: async (ctx: AfterToolCallContext) => {
         // Byte accounting on the realized tool result. `recordToolBytes`
         // walks `result.content[].text` parts and sums UTF-8 byte

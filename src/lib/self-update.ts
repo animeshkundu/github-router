@@ -114,8 +114,13 @@ async function getLatestVersion(npmPath: string): Promise<string | null> {
  * shutdown, or racing each other (callers hold `withInstallLock`
  * before queueing).
  */
-export function queueDetachedGlobalInstall(npmPath: string, spec: string): void {
+export function queueDetachedGlobalInstall(
+  npmPath: string,
+  spec: string,
+  extraArgs: readonly string[] = [],
+): void {
   const parentPid = process.pid
+  const installArgs = ["install", "-g", spec, ...extraArgs]
   // Inline waiter: poll until the parent disappears, then install.
   const waiter = `
     const pid = ${parentPid};
@@ -124,7 +129,7 @@ export function queueDetachedGlobalInstall(npmPath: string, spec: string): void 
     const timer = setInterval(() => {
       if (alive()) return;
       clearInterval(timer);
-      const args = ["install", "-g", ${JSON.stringify(spec)}, "--silent"];
+      const args = [...${JSON.stringify(installArgs)}, "--silent"];
       const isWin = process.platform === "win32";
       const child = spawn(${JSON.stringify(npmPath)}, args, {
         stdio: "ignore", windowsHide: true, shell: isWin, detached: !isWin,

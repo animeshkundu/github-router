@@ -237,6 +237,28 @@ function windowsCmdExe(): string {
 }
 
 /**
+ * Is this a Windows batch script rather than a real executable?
+ *
+ * The distinction is load-bearing for every caller that spawns with
+ * `shell:false`: CreateProcess only resolves `.exe`/`.com`, so a `.cmd`/`.bat`
+ * path throws `EINVAL` at spawn time even though `resolveExecutable` returned
+ * it happily. `buildExecInvocation` is the one helper that can use such a
+ * path, because it routes it through `cmd.exe`; anywhere else a shim is
+ * indistinguishable from a missing binary, and code that treats it as present
+ * gets a failure it did not predict.
+ *
+ * The observed case: ast-grep installed globally through npm. `resolveAstGrep`
+ * returned `ast-grep.cmd`, `runManagedExeCapture` threw `EINVAL`, and
+ * `mode:"ast"` could not run on the canonical Windows host while the version
+ * probe (which DOES go through `buildExecInvocation`) read the shim as a
+ * perfectly adequate 0.45.3.
+ */
+export function isWindowsScriptShim(resolved: string): boolean {
+  if (process.platform !== "win32") return false
+  return /\.(cmd|bat)$/i.test(resolved)
+}
+
+/**
  * Build the platform-correct `spawn` invocation for a command given as
  * an argv array. Pure / unit-testable (no spawn).
  *

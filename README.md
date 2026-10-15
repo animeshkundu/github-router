@@ -122,6 +122,20 @@ For codex-side write capability (a `codex-implementer` persona that can mutate f
 
 Alongside the peer reviewers, the same MCP surface exposes a `code` tool (under the `search` server — `mcp__search__code`) — fast structured code search over the workspace. Without a search flag it uses the local lexical engine. Pass `--search` for router-managed local ColBERT semantic search with transparent lexical fallback, or `--bluebird` to route semantic and lexical modes through the Bluebird Azure DevOps index. Bluebird failures remain visible and never silently fall back locally; `exact`, `regex`, and `ast` always stay local. The flags are independent, so `--bluebird` alone never provisions local ColBERT artifacts. See [local semantic search](docs/semantic-search.md) and the [Bluebird protocol and routing reference](docs/bluebird-search.md).
 
+### Azure DevOps and Kusto (`mcp__ado__*`, `mcp__kusto__*`)
+
+Two further opt-in groups follow the same shape. `--ado` (or a git remote that
+resolves to an Azure DevOps repository, which enables it and Bluebird
+automatically) exposes whatever Microsoft's remote MCP server advertises under
+the selected toolsets, **read-only by default** via `X-MCP-Readonly: true`;
+`--ado-write` clears the header for an operator who explicitly wants mutations,
+and prints a banner line when it does. `--kusto-cluster <uri>` exposes five
+read-only tools over an in-repo Azure Data Explorer client, with read-only
+enforced by the service (`x-ms-readonly` plus
+`request_readonly_hardline`) rather than by inspecting the query text. Both mint
+their own Azure CLI access token, which never reaches a child process. See
+[Azure MCP groups](docs/azure-mcp.md).
+
 The local lexical engine ranks with **BM25F** (Robertson, Zaragoza, Taylor 2004) over matched lines, context, paths, and symbol definitions, then refines top hits with tree-sitter. Single-identifier queries auto-expand across camelCase / snake_case / kebab-case skeletons so `getUserName` also matches `get_user_name`. `workspace` is any absolute path the proxy process can read, and result paths are repository-relative rather than absolute.
 
 Ripgrep is provided via the `@vscode/ripgrep` npm dependency (per-platform binary via `optionalDependencies` — no postinstall script needed). The proxy prefers system `rg` on `PATH` when available and falls back to the bundled binary otherwise. To opt into raw query/path logging for debugging, set `GH_ROUTER_DEBUG_CODE_SEARCH=1` — by default the proxy logs only counts and timings.
@@ -276,6 +290,8 @@ Fallback chains fire only on the implicit-default path; explicit `-m`/`--model` 
 | `--proxy-env` | Use HTTP_PROXY/HTTPS_PROXY env vars | false |
 | `--search` | Enable router-managed local ColBERT semantic search with lexical fallback | false |
 | `--bluebird` | Route semantic and lexical code search through Bluebird; keep exact/regex/AST local | false |
+| `--ado` / `--no-ado` | Expose the Azure DevOps remote MCP group (`mcp__ado__*`), read-only by default. Auto-enabled when a git remote resolves to an Azure DevOps repository | auto |
+| `--kusto` / `--no-kusto` | Expose the Kusto (Azure Data Explorer) MCP group (`mcp__kusto__*`), read-only. Requires `--kusto-cluster` | false |
 
 Additional flags accepted only by the `claude` subcommand:
 

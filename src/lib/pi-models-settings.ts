@@ -12,6 +12,8 @@ import {
   CHEAPEST_PROFILE_ORACLE_EFFORT,
   CHEAPEST_PROFILE_ORACLE_MODEL,
 } from "./cheapest-profile-contract"
+import { CHEAPEST_CONSULT_CONTRACT } from "./claude-md-injection"
+import { PI_MIN_VERSION } from "./pi-version-check"
 import { piContextWindowFor } from "./pi-tier-windows"
 
 export type PiProfileId = "cheapest" | "balanced"
@@ -91,7 +93,7 @@ export const PI_PROFILE_CONTEXT_TOKENS = 200_000 as const
 /** Provider key used in models.json and agent `provider/model` references. */
 export const PI_PROVIDER_NAME = "gh-router" as const
 
-const PI_MIN_VERSION_NOTE = "Requires Pi >= 0.87.1 and Node >= 22.19."
+const PI_MIN_VERSION_NOTE = `Requires Pi >= ${PI_MIN_VERSION} and Node >= 22.19.`
 
 export function piLeadModel(profileId: PiProfileId): string {
   return profileId === "cheapest"
@@ -1252,6 +1254,18 @@ export function buildPiAppendSystem(
     lines.push(
       `- Peerless launch: no subagents or consultants in this session; plan, implement, and verify directly.`,
     );
+  }
+  if (advisor) {
+    // The Claude launcher splits this contract two ways: a short pointer rides
+    // the digest while the full text rides the mirrored CLAUDE.md, which
+    // Claude Code loads every turn. Pi has no second always-resident surface
+    // the launcher owns — APPEND_SYSTEM.md IS the digest, and the mirror's
+    // AGENTS.md is bridge-synthesized PROJECT guidance, not ours — so a
+    // pointer here would send the lead looking for a file that does not
+    // exist. The full contract rides the digest instead; it is the same
+    // exported constant the Claude directive uses, which is the property that
+    // actually matters: the two front-ends cannot drift.
+    lines.push("", CHEAPEST_CONSULT_CONTRACT.trimEnd());
   }
   lines.push("", `(${PI_MIN_VERSION_NOTE})`, "");
   return lines.join("\n");

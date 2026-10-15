@@ -118,9 +118,9 @@ describe("engine to Pi constructor contract", () => {
       ).toEqual([
         "afterToolCall",
         "beforeToolCall",
+        "finishTurn",
         "initialState",
         "prepareNextTurn",
-        "shouldStopAfterTurn",
         "streamFn",
         "toolExecution",
         "transformContext",
@@ -138,6 +138,7 @@ describe("engine to Pi constructor contract", () => {
         "beforeToolCall",
         "afterToolCall",
         "prepareNextTurn",
+        "finishTurn",
       ]) {
         expect(typeof captured?.[key], `Agent option missing or wrong type: ${key}`).toBe("function")
       }
@@ -190,7 +191,7 @@ describe("vendored Pi runtime contracts", () => {
     expect(providerCalls).toBe(1)
   })
 
-  test("shouldStopAfterTurn reaches the Agent loop and prevents another provider request", async () => {
+  test("finishTurn reaches the Agent loop and {action:'end'} prevents another provider request", async () => {
     let hookCalls = 0
     const tool: AgentTool<TSchema, Record<string, never>> = {
       name: "bounded",
@@ -200,19 +201,51 @@ describe("vendored Pi runtime contracts", () => {
       execute: async () => result("bounded result"),
     }
     const { providerCalls } = await runAgent([tool], batch([{ name: "bounded" }]), {
-      shouldStopAfterTurn: () => {
+      // `finishTurn` is the v1.3.0 replacement for the `shouldStopAfterTurn`
+      // boolean this test used to pin. The old name is gone from upstream, so
+      // asserting it would have been asserting the removal of the locally
+      // patched surface rather than the behavior the worker depends on; the
+      // behavior is what this test keeps pinned.
+      finishTurn: () => {
         hookCalls += 1
-        return true
+        return { action: "end" }
       },
     })
     expect(
       hookCalls,
-      "Vendored Agent did not receive shouldStopAfterTurn; restore the local patch documented in docs/pi-vendor-sync.md",
+      "Vendored Agent did not receive finishTurn; the engine's budget hard-stop is wired through it (see docs/pi-vendor-sync.md)",
     ).toBe(1)
     expect(
       providerCalls,
-      "shouldStopAfterTurn was not applied by the Agent loop; see the wiring decision table in docs/pi-vendor-sync.md",
+      "finishTurn {action:'end'} was not applied by the Agent loop; see the wiring decision table in docs/pi-vendor-sync.md",
     ).toBe(1)
+  })
+
+  test("finishTurn returning undefined preserves normal scheduling", async () => {
+    // The worker engine latches a stop or returns undefined — it never returns
+    // {action:"continue"}, because that FORCES one more provider request and
+    // would add a model call to every turn the budget already allowed. This
+    // pins the branch the engine actually runs: the run continues to a second
+    // provider request on its own (the tool turn is followed by a text turn),
+    // so an undefined return must not end the run.
+    let hookCalls = 0
+    const tool: AgentTool<TSchema, Record<string, never>> = {
+      name: "unlatched",
+      label: "unlatched",
+      description: "unlatched",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      execute: async () => result("unlatched result"),
+    }
+    const { providerCalls } = await runAgent([tool], batch([{ name: "unlatched" }]), {
+      finishTurn: () => {
+        hookCalls += 1
+        return undefined
+      },
+    })
+    // Two calls: the tool turn, then the turn that answers it. `finishTurn`
+    // fires once after each completed turn, including the terminal one.
+    expect(providerCalls).toBe(2)
+    expect(hookCalls).toBe(2)
   })
 
   test("beforeToolCall {block, reason} prevents execution and emits an error tool result", async () => {

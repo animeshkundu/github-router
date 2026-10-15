@@ -211,6 +211,36 @@ export interface State {
   bluebirdBranch: string | null
 
   /**
+   * Azure DevOps remote MCP group (`mcp__ado__*`). Enabled by `--ado`, by
+   * `GH_ROUTER_ENABLE_ADO=1`, or automatically when the workspace's git
+   * remotes resolve to an Azure DevOps repository. See
+   * `src/lib/azure-mcp-flags.ts` for the precedence and the trust argument.
+   */
+  adoEnabled: boolean
+  /** Organization whose `https://mcp.dev.azure.com/{org}` endpoint is used. */
+  adoOrganization: string | null
+  /**
+   * `X-MCP-Toolsets` selection. The single entry `"all"` means "send no
+   * header". Empty only while the group is off.
+   */
+  adoToolsets: Array<string>
+  /**
+   * Send `X-MCP-Readonly: true`. True unless `--ado-write` was passed. Never
+   * cleared by discovery — a git remote can turn this group on but can never
+   * widen it to writes.
+   */
+  adoReadOnly: boolean
+
+  /**
+   * Kusto (Azure Data Explorer) MCP group (`mcp__kusto__*`). Requires a
+   * configured cluster; a git remote supplies no cluster identity, so
+   * discovery alone never enables this group.
+   */
+  kustoEnabled: boolean
+  kustoCluster: string | null
+  kustoDatabase: string | null
+
+  /**
    * Humanlike pacing override:
    *   "on"   - --humanlike CLI flag or GH_ROUTER_HUMANLIKE=1 env;
    *            inject Beta-distributed inter-action delays, Bezier
@@ -289,6 +319,13 @@ export const state: State = {
   bluebirdProject: null,
   bluebirdRepositories: [],
   bluebirdBranch: null,
+  adoEnabled: false,
+  adoOrganization: null,
+  adoToolsets: [],
+  adoReadOnly: true,
+  kustoEnabled: false,
+  kustoCluster: null,
+  kustoDatabase: null,
   humanlikeForce: "auto",
   sessionId: randomUUID(),
   machineId: randomBytes(32).toString("hex"),
