@@ -133,6 +133,22 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   guidance lives in skills (`gh-oracle`, `gh-search-first`,
   `gh-delegate`, cheapest-only `gh-advisor`) and `/review`,
   `/parallel-review` (+ cheapest-only `/plan-review`) prompts.
+- **Per-prompt execution brief, cheapest only.** The extension also
+  registers a `before_agent_start` handler that relays the user's prompt to
+  a hook-only MCP tool, `prompt_brief` (group `search`, hook-nonce
+  authenticated, never listed to the model), and re-emits the reply as a
+  custom message ABOVE the user turn — additive, `systemPrompt` untouched.
+  The proxy produces it with the same `runCheapestRewrite` the Claude
+  `UserPromptSubmit` hook uses (`src/lib/hook-prompt-brief.ts` over
+  `src/lib/cheapest-prompt-rewrite.ts`), grounding search, static pack, and
+  one-shot per-session flag included, so `GH_ROUTER_DISABLE_CHEAPEST_REWRITE=1`
+  opts both front-ends out. Trivial prompts decline; the handler stands down
+  inside a `pi-subagents` child process so a fanout cannot spend one brief
+  per child. Deliberately narrower than the Claude hook: no prior-turn
+  findings and no Stop-gate budget reset (Pi has no `Stop` hook to produce
+  them), and a missed or timed-out rewrite injects nothing where Claude
+  falls open to the search tip plus the grounded scope note. `balanced` is
+  floor-free on both counts, like its advisor.
 - **Native compaction stays authoritative.** Each model row carries its
   Default-tier `contextWindow` (272K for Luna/Sol, 200K for Grok — never the
   advertised 1.05M), and `compaction.reserveTokens` is derived per model from
