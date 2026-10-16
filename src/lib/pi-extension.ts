@@ -391,6 +391,13 @@ export function buildPiMemoryBridgeSection(bridge: PiBridgeExtensionInput): Arra
 export function buildPiExtensionSource(opts: {
   profileId: PiProfileId
   searchEnabled: boolean
+  /**
+   * Engine behind `code_search`. Under `bluebird` the tool reaches the Azure
+   * DevOps index and a failure is `source:"error"` with NO local fallback
+   * (`runUnifiedCodeSearch`), so the description must not promise one: a model
+   * that believes in a fallback reads an empty `error` result as "not found".
+   */
+  searchBackend?: "colbert" | "bluebird"
   browseEnabled: boolean
   peers?: boolean
   bridge?: PiBridgeExtensionInput
@@ -555,11 +562,15 @@ export function buildPiExtensionSource(opts: {
     )
   }
   if (opts.searchEnabled) {
+    const codeSearchDescription =
+      opts.searchBackend === "bluebird"
+        ? "Search the indexed Azure DevOps code for this repository (Bluebird). Modes semantic and lexical answer from the remote index and have NO local fallback: a failure returns source \\\"error\\\" and zero results, which means the search did not run, not that nothing matched. Use mode exact/regex/ast for the local engine."
+        : "Semantic-first code search over the workspace index (falls back to lexical with a label). Use for finding code by meaning."
     lines.push(
       `  pi.registerTool({`,
       `    name: "code_search",`,
       `    label: "Code search",`,
-      `    description: "Semantic-first code search over the workspace index (falls back to lexical with a label). Use for finding code by meaning.",`,
+      `    description: "${codeSearchDescription}",`,
       `    parameters: CodeSearchParams,`,
       `    async execute(_toolCallId, params, signal) {`,
       `      const query = stripNul(params.query || "").trim();`,

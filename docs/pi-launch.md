@@ -56,9 +56,11 @@ plus the mode identity. Each surface rides a flag:
 | `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: `pi-mcp-adapter`, allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer and no `files` picker, whose `ctrl+shift+o` would collide with the UI's extra-detail toggle), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
 | `--ui` / `--no-ui` | **on** | Claude-Code look: genuine `claude-code-dark` theme (`#D77757` coral palette; all six CC variants pickable via `/settings`), fixed Claude palette in tool rows (`themeAdaptive: false`), one-line tool rows (`summary`/`count` modes), transparent tool backgrounds. Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag (the cc-ui `Thought for Xs` one-liner has no off switch upstream — it is the minimum). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
 | `--swe` | off | Pipeline surface: `gh-delegate` (+cheapest `gh-advisor`) skills, `review` / `parallel-review` (+cheapest `plan-review`) prompts |
-| `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill (tool and prose appear together or not at all) |
+| `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill. The prose rides this flag alone; the tool also appears under `--bluebird`, below |
 | `--browse` | off | Browser tool surface when a supported browser is installed |
-| `--bluebird` | off | No Pi-side surface; reaches Bluebird server-side through `/mcp/search/code` |
+| `--bluebird` | auto on an Azure DevOps remote | Routes the `code` tool's `semantic` and `lexical` modes to Bluebird server-side, and emits the `code_search` seam **even without `--search`** — same tool, remote engine, and the description says so (no local fallback: a failure is `source:"error"`, not an empty result). `gh-search-first` prose and `pi-web-access` deliberately stay on `--search`: neither is Bluebird's job |
+| `--ado` | auto on an Azure DevOps remote | `ado` MCP group, reached through `pi-mcp-adapter` from `<mirror>/mcp.json` (key `gh-router-ado` -> `<serverUrl>/mcp/ado`, read-only unless `--ado-write`). Needs `--helpers` **and** `--peers`; either one off leaves Pi with no Azure MCP surface |
+| `--kusto` | off (needs `--kusto-cluster`) | `kusto` MCP group by the same route (key `gh-router-kusto`). Naming a cluster is its own opt-in, and there is no launch-side reachability probe: the group is served read-only by the service |
 | `--memory-bridge` / `--no-memory-bridge` | **on** | Copilot (`.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` `applyTo`) + Claude (`.claude/rules/`, `.claude/CLAUDE.md`, `~/.claude/CLAUDE.md`, `~/.copilot/copilot-instructions.md`) bridge. Static repo-wide slice synthesizes into the mirror `AGENTS.md` (Pi-native candidate, 24KB budget, secrets-redacted, fenced idempotent); path-scoped rules lazy-attach on matching `read/edit/write` (once/session). Auto-memory (`~/.claude/projects/<slug>/memory/MEMORY.md`, 200-line/25KB) is on-demand via `/memory` only, never auto-injected. Honors `GH_ROUTER_PI_BRIDGE=0` / `GH_ROUTER_DISABLE_PI_BRIDGE=1` and Pi's own `--no-context-files`/`-nc` passthrough. `--no-memory-bridge` = Pi-native `AGENTS.md`/`CLAUDE.md` discovery only. |
 
 Always injected regardless of flags (like Claude's operating
@@ -68,6 +70,20 @@ the `gh-router-pi` extension — no third-party package; opt out with
 `GH_ROUTER_DISABLE_AIC_STATUSLINE=1`), toolbelt PATH (opt out with
 `GH_ROUTER_DISABLE_TOOLBELT=1`), launch binding. The user's own
 `~/.pi/agent` snapshot is their Pi default, never gated.
+
+**Pi's own `mcp.json`.** The two Azure groups have no extension seam, so they are
+published through Pi's own MCP config in the mirror (`<mirror>/mcp.json`, which
+`pi-mcp-adapter` reads as a user-global source on Pi 0.99+). The file is written
+only when a group is enabled *and* the adapter ships (`--helpers` + `--peers`),
+is read-merged so a user's own `mcpServers` survive untouched, and carries the
+bearer as `Bearer ${GH_ROUTER_HOOK_NONCE}` — a placeholder the adapter expands at
+connect time, never a token on disk. Keys are always `gh-router-<group>`, never
+the bare name: project files (`.mcp.json`, `.pi/mcp.json`,
+`.pi/mcp-adapter.json`) outrank the mirror and replace a same-named server
+wholesale, so a bare `ado` key would be hijacked by the workspace's own. A
+project file that declares one of our prefixed keys is reported in a launch
+warning, never edited. A file we cannot parse is left exactly as it is, and the
+groups are simply not exposed that launch.
 
 Deliberate divergence: pinned Claude profiles refuse `--no-codex-mcp`;
 Pi allows `--no-peers`. Do not "fix" this back into parity.
