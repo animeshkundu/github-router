@@ -1606,6 +1606,22 @@ export function getPiLaunchEnvVars(mirrorDir: string): Record<string, string> {
     vars.npm_config_fund = "false"
     vars.npm_config_update_notifier = "false"
   }
+  // Neutralize an inherited `npm_config_allow_scripts` for this child only.
+  //
+  // npm >= 11.19 rejects a CLI- or env-sourced allow-scripts value for any
+  // project-scoped install: `resolveAllowScripts` computes
+  // `cliPolicy = policyFromSources(npm, ['cli', 'env'])` and throws
+  // EALLOWSCRIPTS when `cliPolicy && !npm.global && !skipProjectConfig`
+  // (npm/lib/utils/resolve-allow-scripts.js). Pi's per-boot package install
+  // is exactly that shape (`npm install <pkg> --prefix <mirror>/npm`), so a
+  // shell export like `npm_config_allow_scripts=koffi` - routine on managed
+  // corporate machines - kills the launch before a single package lands,
+  // with an error naming a flag the caller never passed. Emptying the env
+  // layer is not a policy change: npm treats `''` as no configuration and
+  // falls through to the `.npmrc` cascade, which npm's own error message
+  // names as the correct home for the setting. Setting it only here keeps
+  // the operator's export intact for their own npm use.
+  vars.npm_config_allow_scripts = ""
   if (toolbeltEnabled()) {
     Object.assign(vars, toolbeltPathOverride(process.env, PATHS.TOOLBELT_BIN_DIR))
   }

@@ -316,3 +316,25 @@ stays observe-only), and provider/model overriders (would break the
 fixed-roster cost contract). `--ui` opts into `pi-code` +
 `pi-claude-code-ui`; `pi-lean-ctx` stays a docs recipe until its
 manifest paths are pinned.
+
+## npm `allow-scripts` is neutralized for the Pi child
+
+Pi installs the mirror's `packages[]` on every boot with a project-scoped
+install (`npm install <pkg> --prefix <mirror>/npm`). npm 11.19 refuses a
+CLI- or env-sourced `allow-scripts` for that shape
+(`resolveAllowScripts`: `cliPolicy && !npm.global && !skipProjectConfig`
+throws `EALLOWSCRIPTS`), so a shell export of `npm_config_allow_scripts` -
+routine on managed corporate machines - kills the launch before a single
+package lands, naming a flag the caller never passed. Measured on npm
+11.19.1 with the real command against a scratch prefix: with the export
+present the install fails; with it unset or emptied it succeeds.
+
+`getPiLaunchEnvVars` therefore emits `npm_config_allow_scripts=""` for the
+Pi child only. Empty is not a policy change: npm reads it as no
+configuration and falls through to the `.npmrc` cascade, which is exactly
+where npm's own error message says the setting belongs - so an operator
+who allowlists a package for install scripts in `.npmrc` keeps that
+allowlist, and their shell export still applies to their own npm use. The
+router's other npm invocations are `npm install -g` (Pi's own install and
+update), which the rule exempts because global installs have no project
+context to protect.

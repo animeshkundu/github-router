@@ -92,6 +92,13 @@ const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
     "GO=1e5,Q$=1e6",
     'oje("CLAUDE_CODE_AUTO_COMPACT_WINDOW",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,GO,Q$);if(y.status!=="invalid"){let S=Math.max(GO,y.effective)',
   ],
+  // 2.1.302: identifiers rolled once more, shape untouched. Still the same
+  // pair of facts - the 1e5/1e6 bounds and the `Math.max` floor applied to
+  // the parsed value before it is handed back as the env-sourced window.
+  [
+    "oI=1e5,dU=1e6",
+    'Kje("CLAUDE_CODE_AUTO_COMPACT_WINDOW",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,oI,dU);if(y.status!=="invalid"){let S=Math.max(oI,y.effective)',
+  ],
 ]
 
 describe("client overflow-contract canary", () => {

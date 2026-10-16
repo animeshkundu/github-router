@@ -340,6 +340,23 @@ the per-launch mirror (`<Pi agent dir>/mcp.json`, which the adapter reads on Pi
   without the adapter would expose the groups through a backend this path has
   never validated.
 
+Observed on a real launch (Pi 1.3.0 on Windows, adapter installed into the
+mirror): the adapter's own `mcp-cache.json` lists `gh-router-ado` with exactly
+20 tools (`repo_repository`, `repo_pull_request`, `wit_work_item`,
+`pipelines_build`, `wiki`, `repo_search_commits`, ...) - the read-only set, so
+`X-MCP-Readonly` holds through this route as well - and the session transcript
+shows a completed model turn, which is the end-to-end proof that the nonce
+interpolation and the scoped URL work from Pi. That cache file is the check to
+reach for, because it can only exist after the adapter has connected.
+
+The same launch surfaced a non-network way for the install to fail: npm >= 11.19
+rejects a CLI- or env-sourced `allow-scripts` for a project-scoped install, and
+Pi's per-boot `npm install --prefix <mirror>/npm` is exactly that shape, so a
+shell export of `npm_config_allow_scripts` killed the whole launch before any
+package landed. `getPiLaunchEnvVars` now emits `npm_config_allow_scripts=""` for
+the Pi child, which hands the decision back to the `.npmrc` cascade (rationale
+and measurements in [`pi-launch.md`](pi-launch.md)).
+
 ## Testing policy
 
 The `docs/bluebird-search.md` policy extends verbatim to both clients: **unit and

@@ -24,6 +24,11 @@ import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
  * rewrite when it is well shaped, deny otherwise" — the same property the
  * four older single-return forms asserted). New candidates are APPENDED so a
  * developer on an older install still passes.
+ *
+ * 2.1.302 rolled the identifiers once more and moved nothing: the tag literal
+ * and its `.replace(/\d+$/,"")` are intact, the push still carries
+ * `type`/`name`/`model` plus the conditional `defer_loading`, and the
+ * PreToolUse check string is byte-identical to 2.1.301.
  */
 const REQUIRED_MARKERS = [
   "--advisor <model>",
@@ -32,11 +37,17 @@ const REQUIRED_MARKERS = [
     'type:"advisor_20260301",name:"advisor",model:',
     'var Fit="advisor_20260301",$it="advisor_20260301".replace(/\\d+$/,"");',
     'var kqt="advisor_20260301",Sqt="advisor_20260301".replace(/\\d+$/,"");',
+    // 2.1.302 rolled the identifiers again; the tag literal and the
+    // suffix-strip that makes the model-facing name are unchanged.
+    'var CKt="advisor_20260301",xKt="advisor_20260301".replace(/\\d+$/,"");',
   ],
   [
     'type:"advisor_20260301",name:"advisor",model:',
     "_m.push({type:Fit,name:Sce,model:rs,...Ro&&{defer_loading:!0}})",
     "sN.push({type:kqt,name:Jxe,model:wl,...bl&&{defer_loading:!0}})",
+    // Same seam in 2.1.302: the tool is still pushed with the advisor tag,
+    // a name, the resolved model, and a conditional `defer_loading`.
+    "push({type:CKt,name:PPe,model:_u,...Ta&&{defer_loading:!0}})",
   ],
   "Advising",
   " using ",
