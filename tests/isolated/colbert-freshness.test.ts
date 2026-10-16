@@ -269,6 +269,26 @@ describe("freshness delta + servability", () => {
       expect(store.isServableVerdict({ ...base, verdict })).toBe(false)
     }
   })
+
+  test("never-indexed workspace reports the platform verdict where nothing can build, `absent` where it can", async () => {
+    // `absent` is an instruction as much as a state: the runner reacts by
+    // kicking a background build, and `index --status` prints it as the
+    // freshness verdict. On a platform-arch with no prebuilt colgrep/ORT that
+    // build cannot start (the engine lookup fails before colgrep runs), so the
+    // honest answer is the platform one. The gate used to cover only the
+    // servable states, which left this case telling the operator to index a
+    // workspace that could never be indexed.
+    const store = await import("../../src/lib/colbert/index-store")
+    const ws = fsSync.realpathSync(
+      fsSync.mkdtempSync(path.join(REAL_TMPDIR, "gh-router-noidx-")),
+    )
+    execFileSync("git", ["init"], { cwd: ws, stdio: "pipe" })
+    const v = await store.freshnessVerdict(ws)
+    expect(v.verdict).toBe(PLATFORM_SUPPORTED ? "absent" : "unsupported")
+    // Whichever it is, the runner must not be told this is servable.
+    expect(store.isServableVerdict(v)).toBe(false)
+    await fs.rm(ws, { recursive: true, force: true })
+  })
 })
 
 describe("runner serve-while-stale", () => {

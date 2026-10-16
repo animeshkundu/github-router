@@ -215,6 +215,30 @@ describe("semantic / default mode", () => {
     expect(r.notice).toMatch(/semantic/i)
   })
 
+  test("the semantic-off notice names the reason THIS host can act on", async () => {
+    // Two reasons produce the same degrade and need opposite responses: a
+    // missing opt-in is one flag away, a missing platform build is not.
+    // Asserting only /semantic/i let the second case ship the first case's
+    // advice, which reads as a misconfiguration the operator cannot find. The
+    // expectation is computed from the same predicate the notice reads, so an
+    // x64 CI runner checks the `--search` branch and an arm64 box the other.
+    const { colbertPlatformSupported } = await import("../../src/lib/colbert/manifest")
+    semanticEnabled = false
+    const r = await runUnifiedCodeSearch({
+      query: "refreshAuthToken",
+      workspace: root,
+    })
+    expect(r.source).toBe("lexical-fallback")
+    if (colbertPlatformSupported()) {
+      expect(r.notice).toContain("launch with --search to enable")
+    } else {
+      expect(r.notice).toContain(`${process.platform}-${process.arch}`)
+      expect(r.notice).toMatch(/no prebuilt engine/)
+      // The misdiagnosis, verbatim: nothing on this host is enabled by a flag.
+      expect(r.notice).not.toContain("--search")
+    }
+  })
+
   test("status 'ready' → source 'semantic', forwards rows incl. score", async () => {
     semanticEnabled = true
     semanticResult = {

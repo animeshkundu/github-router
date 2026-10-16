@@ -484,10 +484,13 @@ describe("index-store: meta keying + freshness verdict", () => {
     expect(/^[0-9a-f]{8}$/.test(a)).toBe(true)
   })
 
-  test("absent meta → verdict absent", async () => {
+  test("absent meta → verdict absent where an engine can exist, unsupported where none can", async () => {
     const store = await import("../../src/lib/colbert/index-store")
     const v = await store.freshnessVerdict("/tmp/never-indexed-xyz")
-    expect(v.verdict).toBe("absent")
+    // "absent" is an invitation to build. On a platform-arch with no prebuilt
+    // colgrep/ORT asset that build can only die in the binary lookup, so the
+    // verdict names the platform instead of the missing index (see the header).
+    expect(v.verdict).toBe(PLATFORM_SUPPORTED ? "absent" : "unsupported")
   })
 
   test("status:building → verdict building (no spawn)", async () => {

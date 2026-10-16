@@ -744,9 +744,23 @@ export function isServableVerdict(v: FreshnessResult): boolean {
 }
 
 export async function freshnessVerdict(workspace: string): Promise<FreshnessResult> {
+  const platformSupported = colbertPlatformSupported()
   const meta = await readColbertMeta(workspace)
+  // `absent` means "no index here yet", and every reader acts on it that way:
+  // the runner kicks a background build and tells the caller to retry in
+  // minutes, `index --status` prints it as the freshness verdict. On a
+  // platform-arch with no prebuilt colgrep/ORT asset there is no build to
+  // kick — the engine lookup fails before colgrep starts — so that advice
+  // describes a retry that can never succeed. Report the platform reason
+  // instead; the second half of this gate, after the last servable branch
+  // below, covers the `ready` states. The remaining non-servable diagnostics
+  // (failed/building/crashed/corrupt/suspect) keep their verdicts: a build
+  // cannot have run on this host, so reaching one of them means the meta was
+  // copied from elsewhere and still names a real prior failure.
   if (!meta || meta.status === "absent") {
-    return { verdict: "absent", meta }
+    return platformSupported
+      ? { verdict: "absent", meta }
+      : { verdict: "unsupported", meta }
   }
   if (meta.status === "failed") {
     return { verdict: "failed", meta }
@@ -802,14 +816,16 @@ export async function freshnessVerdict(workspace: string): Promise<FreshnessResu
   // index says about its own state can make it servable here: a query would die
   // inside the binary lookup ("colgrep binary is missing"). This sits exactly at
   // the servable/non-servable boundary — every return ABOVE is a diagnostic that
-  // is already non-servable (absent/failed/building/crashed/corrupt/suspect) and
-  // is left alone, while everything BELOW (fresh, stale-by-content within the
+  // is already non-servable (failed/building/crashed/corrupt/suspect) and is
+  // left alone, while everything BELOW (fresh, stale-by-content within the
   // serve cap) would be served and is not. Without this, the engine comparison
   // just below degrades to a no-op (both shas are `undefined` on an unsupported
   // host, and a comparison needs both sides), so an index built on a supported
   // host and copied here read `fresh` + servable — the exact query that then
-  // failed. `index --status` reported the same lie.
-  if (!colbertPlatformSupported()) {
+  // failed. `index --status` reported the same lie. The same predicate already
+  // answers for the `absent` case at the top of this function, through the
+  // `platformSupported` local, so the two cannot disagree.
+  if (!platformSupported) {
     return { verdict: "unsupported", meta }
   }
 

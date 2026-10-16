@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import os from "node:os"
+import path from "node:path"
 
 import { buildCapabilityRejectedMessage } from "../../src/lib/error"
-import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
+import {
+  anyContractGroupMatches,
+  bundleContainsAll,
+  bundleContainsAny,
+  installedClaudeBundle,
+} from "./installed-claude"
 
 /**
  * Drift canary for the two client-owned mechanisms the overflow fix rides on.
@@ -128,11 +136,10 @@ describe("client overflow-contract canary", () => {
       expect(present).toBe(true)
     }
 
-    const parserContractPresent = await Promise.all(
-      AUTO_COMPACT_CONTRACTS.map(async (markers) =>
-        (await Promise.all(markers.map((marker) => bundleContainsAny(bundle, [marker]))))
-          .every(Boolean)),
-    ).then((matches) => matches.some(Boolean))
+    const parserContractPresent = await anyContractGroupMatches(
+      bundle,
+      AUTO_COMPACT_CONTRACTS,
+    )
     if (!parserContractPresent) {
       throw new Error(
         `Auto-compact parser contract no longer appears in ${bundle}.\n`
@@ -145,4 +152,38 @@ describe("client overflow-contract canary", () => {
     }
     expect(parserContractPresent).toBe(true)
   }, 120_000)
+})
+
+describe("contract-group matching semantics", () => {
+  test("a group requires EVERY marker, and groups are alternatives to each other", async () => {
+    // Drives the same helpers the canary above uses against synthetic content,
+    // so this runs on a machine with no client installed (CI) where that canary
+    // skips. The failure it guards is silent by construction: evaluating a group
+    // with `bundleContainsAny`'s ALTERNATIVES combinator would pass on today's
+    // build and stop discriminating only once a marker disappears for real,
+    // which is exactly when nobody is looking.
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gh-router-canary-"))
+    const file = path.join(dir, "synthetic-bundle")
+    const constants = "EFe=1e5,vYe=1e6"
+    const callSite = "Math.max(EFe,U.effective)"
+    try {
+      writeFileSync(file, `${constants} and nothing else`)
+      // Half a group is not a group. The constants alone are exactly the
+      // identifiers-only match the pairing exists to reject.
+      expect(await bundleContainsAll(file, [constants, callSite])).toBe(false)
+      expect(await bundleContainsAll(file, [constants])).toBe(true)
+
+      writeFileSync(file, `${constants} ... ${callSite}`)
+      expect(await bundleContainsAll(file, [constants, callSite])).toBe(true)
+
+      // Across groups the relation is OR: a developer on an older build must
+      // keep passing on that build's group.
+      const groups = [[constants, callSite], ["GO=1e5,Q$=1e6"]]
+      expect(await anyContractGroupMatches(file, groups)).toBe(true)
+      writeFileSync(file, `${constants} and nothing else`)
+      expect(await anyContractGroupMatches(file, groups)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
