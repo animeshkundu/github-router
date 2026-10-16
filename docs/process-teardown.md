@@ -1,6 +1,6 @@
 # Deterministic child-process teardown
 
-The proxy launches a long-lived child CLI (Claude Code / Codex) that fans
+The proxy launches a long-lived child CLI (Claude Code / Codex / Pi) that fans
 out into `node`/MCP-server and agent grandchildren. This subsystem
 guarantees that subtree does not survive the proxy on the exit paths the
 proxy can observe, and biases to **never kill a wrong process** when it
@@ -57,6 +57,30 @@ A missed orphan is preferred over an innocent kill.
 
 Opt out of the POSIX crash reaper with `GH_ROUTER_DISABLE_PROCESS_GUARD=1`
 (the graceful tree-kill always runs; Windows crash teardown is the OS's).
+
+## The shutdown fail-safe reports the child's status, not a failure
+
+`cleanup()` arms a 5s hard fail-safe **before** any potentially blocking step
+(`taskkill`, `server.close(true)`, `onShutdown`) so a wedged teardown cannot
+hang shutdown indefinitely. It bounds the teardown's TIME, not the reported
+status: it exits with the code the caller already chose (`intendedExitCode`,
+set by the child-exit path from the child's own status and by the signal
+paths as `130`), and falls back to `1` only when no code was chosen at all
+(the child-`error` path, where `1` is the code anyway).
+
+The distinction was measured the hard way. `github-router pi … --print` on
+Windows exited `1` after a fully successful turn: Pi's own status was `0`
+(read directly by putting a recording shim in front of `pi` on `PATH`), and
+the proxy exited `1` exactly 5.10s later, because Pi's per-launch mirror
+carries an npm tree large enough that `server.close(true)` plus the mirror
+removal cross the budget. Reporting `1` there turns a successful session into
+a reported failure for every script or CI wrapper around the CLI, and nothing
+in the proxy's own exit path can observe it. The regression test in
+`tests/isolated/lib-launch-child.test.ts` drives a real hung `server.close`
+and asserts the child's code (7, deliberately not 0, so a stray timer from a
+neighbouring test cannot satisfy it) is what gets reported. The mirror
+directory itself may still be left behind when cleanup is cut off at the
+budget; `sweepStalePiAgentMirrors` reaps it by PID on the next Pi launch.
 
 ## Other spawn sites
 

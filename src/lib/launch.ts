@@ -299,14 +299,24 @@ export function launchChild(
 
   let cleaned = false
   let exiting = false
+  // The code this process intends to exit with, set the moment the caller
+  // knows it (the child's own status, or the synthetic 130 for a signal).
+  // The shutdown fail-safe reads it: a teardown that outruns its budget is
+  // still a shutdown, and reporting `1` there turns a CLI that exited 0
+  // into a reported failure. Observed for real on Windows, where Pi's
+  // per-launch mirror carries an npm tree large enough that
+  // `server.close` + `onShutdown` can cross the budget: Pi exited 0, the
+  // proxy reported 1 exactly 5.10s later.
+  let intendedExitCode: number | null = null
   async function cleanup(): Promise<void> {
     if (cleaned) return
     cleaned = true
 
     // Arm the hard fail-safe FIRST, before any (potentially blocking) kill
     // or async teardown, so a wedged taskkill / server.close can't hang
-    // shutdown indefinitely.
-    const timeout = setTimeout(() => process.exit(1), 5000)
+    // shutdown indefinitely. It bounds the teardown's TIME, not the
+    // reported status, so it exits with the code the caller already chose.
+    const timeout = setTimeout(() => exit(intendedExitCode ?? 1), 5000)
 
     // Tree-kill the whole CLI subtree, not just the direct child. On
     // Windows taskkill /T reaps grandchildren; on POSIX kill(-pgid) reaps
@@ -380,6 +390,7 @@ export function launchChild(
       const graceMs = sig === "SIGINT" ? 10000 : 3000
       if (!forwardGrace) {
         forwardGrace = setTimeout(() => {
+          intendedExitCode = 130
           cleanup().then(() => exit(130)).catch(() => exit(1))
         }, graceMs)
         forwardGrace.unref?.()
@@ -388,6 +399,7 @@ export function launchChild(
     }
     // Windows: the console already delivered Ctrl-C to the direct child;
     // cleanup()'s taskkill /T is the escalation hammer.
+    intendedExitCode = 130
     cleanup().then(() => exit(130)).catch(() => exit(1))
   }
   process.on("SIGINT", () => onSignal("SIGINT"))
@@ -407,6 +419,7 @@ export function launchChild(
     }
     // When killed by a signal, exitCode is null — derive from signal number
     const code = exitCode ?? (signal ? 128 : 1)
+    intendedExitCode = code
     cleanup().then(() => exit(code)).catch(() => exit(1))
   })
   child.on("error", () => {

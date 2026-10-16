@@ -322,6 +322,42 @@ describe("launchChild", () => {
     expect(server.close).toHaveBeenCalledWith(true)
   })
 
+  // The fail-safe bounds the teardown's TIME, not the reported status. This
+  // is the observed Windows failure: Pi exited 0, the proxy reported 1
+  // exactly 5.10s later, because the per-launch mirror's npm tree pushed
+  // `server.close(true)` + `onShutdown` past the 5s budget and the timer
+  // called `process.exit(1)` regardless of the child's own code.
+  //
+  // The child's code here is 7, not 0, precisely so the assertion cannot be
+  // satisfied by the fail-safe timer the test above leaves pending: that
+  // stray timer belongs to a DIFFERENT closure (child code 0) and fires
+  // into this test's mock. Asserting "7 was reported and 1 never was" is
+  // therefore the discrimination, where asserting `didNotThrow` or the
+  // first call would not be. Exits 1 under the old `process.exit(1)`.
+  test("a cleanup that outruns the budget reports the child's code, not 1", async () => {
+    execFileSyncMock.mockReturnValue(Buffer.from("/usr/bin/claude"))
+    const fakeChild = createFakeChild()
+    spawnMock.mockReturnValue(fakeChild)
+    const server = createFakeServer(() => new Promise(() => {}))
+
+    // Record instead of throwing: the fail-safe fires this from a timer
+    // callback, where a thrown ExitError would be an unhandled error rather
+    // than an assertion.
+    exitMock.mockImplementation((code: number) => {
+      exitMock.mock.calls.push([code])
+    })
+
+    launchChild(defaultTarget, server as unknown as Server)
+
+    fakeChild.emit("exit", 7)
+    // Past the 5000ms fail-safe. Real time, not faked: bun has no timer
+    // fake and the budget under test is the product's, not the test's.
+    await new Promise((r) => setTimeout(r, 5600))
+
+    expect(exitMock).toHaveBeenCalledWith(7)
+    expect(exitMock).not.toHaveBeenCalledWith(1)
+  }, 30_000)
+
   test("codex target: spawns codex with correct args", () => {
     execFileSyncMock.mockReturnValue(Buffer.from("/usr/bin/codex"))
     const fakeChild = createFakeChild()
