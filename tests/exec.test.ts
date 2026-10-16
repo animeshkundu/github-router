@@ -334,31 +334,32 @@ describe("runManagedExeCapture — inactivity watchdog", () => {
     (out === 0 ? `clearInterval(t);setTimeout(()=>process.exit(0),${idleMs});` : ``)
 
   test("silent child past the window is killed with stalled:true", async () => {
-    // The window has to clear CHILD BOOT, not merely be short. Same measured
-    // basis as the chatty-child test below: spawn→ready on a loaded Windows
-    // runner is p50 369ms / max 496ms. The original 250ms window expired while
-    // the child was still being created, which made the kill race process
-    // creation — and when the kill loses, the child finishes booting into its
-    // 60s sleep and the test fails as a 15s TIMEOUT rather than as a wrong
-    // `stalled` value. That is exactly the shape of the one occurrence seen in
-    // a full-suite run, and it is why 12 re-runs under 6-way CPU load (all
-    // 450-700ms, i.e. the kill path is sound once the child exists) did not
-    // reproduce it. 1500ms sits above the recorded worst case with room.
-    const started = Date.now()
+    // The child is silent and never exits on its own, so a verdict can only
+    // come from the watchdog killing it. A bun timeout here therefore means
+    // exactly one thing: the kill was never issued or never landed.
+    //
+    // Wall-clock is deliberately NOT asserted. The watchdog timer shares an
+    // event loop with the other 286 lane-1 files in this process, and
+    // synchronous work there delays the callback while the kill path itself
+    // stays fast. Measured both ways: a deliberate 5s spin in this process
+    // turned a 1500ms window into a 5021ms firing and a 5264ms total, and a
+    // full-suite run produced the same shape at 14789ms with a CORRECT
+    // `stalled` verdict. An elapsed bound would assert the runner's
+    // scheduling, not the watchdog. The kill path has its own coverage in the
+    // `onInactivityCheck:false kills` case below.
+    //
+    // The window is 1500ms rather than a token value because the sibling
+    // chatty-child test documents spawn→first-output at p50 369ms / max 496ms
+    // on a loaded Windows runner; a window below child-boot cost makes the
+    // verdict depend on which of the two wins.
     const res = await runManagedExeCapture(
       node,
-      ["-e", "setTimeout(()=>process.exit(0), 60000)"], // 60s, no output
+      ["-e", "setInterval(() => {}, 1000)"], // silent, never exits
       { inactivityTimeoutMs: 1500 },
     )
-    const elapsed = Date.now() - started
     expect(res.stalled).toBe(true)
     expect(res.timedOut).toBe(false)
-    // Separate the two failure modes by naming this one: a kill that takes
-    // seconds is a kill-path finding, and a bare bun timeout cannot tell the
-    // reader whether the watchdog never fired, the kill never landed, or the
-    // process simply never exited.
-    expect(elapsed).toBeLessThan(5000)
-  }, 15_000)
+  }, 60_000)
 
   test("a chatty child resets the watchdog and runs to completion", async () => {
     // 4 ticks 100ms apart, then exit cleanly. The window must clear
