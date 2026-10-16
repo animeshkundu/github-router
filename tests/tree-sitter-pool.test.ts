@@ -427,12 +427,28 @@ poolDescribe("tree-sitter pool — launch warm-up", () => {
       })
       await expect(warmTreeSitterPool()).resolves.toBeUndefined()
 
+      // The 200 ms structural budget is product policy, not this test's
+      // subject. Under a contended full-suite run a cold worker can miss it
+      // and degrade to the regex heuristic (by design, and disclosed via the
+      // result notice), which turns a behavioral assertion into a timing
+      // flake. Lifting it here keeps the claim about lazy initialization; the
+      // shared afterEach restores the default.
+      __setStructuralBudgetForTest(3_600_000)
+
       const result = await runRanked(fx.root)
+      // Lazy init is the actual claim, so assert it directly: warm-up threw,
+      // so the only thing that could have spawned a worker is the query. The
+      // in-process baseline would satisfy the role assertion on its own.
+      expect(
+        getTreeSitterPool()?.__workerLifecycleForTest().spawned ?? 0,
+      ).toBeGreaterThan(0)
       expect(result.results.find((hit) => hit.line === 1)?.role).toBe("definition")
     } finally {
       fx.cleanup()
     }
-  }, 10_000)
+    // Room for a bounded ready handshake (READY_TIMEOUT_MS) plus the
+    // in-process fallback on a loaded machine.
+  }, 20_000)
 })
 
 poolDescribe("tree-sitter pool — budget / abort / shutdown never hang", () => {
