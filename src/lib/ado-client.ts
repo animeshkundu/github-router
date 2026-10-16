@@ -30,7 +30,12 @@
  * warning instead of a bare 401 surfacing through the model's tool call.
  */
 
-import { describeAzFailure, runAzCliAccessToken } from "./azure-cli-token"
+import consola from "consola"
+
+import {
+  AzCliAccessTokenCache,
+  describeAzFailure,
+} from "./azure-cli-token"
 import {
   RemoteMcpClient,
   RemoteMcpError,
@@ -164,16 +169,35 @@ export interface AdoClientOpts {
   baseUrl?: string
 }
 
-/** Token source: explicit env first (tests/manual), else `az` CLI. */
-export async function getAdoToken(signal?: AbortSignal): Promise<string> {
+/** Process-lifetime token cache for this audience. */
+const adoTokenCache = new AzCliAccessTokenCache()
+
+export interface AdoTokenOpts {
+  /**
+   * Allow one interactive `az login` if the silent mint fails for a
+   * credential-shaped reason. The launch probe MUST leave this false: it runs
+   * under a 20 s deadline whose expiry tree-kills the child, so a browser
+   * sign-in started there would be killed mid-flow and misreported.
+   */
+  allowInteractiveLogin?: boolean
+  /** Re-mint even if a cached token is unexpired (the 401 path). */
+  forceRefresh?: boolean
+}
+
+/** Token source: explicit env first (tests/manual), else the `az` ladder. */
+export async function getAdoToken(
+  signal?: AbortSignal,
+  opts: AdoTokenOpts = {},
+): Promise<string> {
   if (signal?.aborted) throw signal.reason ?? new Error("aborted")
   const env = process.env[ADO_TOKEN_ENV]?.trim()
   if (env) return env
   try {
-    const { token } = await runAzCliAccessToken(ADO_TOKEN_RESOURCE, {
+    return await adoTokenCache.get(ADO_TOKEN_RESOURCE, {
       ...(signal ? { signal } : {}),
+      ...(opts.allowInteractiveLogin ? { allowInteractiveLogin: true } : {}),
+      ...(opts.forceRefresh ? { forceRefresh: true } : {}),
     })
-    return token
   } catch (err) {
     if (signal?.aborted) throw signal.reason ?? new Error("aborted")
     throw new AdoError(describeAzFailure("Azure DevOps", err), { retriable: false })
@@ -198,7 +222,18 @@ export class AdoMcpClient extends RemoteMcpClient {
       clientVersion: "ado",
       errorClass: AdoError,
       token: opts.token,
-      tokenProvider: opts.tokenProvider ?? ((signal) => getAdoToken(signal)),
+      // Reached only from the 401 arm of a request: drop the cached entry, then
+      // re-mint. Re-reading the cache would replay the rejected token until it
+      // expired, which is strictly worse than the uncached behaviour this
+      // replaced.
+      tokenProvider: opts.tokenProvider ?? ((signal) => {
+        consola.warn(
+          `Azure DevOps rejected the access token (401). Re-minting for resource `
+            + `${ADO_TOKEN_RESOURCE} through the Azure CLI; if this is a stale `
+            + "session, run `az login`.",
+        )
+        return getAdoToken(signal, { forceRefresh: true, allowInteractiveLogin: true })
+      }),
       staticHeaders: () => ({
         // Read-only is a server-side control: the header is what removes the
         // mutating tools from `tools/list` and what refuses a mutation at

@@ -516,12 +516,20 @@ export function renderKustoResponse(
 }
 
 /** Token source: explicit env first (tests/manual), else `az` CLI. */
+/**
+ * Token source: explicit env first (tests/manual), else the `az` ladder.
+ *
+ * `allowInteractiveLogin` is safe here because this module is call-time only:
+ * the Kusto group has no launch probe (its tools are static and a malformed
+ * cluster fails the launch independently), so no caller reaches this under a
+ * short launch deadline.
+ */
 export async function getKustoToken(clusterUri: string, signal?: AbortSignal): Promise<string> {
   if (signal?.aborted) throw signal.reason ?? new Error("aborted")
   const env = process.env[KUSTO_TOKEN_ENV]?.trim()
   if (env) return env
   try {
-    return await kustoTokenCache.get(clusterUri, signal)
+    return await kustoTokenCache.get(clusterUri, { ...(signal ? { signal } : {}), allowInteractiveLogin: true })
   } catch (err) {
     if (signal?.aborted) throw signal.reason ?? new Error("aborted")
     throw new KustoError(describeAzFailure("Kusto", err), { retriable: false })

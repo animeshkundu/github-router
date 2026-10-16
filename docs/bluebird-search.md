@@ -23,10 +23,30 @@ performs best-effort session teardown.
 
 ## Authentication and scope
 
-The router obtains an Azure access token through Azure CLI for the Azure DevOps
-resource. An operator may provide `BLUEBIRD_TOKEN` for controlled testing, but
-the router strips that variable from Claude, Codex, and their descendants. Tokens
-must never be logged, placed in request examples, or committed to fixtures.
+Provisioning crosses **two Azure audiences**, one per endpoint, and they are not
+interchangeable:
+
+| Endpoint | Resource (audience) | Scope |
+| --- | --- | --- |
+| `https://mcp.bluebird-ai.net/` | `f8efec34-6ac0-4538-8a18-ee59319d7338` | `Bluebird.Mcp.Tools` |
+| `almsearch.dev.azure.com` (the branch-index probe, and `az repos show`) | `499b84ac-1321-427f-aa17-267ca6975798` | `user_impersonation` |
+
+The Bluebird audience is declared by the service itself:
+`GET https://mcp.bluebird-ai.net/.well-known/oauth-protected-resource` returns
+`{"resource":..., "authorization_servers":[...], "scopes_supported":["f8efec34-.../.default"]}`.
+Measured against both endpoints: the Bluebird token answers `initialize` with
+**200** and the ADO token with **401**; the ADO token answers the code-search
+API with **200** and the Bluebird token with a **302** sign-in redirect. One
+token cannot serve both, which is why `BLUEBIRD_MCP_TOKEN_RESOURCE` and
+`ADO_CODE_SEARCH_TOKEN_RESOURCE` are separate constants with separate caches in
+`src/lib/bluebird-client.ts`. The same `az` session mints both; only the
+`--resource` differs.
+
+An operator may provide `BLUEBIRD_TOKEN` for controlled testing, but the router
+strips that variable from Claude, Codex, and their descendants. It is a single
+value serving both audiences, so it is a testing override rather than a
+supported production path. Tokens must never be logged, placed in request
+examples, or committed to fixtures.
 
 The query workspace must be an absolute, accessible directory. Its local Git
 remotes supply exactly one Azure DevOps organization, project, and repository

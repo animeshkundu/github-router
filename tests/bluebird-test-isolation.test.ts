@@ -14,9 +14,11 @@ const ROOT = path.join(HERE, "..")
  */
 const AZURE_TEST_FILES = [
   "ado-client.test.ts",
+  "azure-cli-token.test.ts",
   "azure-mcp-flags.test.ts",
   "bluebird-azure-repo.test.ts",
   "bluebird-client.test.ts",
+  "bluebird-provision.test.ts",
   "bluebird-routing.test.ts",
   "kusto-client.test.ts",
 ]

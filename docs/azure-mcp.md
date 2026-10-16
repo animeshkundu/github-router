@@ -262,6 +262,84 @@ call would fix. The ladder is injectable through the client's `retryDelaysMs`
 seam; an empty array makes every retriable verdict final, which is how the
 suites assert a verdict without paying the production backoff.
 
+## Token acquisition
+
+All three Azure clients share `src/lib/azure-cli-token.ts`, which resolves a
+bearer in three layers: an environment override (`BLUEBIRD_TOKEN`,
+`ADO_MCP_TOKEN`, `KUSTO_TOKEN`), then a **silent** `az account get-access-token
+--resource <r>`, then a single interactive login when, and only when, the silent
+mint fails for a credential-shaped reason.
+
+The classification is the point, because the remedies differ:
+
+| `az` stderr | Class | What the router does |
+| --- | --- | --- |
+| `Please run 'az login' to setup account.` | `login-required` | one interactive login, then one re-mint |
+| `V2Error: invalid_resource AADSTS500011` | `tenant` | never a login: names the resource and tenant, points at `AZURE_TENANT_ID` |
+| binary not resolvable | `az-missing` | never a login: names the install |
+| timeout | `timeout` | surfaces the timeout |
+| anything else | `unknown` | surfaces the text |
+
+`AZURE_TENANT_ID` (or `--tenant` semantics) is applied to both the mint and the
+interactive login, so a multi-tenant operator does not have to re-point `az`
+globally.
+
+The interactive login is `az login` first (the browser carries the session), then
+`az login --use-device-code` when the browser cannot complete it; the code and URL
+are printed to the operator's own terminal, which is why the child inherits stdio.
+It is bounded (120 s browser, 300 s device code), single-flighted so concurrent
+callers share one login, and counted **only when an attempt completes**: an
+aborted attempt does not permanently consume the session's one try, and a
+genuinely failed attempt backs off (5 min) rather than retrying per request. A
+caller that goes away does not kill a login other callers are waiting on: the
+login runs under its own controller, not the caller's signal.
+
+Two paths deliberately **never** reach it. The launch probe (`provisionAdoTools`)
+runs under `PROVISION_TIMEOUT_MS = 20_000`, and its abort tree-kills the child, so
+a 120 s browser login underneath it would be killed at 20 s and reported as a
+failure; the probe stays silent-mint only and keeps its existing behavior of
+switching the group off with a visible reason. And an environment override
+short-circuits the whole ladder, so an operator-supplied token is never
+second-guessed by a browser popup.
+
+Every client invalidates its cache entry on a 401 before re-minting, so the retry
+sends a genuinely fresh token instead of replaying the rejected one. A 401 is the
+only invalidation trigger, matching the Kusto rationale above: a 403 is an
+authorization verdict, not a credential verdict.
+
+## Clients that receive these groups
+
+| Client | `ado` / `kusto` |
+| --- | --- |
+| `github-router claude` | yes: scoped `mcpServers` entries injected into the mirrored `.claude.json` |
+| `github-router serve` | yes: same injection through `src/lib/serve/enhancements.ts` |
+| `github-router pi` | yes: entries written to `<mirror>/mcp.json`, read by `pi-mcp-adapter` |
+| `github-router codex` | no: nothing registers MCP servers for Codex today |
+| worker subagents (`explore` / `review` / `implement`) | no: the worker toolset is its own fixed list |
+
+The Pi route differs from the Claude one. Pi reaches `peers`, `search`, and
+`browser` through a generated extension that calls `/mcp/<group>` directly; the
+two Azure groups have no extension seam, so they ride **Pi's own `mcp.json`** in
+the per-launch mirror (`<Pi agent dir>/mcp.json`, which the adapter reads on Pi
+0.99+). Three consequences worth knowing:
+
+- Every key is prefixed `gh-router-<group>`. In the adapter's precedence order
+  the mirror file is a user-global source, and `.mcp.json` / `.pi/mcp.json` /
+  `.pi/mcp-adapter.json` all outrank it and replace a same-named server
+  **wholesale**. A bare `ado` key would therefore hand the model the workspace's
+  own `ado` server under a name meant for ours. A project file that declares one
+  of our prefixed keys is reported at launch, never edited.
+- The bearer is written as `Bearer ${GH_ROUTER_HOOK_NONCE}`, which the adapter
+  interpolates from the child environment at connect time. The file never
+  contains a token.
+- The write is gated on `--helpers` **and** `--peers` (the adapter's own gates)
+  plus the group being enabled. `--no-helpers` and `--no-peers` therefore leave
+  Pi with no Azure MCP surface at all, and so does a failed offline install of
+  the adapter package. The gate is deliberately conservative in the other
+  direction too: the same file is Pi's *built-in* MCP config, so writing it
+  without the adapter would expose the groups through a backend this path has
+  never validated.
+
 ## Testing policy
 
 The `docs/bluebird-search.md` policy extends verbatim to both clients: **unit and

@@ -12,14 +12,18 @@
  * the Bluebird endpoint, its scope headers, its required tool set, and the
  * interpretation of a search result.
  *
- * Auth: `az account get-access-token` for the Azure DevOps resource
- * (`499b84ac-1321-427f-aa17-267ca6975798`). `BLUEBIRD_TOKEN` env overrides
- * for tests and manual runs. 401 refreshes the token and recreates the session
- * once before retrying.
+ * Auth: `az account get-access-token`, for TWO audiences (see the constants
+ * below): the Bluebird MCP endpoint (`f8efec34-…`) and, for the branch-index
+ * probe alone, the Azure DevOps resource (`499b84ac-…`). `BLUEBIRD_TOKEN` env
+ * overrides both for tests and manual runs. A 401 drops the cached token,
+ * re-mints, and retries the request once.
  */
 
+import consola from "consola"
+
 import {
-  runAzCliAccessToken,
+  AzCliAccessTokenCache,
+  classifyAzFailure,
   describeAzFailure,
 } from "./azure-cli-token"
 import {
@@ -44,7 +48,28 @@ import { sanitizeTransportText } from "./upstream-retry"
 import type { UnifiedResultRow } from "./unified-code-search"
 
 export const BLUEBIRD_MCP_URL = "https://mcp.bluebird-ai.net/"
-export const BLUEBIRD_TOKEN_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
+
+/**
+ * Two resources, one flow. They are NOT interchangeable, and sending one where
+ * the other belongs is the exact failure this constant pair exists to prevent:
+ * `mcp.bluebird-ai.net` answers 401 to a token minted for the Azure DevOps
+ * resource, and `almsearch.dev.azure.com` answers 302-sign-in to a token minted
+ * for the Bluebird one. The MCP endpoint declares its audience at
+ * `https://mcp.bluebird-ai.net/.well-known/oauth-protected-resource`
+ * (`scopes_supported: ["f8efec34-…/.default"]`).
+ */
+export const BLUEBIRD_MCP_TOKEN_RESOURCE = "f8efec34-6ac0-4538-8a18-ee59319d7338"
+
+/**
+ * Azure DevOps, for the branch-index probe (`checkBranchIndexStatus` →
+ * `almsearch.dev.azure.com`). Minted only when that probe actually runs.
+ *
+ * Deliberately a different id from `ADO_TOKEN_RESOURCE` in `ado-client.ts`
+ * (`2a72489c-…`, the `mcp.dev.azure.com` audience): same vendor, different
+ * audience, and neither substitutes for the other.
+ */
+export const ADO_CODE_SEARCH_TOKEN_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
+
 export const BLUEBIRD_PROTOCOL_VERSION = "2025-06-18"
 
 export class BluebirdError extends RemoteMcpError {
@@ -79,19 +104,71 @@ function bluebirdScopeHeaders(scope: BluebirdScope): Record<string, string> {
   return headers
 }
 
-/** Token source: explicit env first (tests/manual), else `az` CLI. */
-export async function getBluebirdToken(signal?: AbortSignal): Promise<string> {
+/**
+ * Process-lifetime caches, one per audience. Keyed by resource inside the
+ * shared cache class, but separate instances so a future `clear` on one cannot
+ * silently drop the other's entry.
+ */
+const bluebirdTokenCache = new AzCliAccessTokenCache()
+const adoCodeSearchTokenCache = new AzCliAccessTokenCache()
+
+export interface BluebirdTokenOpts {
+  /**
+   * Allow one interactive `az login` if the silent mint fails for a
+   * credential-shaped reason. Every path that reaches here is call-time (the
+   * search a model asked for, or a 401-triggered re-mint), so the login
+   * budget cannot be spent under a launch deadline.
+   */
+  allowInteractiveLogin?: boolean
+  /** Re-mint even if a cached token is unexpired (the 401 path). */
+  forceRefresh?: boolean
+}
+
+/**
+ * Token source: explicit env first (tests/manual), else the `az` ladder.
+ *
+ * `BLUEBIRD_TOKEN` is a single override serving BOTH audiences in this file.
+ * That is only safe because it exists for tests and for an operator who is
+ * deliberately pinning one — a real Bluebird deployment never sets it.
+ */
+export async function getBluebirdToken(
+  signal?: AbortSignal,
+  opts: BluebirdTokenOpts = {},
+): Promise<string> {
   if (signal?.aborted) throw signal.reason ?? new Error("aborted")
   const env = process.env.BLUEBIRD_TOKEN?.trim()
   if (env) return env
   try {
-    const { token } = await runAzCliAccessToken(BLUEBIRD_TOKEN_RESOURCE, {
+    return await bluebirdTokenCache.get(BLUEBIRD_MCP_TOKEN_RESOURCE, {
       ...(signal ? { signal } : {}),
+      ...(opts.allowInteractiveLogin ? { allowInteractiveLogin: true } : {}),
+      ...(opts.forceRefresh ? { forceRefresh: true } : {}),
     })
-    return token
   } catch (err) {
     if (signal?.aborted) throw signal.reason ?? new Error("aborted")
     throw new BluebirdError(describeAzFailure("Bluebird", err), { retriable: false })
+  }
+}
+
+/**
+ * The ADO-audience token, for the branch-index probe only. Same env override as
+ * `getBluebirdToken` (see the note there).
+ */
+export async function getAdoCodeSearchToken(signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) throw signal.reason ?? new Error("aborted")
+  const env = process.env.BLUEBIRD_TOKEN?.trim()
+  if (env) return env
+  try {
+    return await adoCodeSearchTokenCache.get(ADO_CODE_SEARCH_TOKEN_RESOURCE, {
+      ...(signal ? { signal } : {}),
+      allowInteractiveLogin: true,
+    })
+  } catch (err) {
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted")
+    throw new BluebirdError(
+      describeAzFailure("Azure DevOps code search", err),
+      { retriable: false },
+    )
   }
 }
 
@@ -333,7 +410,17 @@ export class BluebirdMcpClient extends RemoteMcpClient {
       clientVersion: "bluebird",
       errorClass: BluebirdError,
       token,
-      tokenProvider: (signal) => getBluebirdToken(signal),
+      // Reached only from the 401 arm of a request. The cached entry is
+      // dropped first: a retry that re-read it would send the same rejected
+      // value and report it as a dead credential.
+      tokenProvider: (signal) => {
+        consola.warn(
+          `Bluebird rejected the access token (401). Re-minting for resource `
+            + `${BLUEBIRD_MCP_TOKEN_RESOURCE} through the Azure CLI; if this is a `
+            + "stale session, run `az login`.",
+        )
+        return getBluebirdToken(signal, { forceRefresh: true, allowInteractiveLogin: true })
+      },
       staticHeaders: () => bluebirdScopeHeaders(scope),
       validateTools: validateBluebirdTools,
     })
@@ -449,7 +536,7 @@ async function resolveBluebirdProvisionFromWorkspace(
 
   let token: string
   try {
-    token = await getBluebirdToken(signal)
+    token = await getBluebirdToken(signal, { allowInteractiveLogin: true })
   } catch (err) {
     throw err instanceof BluebirdError
       ? err
@@ -463,7 +550,10 @@ async function resolveBluebirdProvisionFromWorkspace(
   try {
     const current = await getCurrentBranch(workspace, signal)
     if (current) {
-      const status = await checkBranchIndexStatus(primary, current, token, signal)
+      // ADO audience, minted here rather than up front: the two audiences are
+      // not interchangeable, and this one is only ever spent on the probe.
+      const indexToken = await getAdoCodeSearchToken(signal)
+      const status = await checkBranchIndexStatus(primary, current, indexToken, signal)
       branch = status.isIndexed
         ? status.branch
         : await getDefaultBranch(primary, workspace, signal)
@@ -472,9 +562,13 @@ async function resolveBluebirdProvisionFromWorkspace(
     }
   } catch (err) {
     if (signal?.aborted) throw signal.reason ?? new Error("aborted")
-    throw err instanceof BluebirdError
-      ? err
-      : new BluebirdError(sanitizeRemoteDetail(err), { retriable: false })
+    if (err instanceof BluebirdError) throw err
+    // The default-branch lookup shells out to `az repos show`, which relies on
+    // az's own Azure DevOps session and fails with the same credential-shaped
+    // text `az login` produces. Classify it so a dead session is told to
+    // re-authenticate instead of leaving a bare stderr line.
+    const advice = classifyAzFailure(err) === "login-required" ? " Run `az login` and retry." : ""
+    throw new BluebirdError(`${sanitizeRemoteDetail(err)}${advice}`, { retriable: false })
   }
   return {
     organization: primary.organization,
