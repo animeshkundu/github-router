@@ -1576,9 +1576,26 @@ function estimateContextBytes(context: TranscriptContext): number {
     /* tool schemas are bounded + base64-free; a stringify failure is non-fatal */
   }
   for (const m of context.messages ?? []) {
+    // The prompt is counted ONCE, above, because that is where both wire
+    // builders take it from: `buildPayload` pushes it as a chat `system`
+    // message and `buildResponsesPayload` passes it as `instructions`, while
+    // `translateMessages` / `piMessagesToNeutral` DROP the transcript's own
+    // system message rather than encoding it. The transcript's leading system
+    // message carries the same text (and since `normalizeContext` stamps it
+    // with `timestamp: 0`, the replay above always finds it), so counting it
+    // here would add a second copy of the prompt. That over-count fires the
+    // backstop one whole prompt early and ends a run whose payload would fit.
+    if (isSystemMessage(m)) continue
     bytes += messageWireBytes(m)
   }
   return bytes
+}
+
+/** True for the transcript's `role: "system"` message(s), counted separately above. */
+function isSystemMessage(m: unknown): boolean {
+  return (
+    m !== null && typeof m === "object" && (m as { role?: unknown }).role === "system"
+  )
 }
 
 /** Bytes of one wire message: text content + per-image equivalent + bulk fields. */
