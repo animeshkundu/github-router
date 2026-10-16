@@ -30,7 +30,8 @@
   "files": [
     "dist",
     "docs/bluebird-search.md",
-    "docs/azure-mcp.md"
+    "docs/azure-mcp.md",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsdown && bun scripts/copy-browser-ext.ts && bun scripts/stamp-hooks-digest.ts",

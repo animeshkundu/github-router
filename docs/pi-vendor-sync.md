@@ -8,7 +8,7 @@ The Pi runtime backs github-router's worker agents. Two upstream slices are reta
 
 | Subtree | Upstream source | Rule |
 | --- | --- | --- |
-| `src/vendor/pi/agent/` | `packages/agent/src/` | Full directory replacement plus a four-hunk `proxy.ts` type patch and an `index.ts` comment header. Five of the six files are byte-identical upstream. |
+| `src/vendor/pi/agent/` | `packages/agent/src/` | Full directory replacement plus a four-hunk `proxy.ts` type patch and an `index.ts` comment header. Four of the six files are byte-identical upstream; those two are the divergences. |
 | `src/vendor/pi/ai/` | `packages/ai/src/` | Minimal transitive closure required by the agent tree and `src/lib/worker-agent/`, with documented type-only stubs and a rewritten index. |
 
 The current pin is upstream tag `v1.3.0`, commit `71023aec1546d6d677a65669c5665c0927ce0dd0` (2026-10-15).

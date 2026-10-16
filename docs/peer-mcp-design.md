@@ -520,7 +520,7 @@ The worker's read-only file tools refuse paths matching `.env*`, `*.pem`, `id_rs
 
 ### Vendored Pi runtime
 
-The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice) is **vendored** at `src/vendor/pi/` rather than depended on via `package.json`. The vendor sync protocol - how to refresh the snapshot, what to keep in sync, and what to deliberately diverge on - is documented in [`pi-vendor-sync.md`](pi-vendor-sync.md). MIT attribution is preserved verbatim in `src/vendor/pi/LICENSE` and via comment headers on every vendored file.
+The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice) is **vendored** at `src/vendor/pi/` rather than depended on via `package.json`. The vendor sync protocol - how to refresh the snapshot, what to keep in sync, and what to deliberately diverge on - is documented in [`pi-vendor-sync.md`](pi-vendor-sync.md). MIT attribution is preserved verbatim in `src/vendor/pi/LICENSE`, restated in the package-level `NOTICE`, and carried as a local comment header or patch note on the five files we touched (`agent/index.ts`, `agent/proxy.ts`, `ai/index.ts`, `ai/types.ts`, `ai/utils/diagnostics.ts`) rather than on every vendored file. The `NOTICE` copy is the load-bearing one for redistribution: `package.json` `files` ships `dist/`, the named docs, and `NOTICE`, not `src/vendor/`, while `dist/` bundles the runtime. `scripts/check-pack-no-agpl.mjs` asserts it at release time.
 
 ### Compatibility probes (worker model + body-shape contracts)
 

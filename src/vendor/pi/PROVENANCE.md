@@ -16,7 +16,7 @@ This tree vendors the Pi agent runtime and the minimal Pi AI dependency closure 
 
 Path aliases in `tsconfig.json` route `@earendil-works/pi-agent-core` and `@earendil-works/pi-ai` imports into this tree.
 
-At v1.3.0 `packages/agent/src/` is exactly `agent.ts`, `agent-loop.ts`, `index.ts`, `proxy.ts`, `stream-fn.ts`, `types.ts`. Five of the six are byte-identical upstream; only `proxy.ts` carries runtime-neutral type patches and only `index.ts` carries a comment header.
+At v1.3.0 `packages/agent/src/` is exactly `agent.ts`, `agent-loop.ts`, `index.ts`, `proxy.ts`, `stream-fn.ts`, `types.ts`. Four of the six are byte-identical upstream (`agent.ts`, `agent-loop.ts`, `stream-fn.ts`, `types.ts`, verified by SHA-256 against the pinned tag); `proxy.ts` carries runtime-neutral type patches and `index.ts` carries a comment header, which are the two divergences a refresh has to re-apply.
 
 The agent package's own `dependencies` at v1.3.0 are two entries: `@earendil-works/pi-ai@1.3.0` (satisfied by the alias into this tree) and `typebox@1.3.27`. No import in the vendored agent files reaches any other package.
 
