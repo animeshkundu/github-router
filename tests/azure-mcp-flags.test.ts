@@ -256,7 +256,6 @@ describe("discoverAzureRepo", () => {
   })
 
   test("a probe that never settles is bounded by the timeout", async () => {
-    const started = Date.now()
     const result = await discoverAzureRepo({
       timeoutMs: 30,
       probe: async (_workspace: string, signal?: AbortSignal) => {
@@ -267,8 +266,13 @@ describe("discoverAzureRepo", () => {
         throw new Error("aborted")
       },
     })
+    // The probe cannot settle on its own, so reaching this line means the
+    // deadline fired and reached the probe. No wall-clock bound is asserted:
+    // that deadline is a timer on the test runner's own event loop, and
+    // synchronous work in lane 1 delays timers (measured at 5.0s late under a
+    // deliberate 5s block; see tests/exec.test.ts). A broken deadline shows up
+    // here as a bun timeout, which for this test has exactly one meaning.
     expect(result).toBeNull()
-    expect(Date.now() - started).toBeLessThan(3_000)
   })
 
   test("gitAzureRepoProbe resolves a non-repository directory to null", async () => {
