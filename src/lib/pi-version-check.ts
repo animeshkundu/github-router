@@ -20,8 +20,14 @@ export const PI_NPM_PACKAGE = "@earendil-works/pi-coding-agent"
  * carries the `messageType` discriminator (present at 1.3.0, absent at 1.1.0).
  * The generated extension's prompt hook stands down for non-user events using
  * that field, and without it the hook would fire on subagent and system turns
- * the user never typed — a wrong brief rather than a missing one. Below-floor
- * Pi hard-exits at the launcher (`src/pi.ts`) rather than degrading quietly.
+ * the user never typed, which is a wrong brief rather than a missing one.
+ * Below-floor Pi hard-exits at the launcher (`src/pi.ts`), but only where the
+ * gate actually runs: the install probe, the background refresh, and this floor
+ * check all sit inside `--update-check` (default on), so `--no-update-check`
+ * (documented for offline/CI) skips the floor as well. That path is still
+ * fail-closed rather than silently wrong: the generated extension's own shape
+ * probe sees the missing `messageType`, warns once with the fix, and injects
+ * nothing.
  */
 export const PI_MIN_VERSION = "1.3.0"
 

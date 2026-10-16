@@ -128,8 +128,9 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   ceiling — the Pi-native analogue of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. The
   extension's `session_before_compact` handler observes only and always
   falls back to native.
-- **Pi lifecycle respected.** Version floor Pi ≥ 0.87.1 / Node ≥ 22.19.
-  Startup never waits on npm: a fast local `pi --version` probe gates
+- **Pi lifecycle respected.** Version floor Pi ≥ 1.3.0 (`PI_MIN_VERSION`,
+  `src/lib/pi-version-check.ts`) / Node ≥ 22.19. Startup never waits on npm:
+  a fast local `pi --version` probe gates
   the floor foreground; a missing Pi installs in parallel with server
   boot (joined fail-closed before launch, aborted if setup fails); a
   healthy install refreshes in the background (throttled hourly probe,
@@ -279,9 +280,12 @@ bun test tests/pi-memory-bridge.test.ts tests/pi-models-settings.test.ts
 bun run typecheck && bun run lint:all && bun run build
 ```
 
-Spike note: Pi 0.87.1 (latest at time of writing) vs the vendored
-worker runtime pin v0.82.0 — the launcher uses the installed Pi and is
-independent of the vendor tree.
+Spike note, recorded when Pi 0.87.1 was the latest release and the vendored
+worker runtime pinned v0.82.0: the launcher uses the installed Pi and is
+independent of the vendor tree. Both have since moved in step to the 1.3.0
+line (`PI_MIN_VERSION` and `docs/pi-vendor-sync.md`), so an install below
+1.3.0 now fails the launch floor instead of running the older shape this
+note was measured against.
 
 ## Helpful bundle (exclusion guardrails)
 
