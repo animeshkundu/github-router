@@ -16,6 +16,7 @@
 import type { NonPersonaMcpTool } from "./peer-mcp-personas"
 import { renderKustoResponse, KustoClient, KustoError } from "./kusto-client"
 import { state } from "./state"
+import { relaySafeText } from "./worker-agent/relay-cap"
 
 const KUSTO_GROUP = "kusto" as const
 
@@ -49,8 +50,19 @@ function kustoClient(): KustoClient {
   return client
 }
 
-function text(value: string): { content: Array<{ type: "text"; text: string }> } {
-  return { content: [{ type: "text", text: value }] }
+/**
+ * MCP result envelope for one tool answer, relay-safe.
+ *
+ * A grid rendered to the row/character cap, and a large schema, both exceed
+ * the relay ceiling Claude Code applies to an MCP result. `relaySafeText` is
+ * therefore the LAST transform: over the cap the full text is written to a
+ * file and the model gets a bounded preview plus that path, instead of a
+ * result the client silently clips. It sits here rather than in the Kusto
+ * client because the client's own cap bounds RENDERING work, and its trailer
+ * says so, while this one bounds what the model is asked to read.
+ */
+async function text(value: string): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  return { content: [{ type: "text", text: await relaySafeText(value) }] }
 }
 
 /** Optional `database`, present in the schema only as a free string. */

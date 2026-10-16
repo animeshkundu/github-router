@@ -36,8 +36,9 @@
 import consola from "consola"
 
 import { AdoMcpClient, getAdoToken, type AdoToolDescriptor } from "./ado-client"
-import { NON_PERSONA_MCP_TOOLS, type NonPersonaMcpTool } from "./peer-mcp-personas"
+import { proxyOwnedMcpToolNames, type NonPersonaMcpTool } from "./peer-mcp-personas"
 import { sanitizeRemoteDetail } from "./remote-mcp-client"
+import { relaySafeText } from "./worker-agent/relay-cap"
 import { state } from "./state"
 
 /** Bound on the launch-time `initialize` + `tools/list` round trip. */
@@ -79,8 +80,15 @@ export async function disposeAdoClients(): Promise<void> {
 /**
  * The one process-lifetime ADO client, constructed from `state`. Single-flight
  * so concurrent first calls cannot mint two clients (and two `az` tokens).
+ *
+ * `signal` bounds the CONSTRUCTION only (the token mint and the MCP
+ * `initialize`/`tools/list` round trip), which is where the unbounded wait
+ * lives: `az account get-access-token` and a first `initialize` against a
+ * unreachable server can each hang for minutes. Once the client is memoized
+ * every later caller returns immediately and the signal is unused, so a
+ * request-end abort cannot tear down a client other calls are using.
  */
-async function ensureAdoClient(): Promise<AdoMcpClient> {
+async function ensureAdoClient(signal?: AbortSignal): Promise<AdoMcpClient> {
   if (client) return client
   const existing = inflight
   if (existing) return existing
@@ -91,14 +99,14 @@ async function ensureAdoClient(): Promise<AdoMcpClient> {
         "No Azure DevOps organization is configured. Launch with `--ado-org <org>` or run inside a checkout whose git remotes point at Azure DevOps.",
       )
     }
-    const token = await getAdoToken()
+    const token = await getAdoToken(signal)
     const created = new AdoMcpClient({
       organization,
       readOnly: state.adoReadOnly,
       toolsets: state.adoToolsets.length > 0 ? state.adoToolsets : undefined,
       token,
     })
-    await created.initialize()
+    await created.initialize(signal)
     client = created
     return created
   })()
@@ -131,7 +139,12 @@ export async function provisionAdoTools(): Promise<
   )
   handle.unref?.()
   try {
-    const created = await ensureAdoClient()
+    // The bound is real only because the signal reaches the mint and the
+    // `initialize` handshake: without that, this call resolved when the
+    // upstream did and the timeout merely re-labelled a hang that had already
+    // finished. The post-await check stays for the race where the timer fires
+    // between the last await resolving and this line.
+    const created = await ensureAdoClient(timer.signal)
     if (timer.signal.aborted) throw new Error("Azure DevOps MCP provisioning timed out")
     snapshot = buildAdoToolEntries(created.listAdoTools())
     if (snapshot.length === 0) {
@@ -165,7 +178,13 @@ export function buildAdoToolEntries(
   // dropped tool, and "the proxy already serves a tool by that name" is false
   // for an intra-upstream duplicate. Keeping them separate is what makes the
   // message name the actual cause.
-  const proxyOwned = new Set(NON_PERSONA_MCP_TOOLS.map((tool) => tool.toolNameHttp))
+  //
+  // `proxyOwnedMcpToolNames()` rather than `NON_PERSONA_MCP_TOOLS` alone: the
+  // persona names are served by this proxy too, and dispatch is keyed on the
+  // bare name, so an upstream tool called e.g. `opus_critic` would be listed
+  // under `ado`, resolve to the persona on the unscoped union, and be rejected
+  // as out of scope on `/mcp/ado` — listed but unreachable in both directions.
+  const proxyOwned = proxyOwnedMcpToolNames()
   const seen = new Set<string>()
   const entries: Array<NonPersonaMcpTool> = []
   for (const tool of tools) {
@@ -186,11 +205,15 @@ export function buildAdoToolEntries(
       description: tool.description || `Azure DevOps tool ${name}.`,
       inputSchema: tool.inputSchema,
       async handler(args, signal) {
-        const active = await ensureAdoClient()
+        const active = await ensureAdoClient(signal)
         const result = await active.callAdoTool(name, args, signal)
-        return result.isError === true
-          ? { content: result.content, isError: true }
-          : { content: result.content }
+        if (result.isError === true) return { content: result.content, isError: true }
+        // Relay-safe at the boundary: a result over the cap spills IN FULL to a
+        // file with a bounded preview and that path, instead of being clipped
+        // here (where the model could not tell a truncated answer from a
+        // complete one) or silently truncated by Claude Code's MCP result cap.
+        const text = await relaySafeText(result.content.map((block) => block.text).join(""))
+        return { content: [{ type: "text", text }] }
       },
     })
   }

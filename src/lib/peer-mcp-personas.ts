@@ -3235,6 +3235,23 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
   ])
 
 /**
+ * Every MCP tool name the proxy serves itself: the personas (definitionally the
+ * `peers` group) plus the non-persona utilities.
+ *
+ * Exported because a dynamic upstream listing has to refuse these too. The
+ * Azure DevOps server forwards `tools/list` verbatim, so an upstream rename
+ * could hand back a name this proxy already owns; `handleToolsCall` keys
+ * dispatch on the bare name, so the caller would see the tool listed and reach
+ * the proxy's own handler instead.
+ */
+export function proxyOwnedMcpToolNames(): ReadonlySet<string> {
+  const names = new Set<string>()
+  for (const p of [...PERSONAS_READ, ...PERSONAS_WRITE]) names.add(p.toolNameHttp)
+  for (const t of NON_PERSONA_MCP_TOOLS) names.add(t.toolNameHttp)
+  return names
+}
+
+/**
  * Startup invariant: every MCP tool name must be unique within its group
  * AND across the unscoped `/mcp` union. `handleToolsCall` keys dispatch on
  * the bare tool name, so a duplicate would silently shadow — this assertion

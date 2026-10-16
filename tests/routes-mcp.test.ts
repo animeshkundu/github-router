@@ -4047,6 +4047,24 @@ describe("/mcp ado + kusto groups — scoping and gating", () => {
     expect((json.result as { tools: Array<unknown> }).tools).toEqual([])
   })
 
+  test("kusto stays hidden when the configured cluster would not normalize", async () => {
+    // A cluster the client would reject is not a capability: advertising five
+    // tools whose every call fails is the empty-server smell the gate exists
+    // to prevent. The launch path throws before it ever sets this state, so
+    // this arm covers directly-written state and must agree with it.
+    state.kustoEnabled = true
+    state.kustoCluster = "http://example.kusto.windows.net"
+    const listed = await scopedRpc("kusto", { jsonrpc: "2.0", id: 907, method: "tools/list" })
+    expect((listed.json.result as { tools: Array<unknown> }).tools).toEqual([])
+    const called = await scopedRpc("kusto", {
+      jsonrpc: "2.0",
+      id: 908,
+      method: "tools/call",
+      params: { name: "databases", arguments: {} },
+    })
+    expect(called.json.error).toMatchObject({ code: -32601 })
+  })
+
   test("ado tools/list is the upstream snapshot, and empty when the group is off", async () => {
     enableAdo()
     const on = await scopedRpc("ado", { jsonrpc: "2.0", id: 903, method: "tools/list" })
@@ -4154,6 +4172,73 @@ describe("/mcp ado + kusto groups — scoping and gating", () => {
       expect(names).toContain("databases")
       // A group outside the allow-list stays off even though it is enabled.
       expect(names).not.toContain("code")
+    } finally {
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
+  test("a pinned profile's allow-list admits ado/kusto in list AND call", async () => {
+    // Every pinned `*_PROFILE.allowedGroups` (fast, cheap, cheap1m, cheapest,
+    // balanced) carries `ado` and `kusto`, and `setupAndServe` registers both
+    // servers on those launches. `fastToolIsEnabled` is the WHOLE projection
+    // for that profile family and is shared by `tools/list` and `tools/call`,
+    // so a group the registry allows but that predicate does not handle is
+    // invisible AND uncallable: the launch registers a server with no tools,
+    // and a hardcoded `mcp__ado__*` call answers -32601.
+    enableAdo()
+    state.kustoEnabled = true
+    state.kustoCluster = "https://example.kusto.windows.net"
+    const nonce = "e".repeat(64)
+    const launch = registerLaunch({
+      profileId: "fast",
+      nonce,
+      secret: "fast-azure-allowlist-secret",
+      allowedGroups: new Set(["search", "ado", "kusto"]),
+    })
+    try {
+      const listed = await rpc(
+        { jsonrpc: "2.0", id: 913, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const names = (listed.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      expect(names).toContain("repo_pull_request")
+      expect(names).toContain("databases")
+
+      const called = await rpc({
+        jsonrpc: "2.0",
+        id: 914,
+        method: "tools/call",
+        params: { name: "repo_pull_request", arguments: {} },
+      }, { auth: `Bearer ${nonce}` })
+      const result = called.json.result as { content: Array<{ text: string }> }
+      expect(result.content[0]!.text).toBe("ado ok")
+    } finally {
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
+  test("the pinned-profile admission still follows the capability gate", async () => {
+    // The allow-list admits the GROUP; the group's own gate decides whether
+    // anything is there. Without this, the line above would turn a disabled
+    // group into an empty-but-listed server instead of an absent one.
+    disableAzure()
+    const nonce = "d".repeat(64)
+    const launch = registerLaunch({
+      profileId: "fast",
+      nonce,
+      secret: "fast-azure-gate-secret",
+      allowedGroups: new Set(["search", "ado", "kusto"]),
+    })
+    try {
+      const listed = await rpc(
+        { jsonrpc: "2.0", id: 915, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const names = (listed.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      expect(names).not.toContain("repo_pull_request")
+      expect(names).not.toContain("databases")
     } finally {
       unregisterLaunch(launch.launchId)
     }

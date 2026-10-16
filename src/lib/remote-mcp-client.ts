@@ -185,7 +185,13 @@ function sameJsonRpcId(actual: unknown, expected: unknown): boolean {
   return actual === expected || (typeof actual === "number" && typeof expected === "number" && actual === expected)
 }
 
-function parseRetryAfter(value: string | null): number | undefined {
+/**
+ * `Retry-After` (delta-seconds or HTTP-date) in milliseconds, clamped to
+ * 5 minutes. Exported because the Kusto REST client is not an MCP transport
+ * but must read the header the same way: two parsers would drift on the
+ * clamp and on which malformed values mean "no hint".
+ */
+export function parseRetryAfter(value: string | null): number | undefined {
   if (!value) return undefined
   const seconds = Number(value.trim())
   if (Number.isFinite(seconds) && seconds >= 0) {

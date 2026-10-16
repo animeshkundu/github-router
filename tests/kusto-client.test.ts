@@ -79,14 +79,21 @@ function client(
     reply?: Response | ((captured: Captured, index: number) => Response)
     database?: string
     clusterUri?: string
+    /** Default is the production ladder; tests assert verdicts with none. */
+    retryDelaysMs?: ReadonlyArray<number>
+    tokenProvider?: (signal?: AbortSignal) => Promise<string>
   } = {},
 ) {
   const { captured, impl } = mockFetch(opts.reply ?? jsonResponse(envelope([["x"]])))
   const instance = new KustoClient({
     clusterUri: opts.clusterUri ?? CLUSTER,
     ...(opts.database ? { database: opts.database } : {}),
-    tokenProvider: async () => SYNTHETIC_TOKEN,
+    tokenProvider: opts.tokenProvider ?? (async () => SYNTHETIC_TOKEN),
     fetchImpl: impl,
+    // No backoff unless a test asks for it: the ladder is asserted with a
+    // short one, and every OTHER case here is about the verdict, which the
+    // production ladder would make a 7-second test out of.
+    retryDelaysMs: opts.retryDelaysMs ?? [],
   })
   return { client: instance, captured }
 }
@@ -197,12 +204,52 @@ describe("KustoClient wire shape", () => {
 
 describe("KustoClient error envelope", () => {
   test("a 401 is a non-retriable auth failure naming the tenant", async () => {
-    const { client: c } = client({ reply: () => new Response("denied", { status: 401 }) })
+    let mints = 0
+    const { client: c, captured } = client({
+      reply: () => new Response("denied", { status: 401 }),
+      tokenProvider: async () => {
+        mints += 1
+        return SYNTHETIC_TOKEN
+      },
+    })
     const err = await c.runCsl("Events | count", { database: "Telemetry" }).catch((e) => e)
     expect(err).toBeInstanceOf(KustoError)
     expect(err.retriable).toBe(false)
     expect(err.status).toBe(401)
     expect(err.message).toContain("az login")
+    // The 401 branch invalidates the cache and retries ONCE, so the second
+    // attempt mints a fresh token instead of replaying the dead one. Once
+    // only: a second 401 from a fresh token is a real verdict.
+    expect(captured).toHaveLength(2)
+    expect(mints).toBe(2)
+  })
+
+  test("a 403 is a permission verdict carrying the service's own text, and is not retried", async () => {
+    let mints = 0
+    const { client: c, captured } = client({
+      reply: () =>
+        new Response(
+          JSON.stringify({
+            error: { message: "Principal is not authorized to access database Telemetry." },
+          }),
+          { status: 403 },
+        ),
+      tokenProvider: async () => {
+        mints += 1
+        return SYNTHETIC_TOKEN
+      },
+    })
+    const err = await c.runCsl("Events | count", { database: "Telemetry" }).catch((e) => e)
+    expect(err).toBeInstanceOf(KustoError)
+    expect(err.retriable).toBe(false)
+    expect(err.status).toBe(403)
+    // The two halves of the split that matters: the cause comes from the
+    // service (a 403 is not a dead token), and the token is not re-minted or
+    // the cache dropped, so no `az` call is spent on a call that still 403s.
+    expect(err.message).toContain("not authorized to access database")
+    expect(err.message).not.toContain("az login")
+    expect(captured).toHaveLength(1)
+    expect(mints).toBe(1)
   })
 
   test("a 429 and a 503 stay retriable", async () => {
@@ -214,6 +261,101 @@ describe("KustoClient error envelope", () => {
     }
   })
 
+  test("Retry-After rides the retriable verdict as a millisecond hint", async () => {
+    const { client: c } = client({
+      reply: () => new Response("busy", { status: 429, headers: { "retry-after": "2" } }),
+    })
+    const err = await c.runCsl("Events | count", { database: "Telemetry" }).catch((e) => e)
+    // Clamped to 5 minutes by the shared parser, which is why the value is
+    // asserted in ms rather than as the header's raw seconds.
+    expect(err.retryAfterMs).toBe(2000)
+  })
+})
+
+describe("KustoClient retry policy", () => {
+  test("a retriable status is retried and the retry's result is returned", async () => {
+    // A short ladder: the production ladder is asserted by shape (1/2/4 s) and
+    // refusing to pay it is the point of the seam, not a weakened assertion.
+    const { client: c, captured } = client({
+      retryDelaysMs: [5],
+      reply: (_record, index) =>
+        index === 0
+          ? new Response("busy", { status: 503 })
+          : jsonResponse(envelope([["recovered"]])),
+    })
+    expect(await c.runCsl("Events | count", { database: "Telemetry" })).toMatchObject({
+      tables: [{ rows: [["recovered"]] }],
+    })
+    expect(captured).toHaveLength(2)
+  })
+
+  test("a transport failure is retried, and the ladder stops at its last rung", async () => {
+    const { client: c, captured } = client({
+      retryDelaysMs: [5, 5],
+      reply: () => {
+        throw new Error("connection reset")
+      },
+    })
+    const err = await c.runCsl("Events | count", { database: "Telemetry" }).catch((e) => e)
+    expect(err).toBeInstanceOf(KustoError)
+    expect(err.retriable).toBe(true)
+    // 1 initial attempt + one per rung, not unbounded.
+    expect(captured).toHaveLength(3)
+  })
+
+  test("a non-retriable verdict is issued exactly once", async () => {
+    const { client: c, captured } = client({
+      retryDelaysMs: [5, 5, 5],
+      reply: () => new Response("bad query", { status: 400 }),
+    })
+    await c.runCsl("Events | count", { database: "Telemetry" }).catch(() => undefined)
+    expect(captured).toHaveLength(1)
+  })
+
+  test("a caller abort during the backoff surfaces the abort reason, not a retry", async () => {
+    const controller = new AbortController()
+    const { client: c, captured } = client({
+      retryDelaysMs: [5_000],
+      reply: () => {
+        controller.abort(new Error("caller cancelled"))
+        return new Response("busy", { status: 503 })
+      },
+    })
+    const err = await c
+      .runCsl("Events | count", { database: "Telemetry", signal: controller.signal })
+      .catch((e) => e)
+    expect(String(err)).toContain("caller cancelled")
+    expect(captured).toHaveLength(1)
+  })
+})
+
+describe("KustoClient response cap", () => {
+  test("the cap counts BYTES, not characters", async () => {
+    // Under the cap by `text.length` (2.8M chars) and over it by UTF-8 bytes
+    // (8.4M): the old char-count check passed this body through.
+    const { client: c } = client({
+      reply: () => new Response("€".repeat(2_800_000), { status: 200 }),
+    })
+    await expect(c.runCsl("Events | count", { database: "Telemetry" })).rejects.toThrow(
+      /8 MiB client cap/,
+    )
+  })
+
+  test("a declared-oversized body is refused before it is buffered", async () => {
+    const { client: c } = client({
+      reply: () =>
+        new Response("x", {
+          status: 200,
+          headers: { "content-length": String(64 * 1024 * 1024) },
+        }),
+    })
+    await expect(c.runCsl("Events | count", { database: "Telemetry" })).rejects.toThrow(
+      /declared 67108864 bytes/,
+    )
+  })
+})
+
+describe("KustoClient error envelope — upstream detail", () => {
   test("a 400 surfaces the service's message, with credentials and URLs redacted", async () => {
     const { client: c } = client({
       reply: () =>

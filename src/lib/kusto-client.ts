@@ -25,7 +25,7 @@
  */
 
 import { AzCliAccessTokenCache, describeAzFailure } from "./azure-cli-token"
-import { sanitizeRemoteDetail } from "./remote-mcp-client"
+import { parseRetryAfter, sanitizeRemoteDetail, sleep } from "./remote-mcp-client"
 
 export const KUSTO_TOKEN_ENV = "KUSTO_TOKEN"
 
@@ -55,6 +55,46 @@ const DEFAULT_ROW_CAP = 200
 const DEFAULT_CELL_CHARS = 300
 const DEFAULT_RENDER_CHARS = 60_000
 const REQUEST_TIMEOUT_MS = 60_000
+
+/**
+ * Backoff for a retriable verdict (429/5xx/transport), mirroring the shared
+ * remote-MCP transport's `initializeWithRecovery`: three retries at 1/2/4 s,
+ * with `Retry-After` winning when the service sends one. Every request here is
+ * read-only, which is what makes resending it safe.
+ */
+const KUSTO_RETRY_DELAYS_MS: ReadonlyArray<number> = [1000, 2000, 4000]
+
+/**
+ * Read a response body under `MAX_RESPONSE_BYTES`, in BYTES.
+ *
+ * The cap is a byte budget, so it has to be measured in bytes: `text.length`
+ * counts UTF-16 code units, so a body of multi-byte characters passes a
+ * char-count check while occupying up to 3x the memory the cap names. A
+ * `content-length` that already declares an oversized body is refused before
+ * it is buffered at all; a chunked or header-less response falls back to the
+ * byte count after the read, which is the only remaining signal.
+ */
+async function readBoundedBody(res: Response): Promise<string> {
+  const declaredHeader = res.headers.get("content-length")
+  const declared = declaredHeader ? Number(declaredHeader) : Number.NaN
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    // Release the socket rather than buffering what is already refused.
+    await res.body?.cancel().catch(() => {})
+    throw new KustoError(
+      `Kusto response declared ${declared} bytes, over the 8 MiB client cap. Narrow the query.`,
+      { retriable: false },
+    )
+  }
+  const text = await res.text()
+  const bytes = Buffer.byteLength(text, "utf8")
+  if (bytes > MAX_RESPONSE_BYTES) {
+    throw new KustoError(
+      `Kusto response exceeded the 8 MiB client cap (${bytes} bytes). Narrow the query.`,
+      { retriable: false },
+    )
+  }
+  return text
+}
 
 export interface KustoTable {
   name: string
@@ -129,6 +169,12 @@ export interface KustoClientOpts {
   tokenProvider?: (signal?: AbortSignal) => Promise<string>
   /** Test seam: replaces global `fetch`. */
   fetchImpl?: typeof fetch
+  /**
+   * Test seam: replaces the retry ladder. An empty array makes every retriable
+   * verdict final, which is how a suite asserts the VERDICT without paying the
+   * production backoff; the ladder itself is asserted with a short one.
+   */
+  retryDelaysMs?: ReadonlyArray<number>
 }
 
 /** Process-lifetime token cache shared by every Kusto client in the process. */
@@ -139,12 +185,14 @@ export class KustoClient {
   readonly database: string | undefined
   private readonly fetchImpl: typeof fetch
   private readonly tokenProvider: (signal?: AbortSignal) => Promise<string>
+  private readonly retryDelaysMs: ReadonlyArray<number>
 
   constructor(opts: KustoClientOpts) {
     this.clusterUri = normalizeKustoClusterUri(opts.clusterUri)
     this.database = opts.database?.trim() || undefined
     this.fetchImpl = opts.fetchImpl ?? fetch
     this.tokenProvider = opts.tokenProvider ?? ((signal) => getKustoToken(this.clusterUri, signal))
+    this.retryDelaysMs = opts.retryDelaysMs ?? KUSTO_RETRY_DELAYS_MS
   }
 
   private resolveDatabase(database?: string): string {
@@ -160,6 +208,41 @@ export class KustoClient {
   }
 
   private async post(
+    endpoint: "query" | "mgmt",
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<KustoResponse> {
+    let refreshed = false
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.attemptOnce(endpoint, body, signal)
+      } catch (err) {
+        if (signal?.aborted) throw signal.reason ?? err
+        // A 401 was already invalidated inside the attempt, so the retry mints
+        // a fresh token rather than replaying the dead one. Once only: a
+        // second 401 from a freshly minted token is a real auth verdict, not
+        // something another `az` call would fix.
+        if (err instanceof KustoError && err.status === 401 && !refreshed) {
+          refreshed = true
+          continue
+        }
+        const retriable = err instanceof KustoError ? err.retriable : true
+        if (!retriable || attempt >= this.retryDelaysMs.length) throw err
+        // A hint from the service wins over the ladder, which is the whole
+        // point of reading `Retry-After`. `attempt < length` is established
+        // above, so the indexed rung always exists.
+        const hint = err instanceof KustoError ? err.retryAfterMs : undefined
+        await sleep(hint ?? this.retryDelaysMs[attempt]!, signal)
+      }
+    }
+  }
+
+  /**
+   * One attempt: mint/confirm the token, POST, classify the response. Every
+   * thrown `KustoError` carries a verdict the caller in `post` acts on, so the
+   * retry policy lives in exactly one place.
+   */
+  private async attemptOnce(
     endpoint: "query" | "mgmt",
     body: Record<string, unknown>,
     signal?: AbortSignal,
@@ -195,28 +278,40 @@ export class KustoClient {
         })
       }
 
-      if (res.status === 401 || res.status === 403) {
+      if (res.status === 401) {
         // A 401 means the cached token is no longer accepted; drop it so the
-        // next call mints a fresh one rather than replaying the dead value.
+        // retry (and every later call) mints a fresh one rather than replaying
+        // the dead value.
         kustoTokenCache.invalidate(this.clusterUri)
         throw new KustoError(
-          `Kusto rejected the access token (HTTP ${res.status}). Verify \`az login\` targets the tenant that owns this cluster.`,
-          { retriable: false, status: res.status },
+          "Kusto rejected the access token (HTTP 401). Verify `az login` targets the tenant that owns this cluster, then retry.",
+          { retriable: false, status: 401 },
         )
       }
+      if (res.status === 403) {
+        // Deliberately NOT the same verdict as a 401, and deliberately no
+        // cache invalidation. ADX answers 403 for a valid identity with no
+        // access to the cluster or database, so calling it a credential
+        // failure sends the operator to re-authenticate against a token that
+        // is fine, and invalidating would spawn an `az` call per attempt that
+        // still 403s. The service's own text names the missing grant, so it
+        // is read and reported rather than replaced by a guess.
+        const detail = await readBoundedBody(res)
+        throw new KustoError(
+          `Kusto refused the request (HTTP 403): ${kustoErrorDetail(detail)} `
+            + "The token was accepted; this is an access-permission verdict for the cluster or database.",
+          { retriable: false, status: 403 },
+        )
+      }
+      const retryAfter = parseRetryAfter(res.headers.get("retry-after"))
       if ([429, 500, 502, 503, 504].includes(res.status)) {
         throw new KustoError(`Kusto responded with HTTP ${res.status}.`, {
           retriable: true,
           status: res.status,
+          ...(retryAfter === undefined ? {} : { retryAfterMs: retryAfter }),
         })
       }
-      const text = await res.text()
-      if (text.length > MAX_RESPONSE_BYTES) {
-        throw new KustoError(
-          "Kusto response exceeded the 8 MiB client cap. Narrow the query.",
-          { retriable: false },
-        )
-      }
+      const text = await readBoundedBody(res)
       if (!res.ok) {
         throw new KustoError(
           `Kusto responded with HTTP ${res.status}: ${kustoErrorDetail(text)}`,

@@ -20,6 +20,7 @@ import {
   colbertSearchEnabled,
 } from "./colbert"
 import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
+import { normalizeKustoClusterUri } from "./kusto-client"
 import { OPENAI_FRONTIER_MODELS } from "./openai-frontier"
 import { ONE_M_TOKENS } from "./one-m-context"
 import { maxProReplacementModel } from "./max-profile-contract"
@@ -902,5 +903,18 @@ export function adoToolsEnabled(): boolean {
  * empty-server smell this predicate exists to prevent.
  */
 export function kustoToolsEnabled(): boolean {
-  return state.kustoEnabled && state.kustoCluster !== null
+  if (!state.kustoEnabled || state.kustoCluster === null) return false
+  // A cluster that would not survive normalization is not a capability: every
+  // call would fail in the Kusto client's own validator, after the five tools
+  // had already been advertised. No log here — the launch path is where an
+  // operator hears about a malformed cluster (`resolveAzureMcpFlags` throws
+  // with the expectation named, before `state` is written), so this arm covers
+  // directly-written state and stays quiet rather than warning on every
+  // `tools/list` of a session that already reported the problem.
+  try {
+    normalizeKustoClusterUri(state.kustoCluster)
+    return true
+  } catch {
+    return false
+  }
 }

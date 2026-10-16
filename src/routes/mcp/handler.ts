@@ -593,6 +593,15 @@ function fastToolIsEnabled(tool: NonPersonaMcpTool): boolean {
       && tool.capability === "browse_agent"
       && browseAgentEnabled()
   }
+  // The Azure groups are read-only, operator-opted-in data tools, so every
+  // profile whose `allowedGroups` carries them (all five pinned profiles do)
+  // must also LIST and CALL them: this predicate is the fast family's whole
+  // projection, shared by `tools/list` and `tools/call`. Gating falls through
+  // to the same capability predicates the standard projection applies, and the
+  // caller's `allowedGroups` check still runs first, so an opt-in on a launch
+  // that never enabled the group changes nothing.
+  if (tool.group === "ado") return adoToolsEnabled()
+  if (tool.group === "kusto") return kustoToolsEnabled()
   if (tool.group !== "browser") return false
   if (!browserToolsEnabled()) return false
   if (tool.capability === "browser_compound") return browserCompoundToolsEnabled()

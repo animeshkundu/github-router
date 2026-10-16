@@ -45,6 +45,7 @@
 
 import { ADO_DEFAULT_TOOLSETS, normalizeAdoToolsets } from "./ado-client"
 import { getAzureRepoFromGit, type AzureRepoInfo } from "./azure-repo"
+import { normalizeKustoClusterUri } from "./kusto-client"
 
 /** Injection seam for the git read, so unit tests never touch real remotes. */
 export type AzureRepoProbe = (
@@ -247,6 +248,12 @@ export function resolveAzureMcpFlags(
   let kusto = false
   if (!suppressAll && intent.kusto !== false) {
     if (intent.kustoCluster) {
+      // Validated here, once, at the point the value enters the process. The
+      // client normalizes again on every request, but by then a typo would
+      // have advertised five tools whose every call fails, and the operator
+      // would have no signal: a malformed host throws here, with the
+      // expectation named, in the same style as an unknown ADO toolset.
+      normalizeKustoClusterUri(intent.kustoCluster)
       kusto = true
     } else if (intent.kusto === true) {
       warnings.push("kusto: requested but no cluster (--kusto-cluster)")

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { readFileSync, rmSync } from "node:fs"
 
 import {
   ADO_DEFAULT_TOOLSETS,
@@ -12,7 +13,13 @@ import {
   normalizeAdoToolsets,
   type AdoToolDescriptor,
 } from "../src/lib/ado-client"
-import { buildAdoToolEntries } from "../src/lib/ado-tools"
+import {
+  adoMcpToolEntries,
+  buildAdoToolEntries,
+  provisionAdoTools,
+  resetAdoToolsForTesting,
+} from "../src/lib/ado-tools"
+import { state } from "../src/lib/state"
 
 // Hermetic by construction: a fictional host passed as `baseUrl`, an injected
 // `tokenProvider`, and a mocked global fetch. Nothing here reaches
@@ -156,6 +163,12 @@ afterEach(() => {
   globalThis.fetch = originalFetch
   if (originalAdoToken === undefined) delete process.env[ADO_TOKEN_ENV]
   else process.env[ADO_TOKEN_ENV] = originalAdoToken
+  // The boundary suite drives the real process-lifetime client and the
+  // snapshot, both of which are module state: dropping them here keeps that
+  // suite from deciding what the rest of the file sees.
+  resetAdoToolsForTesting()
+  state.adoEnabled = false
+  state.adoOrganization = null
 })
 
 describe("normalizeAdoOrganization", () => {
@@ -352,14 +365,60 @@ describe("AdoMcpClient protocol", () => {
     expect(result.content[0]!.text).toBe("Azure DevOps returned an empty result.")
   })
 
-  test("a result over the character cap is truncated with an explicit trailer", async () => {
+  test("a large result is forwarded in full, for the relay boundary to bound", async () => {
+    // There is deliberately no char cap here: clipping at this boundary would
+    // hand the model a truncated answer it cannot tell from a complete one,
+    // and would make the spill file at the relay boundary partial too. The
+    // bound that matters is asserted at the tool boundary below.
     const { client } = installServer({
       callResult: { content: [{ type: "text", text: "z".repeat(70_000) }] },
     })
     const result = await client.callAdoTool("repo_search_commits", { searchText: "x" })
-    const text = result.content[0]!.text
-    expect(text.length).toBeLessThan(61_000)
-    expect(text).toContain("result truncated at 60000 characters")
+    expect(result.content[0]!.text).toHaveLength(70_000)
+  })
+})
+
+describe("ado tool boundary — relay cap", () => {
+  test("an oversized result spills IN FULL and returns a bounded preview plus the path", async () => {
+    resetAdoToolsForTesting()
+    process.env[ADO_TOKEN_ENV] = SYNTHETIC_TOKEN
+    state.adoEnabled = true
+    state.adoOrganization = ORGANIZATION
+    installServer({ callResult: { content: [{ type: "text", text: "z".repeat(70_000) }] } })
+    const provisioned = await provisionAdoTools()
+    expect(provisioned.ok).toBe(true)
+
+    const entry = adoMcpToolEntries().find((t) => t.toolNameHttp === "repo_search_commits")!
+    const result = await entry.handler({ searchText: "x" })
+    const block = result.content[0]
+    if (block?.type !== "text" || typeof block.text !== "string") {
+      throw new Error("expected a text content block")
+    }
+    const text = block.text
+    // The model-facing bound: under the relay ceiling, with the promise the
+    // trailer makes kept by the file it names.
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(16 * 1024)
+    expect(text).toContain("full result saved to:")
+    const saved = /full result saved to: (.+)\]/u.exec(text)?.[1]
+    expect(saved).toBeTruthy()
+    expect(readFileSync(saved!, "utf8")).toHaveLength(70_000)
+    // The spill directory is the operator's real router cache (the same one a
+    // live oversized result would land in), so the test removes what it wrote
+    // rather than leaving litter there until the 7-day sweep.
+    rmSync(saved!, { force: true })
+  })
+
+  test("a small result is returned unchanged, with no trailer and no file", async () => {
+    resetAdoToolsForTesting()
+    process.env[ADO_TOKEN_ENV] = SYNTHETIC_TOKEN
+    state.adoEnabled = true
+    state.adoOrganization = ORGANIZATION
+    installServer({ callResult: { content: [{ type: "text", text: "small result" }] } })
+    await provisionAdoTools()
+
+    const entry = adoMcpToolEntries().find((t) => t.toolNameHttp === "repo_search_commits")!
+    const result = await entry.handler({ searchText: "x" })
+    expect(result.content[0]).toEqual({ type: "text", text: "small result" })
   })
 })
 
@@ -439,6 +498,18 @@ describe("buildAdoToolEntries", () => {
       tool("web", {}),
     ])
     expect(entries.map((e) => e.toolNameHttp)).toEqual(["repo_list_repos_by_project"])
+  })
+
+  test("a name the proxy serves as a PERSONA is dropped too", () => {
+    // The reserved set is personas + utilities, not utilities alone. A persona
+    // name would be listed under `ado` and rejected as out of scope on
+    // `/mcp/ado`, since dispatch keys on the bare name.
+    const entries = buildAdoToolEntries([
+      tool("opus_critic", {}),
+      tool("codex_reviewer", {}),
+      tool("core_list_projects", {}),
+    ])
+    expect(entries.map((e) => e.toolNameHttp)).toEqual(["core_list_projects"])
   })
 
   test("a duplicate within the upstream list is kept once", () => {

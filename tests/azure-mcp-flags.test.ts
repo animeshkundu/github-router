@@ -122,6 +122,18 @@ describe("resolveAzureMcpFlags — Kusto needs a cluster, never a remote", () =>
     expect(flags.kustoCluster).toBe("https://example.kusto.windows.net")
   })
 
+  test("a malformed cluster fails the launch instead of advertising a dead group", () => {
+    // Every kusto tool would fail in the client's own validator, after the
+    // group had already been listed and the banner had already said it was on.
+    // The cluster is normalized at the point it enters the process so the
+    // operator gets the expectation named, in the style of the ADO toolset
+    // typo above.
+    expect(() => resolve({ kustoCluster: "http://example.kusto.windows.net" })).toThrow(/https/)
+    expect(() => resolve({ kustoCluster: "not a host" })).toThrow(/not a valid/)
+    expect(() => resolve({ kustoCluster: "https://user:pw@example.kusto.windows.net" }))
+      .toThrow(/credentials/)
+  })
+
   test("--kusto without a cluster warns instead of guessing one", () => {
     const flags = resolve({ kustoFlag: true }, DISCOVERED)
     expect(flags.kusto).toBe(false)

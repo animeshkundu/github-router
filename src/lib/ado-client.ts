@@ -68,8 +68,19 @@ export const ADO_TOOLSET_VALUES = [
  */
 export const ADO_DEFAULT_TOOLSETS: ReadonlyArray<string> = ["repos", "wit", "pipelines", "wiki"]
 
-/** Whole-result cap. A tool result is context, not an export format. */
-const MAX_RESULT_CHARS = 60_000
+/**
+ * No result cap here, deliberately.
+ *
+ * A character cap at this boundary would truncate a large upstream result
+ * BEFORE the `/mcp` relay could spill it, so the model would receive a
+ * preview plus a path to a file that is itself truncated while the trailer
+ * promises the full result. The model-facing bound belongs at the relay
+ * boundary, which `ado-tools` applies through `relaySafeText`: over the cap
+ * the FULL text is written to a file and a bounded preview plus that path is
+ * returned, which is recoverable rather than clipped. Bounds on upstream
+ * payloads still exist, just where they can be honoured: the transport's
+ * per-attempt timeouts and the service's own paging arguments.
+ */
 
 export class AdoError extends RemoteMcpError {
   constructor(message: string, opts: RemoteMcpErrorOptions = {}) {
@@ -246,11 +257,8 @@ export class AdoMcpClient extends RemoteMcpClient {
       }
     }
     const joined = texts.join("\n\n")
-    const capped = joined.length > MAX_RESULT_CHARS
-      ? `${joined.slice(0, MAX_RESULT_CHARS)}\n\n… result truncated at ${MAX_RESULT_CHARS} characters.`
-      : joined
     const envelope: { content: Array<{ type: "text"; text: string }>; isError?: boolean } = {
-      content: [{ type: "text", text: capped || "Azure DevOps returned an empty result." }],
+      content: [{ type: "text", text: joined || "Azure DevOps returned an empty result." }],
     }
     if (result.isError === true) envelope.isError = true
     return envelope
