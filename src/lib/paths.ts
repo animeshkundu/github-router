@@ -536,7 +536,10 @@ const SYNTHETIC_CLAUDE_JSON_FIELDS = {
  * is idempotent; symlinks are created via atomic temp+rename so two
  * parallel github-router-claude startups can't race to EEXIST; the
  * credentials write uses temp-file + atomic rename so Claude Code's
- * `EZ1()` mtime watcher never sees a partial write.
+ * `EZ1()` mtime watcher never sees a partial write. In-process callers
+ * share one run via the single-flight below, which is what keeps the
+ * `.claude.json` replace from racing itself; the cross-process case is
+ * handled by that write's own lost-race judgment.
  *
  * Walks with `lstat` (does NOT follow symlinks during traversal — a
  * symlink-into-`/` would otherwise let the walk escape). Symlink leaves
@@ -554,8 +557,60 @@ export async function ensureClaudeConfigMirror(opts: {
   realHome?: string
 } = {}): Promise<void> {
   const realHome = opts.realHome ?? os.homedir()
-  const sourceDir = path.join(realHome, ".claude")
   const targetDir = PATHS.CLAUDE_CONFIG_DIR
+
+  // Single-flight, keyed on both paths. Concurrent callers in ONE process
+  // (a `claude` launch whose two entry points prepare the same mirror, or
+  // the 4-way shape the tests use) used to run the whole walk and the
+  // `.claude.json` replace simultaneously. The walk is idempotent, but the
+  // replace is not race-free on Windows: `fs.rename` over a destination
+  // another writer is mid-replacing fails with EPERM/EBUSY, and that
+  // failure then has to be told apart from a real write failure by
+  // inspecting what the racer happened to leave behind. Serializing here
+  // removes the in-process half of that problem at the source; the
+  // cross-process half is what the rename tolerance below is for.
+  //
+  // The check and the publish must not be separated by an await (the same
+  // rule token refresh follows): anything awaited in between yields the
+  // event loop and lets a second caller walk in before the first call has
+  // published its promise. No I/O happens before the publish.
+  const key = `${targetDir}\u0000${realHome}`
+  const inflight = claudeConfigMirrorInflight.get(key)
+  if (inflight) return inflight
+
+  const run = async (): Promise<void> => {
+    try {
+      await runClaudeConfigMirror(realHome, targetDir)
+    } finally {
+      // Identity-checked release: an unconditional delete would let a
+      // finished run evict a newer run's entry and re-open the overlap
+      // this exists to close. `attempt` is assigned before any await
+      // inside `run()` can settle, so it is always bound here.
+      if (claudeConfigMirrorInflight.get(key) === attempt) {
+        claudeConfigMirrorInflight.delete(key)
+      }
+    }
+  }
+  const attempt = run()
+  claudeConfigMirrorInflight.set(key, attempt)
+  return attempt
+}
+
+/**
+ * The in-process single-flight map behind `ensureClaudeConfigMirror`.
+ *
+ * Entries are released as soon as a run settles, so a SEQUENTIAL caller
+ * still gets a fresh walk — which matters because the mirror is re-walked
+ * after callers change `~/.claude` (and because several tests do exactly
+ * that between calls). Only overlapping calls share a run.
+ */
+const claudeConfigMirrorInflight = new Map<string, Promise<void>>()
+
+async function runClaudeConfigMirror(
+  realHome: string,
+  targetDir: string,
+): Promise<void> {
+  const sourceDir = path.join(realHome, ".claude")
 
   // 1. Create our config dir (idempotent, mode 0o700)
   await fs.mkdir(targetDir, { recursive: true, mode: 0o700 })
@@ -959,40 +1014,63 @@ async function injectSyntheticClaudeJsonFields(
   //    perms): `fs.rename` over a read-only file can fail with EPERM
   //    on Windows even though POSIX would silently succeed.
   //
-  //    Concurrent-racer tolerance: when multiple callers replace this
-  //    file at once — two `github-router claude` startups, or four
-  //    parallel in-process callers in a test — Windows `fs.rename` can
-  //    fail with EBUSY/EPERM/EACCES against a destination that is
-  //    momentarily open. Byte equality against `desiredJson` was the
-  //    ORIGINAL acceptance test here and it is the wrong one: the
-  //    source-priority list above INCLUDES this mirror file, so a racer
-  //    whose `lstat` lands after another racer's write merges from the
-  //    mirror rather than from HOME and legitimately computes different
-  //    bytes. Byte inequality therefore does not mean the write failed,
-  //    and treating it as failure made a benign lost race throw out of
-  //    the launch. What must actually be true for the launch to proceed
-  //    is the gate postcondition, which step 6a asserts immediately
-  //    anyway — so check the same invariant here and let a real write
-  //    failure surface as a gate failure rather than a rename error.
+  //    Concurrent-racer tolerance: two `github-router claude` startups can
+  //    replace this file at once (the single-flight in
+  //    `ensureClaudeConfigMirror` covers in-process callers only, since two
+  //    processes share nothing), and Windows `fs.rename` then fails with
+  //    EBUSY/EPERM/EACCES against a destination that is momentarily open.
+  //    Byte equality against `desiredJson` was the ORIGINAL acceptance test
+  //    here and it is the wrong one: the source-priority list above
+  //    INCLUDES this mirror file, so a racer whose `lstat` lands after
+  //    another racer's write merges from the mirror rather than from HOME
+  //    and legitimately computes different bytes. Byte inequality therefore
+  //    does not mean the write failed, and treating it as failure made a
+  //    benign lost race throw out of the launch.
+  //
+  //    The gate postcondition ALONE is the other wrong acceptance test, and
+  //    it is this branch's previous shape. A mirror that already carries the
+  //    gate satisfies it with or without our write — that is precisely the
+  //    legacy `~/.claude/.claude.json` shadow the source list above accepts,
+  //    and any mirror an earlier launch already prepared. Accepting on that
+  //    evidence alone converts a real write failure (disk full, an antivirus
+  //    holding the file, a read-only profile) into a silent drop of the
+  //    merge: the user's user-scope MCPs and settings are in `desiredJson`
+  //    and never reach the mirror, with one `consola.debug` as the only
+  //    trace. So the pre-write state is captured here and handed to
+  //    `judgeLostClaudeJsonWrite`, which requires evidence that the
+  //    destination got BETTER, not merely that it is acceptable.
+  const preWriteGateProblem = await onboardingGateProblem(claudeJsonPath)
   const tempPath = `${claudeJsonPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
   try {
     await fs.writeFile(tempPath, desiredJson, { mode: 0o600, flag: "wx" })
+  } catch (err) {
+    // Not a race to lose: nobody else can have created OUR temp path, and a
+    // failure here leaves the destination exactly as it was.
+    await fs.unlink(tempPath).catch(() => {})
+    throw err
+  }
+  try {
     if (mirrorIsRegularFile) {
       await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})
     }
     await fs.rename(tempPath, claudeJsonPath)
   } catch (err) {
     await fs.unlink(tempPath).catch(() => {})
-    const problem = await onboardingGateProblem(claudeJsonPath)
-    if (problem === null) {
-      consola.debug(
-        `ensureClaudeConfigMirror: rename failed but the mirror already holds the applied gate (a concurrent writer won the race):`,
-        err,
+    const reason = await judgeLostClaudeJsonWrite(
+      claudeJsonPath,
+      desiredJson,
+      preWriteGateProblem,
+    )
+    if (reason !== null) {
+      throw new Error(
+        `ensureClaudeConfigMirror: replacing ${claudeJsonPath} failed (${(err as Error).message}) and the failure is not explained by a concurrent writer: ${reason}`,
+        { cause: err },
       )
-      await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})
-      return
     }
-    throw err
+    consola.debug(
+      `ensureClaudeConfigMirror: the ${claudeJsonPath} replace did not land, but the destination already holds what this write intended (a concurrent writer won the race):`,
+      err,
+    )
   }
   await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})
 }
@@ -1169,6 +1247,56 @@ async function assertOnboardingGateInjected(targetDir: string): Promise<void> {
     `ensureClaudeConfigMirror: postcondition failed — ${problem.reason}`,
     problem.cause === undefined ? undefined : { cause: problem.cause },
   )
+}
+
+/**
+ * May the launch proceed after a `.claude.json` replace failed?
+ *
+ * `null` means yes: the destination is in a state that accounts for the
+ * failure, so it is a lost race rather than a lost write. A non-null string
+ * is the reason it is NOT, for the caller to fold into the thrown error.
+ *
+ * Exactly two things account for a failed replace, and both are evidence
+ * that the destination got BETTER while we were failing:
+ *
+ *   1. The bytes on disk are the bytes we intended to write. Whoever wrote
+ *      them, the merge this call exists to perform is the merge in place —
+ *      a strictly stronger statement than any gate check — so it is tested
+ *      first, and it is also what covers a racer that merged from a
+ *      different source than we did.
+ *   2. The destination did NOT satisfy the gate before this write and does
+ *      now. Somebody applied the gate to this path while our rename was
+ *      failing, which is the same job this call does; the pre-write miss is
+ *      what makes the post-write hit evidence rather than coincidence.
+ *
+ * A destination that already carried the gate is deliberately NOT accepted.
+ * That is the legacy `~/.claude/.claude.json` shadow (or any mirror a prior
+ * launch prepared): it satisfies the gate on its own, so accepting it would
+ * let a genuine write failure pass as a lost race while the merge silently
+ * never lands. The gate is not the whole postcondition of this helper — the
+ * merge is the reason a gate-valid mirror still gets rewritten.
+ */
+async function judgeLostClaudeJsonWrite(
+  claudeJsonPath: string,
+  desiredJson: string,
+  preWriteGateProblem: { reason: string } | null,
+): Promise<string | null> {
+  try {
+    const current = await fs.readFile(claudeJsonPath, "utf8")
+    if (current === desiredJson) return null
+  } catch {
+    // Unreadable or gone. Fall through: the gate check below reports the
+    // state with its own reason, which is more specific than "read failed".
+  }
+
+  const postWriteGateProblem = await onboardingGateProblem(claudeJsonPath)
+  if (postWriteGateProblem !== null) {
+    return `the destination does not hold the onboarding gate either (${postWriteGateProblem.reason})`
+  }
+  if (preWriteGateProblem === null) {
+    return "the destination already held the onboarding gate before this write, so holding it afterwards proves nothing about this merge; the mirrored content this call adds (user-scope MCPs, settings) may be missing from the launch"
+  }
+  return null
 }
 
 /**
