@@ -184,6 +184,10 @@ The query field is **`csl`**, not `query` — a `query` field is silently ignore
 by the service. `truncationmaxrecords` (200) and `truncationmaxsize` (64 MiB)
 bound the response; an 8 MiB client-side cap and a rendered-size cap bound it
 again; a response over either is a stated truncation, never a silent short read.
+The 8 MiB cap is counted in **bytes**, not UTF-16 code units, and a
+`content-length` that already declares an oversize body is refused before the
+body is buffered at all: a character count lets a multi-byte body past a budget
+named in bytes.
 
 Cluster references are normalized to a bare https origin. Anything else is
 refused, because the value becomes both a request URL and an `az --resource`
@@ -214,6 +218,18 @@ Results are rendered as a compact aligned grid, never raw wire JSON —
 `{"Tables":[{"Columns":[{"ColumnName":…` is both unreadable to the model and
 several times the tokens of the same content as columns and rows.
 
+### Results at the relay boundary
+
+Both groups' tool results pass through `relaySafeText` as the last transform
+before they leave `/mcp`. A result over the relay cap spills **in full** to a
+file and the model receives a bounded preview plus that path, instead of a
+string truncated where the model cannot see it (the ADO client had its own 60k
+character clip for exactly that, and it is deleted: clipping there made the
+relay's "full result saved to" trailer untrue). Kusto's rendered-size cap
+stays, because it bounds RENDERING work rather than relay size, and the spill
+file carries that client's own truncation trailer so "full" is never read as
+"everything the service had".
+
 ### Token refresh
 
 One process-lifetime cache keyed by cluster URI (which is also the audience),
@@ -221,8 +237,30 @@ with a 5-minute refresh margin ahead of the reported expiry and **single-flighte
 refresh: concurrent callers that see the same expired entry await ONE `az`
 invocation. A token whose expiry `az` does not report is used but **not cached**,
 because a cache entry with no deadline can only be either immortal (serving a
-dead token) or arbitrary (minting in a loop). A 401 or 403 invalidates the cached
-entry so the next call mints a fresh one rather than replaying the dead value.
+dead token) or arbitrary (minting in a loop). A **401 alone** invalidates the
+cached entry, so the retry (and every later call) mints a fresh token rather
+than replaying the dead value. A **403 does not**, and is not reported as a
+credential problem: ADX answers 403 for a valid identity that has no access to
+the cluster or database, so invalidating would send the operator to
+re-authenticate against a token that is fine while spawning an `az` call per
+attempt that still 403s. The service's own text names the missing grant, so it
+is read (under the same byte cap) and surfaced rather than replaced by a guess.
+This is the same distinction `src/lib/token.ts` makes for GitHub: only a 401 is
+a rejected credential, a bare 403 is not.
+
+### Retries
+
+429 and 5xx, plus transport failures, retry three times at 1/2/4 seconds, with
+`Retry-After` winning when the service sends one (both the delta-seconds and
+the HTTP-date forms, clamped to 300 s). Every request here is read-only, which
+is what makes resending it safe:
+no tool in this client mutates anything, by construction rather than by
+convention, since read-only is enforced by the service. A 401 retries at most
+once, and only after the cache invalidation above, so a second 401 from a
+freshly minted token is a real auth verdict instead of something another `az`
+call would fix. The ladder is injectable through the client's `retryDelaysMs`
+seam; an empty array makes every retriable verdict final, which is how the
+suites assert a verdict without paying the production backoff.
 
 ## Testing policy
 
