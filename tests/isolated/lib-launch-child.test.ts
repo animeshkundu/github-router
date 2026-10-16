@@ -25,7 +25,13 @@ mock.module("node:child_process", () => ({
   spawnSync: spawnSyncMock,
 }))
 
-const exitMock = mock((code: number) => {
+// Declared as returning `void` rather than letting the default implementation's
+// `throw` infer `never`: the fail-safe test below replaces it with a recording
+// implementation (a throw from a timer callback is an unhandled error, not a
+// failed assertion), and a `never`-returning mock type rejects that. Throwing
+// is still assignable to `void`, so the tests that assert `toThrow(ExitError)`
+// on the synchronous exit paths are unaffected.
+const exitMock = mock<(code: number) => void>((code: number) => {
   throw new ExitError(code)
 })
 const killMock = mock()
