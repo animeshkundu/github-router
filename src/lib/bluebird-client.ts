@@ -297,7 +297,138 @@ function rowsFromArray(items: Array<unknown>): Array<UnifiedResultRow> {
   return rows
 }
 
-function rowsFromCallResult(result: unknown): Array<UnifiedResultRow> {
+/**
+ * The deployed `code_search` answers with human-readable reports, not JSON:
+ * the lexical method replies with per-file sections of context lines, the
+ * semantic method with ranked windows in fenced code blocks. Both shapes were
+ * read off the live service (Bluebird 1.0.32298816); a text-only response is
+ * what made every search fail with "unexpected tool result shape". The JSON
+ * shapes above stay supported because the wire contract is versioned upstream
+ * and older deployments did return machine-readable arrays.
+ */
+const KEYWORD_SECTION_RE = /^Repository:\s*(.+?),\s*Path:\s*(.+?)\s+[—–-]\s/
+const KEYWORD_LINE_RE = /^Line\s+(\d+):\s?(.*)$/
+const SEMANTIC_HEADER_RE =
+  /^\[(\d+)\]\s+\S+\s+(\S+)\s+\(lines?\s+(\d+)(?:\s*-\s*(\d+))?\)\s+similarity=([\d.]+)\s*$/
+const SEMANTIC_FILE_RE = /^File:\s*`(.+)`\s*$/
+/** One displayed source line; such a line can embed a whole JSON blob. */
+const REPORT_LINE_CAP = 2000
+/** A semantic window is ~20 lines of source; this bounds a pathological one. */
+const REPORT_WINDOW_CAP = 8000
+
+function positiveInt(value: string | undefined): number | null {
+  const parsed = Number.parseInt(value ?? "", 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+
+/**
+ * Lexical report: `Line 48: <code>` entries under `Repository: …, Path: …`
+ * headers, with non-matching context lines interleaved and `... (13 lines
+ * omitted)` elisions. The service does not mark which displayed lines matched,
+ * so the query is the only signal available: a line containing it is a hit. A
+ * query that cannot match textually (an `OR`/`NOT` expression, a
+ * natural-language phrase) keeps the server's own context selection rather
+ * than reporting nothing.
+ */
+function rowsFromKeywordReport(
+  text: string,
+  query: string,
+): Array<UnifiedResultRow> | null {
+  const rows: Array<UnifiedResultRow> = []
+  let file: string | null = null
+  for (const line of text.split(/\r?\n/)) {
+    const section = KEYWORD_SECTION_RE.exec(line)
+    if (section?.[2]) {
+      file = normalizeRemotePath(section[2])
+      continue
+    }
+    const numbered = KEYWORD_LINE_RE.exec(line)
+    if (!numbered || !file) continue
+    const lineNumber = positiveInt(numbered[1])
+    const snippet = (numbered[2] ?? "").slice(0, REPORT_LINE_CAP)
+    if (lineNumber === null || !snippet.trim()) continue
+    rows.push({ file, line: lineNumber, snippet })
+  }
+  if (rows.length === 0) return null
+  const needle = query.trim().toLowerCase()
+  if (!needle) return rows
+  const matching = rows.filter((row) =>
+    row.snippet.toLowerCase().includes(needle)
+  )
+  return matching.length > 0 ? matching : rows
+}
+
+/**
+ * Semantic report: `[1] repo /path (lines 54-74)  similarity=0.664`, then a
+ * `File: \`/path\`` line, then the window in a fenced block. `//...` elisions
+ * inside a window are the server's own, and are kept as-is.
+ */
+function rowsFromSemanticReport(text: string): Array<UnifiedResultRow> | null {
+  const rows: Array<UnifiedResultRow> = []
+  interface PendingWindow {
+    file: string
+    line: number
+    endLine?: number
+    score?: number
+  }
+  let pending: PendingWindow | null = null
+  let window: Array<string> = []
+  let inFence = false
+  const flush = (): void => {
+    const record = pending
+    if (!record) return
+    const snippet = window.join("\n").trim()
+    rows.push({
+      file: record.file,
+      line: record.line,
+      ...(record.endLine !== undefined ? { endLine: record.endLine } : {}),
+      ...(record.score !== undefined ? { score: record.score } : {}),
+      snippet: (snippet || `${record.file}:${record.line}`).slice(
+        0,
+        REPORT_WINDOW_CAP,
+      ),
+    })
+    pending = null
+    window = []
+  }
+  for (const line of text.split(/\r?\n/)) {
+    if (inFence) {
+      if (line.trimStart().startsWith("```")) inFence = false
+      else window.push(line)
+      continue
+    }
+    const header = SEMANTIC_HEADER_RE.exec(line)
+    if (header) {
+      flush()
+      const file = normalizeRemotePath(header[2] ?? "")
+      const lineNumber = positiveInt(header[3])
+      if (!file || lineNumber === null) continue
+      const endLine = positiveInt(header[4])
+      const score = Number.parseFloat(header[5] ?? "")
+      pending = {
+        file,
+        line: lineNumber,
+        ...(endLine !== null ? { endLine } : {}),
+        ...(Number.isFinite(score) ? { score } : {}),
+      }
+      continue
+    }
+    const fileLine = SEMANTIC_FILE_RE.exec(line)
+    if (fileLine && pending) {
+      const named = normalizeRemotePath(fileLine[1] ?? "")
+      if (named) pending.file = named
+      continue
+    }
+    if (line.trimStart().startsWith("```")) inFence = true
+  }
+  flush()
+  return rows.length > 0 ? rows : null
+}
+
+function rowsFromCallResult(
+  result: unknown,
+  query?: string,
+): Array<UnifiedResultRow> {
   if (Array.isArray(result)) return rowsFromArray(result)
   if (!isRecord(result)) {
     throw new BluebirdError("Bluebird returned an empty result.", { retriable: true })
@@ -331,7 +462,13 @@ function rowsFromCallResult(result: unknown): Array<UnifiedResultRow> {
   }
   for (const text of texts) {
     const trimmed = text.trim()
-    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) continue
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+      // Not JSON: the deployed service answers with its own text report.
+      const report = rowsFromKeywordReport(trimmed, query ?? "")
+        ?? rowsFromSemanticReport(trimmed)
+      if (report) return report
+      continue
+    }
     let parsed: unknown
     try {
       parsed = JSON.parse(trimmed)
@@ -364,8 +501,14 @@ function rowsFromCallResult(result: unknown): Array<UnifiedResultRow> {
           : null
     if (arr) return rowsFromArray(arr)
   }
+  // A shape we do not know is diagnosable only if the reply is quoted back:
+  // the deployed service changed its result shape once already, and the bare
+  // message cost a debugging round trip.
+  const head = sanitizeTransportText(
+    (texts[0] ?? "").trim().replace(/\s+/g, " ").slice(0, 160),
+  )
   throw new BluebirdError(
-    "Bluebird returned no parseable code hits (unexpected tool result shape).",
+    `Bluebird returned no parseable code hits (unexpected tool result shape${head ? `: ${head}` : ""}).`,
     { retriable: false },
   )
 }
@@ -475,7 +618,7 @@ export class BluebirdMcpClient extends RemoteMcpClient {
       this.shapeArgs(tool, query, opts, "lexical"),
       opts.signal,
     )
-    const rows = rowsFromCallResult(result)
+    const rows = rowsFromCallResult(result, query)
     return opts.limit !== undefined ? rows.slice(0, opts.limit) : rows
   }
 
@@ -488,7 +631,7 @@ export class BluebirdMcpClient extends RemoteMcpClient {
       this.shapeArgs(tool, query, opts, "semantic"),
       opts.signal,
     )
-    const rows = rowsFromCallResult(result)
+    const rows = rowsFromCallResult(result, query)
     return opts.limit !== undefined ? rows.slice(0, opts.limit) : rows
   }
 }

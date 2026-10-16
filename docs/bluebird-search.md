@@ -249,7 +249,76 @@ explicit compatible glob field. It is not translated heuristically to `path` or
 
 ## Search responses
 
-A normal MCP tool result wraps one or more text blocks:
+The deployed service answers `code_search` with a human-readable TEXT report in
+a single `text` block, not with JSON. There is one shape per method; both were
+read off the live service (Bluebird 1.0.32298816) and both are parsed by the
+client. The repositories and paths below are synthetic.
+
+### Lexical (`method: "keyword"`)
+
+```
+Found 3 matches across 2 files (query matched 7 files total — refine query or use path filter to narrow):
+
+
+====================
+Repository: synthetic-service, Path: /src/alpha/tabs.ts — 2 match(es)
+====================
+Line 10: const unrelated = 1
+Line 11: export function createTab(name: string) {
+Line 12:   return name
+Line 13:   // createTab keeps the tab registry honest
+
+====================
+Repository: synthetic-service, Path: /src/beta/registry.ts — showing 1 of 9 matches (truncated — read the file directly for full context)
+====================
+Line  4: import { createTab } from "../alpha/tabs"
+```
+
+Each section header names the file and its match count (`N match(es)`, or
+`showing X of Y matches` for a truncated window). The body is a context window:
+every line is prefixed `Line <n>:` with the number right-aligned, non-matching
+context lines are interleaved, and long runs collapse to `... (N lines
+omitted)`. The service does not mark which displayed lines matched, and its
+count is per occurrence while a row here is per line, so the query is the
+signal: displayed lines containing it become rows, and a query that cannot
+match textually (an `OR`/`NOT` expression, a natural-language phrase) keeps the
+server's own selection rather than reporting a successful search as zero hits.
+
+### Semantic (`method: "semantic"`)
+
+````
+Found 2 semantic match(es) (model: Metis):
+
+[1] synthetic-service /src/alpha/tabs.ts (lines 11-14)  similarity=0.812
+File: `/src/alpha/tabs.ts`
+```ts
+export function createTab(name: string) {
+//...
+  return name
+}
+```
+
+[2] synthetic-service /src/beta/registry.ts (line 4)  similarity=0.501
+File: `/src/beta/registry.ts`
+```ts
+import { createTab } from "../alpha/tabs"
+```
+````
+
+One row per ranked window: `line` from the `(lines A-B)` range, `endLine` from
+`B` when the range has one, `score` from `similarity=`, and `snippet` from the
+fenced block. The server's own `//...` elisions inside a window are kept as
+they are.
+
+A report whose shape is neither of these is an error, and the message quotes
+the leading text back so an upstream format change is diagnosable from the
+tool response alone.
+
+### Machine-readable results (older deployments)
+
+Older deployments answered with JSON in the same `text` block, and the client
+still reads those shapes, because the wire contract is versioned upstream. A
+normal MCP tool result wraps one or more text blocks:
 
 ```json
 {
@@ -267,8 +336,8 @@ A normal MCP tool result wraps one or more text blocks:
 }
 ```
 
-Semantic results use `SimilaritySearchResult`. Keyword results use
-`FullTextSearchResult`:
+In that shape, semantic results use `SimilaritySearchResult` and keyword
+results use `FullTextSearchResult`:
 
 ```json
 [

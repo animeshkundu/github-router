@@ -832,3 +832,115 @@ describe("bluebirdScopeSummary", () => {
     expect(bluebirdScopeSummary()).toBe("contoso/webApp [portal]")
   })
 })
+
+describe("BluebirdMcpClient text-report results", () => {
+  // The deployed `code_search` answers with a human-readable report rather
+  // than JSON (read off Bluebird 1.0.32298816), which is why every search
+  // used to fail with "unexpected tool result shape". These fixtures are the
+  // two live shapes with synthetic repositories and paths.
+  function reportServer(text: string): void {
+    installServer(
+      [tool("code_search", { method: {}, query: {} })],
+      { content: [{ type: "text", text }] },
+    )
+  }
+
+  test("parses the lexical report and keeps only the lines the query matches", async () => {
+    reportServer([
+      "Found 3 matches across 2 files (query matched 7 files total — refine query or use path filter to narrow):",
+      "",
+      "",
+      "====================",
+      "Repository: synthetic-service, Path: /src/alpha/tabs.ts — 2 match(es)",
+      "====================",
+      "Line 10: const unrelated = 1",
+      "Line 11: export function createTab(name: string) {",
+      "Line 12:   return name",
+      "Line 13:   // createTab keeps the tab registry honest",
+      "",
+      "====================",
+      "Repository: synthetic-service, Path: /src/beta/registry.ts — showing 1 of 9 matches (truncated — read the file directly for full context)",
+      "====================",
+      "Line  4: import { createTab } from \"../alpha/tabs\"",
+      "Line  5: const unrelated = 2",
+    ].join("\n"))
+    const client = new BluebirdMcpClient(scope, "test-token", "https://example.test/mcp")
+
+    const rows = await client.searchFileContent("createTab")
+
+    // The service interleaves context lines and does not mark the matches;
+    // what reaches the caller is one row per matching line, with its real
+    // line number, and none of the surrounding noise.
+    expect(rows.map((row) => `${row.file}:${row.line}`)).toEqual([
+      "src/alpha/tabs.ts:11",
+      "src/alpha/tabs.ts:13",
+      "src/beta/registry.ts:4",
+    ])
+    expect(rows[2]?.snippet).toBe("import { createTab } from \"../alpha/tabs\"")
+  })
+
+  test("keeps the server's own selection when the query cannot match textually", async () => {
+    reportServer([
+      "Found 1 matches across 1 files:",
+      "",
+      "====================",
+      "Repository: synthetic-service, Path: /src/alpha/tabs.ts — 1 match(es)",
+      "====================",
+      "Line 11: export function createTab(name: string) {",
+      "Line 12:   return name",
+    ].join("\n"))
+    const client = new BluebirdMcpClient(scope, "test-token", "https://example.test/mcp")
+
+    // `OR` is server-side syntax: no single line contains the whole string, so
+    // filtering on it would report a successful search as zero hits.
+    const rows = await client.searchFileContent("createTab OR deleteTab")
+    expect(rows.map((row) => row.line)).toEqual([11, 12])
+  })
+
+  test("parses semantic report windows with their line ranges and scores", async () => {
+    reportServer([
+      "Found 2 semantic match(es) (model: Metis):",
+      "",
+      "[1] synthetic-service /src/alpha/tabs.ts (lines 11-14)  similarity=0.812",
+      "File: `/src/alpha/tabs.ts`",
+      "```ts",
+      "export function createTab(name: string) {",
+      "//...",
+      "  return name",
+      "}",
+      "```",
+      "",
+      "[2] synthetic-service /src/beta/registry.ts (line 4)  similarity=0.501",
+      "File: `/src/beta/registry.ts`",
+      "```ts",
+      "import { createTab } from \"../alpha/tabs\"",
+      "```",
+    ].join("\n"))
+    const client = new BluebirdMcpClient(scope, "test-token", "https://example.test/mcp")
+
+    const rows = await client.doVectorSearch("service that creates tabs")
+
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({
+      file: "src/alpha/tabs.ts",
+      line: 11,
+      endLine: 14,
+      score: 0.812,
+    })
+    expect(rows[0]?.snippet).toContain("export function createTab")
+    // The fence is report furniture, not code.
+    expect(rows[0]?.snippet).not.toContain("```")
+    // `(line 4)` is a single-line window: no endLine is invented for it.
+    expect(rows[1]).toMatchObject({ file: "src/beta/registry.ts", line: 4, score: 0.501 })
+    expect(rows[1]?.endLine).toBeUndefined()
+  })
+
+  test("quotes the reply when the result shape is neither JSON nor a report", async () => {
+    reportServer("Bluebird is warming up. Please retry in a few seconds.")
+    const client = new BluebirdMcpClient(scope, "test-token", "https://example.test/mcp")
+
+    await expect(client.doVectorSearch("anything")).rejects.toThrow(
+      "unexpected tool result shape: Bluebird is warming up",
+    )
+  })
+})
