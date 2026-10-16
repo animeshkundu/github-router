@@ -1886,6 +1886,94 @@ test("ensureClaudeConfigMirror SHARED-symlink concurrent wrong-target replace: p
   expect(tempLitter).toEqual([])
 })
 
+test("ensureClaudeConfigMirror lost the .claude.json rename to a differently-merged writer: resolves when the gate is applied, throws when it is not", async () => {
+  // The regression this pins. The write path's concurrent-racer tolerance
+  // used to accept a lost rename ONLY when the on-disk bytes equalled its own
+  // `desiredJson`, on the stated premise that "the write content is fully
+  // deterministic ... so a successful rename by ANY racer produces the same
+  // bytes we'd produce". The source-priority list includes this very mirror
+  // file, so a racer whose lstat lands after another racer's write merges from
+  // the mirror and legitimately computes different bytes — the premise is
+  // false by construction, and the benign loser threw out of the launch. That
+  // is also the load-dependent failure the 4-way test above showed on this
+  // machine (passing alone, failing under suite load), because Windows
+  // `fs.rename` fails with EPERM against a momentarily-open destination often
+  // enough to hit the branch.
+  //
+  // What must be true for the launch to proceed is the gate postcondition, so
+  // that is what the tolerance branch now checks — through the same helper the
+  // postcondition uses, which is why this test can assert both directions.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  const mirrorJsonPath = path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json")
+
+  // A DIFFERENT writer's merge: the gate is applied (so accepting it is
+  // correct) plus a key our own merge would never emit (so the bytes are
+  // guaranteed unequal to `desiredJson` — the old code's acceptance test).
+  const concurrentMerge = JSON.stringify(
+    {
+      hasCompletedOnboarding: true,
+      bypassPermissionsModeAccepted: true,
+      oauthAccount: {
+        accountUuid: "11111111-1111-1111-1111-111111111111",
+        organizationUuid: "22222222-2222-2222-2222-222222222222",
+      },
+      writtenByConcurrentRacer: true,
+    },
+    null,
+    2,
+  ) + "\n"
+  await fs.writeFile(mirrorJsonPath, concurrentMerge, "utf8")
+
+  const originalRename = fs.rename
+  const renameSpy = mock(async (from: string, to: string) => {
+    // Fail only the .claude.json replace; the credentials write and the
+    // SHARED-slot renames must behave normally or the test would be
+    // exercising a different failure.
+    if (String(to).endsWith(".claude.json")) {
+      const err = new Error("simulated rename failure (lost race)") as NodeJS.ErrnoException
+      err.code = "EPERM"
+      throw err
+    }
+    return originalRename(from, to)
+  })
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  try {
+    await expectFsSpyInstalled("rename", renameSpy)
+    // The whole point: a lost race with the gate already applied resolves.
+    await expect(ensureClaudeConfigMirror()).resolves.toBeUndefined()
+  } finally {
+    ;(fs as unknown as { rename: unknown }).rename = originalRename
+  }
+
+  // The raced file is still the one on disk (we accepted it, we did not
+  // overwrite it with our merge) and the gate the postcondition asserts holds.
+  const applied = JSON.parse(await fs.readFile(mirrorJsonPath, "utf8")) as Record<
+    string,
+    unknown
+  >
+  expect(applied.writtenByConcurrentRacer).toBe(true)
+  expect(applied.hasCompletedOnboarding).toBe(true)
+  expect(applied.bypassPermissionsModeAccepted).toBe(true)
+
+  // And the other direction, which the tolerance must NOT swallow: a slot
+  // that cannot hold the gate is a real failure, so this still throws (the
+  // rename error, which names the cause rather than the symptom).
+  await fs.writeFile(mirrorJsonPath, "{ not json", "utf8")
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  try {
+    await expect(ensureClaudeConfigMirror()).rejects.toThrow(
+      /simulated rename failure/,
+    )
+  } finally {
+    ;(fs as unknown as { rename: unknown }).rename = originalRename
+  }
+})
+
 // ============================================================
 // Round-3 G2: diagnostic test for the SHARED-symlink fast path
 // ============================================================
@@ -2051,6 +2139,77 @@ test("ensureSharedSymlink: rename failure surfaces a consola.warn and cleans up 
   } finally {
     ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
     ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = originalUnlink
+    ;(consola as unknown as { warn: typeof consola.warn }).warn = originalWarn
+  }
+})
+
+test("ensureSharedSymlink: a rename that lost a race to a sibling's correct junction does NOT warn", async () => {
+  // Companion to G5 above, which pins the genuine-failure branch to a warn.
+  // This pins the branch that must stay QUIET. Under contention on Windows
+  // (two startups, or one startup racing a stale sweep) the loser's rename
+  // fails against a destination that is momentarily open while the slot is
+  // already pointing at the right source — the state the function exists to
+  // produce. Warning on that made the contended path emit dozens of EPERM
+  // warns per startup, and a warn stream that is usually expected noise is
+  // how a real rename failure hides (the exact bug class the G5 warn was
+  // added for), so "verify before shouting" is a correctness property here,
+  // not cosmetic.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  const mirrorDir = path.join(
+    tempDir,
+    `mirror-rename-race-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(mirrorDir, { recursive: true })
+
+  // Wrong-target junction at the slot: the replace path, and the decoy is
+  // intact so the fast path cannot return early.
+  const decoy = path.join(tempDir, `decoy-race-${randomBytes(4).toString("hex")}`)
+  await fs.mkdir(decoy, { recursive: true })
+  const slotPath = path.join(mirrorDir, "projects")
+  const sourcePath = path.join(claudeHome, "projects")
+  await fs.symlink(
+    decoy,
+    slotPath,
+    process.platform === "win32" ? "junction" : "dir",
+  )
+
+  const originalRename = fs.rename
+  const originalWarn = consola.warn
+  const warnSpy = mock(originalWarn.bind(consola))
+  // The sibling racer: it installs the correct junction between our unlink
+  // and our rename, so our rename lands and then fails against the fresh
+  // target. Doing the real rename first is what makes the simulation
+  // faithful instead of merely asserting on a stubbed error.
+  const renameSpy = mock(async (from: string, to: string) => {
+    await fs.unlink(to).catch(() => {})
+    await originalRename(from, to)
+    const err = new Error(
+      "simulated rename failure (sibling won the race)",
+    ) as NodeJS.ErrnoException
+    err.code = "EPERM"
+    throw err
+  })
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  ;(consola as unknown as { warn: unknown }).warn = warnSpy
+  try {
+    await expectFsSpyInstalled("rename", renameSpy)
+    await expectConsolaSpyInstalled("warn", warnSpy)
+
+    await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
+
+    // The failing branch really did run...
+    expect(renameSpy).toHaveBeenCalled()
+    // ...the slot really does resolve to the source...
+    expect(await fs.realpath(slotPath)).toBe(await fs.realpath(sourcePath))
+    // ...and the losing racer stayed silent.
+    const warnedAboutRename = warnSpy.mock.calls.some(
+      (call) => typeof call[0] === "string" && call[0].includes("rename"),
+    )
+    expect(warnedAboutRename).toBe(false)
+  } finally {
+    ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
     ;(consola as unknown as { warn: typeof consola.warn }).warn = originalWarn
   }
 })

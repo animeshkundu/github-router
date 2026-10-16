@@ -959,16 +959,21 @@ async function injectSyntheticClaudeJsonFields(
   //    perms): `fs.rename` over a read-only file can fail with EPERM
   //    on Windows even though POSIX would silently succeed.
   //
-  //    Concurrent-racer tolerance: when multiple `ensureClaudeConfigMirror()`
-  //    calls run in parallel (e.g., from tests, or a future caller),
-  //    Windows `fs.rename` can fail with EBUSY/EPERM/EACCES if
-  //    another racer has the destination open or mid-write. The
-  //    write content is fully deterministic (same SYNTHETIC fields,
-  //    same force-override merge of the same source-priority list),
-  //    so a successful rename by ANY racer produces the same bytes
-  //    we'd produce. On rename failure, verify the on-disk content
-  //    matches `desiredJson` — if so, accept silently (another
-  //    racer won the race; the file is correct).
+  //    Concurrent-racer tolerance: when multiple callers replace this
+  //    file at once — two `github-router claude` startups, or four
+  //    parallel in-process callers in a test — Windows `fs.rename` can
+  //    fail with EBUSY/EPERM/EACCES against a destination that is
+  //    momentarily open. Byte equality against `desiredJson` was the
+  //    ORIGINAL acceptance test here and it is the wrong one: the
+  //    source-priority list above INCLUDES this mirror file, so a racer
+  //    whose `lstat` lands after another racer's write merges from the
+  //    mirror rather than from HOME and legitimately computes different
+  //    bytes. Byte inequality therefore does not mean the write failed,
+  //    and treating it as failure made a benign lost race throw out of
+  //    the launch. What must actually be true for the launch to proceed
+  //    is the gate postcondition, which step 6a asserts immediately
+  //    anyway — so check the same invariant here and let a real write
+  //    failure surface as a gate failure rather than a rename error.
   const tempPath = `${claudeJsonPath}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
   try {
     await fs.writeFile(tempPath, desiredJson, { mode: 0o600, flag: "wx" })
@@ -978,18 +983,14 @@ async function injectSyntheticClaudeJsonFields(
     await fs.rename(tempPath, claudeJsonPath)
   } catch (err) {
     await fs.unlink(tempPath).catch(() => {})
-    try {
-      const observed = await fs.readFile(claudeJsonPath, "utf8")
-      if (observed === desiredJson) {
-        consola.debug(
-          `ensureClaudeConfigMirror: rename failed but mirror already holds expected content (concurrent racer won the race):`,
-          err,
-        )
-        await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})
-        return
-      }
-    } catch {
-      // Fall through to rethrow the original error.
+    const problem = await onboardingGateProblem(claudeJsonPath)
+    if (problem === null) {
+      consola.debug(
+        `ensureClaudeConfigMirror: rename failed but the mirror already holds the applied gate (a concurrent writer won the race):`,
+        err,
+      )
+      await chmodIfPossible(claudeJsonPath, 0o600).catch(() => {})
+      return
     }
     throw err
   }
@@ -1081,36 +1082,49 @@ function parseExistingClaudeJson(
  * for free instead of having to remember to thread the failure
  * upward by hand.
  */
-async function assertOnboardingGateInjected(targetDir: string): Promise<void> {
-  const claudeJsonPath = path.join(targetDir, ".claude.json")
-
-  // 1. lstat first — never follow a symlink. A planted symlink at the
-  //    mirror path pointing at an attacker-controlled file with valid
-  //    gate fields would otherwise pass a plain readFile check and let
-  //    the helper's "non-regular target" warn-and-return slip through.
+/**
+ * Does the file at `claudeJsonPath` hold the synthetic onboarding gate?
+ *
+ * Returns `null` when the gate is satisfied, otherwise an actionable reason
+ * (without the caller's prefix) plus the underlying error where one exists.
+ *
+ * Shared by BOTH sites that need the answer, which is the point of extracting
+ * it: the write path uses it to decide whether a lost rename race is benign
+ * (`injectSyntheticClaudeJsonFields` step 5) and `assertOnboardingGateInjected`
+ * uses it to decide whether the launch may proceed. Two independent copies of
+ * "the gate is applied" is exactly how a benign-race acceptance test and the
+ * fail-loud postcondition drift apart.
+ */
+async function onboardingGateProblem(
+  claudeJsonPath: string,
+): Promise<{ reason: string; cause?: unknown } | null> {
+  // lstat first — never follow a symlink. A planted symlink at the mirror
+  // path pointing at an attacker-controlled file with valid gate fields would
+  // otherwise pass a plain readFile check and let the helper's "non-regular
+  // target" warn-and-return slip through.
   let lst: import("node:fs").Stats
   try {
     lst = await fs.lstat(claudeJsonPath)
   } catch (err) {
-    throw new Error(
-      `ensureClaudeConfigMirror: postcondition failed — cannot lstat ${claudeJsonPath} after injection (synthetic onboarding-skip fields are required to prevent Claude Code's first-launch wizard, which would defeat the synthetic credential): ${(err as Error).message}`,
-      { cause: err },
-    )
+    return {
+      reason: `cannot lstat ${claudeJsonPath} after injection (synthetic onboarding-skip fields are required to prevent Claude Code's first-launch wizard, which would defeat the synthetic credential): ${(err as Error).message}`,
+      cause: err,
+    }
   }
   if (!lst.isFile()) {
-    throw new Error(
-      `ensureClaudeConfigMirror: postcondition failed — ${claudeJsonPath} exists but is not a regular file (mode=${lst.mode.toString(8)}). Check the preceding warn-level log lines for the underlying cause; without a regular file holding the gate fields, Claude Code's first-launch wizard fires and defeats the synthetic credential.`,
-    )
+    return {
+      reason: `${claudeJsonPath} exists but is not a regular file (mode=${lst.mode.toString(8)}). Check the preceding warn-level log lines for the underlying cause; without a regular file holding the gate fields, Claude Code's first-launch wizard fires and defeats the synthetic credential.`,
+    }
   }
 
   let raw: string
   try {
     raw = await fs.readFile(claudeJsonPath, "utf8")
   } catch (err) {
-    throw new Error(
-      `ensureClaudeConfigMirror: postcondition failed — cannot read ${claudeJsonPath} after injection: ${(err as Error).message}`,
-      { cause: err },
-    )
+    return {
+      reason: `cannot read ${claudeJsonPath} after injection: ${(err as Error).message}`,
+      cause: err,
+    }
   }
   let parsed: Record<string, unknown>
   try {
@@ -1120,30 +1134,41 @@ async function assertOnboardingGateInjected(targetDir: string): Promise<void> {
     }
     parsed = json as Record<string, unknown>
   } catch (err) {
-    throw new Error(
-      `ensureClaudeConfigMirror: postcondition failed — ${claudeJsonPath} is not a valid JSON object after injection: ${(err as Error).message}`,
-      { cause: err },
-    )
+    return {
+      reason: `${claudeJsonPath} is not a valid JSON object after injection: ${(err as Error).message}`,
+      cause: err,
+    }
   }
   if (
     parsed.hasCompletedOnboarding !== true
     || parsed.bypassPermissionsModeAccepted !== true
   ) {
-    throw new Error(
-      `ensureClaudeConfigMirror: postcondition failed — ${claudeJsonPath} is missing required gate fields after injection (hasCompletedOnboarding=${String(parsed.hasCompletedOnboarding)}, bypassPermissionsModeAccepted=${String(parsed.bypassPermissionsModeAccepted)}). Check the preceding warn-level log lines for the underlying cause; without these fields Claude Code's first-launch wizard fires and defeats the synthetic credential.`,
-    )
+    return {
+      reason: `${claudeJsonPath} is missing required gate fields after injection (hasCompletedOnboarding=${String(parsed.hasCompletedOnboarding)}, bypassPermissionsModeAccepted=${String(parsed.bypassPermissionsModeAccepted)}). Check the preceding warn-level log lines for the underlying cause; without these fields Claude Code's first-launch wizard fires and defeats the synthetic credential.`,
+    }
   }
   // Reuse `isUsableOauthAccount` so a future change to the structural
-  // definition stays consistent across helper write-decision and
-  // postcondition. The synthetic blob we always write satisfies this
-  // by construction; a regression that drops oauthAccount during the
-  // merge would otherwise slip past (per the round-2 codex/opus/
+  // definition stays consistent across helper write-decision, the benign-race
+  // acceptance test, and postcondition. The synthetic blob we always write
+  // satisfies this by construction; a regression that drops oauthAccount
+  // during the merge would otherwise slip past (per the round-2 codex/opus/
   // gemini-3-lab finding).
   if (!isUsableOauthAccount(parsed.oauthAccount)) {
-    throw new Error(
-      `ensureClaudeConfigMirror: postcondition failed — ${claudeJsonPath} has invalid oauthAccount after injection (got ${JSON.stringify(parsed.oauthAccount)}). The synthetic identity blob is required so Claude Code's identity-vs-token cross-checks don't trigger a re-login that defeats the synthetic credential.`,
-    )
+    return {
+      reason: `${claudeJsonPath} has invalid oauthAccount after injection (got ${JSON.stringify(parsed.oauthAccount)}). The synthetic identity blob is required so Claude Code's identity-vs-token cross-checks don't trigger a re-login that defeats the synthetic credential.`,
+    }
   }
+  return null
+}
+
+async function assertOnboardingGateInjected(targetDir: string): Promise<void> {
+  const claudeJsonPath = path.join(targetDir, ".claude.json")
+  const problem = await onboardingGateProblem(claudeJsonPath)
+  if (problem === null) return
+  throw new Error(
+    `ensureClaudeConfigMirror: postcondition failed — ${problem.reason}`,
+    problem.cause === undefined ? undefined : { cause: problem.cause },
+  )
 }
 
 /**
@@ -1497,21 +1522,40 @@ async function ensureSharedSymlink(
     // below can land. Best-effort — if a concurrent racer already
     // unlinked it, the rename succeeds as a CREATE; if a concurrent
     // racer already replaced it with a fresh junction, the rename
-    // hits the catch below and we surface a warn.
+    // hits the catch below, which now VERIFIES the slot rather than
+    // assuming a rename failure means a wrong one.
     await fs.unlink(mirrorPath).catch(() => {})
   }
   try {
     await fs.rename(tempPath, mirrorPath)
   } catch (err) {
-    // Escalated from debug → warn per the CLAUDE.md "smoking gun"
-    // rule (consistent with the fs.symlink catch above): a silent
-    // debug log here previously hid the Windows rename-replace bug
-    // (junction-over-junction MoveFileEx EPERM). Post-fix, rename
-    // failures should be rare and visible.
-    consola.warn(
-      `ensureSharedSymlink(${name}): rename ${tempPath} → ${mirrorPath} failed:`,
-      err,
-    )
+    // A lost race is not a failure. When two `github-router claude`
+    // startups (or one startup and a stale sweeper) replace the same slot,
+    // the sibling's rename can land first and ours then fails against a
+    // destination that is momentarily open — by which point the slot is
+    // already pointing at the source this function exists to install. Ask
+    // the slot what it resolves to (the same question the fast path at the
+    // top asks) and only shout when it is genuinely wrong: on Windows the
+    // unlink-then-rename path emitted dozens of EPERM warns per contended
+    // startup, and a warn stream that is usually expected noise is exactly
+    // how a real rename failure hides (the bug class this warn was added
+    // for). Escalated from debug → warn per the CLAUDE.md "smoking gun"
+    // rule remains true for the genuine-failure branch below.
+    const [slotReal, wantReal] = await Promise.all([
+      fs.realpath(mirrorPath).catch(() => null),
+      fs.realpath(sourcePath).catch(() => null),
+    ])
+    if (slotReal !== null && wantReal !== null && slotReal === wantReal) {
+      consola.debug(
+        `ensureSharedSymlink(${name}): rename ${tempPath} → ${mirrorPath} lost a race; the slot already resolves to the right source:`,
+        err,
+      )
+    } else {
+      consola.warn(
+        `ensureSharedSymlink(${name}): rename ${tempPath} → ${mirrorPath} failed:`,
+        err,
+      )
+    }
     await fs.unlink(tempPath).catch(() => {})
   }
 }

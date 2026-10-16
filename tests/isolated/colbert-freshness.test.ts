@@ -10,6 +10,12 @@
  * Sandbox mirrors tests/isolated/colbert.test.ts (mocked homedir, guarded
  * writes, real git repos) in miniature. Own process (isolated/) because of
  * the process-global `node:os` mock.
+ *
+ * Servability is platform-gated: on a platform-arch with no prebuilt
+ * colgrep/ORT asset there is nothing to serve WITH, so `freshnessVerdict`
+ * answers `unsupported` where it would otherwise answer `fresh` or a servable
+ * `stale/content`. Each test states the contract of the host it is on rather
+ * than skipping the file — see `PLATFORM_SUPPORTED` / `hostCannotServe`.
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test"
@@ -29,6 +35,33 @@ mock.module("node:os", () => ({
 
 const appDir = path.join(TEST_HOME, ".local", "share", "github-router")
 const colbertDir = path.join(appDir, "colbert")
+
+/**
+ * Does this platform-arch have a prebuilt colgrep/ORT asset?
+ *
+ * The verdict machine below is platform-independent, but SERVABILITY is not:
+ * with no prebuilt engine, `freshnessVerdict` substitutes `unsupported` for
+ * `fresh` and for a servable `stale/content` (there is nothing to serve WITH),
+ * while the already-non-servable diagnostics keep their verdict. Tests here
+ * therefore assert the contract of the host they run on instead of skipping the
+ * file: an x64 CI runner exercises the supported shape, an arm64 box the other.
+ */
+const PLATFORM_SUPPORTED = (await import("../../src/lib/colbert/manifest")).colbertPlatformSupported()
+
+/**
+ * True when this host cannot serve semantic results at all, in which case the
+ * caller's servable-branch assertions do not apply. Asserts that host contract
+ * (`unsupported`, never servable) before returning, so the unsupported branch is
+ * pinned rather than skipped.
+ */
+async function hostCannotServe(ws: string): Promise<boolean> {
+  if (PLATFORM_SUPPORTED) return false
+  const store = await import("../../src/lib/colbert/index-store")
+  const v = await store.freshnessVerdict(ws)
+  expect(v.verdict).toBe("unsupported")
+  expect(store.isServableVerdict(v)).toBe(false)
+  return true
+}
 
 async function writeInsideTestHome(target: string, content: string): Promise<void> {
   const rel = path.relative(path.resolve(TEST_HOME), path.resolve(target))
@@ -108,6 +141,7 @@ describe("freshness delta + servability", () => {
   test("clean tree, same HEAD → fresh, servable, no delta", async () => {
     const store = await import("../../src/lib/colbert/index-store")
     const { ws } = await mkIndexedRepo("fresh")
+    if (await hostCannotServe(ws)) return
     const v = await store.freshnessVerdict(ws)
     expect(v.verdict).toBe("fresh")
     expect(store.isServableVerdict(v)).toBe(true)
@@ -118,6 +152,7 @@ describe("freshness delta + servability", () => {
     const store = await import("../../src/lib/colbert/index-store")
     const { ws } = await mkIndexedRepo("dirty1")
     await fs.writeFile(path.join(ws, "a.txt"), "a changed\n")
+    if (await hostCannotServe(ws)) return
     const v = await store.freshnessVerdict(ws)
     expect(v.verdict).toBe("stale")
     expect(v.staleKind).toBe("content")
@@ -130,6 +165,7 @@ describe("freshness delta + servability", () => {
     const store = await import("../../src/lib/colbert/index-store")
     const { ws } = await mkIndexedRepo("untracked")
     await fs.writeFile(path.join(ws, "new.txt"), "new\n")
+    if (await hostCannotServe(ws)) return
     const v = await store.freshnessVerdict(ws)
     expect(v.verdict).toBe("stale")
     expect(v.staleKind).toBe("content")
@@ -143,6 +179,7 @@ describe("freshness delta + servability", () => {
     await fs.writeFile(path.join(ws, "b.txt"), "b\n")
     git(ws, ["add", "-A"])
     git(ws, ["commit", "-qm", "b"])
+    if (await hostCannotServe(ws)) return
     const v = await store.freshnessVerdict(ws)
     expect(v.verdict).toBe("stale")
     expect(v.staleKind).toBe("content")
@@ -156,6 +193,7 @@ describe("freshness delta + servability", () => {
     for (let i = 0; i < 250; i++) {
       await fs.writeFile(path.join(ws, `f${i}.txt`), "x\n")
     }
+    if (await hostCannotServe(ws)) return
     const v = await store.freshnessVerdict(ws)
     expect(v.verdict).toBe("stale")
     expect(v.staleKind).toBe("content")
@@ -173,6 +211,10 @@ describe("freshness delta + servability", () => {
       workspace: ws,
       binarySha: "stale-binary-sha",
     })
+    // On a host with no prebuilt engine the comparison this test targets cannot
+    // run at all (both shas are `undefined`), so the host contract stands in:
+    // an index recorded against a foreign engine is not servable here either.
+    if (await hostCannotServe(ws)) return
     const v = await store.freshnessVerdict(ws)
     expect(v.verdict).toBe("stale")
     expect(v.staleKind).toBe("engine")
@@ -216,7 +258,14 @@ describe("freshness delta + servability", () => {
     expect(
       store.isServableVerdict({ ...base, verdict: "stale", staleKind: "suspect" }),
     ).toBe(false)
-    for (const verdict of ["building", "failed", "crashed", "corrupt", "absent"] as const) {
+    for (const verdict of [
+      "building",
+      "failed",
+      "crashed",
+      "corrupt",
+      "absent",
+      "unsupported",
+    ] as const) {
       expect(store.isServableVerdict({ ...base, verdict })).toBe(false)
     }
   })
@@ -257,13 +306,30 @@ describe("runner serve-while-stale", () => {
     const { ws } = await mkIndexedRepo("servestale")
     await fakeBinaries()
     await fs.writeFile(path.join(ws, "a.txt"), "a changed\n")
-    runner.__setInitRunnerForTests((async () => cannedSearchHits(ws)) as never)
+    // Counts everything that goes through the mocked runner entry (the serve
+    // AND the background refresh kick share it).
+    let runnerCalls = 0
+    runner.__setInitRunnerForTests((async () => {
+      runnerCalls++
+      return cannedSearchHits(ws)
+    }) as never)
     try {
       const r = await runner.runSemanticSearch({
         query: "a",
         workspace: ws,
         serveStale: true,
       })
+      if (!PLATFORM_SUPPORTED) {
+        // No prebuilt engine: the verdict is `unsupported`, so the runner
+        // reports it and — unlike the `absent`/`stale` paths — must NOT kick a
+        // build that can only die in the binary lookup.
+        expect(r.status).toBe("unavailable")
+        expect(r.isError).toBe(true)
+        expect(r.notice).toMatch(/platform/i)
+        expect(r.stale_files).toBeUndefined()
+        expect(runnerCalls).toBe(0)
+        return
+      }
       expect(r.status).toBe("ready")
       expect(r.source).toBe("semantic")
       expect(r.results?.length).toBeGreaterThan(0)
@@ -279,9 +345,21 @@ describe("runner serve-while-stale", () => {
     const { ws } = await mkIndexedRepo("strictstale")
     await fakeBinaries()
     await fs.writeFile(path.join(ws, "a.txt"), "a changed\n")
-    runner.__setInitRunnerForTests((async () => cannedSearchHits(ws)) as never)
+    let runnerCalls = 0
+    runner.__setInitRunnerForTests((async () => {
+      runnerCalls++
+      return cannedSearchHits(ws)
+    }) as never)
     try {
       const r = await runner.runSemanticSearch({ query: "a", workspace: ws })
+      if (!PLATFORM_SUPPORTED) {
+        expect(r.status).toBe("unavailable")
+        expect(r.isError).toBe(true)
+        expect(r.results).toBeUndefined()
+        expect(r.freshness).toBeUndefined()
+        expect(runnerCalls).toBe(0)
+        return
+      }
       expect(r.status).toBe("stale")
       expect(r.results).toBeUndefined()
       expect(r.freshness).toBeUndefined()

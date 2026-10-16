@@ -76,6 +76,14 @@ const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
     "NVe=1e5,_ot=1e6",
     "kPe(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,NVe,_ot);if(j.status!==\"invalid\"){let he=Math.max(NVe,j.effective)",
   ],
+  // 2.1.301: the pair moved into the auto-compact settings module and the
+  // parser call site was restructured to an early `if (process.env...)`
+  // guard. The bounds are unchanged (floor 1e5, cap 1e6) and the floor is
+  // still applied with Math.max, which is the property we depend on.
+  [
+    "GO=1e5,Q$=1e6",
+    'oje("CLAUDE_CODE_AUTO_COMPACT_WINDOW",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,GO,Q$);if(y.status!=="invalid"){let S=Math.max(GO,y.effective)',
+  ],
 ]
 
 describe("client overflow-contract canary", () => {

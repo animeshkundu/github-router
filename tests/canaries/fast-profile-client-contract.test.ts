@@ -15,6 +15,15 @@ import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
  * 2.1.280 split Advisor tag definition from tool construction. Each of the
  * two entries below still accepts the older combined marker so prior
  * installs pass; a 2.1.280+ bundle must contain both semantic seams.
+ *
+ * 2.1.301 rolled the minified identifiers again without moving any seam: the
+ * advisor tag is still `advisor_20260301` with the version-suffix stripped for
+ * the model-facing name, the tool is still pushed with `model` plus a
+ * conditional `defer_loading`, and the Agent-spawn PreToolUse check still
+ * admits a string `model` (now as `Be(...) ?? ot("deny", ...)`, i.e. "allow the
+ * rewrite when it is well shaped, deny otherwise" — the same property the
+ * four older single-return forms asserted). New candidates are APPENDED so a
+ * developer on an older install still passes.
  */
 const REQUIRED_MARKERS = [
   "--advisor <model>",
@@ -22,17 +31,20 @@ const REQUIRED_MARKERS = [
   [
     'type:"advisor_20260301",name:"advisor",model:',
     'var Fit="advisor_20260301",$it="advisor_20260301".replace(/\\d+$/,"");',
+    'var kqt="advisor_20260301",Sqt="advisor_20260301".replace(/\\d+$/,"");',
   ],
   [
     'type:"advisor_20260301",name:"advisor",model:',
     "_m.push({type:Fit,name:Sce,model:rs,...Ro&&{defer_loading:!0}})",
+    "sN.push({type:kqt,name:Jxe,model:wl,...bl&&{defer_loading:!0}})",
   ],
   "Advising",
   " using ",
   "updatedInput",
-  // 2.1.280: ot; 2.1.273: Et; 2.1.266+: it; 2.1.260: ut;
-  // 2.1.258-: "a rewrite changes model alone"
+  // 2.1.301: v with `?? ot("deny", ...)`; 2.1.280: ot; 2.1.273: Et;
+  // 2.1.266+: it; 2.1.260: ut; 2.1.258-: "a rewrite changes model alone"
   [
+    'check:v((e,t,o)=>Be(e,"{ model }",(r)=>typeof r.model==="string")??ot("deny",e,o))',
     'check:x((e)=>ot(e,"{ model }",(t)=>typeof t.model==="string"))',
     'check:_((e)=>Et(e,"{ model }",(t)=>typeof t.model==="string"))',
     'check:A((e)=>it(e,"{ model }",(t)=>typeof t.model==="string"))',

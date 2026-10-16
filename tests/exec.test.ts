@@ -334,13 +334,30 @@ describe("runManagedExeCapture — inactivity watchdog", () => {
     (out === 0 ? `clearInterval(t);setTimeout(()=>process.exit(0),${idleMs});` : ``)
 
   test("silent child past the window is killed with stalled:true", async () => {
+    // The window has to clear CHILD BOOT, not merely be short. Same measured
+    // basis as the chatty-child test below: spawn→ready on a loaded Windows
+    // runner is p50 369ms / max 496ms. The original 250ms window expired while
+    // the child was still being created, which made the kill race process
+    // creation — and when the kill loses, the child finishes booting into its
+    // 60s sleep and the test fails as a 15s TIMEOUT rather than as a wrong
+    // `stalled` value. That is exactly the shape of the one occurrence seen in
+    // a full-suite run, and it is why 12 re-runs under 6-way CPU load (all
+    // 450-700ms, i.e. the kill path is sound once the child exists) did not
+    // reproduce it. 1500ms sits above the recorded worst case with room.
+    const started = Date.now()
     const res = await runManagedExeCapture(
       node,
       ["-e", "setTimeout(()=>process.exit(0), 60000)"], // 60s, no output
-      { inactivityTimeoutMs: 250 },
+      { inactivityTimeoutMs: 1500 },
     )
+    const elapsed = Date.now() - started
     expect(res.stalled).toBe(true)
     expect(res.timedOut).toBe(false)
+    // Separate the two failure modes by naming this one: a kill that takes
+    // seconds is a kill-path finding, and a bare bun timeout cannot tell the
+    // reader whether the watchdog never fired, the kill never landed, or the
+    // process simply never exited.
+    expect(elapsed).toBeLessThan(5000)
   }, 15_000)
 
   test("a chatty child resets the watchdog and runs to completion", async () => {

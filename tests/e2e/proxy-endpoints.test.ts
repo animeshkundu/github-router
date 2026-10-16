@@ -125,11 +125,6 @@ const allModels: Model[] = [codexModel, codexOldModel, claudeOpus1m, claudeOpus,
 
 const realFetch = globalThis.fetch
 let testServer: ReturnType<typeof serve> | undefined
-let testPort = 11100
-
-function nextPort(): number {
-  return testPort++
-}
 
 function setupState(models: Model[] = allModels) {
   state.accountType = "enterprise"
@@ -144,11 +139,16 @@ function setupState(models: Model[] = allModels) {
 }
 
 async function startServer(): Promise<string> {
-  const port = nextPort()
+  // Port 0: let the OS pick. This used to walk a fixed linear range from
+  // 11100, which collides with whatever the host already listens on — one
+  // developer machine has `wslrelay.exe` on 11111 — and the collision shows
+  // up as an `EADDRINUSE` from inside srvx's Bun adapter, i.e. it reads like
+  // a proxy bug rather than a busy port. The origin is read back from the
+  // server, so callers still get a real URL to fetch.
   testServer = serve({
     fetch: app.fetch as Parameters<typeof serve>[0]["fetch"],
     hostname: "127.0.0.1",
-    port,
+    port: 0,
     silent: true,
   })
   await testServer.ready()
