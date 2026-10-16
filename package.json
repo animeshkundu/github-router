@@ -70,7 +70,7 @@
     "consola": "^3.4.2",
     "fetch-event-stream": "^0.1.6",
     "flashrank-js": "^0.1.0",
-    "gpt-tokenizer": "^3.4.0",
+    "gpt-tokenizer": "^4.0.3",
     "hono": "^4.13.13",
     "marked": "^18.1.1",
     "partial-json": "0.1.7",
