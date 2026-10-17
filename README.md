@@ -101,43 +101,9 @@ Each persona is exposed both as a Claude Code subagent (callable via the `Task` 
 
 `gemini-critic` and `gemini-reviewer` both register only when `gemini-3.1-pro-preview` (or another `gemini-3.x-pro` model) is present in your Copilot model catalog — `gemini-critic` is the architecture-level critic, `gemini-reviewer` the line-level second-lab code reviewer on the same model at its highest reasoning tier. If absent, both personas are silently dropped from the MCP `tools/list` and the subagent set, and `peer-review-coordinator` skips them in routing decisions.
 
-### Native subagents
-
-The launcher also registers focused native subagents that run in their own contexts. `implementer`, `reviewer`, `brainstorm`, and `scribe` are always present. Each uses its preferred model when the live catalog provides one with tool calls, otherwise it inherits the lead model; `scout`, `implementer-fast`, `reviewer-fast`, and `general-purpose-fast` are present only when their cheap-tier model chains resolve, so the work they exist to make cheaper does not silently run at the lead's model rate.
-
-| Subagent | Use for | Preferred model chain | Tools |
-|---|---|---|---|
-| `implementer` | Coding changes needing judgment or with ambiguous scope | gpt-5.6-sol → gpt-6-sol → gpt-5.5 | Full inherited toolset |
-| `implementer-fast` | Well-specified, mechanical coding changes | gpt-5.6-terra → gemini-3.1-pro-preview | Full inherited toolset |
-| `reviewer` | Assessing an existing diff, plan, document, or failure | gemini-3.1-pro-preview → gemini-3.8-flash → OpenAI frontier | Full inherited toolset |
-| `reviewer-fast` | Lower-stakes assessment on a cheaper cross-lab model | gemini-3.8-flash | Full inherited toolset |
-| `brainstorm` | Divergent approaches before selecting one | gemini-3.1-pro-preview → gemini-3.8-flash → OpenAI frontier | Read-only allowlist |
-| `scout` | Low-cost repository exploration | gpt-6-luna → gemini-3.8-flash | Read-only allowlist |
-| `scribe` | Documentation that trails the code | gpt-5.6-terra → OpenAI frontier | Full inherited toolset |
-| `general-purpose-fast` | Work no specialist fits | gpt-6-luna | Full inherited toolset |
-
-For codex-side write capability (a `codex-implementer` persona that can mutate files via Codex's tool-use sandbox), pass `--codex-cli`. Requires `codex` CLI 0.129+ on `PATH`; falls back to HTTP-only with a warning if codex is missing or older. Pass `--codex-mcp-only` to also pass `--strict-mcp-config` to Claude Code so only the proxy's MCP servers are loaded (hides any MCP servers in your existing `~/.claude/mcp.json`).
-
 ### Code search (`mcp__search__code`)
 
-Alongside the peer reviewers, the same MCP surface exposes a `code` tool (under the `search` server — `mcp__search__code`) — fast structured code search over the workspace. Without a search flag it uses the local lexical engine. Pass `--search` for router-managed local ColBERT semantic search with transparent lexical fallback, or `--bluebird` to route semantic and lexical modes through the Bluebird Azure DevOps index. Bluebird failures remain visible and never silently fall back locally; `exact`, `regex`, and `ast` always stay local. The flags are independent, so `--bluebird` alone never provisions local ColBERT artifacts. See [local semantic search](docs/semantic-search.md) and the [Bluebird protocol and routing reference](docs/bluebird-search.md).
-
-### Azure DevOps and Kusto (`mcp__ado__*`, `mcp__kusto__*`)
-
-Two further groups follow the same shape, and a git remote that resolves to an
-Azure DevOps repository turns on all three of Bluebird, `ado` and `kusto` at
-once (`--ado` / `--kusto` force them anywhere; `--no-…` refuses any one of
-them). `ado` exposes whatever Microsoft's remote MCP server advertises under
-the selected toolsets, **read-only by default** via `X-MCP-Readonly: true`;
-`--ado-write` clears the header for an operator who explicitly wants mutations,
-and prints a banner line when it does. `kusto` exposes five
-read-only tools over an in-repo Azure Data Explorer client, the cluster named on
-each call (`--kusto-cluster` only sets a default, and discovery never supplies
-one), with read-only
-enforced by the service (`x-ms-readonly` plus
-`request_readonly_hardline`) rather than by inspecting the query text. Both mint
-their own Azure CLI access token, which never reaches a child process. See
-[Azure MCP groups](docs/azure-mcp.md).
+Alongside the peer reviewers, the same MCP surface exposes a `code` tool (under the `search` server — `mcp__search__code`) — fast structured code search over the workspace. Without a search flag it uses the local lexical engine. Pass `--search` for router-managed local ColBERT semantic search with transparent lexical fallback; `exact`, `regex`, and `ast` always stay local. See [local semantic search](docs/semantic-search.md).
 
 The local lexical engine ranks with **BM25F** (Robertson, Zaragoza, Taylor 2004) over matched lines, context, paths, and symbol definitions, then refines top hits with tree-sitter. Single-identifier queries auto-expand across camelCase / snake_case / kebab-case skeletons so `getUserName` also matches `get_user_name`. `workspace` is any absolute path the proxy process can read, and result paths are repository-relative rather than absolute.
 
@@ -292,9 +258,6 @@ Fallback chains fire only on the implicit-default path; explicit `-m`/`--model` 
 | `--show-token` | Print tokens to console | false |
 | `--proxy-env` | Use HTTP_PROXY/HTTPS_PROXY env vars | false |
 | `--search` | Enable router-managed local ColBERT semantic search with lexical fallback | false |
-| `--bluebird` | Route semantic and lexical code search through Bluebird; keep exact/regex/AST local | false |
-| `--ado` / `--no-ado` | Expose the Azure DevOps remote MCP group (`mcp__ado__*`), read-only by default. Auto-enabled when a git remote resolves to an Azure DevOps repository | auto |
-| `--kusto` / `--no-kusto` | Expose the Kusto (Azure Data Explorer) MCP group (`mcp__kusto__*`), read-only. The cluster is named per call; `--kusto-cluster` sets the default and is needed only by calls that omit one. Auto-enabled when a git remote resolves to an Azure DevOps repository | auto |
 
 Additional flags accepted only by the `claude` subcommand:
 
