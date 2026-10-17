@@ -218,10 +218,16 @@ that split are deliberate:
 
 - **The label rule is a shape guard, not an allowlist.** Anything
   Kusto-shaped is accepted; no list of pre-approved clusters exists, matching the
-  code-search model where a workspace is any path the process can read. The real
-  boundary is AAD, which mints no token for a resource the identity cannot reach
-  (each cluster is its own audience), plus the identity's RBAC inside the
-  cluster.
+  code-search model where a workspace is any path the process can read. What the
+  label buys is the audience namespace. AAD mints a token per cluster URI and
+  does not check that the cluster exists or that the identity can reach it:
+  measured on 2026-10-16, an invented host
+  (`https://gh-router-probe-xyz123.kusto.windows.net`) returned a token whose
+  audience is that exact URI, while `https://example.com` was refused with
+  AADSTS500011. So the shape rule is what keeps the audience inside the Kusto
+  family, and the data boundary is the cluster's own authorization of that token,
+  which is the identity's RBAC inside the cluster (a 403, see "Token refresh").
+  A host that does not resolve surfaces as the client's own transport error.
 - **A launch cluster stays permissive.** An operator may legitimately point
   `--kusto-cluster` at a reverse proxy or a private-DNS front end that carries no
   `kusto` label, so that path keeps the other rules only. A call cannot name such
@@ -276,7 +282,11 @@ file carries that client's own truncation trailer so "full" is never read as
 
 One process-lifetime cache keyed by cluster URI (which is also the audience),
 with one entry per distinct origin, so a session that queries two clusters holds
-two live tokens and mints each on first use. A 5-minute refresh margin ahead of
+two live tokens and mints each on first use. An `az` mint against a cold or
+expired MSAL entry measured 7-20 s on the machine this was written on, against
+the client's 20 s `AZ_TIMEOUT_MS`, so the first call of a session can fail with
+the retriable "Azure CLI did not answer" timeout before the cache is warm; the
+retry succeeds. A 5-minute refresh margin ahead of
 the reported expiry and a **single-flighted** refresh: concurrent callers that
 see the same expired entry await ONE `az` invocation. A token whose expiry `az` does not report is used but **not cached**,
 because a cache entry with no deadline can only be either immortal (serving a
