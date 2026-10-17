@@ -8,8 +8,9 @@ shape as the Bluebird integration ([`docs/bluebird-search.md`](bluebird-search.m
 | `ado` | `github-router-ado` | `https://mcp.dev.azure.com/{organization}` | whatever the remote advertises under the selected toolsets |
 | `kusto` | `github-router-kusto` | `{cluster}/v1/rest/{query,mgmt}` | five static tools over an in-repo client |
 
-Both are **off unless enabled**, and both mint their own Azure access token
-through the already-authenticated `az` CLI. Neither token ever reaches a child
+Both are **off unless something turns them on** (a flag, or repository
+discovery in an Azure DevOps checkout, see below), and both mint their own Azure
+access token through the already-authenticated `az` CLI. Neither token ever reaches a child
 process: `ADO_MCP_TOKEN` and `KUSTO_TOKEN` are in the stripped-env key list
 beside `BLUEBIRD_TOKEN`, so a value the operator exports for a manual run is
 consumed by the router and removed from the environment Claude, Codex, and every
@@ -30,7 +31,7 @@ github-router claude --kusto      # no default cluster: every call names the one
 | `--ado-toolsets <csv>` | Toolsets to request. Default `repos,wit,pipelines,wiki` |
 | `--ado-all-toolsets` | Request every toolset (sends no `X-MCP-Toolsets` header) |
 | `--ado-write` | Omit `X-MCP-Readonly`, making mutating tools reachable |
-| `--kusto` / `--no-kusto` | Expose / refuse the Kusto group. The flag alone is a complete opt-in |
+| `--kusto` / `--no-kusto` | Expose / refuse the Kusto group. The flag alone is a complete opt-in; an Azure DevOps remote enables it too |
 | `--kusto-cluster <uri>` | Default cluster origin for the calls that do not name one |
 | `--kusto-database <name>` | Default database for the calls that do not name one, on whichever cluster a call resolves |
 
@@ -43,9 +44,16 @@ positives.
 ## Auto-enable on Azure DevOps repository discovery
 
 Launching inside a checkout whose git remotes resolve to an Azure DevOps
-repository turns **Bluebird and `ado`** on without a flag. `kusto` does not
-auto-enable: a git remote carries no cluster identity, and choosing which data to
-read with the operator's credentials is not a discovery decision.
+repository turns **Bluebird, `ado` and `kusto`** on without a flag.
+
+Kusto joined that rule when the cluster became a per-call argument. What kept it
+out before was that a git remote carries no cluster identity, so a
+discovery-enabled group would have advertised five tools that could not answer
+anything. With the cluster named per call, the remote says only "this is an
+Azure workspace" and the model picks the cluster; the operator still owns the
+only thing that bounds what a call can read, which is their own identity in each
+cluster. Discovery never supplies a cluster, and the launch says so when the
+group came on without one.
 
 Resolution order per capability:
 
@@ -63,12 +71,14 @@ the user did not type. Four properties bound it:
 - It is suppressible per capability (`--no-bluebird`, `--no-ado`, `--no-kusto`)
   and wholesale (`GH_ROUTER_AZURE_MCPS=off`).
 - The banner names both what turned on and the remote that caused it, so a
-  session that suddenly has two more servers is explainable rather than
-  mysterious.
-- Kusto requires an explicit operator opt-in that discovery never supplies, and
-  the cluster a call names is held to a Kusto-shaped https origin. What a call
-  can actually read is bounded by the operator's own identity: the router grants
-  no cluster access the `az` session behind it did not already have.
+  session that suddenly has three more servers is explainable rather than
+  mysterious; a surface a flag enabled is never miscredited to the remote.
+- Kusto is the one surface whose reach extends past the repository, and
+  discovery does not extend it: discovery may turn the *group* on, never the
+  cluster, and the cluster a call names is held to a Kusto-shaped https origin.
+  What a call can actually read is bounded by the operator's own identity: the
+  router grants no cluster access the `az` session behind it did not already
+  have.
 
 The probe is one memoized, bounded (`5 s`) `git` read per process, and any
 failure resolves to "not an Azure DevOps workspace" rather than failing the

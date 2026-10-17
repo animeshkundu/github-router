@@ -440,6 +440,18 @@ describe("pi launch card", () => {
     )
   })
 
+  test("Azure groups are named only when the resolved surface carries them", () => {
+    // The card receives the resolved decision, not `state`, because the Azure
+    // groups reach a Pi session only through the helpers bundle: naming one
+    // the mirror does not have would be the same invisible-tool confusion the
+    // card exists to prevent.
+    expect(buildPiLaunchCard(full)).not.toContain("kusto")
+    const card = buildPiLaunchCard({ ...full, browse: true, azureGroups: ["ado", "kusto"] })
+    expect(card.split("\n")[2]).toBe(
+      "  lead gpt-6-luna · 2 models · peers helpers ui search browse ado kusto · http://127.0.0.1:59088",
+    )
+  })
+
   test("peerless collapses the surface, missing facts omitted cleanly", () => {
     const card = buildPiLaunchCard({
       ...full,

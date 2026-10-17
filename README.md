@@ -124,14 +124,16 @@ Alongside the peer reviewers, the same MCP surface exposes a `code` tool (under 
 
 ### Azure DevOps and Kusto (`mcp__ado__*`, `mcp__kusto__*`)
 
-Two further opt-in groups follow the same shape. `--ado` (or a git remote that
-resolves to an Azure DevOps repository, which enables it and Bluebird
-automatically) exposes whatever Microsoft's remote MCP server advertises under
+Two further groups follow the same shape, and a git remote that resolves to an
+Azure DevOps repository turns on all three of Bluebird, `ado` and `kusto` at
+once (`--ado` / `--kusto` force them anywhere; `--no-…` refuses any one of
+them). `ado` exposes whatever Microsoft's remote MCP server advertises under
 the selected toolsets, **read-only by default** via `X-MCP-Readonly: true`;
 `--ado-write` clears the header for an operator who explicitly wants mutations,
-and prints a banner line when it does. `--kusto` exposes five
+and prints a banner line when it does. `kusto` exposes five
 read-only tools over an in-repo Azure Data Explorer client, the cluster named on
-each call (`--kusto-cluster` only sets a default), with read-only
+each call (`--kusto-cluster` only sets a default, and discovery never supplies
+one), with read-only
 enforced by the service (`x-ms-readonly` plus
 `request_readonly_hardline`) rather than by inspecting the query text. Both mint
 their own Azure CLI access token, which never reaches a child process. See
@@ -292,7 +294,7 @@ Fallback chains fire only on the implicit-default path; explicit `-m`/`--model` 
 | `--search` | Enable router-managed local ColBERT semantic search with lexical fallback | false |
 | `--bluebird` | Route semantic and lexical code search through Bluebird; keep exact/regex/AST local | false |
 | `--ado` / `--no-ado` | Expose the Azure DevOps remote MCP group (`mcp__ado__*`), read-only by default. Auto-enabled when a git remote resolves to an Azure DevOps repository | auto |
-| `--kusto` / `--no-kusto` | Expose the Kusto (Azure Data Explorer) MCP group (`mcp__kusto__*`), read-only. The cluster is named per call; `--kusto-cluster` sets the default and is needed only by calls that omit one | false |
+| `--kusto` / `--no-kusto` | Expose the Kusto (Azure Data Explorer) MCP group (`mcp__kusto__*`), read-only. The cluster is named per call; `--kusto-cluster` sets the default and is needed only by calls that omit one. Auto-enabled when a git remote resolves to an Azure DevOps repository | auto |
 
 Additional flags accepted only by the `claude` subcommand:
 

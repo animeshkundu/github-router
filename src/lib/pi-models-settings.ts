@@ -1190,6 +1190,15 @@ export interface PiLaunchCardOpts {
   swe: boolean
   search: boolean
   browse: boolean
+  /**
+   * Azure MCP groups the launch actually wires into the Pi mirror, by their
+   * flag names (`ado`, `kusto`). Empty or absent means none, which is also
+   * what a peerless or helper-less launch resolves to: the groups travel
+   * through `pi-mcp-adapter`, so without that bundle they are not in the
+   * session at all. Passed from the resolved surface decision rather than
+   * from `state`, so the card can never advertise a group the mirror lacks.
+   */
+  azureGroups?: Array<string> | undefined
   serverUrl: string
 }
 
@@ -1207,6 +1216,7 @@ export function buildPiLaunchCard(opts: PiLaunchCardOpts): string {
   if (opts.swe) surface.push("swe")
   if (opts.search) surface.push("search")
   if (opts.browse) surface.push("browse")
+  for (const group of opts.azureGroups ?? []) surface.push(group)
   const identity = [
     opts.accountType,
     opts.login,

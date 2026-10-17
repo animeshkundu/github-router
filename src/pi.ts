@@ -702,6 +702,10 @@ export const pi = defineCommand({
         swe: sweEnabled,
         search: searchEnabled,
         browse: browseEnabled,
+        // From the resolved decision, not from `state`: the Azure groups only
+        // reach the session through the helpers bundle, so the card must name
+        // exactly what the mirror carries.
+        azureGroups: surfaces.groups.map((g) => g.group),
         serverUrl,
       })}\n`,
     )

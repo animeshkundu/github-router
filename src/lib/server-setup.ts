@@ -429,13 +429,23 @@ export async function setupAndServe(
   state.kustoDatabase = azureFlags.kustoDatabase
   // Said here rather than at the first tool call: a `--kusto` that was meant as
   // `--kusto-cluster` would otherwise stay silent until a model spent a turn
-  // discovering the group needs a cluster per call. Informational, not a
-  // warning — the group works, it just has no default host.
+  // discovering the group needs a cluster per call. This now also fires for an
+  // auto-enabled group, where it is the only launch-time signal that discovery
+  // supplied a group but no host. Informational, not a warning — the group
+  // works, it just has no default host.
   if (state.kustoEnabled && state.kustoCluster === null) {
     consola.info("Kusto MCP: no default cluster; every call must name one (--kusto-cluster sets a default).")
   }
   for (const reason of azureFlags.reasons) {
-    consola.info(`Azure MCP auto-enabled (${reason}). Suppress with --no-bluebird / --no-ado / --no-kusto, or GH_ROUTER_AZURE_MCPS=off.`)
+    consola.info(`Azure MCP auto-enabled (${reason}).`)
+  }
+  // Stated once rather than appended to every cause line: a discovered remote
+  // now turns three surfaces on, and repeating the same sentence three times
+  // buries the causes it is meant to explain.
+  if (azureFlags.reasons.length > 0) {
+    consola.info(
+      "Suppress auto-enabled Azure surfaces with --no-bluebird / --no-ado / --no-kusto, or GH_ROUTER_AZURE_MCPS=off.",
+    )
   }
   for (const warning of azureFlags.warnings) consola.warn(`Azure MCP: ${warning}`)
   if (state.adoEnabled && options.adoWriteEnabled === true) {
@@ -764,14 +774,14 @@ export const sharedServerArgs = {
     type: "boolean" as const,
     default: undefined,
     description:
-      "Expose the Kusto (Azure Data Explorer) MCP group (mcp__kusto__*), read-only. Without --kusto-cluster every call must name the cluster to query, since different tables live in different clusters. GH_ROUTER_ENABLE_KUSTO=1 is the env equivalent.",
+      "Expose the Kusto (Azure Data Explorer) MCP group (mcp__kusto__*), read-only. Enabled automatically in a checkout whose git remote is an Azure DevOps repository. Without --kusto-cluster every call must name the cluster to query, since different tables live in different clusters. GH_ROUTER_ENABLE_KUSTO=1 is the env equivalent.",
     negativeDescription:
-      "Never expose the Kusto MCP group, even when a cluster is configured or the env equivalent is set.",
+      "Never expose the Kusto MCP group, even when a cluster is configured, the env equivalent is set, or the repository is an Azure DevOps checkout.",
   },
   "kusto-cluster": {
     type: "string" as const,
     description:
-      "Default Kusto cluster URI, e.g. https://example.kusto.windows.net, used by calls that do not name one. Naming a cluster enables the `kusto` group and is its own opt-in. Falls back to GH_ROUTER_KUSTO_CLUSTER.",
+      "Default Kusto cluster URI, e.g. https://example.kusto.windows.net, used by calls that do not name one. Naming a cluster is itself enough to enable the `kusto` group. Falls back to GH_ROUTER_KUSTO_CLUSTER.",
   },
   "kusto-database": {
     type: "string" as const,

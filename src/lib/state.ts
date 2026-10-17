@@ -233,8 +233,10 @@ export interface State {
 
   /**
    * Kusto (Azure Data Explorer) MCP group (`mcp__kusto__*`). Turned on by the
-   * operator's `--kusto` flag; a git remote supplies no cluster identity, so
-   * discovery alone never enables this group.
+   * operator's `--kusto` flag, by a named cluster, or automatically when the
+   * workspace's git remotes resolve to an Azure DevOps repository. Discovery
+   * turns the GROUP on and never supplies a cluster: the model names one per
+   * call, and the operator's own cluster access bounds the reach.
    */
   kustoEnabled: boolean
   /**

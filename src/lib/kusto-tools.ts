@@ -8,15 +8,16 @@
  * "read-only" so the model does not spend a turn attempting a mutation, not
  * because the text is what stops one.
  *
- * The group is registered by `--kusto` (or `GH_ROUTER_ENABLE_KUSTO=1`). A
- * launch cluster (`--kusto-cluster`) is the DEFAULT for calls that do not name
- * one; it is no longer what turns the group on, because different tables live
- * in different clusters and a single pinned cluster made a cross-cluster
- * question unanswerable. Every tool therefore takes an optional `cluster`, held
- * to a Kusto-shaped https origin (`normalizeKustoCallClusterUri`), and a call
- * reaches whatever the current Azure identity can read there. A git remote
- * supplies no cluster identity, so nothing here is auto-enabled by repository
- * discovery: the operator opts in, the model picks the cluster.
+ * The group is registered by `--kusto` (or `GH_ROUTER_ENABLE_KUSTO=1`), or by
+ * repository discovery when the workspace's remote is an Azure DevOps
+ * repository (see `./azure-mcp-flags`). A launch cluster (`--kusto-cluster`)
+ * is the DEFAULT for calls that do not name one; it is not what turns the
+ * group on, because different tables live in different clusters and a single
+ * pinned cluster made a cross-cluster question unanswerable. Every tool
+ * therefore takes an optional `cluster`, held to a Kusto-shaped https origin
+ * (`normalizeKustoCallClusterUri`), and a call reaches whatever the current
+ * Azure identity can read there. Discovery never supplies a cluster: the model
+ * picks one per call, and the operator's identity bounds the reach.
  */
 
 import type { NonPersonaMcpTool } from "./peer-mcp-personas"

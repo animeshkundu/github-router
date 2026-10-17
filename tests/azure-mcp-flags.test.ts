@@ -42,19 +42,22 @@ afterEach(() => {
 })
 
 describe("resolveAzureMcpFlags — precedence", () => {
-  test("an Azure DevOps remote turns bluebird and ado on, and kusto stays off", () => {
+  test("an Azure DevOps remote turns bluebird, ado and kusto on", () => {
     const flags = resolve({}, DISCOVERED)
     expect(flags.bluebird).toBe(true)
     expect(flags.ado).toBe(true)
     expect(flags.adoOrganization).toBe("contoso")
-    expect(flags.kusto).toBe(false)
+    expect(flags.kusto).toBe(true)
+    // The group comes on with no host: discovery supplies a group, never a
+    // cluster, so every call must name the cluster it reads.
     expect(flags.kustoCluster).toBeNull()
     expect(flags.warnings).toEqual([])
-    // Both flags came from discovery, so both announce the remote that caused
-    // them: a session with three more servers has to be explainable.
+    // All three came from discovery, so all three announce the remote that
+    // caused them: a session with three more servers has to be explainable.
     expect(flags.reasons).toEqual([
       "bluebird: Azure DevOps remote contoso/widgets/widget-service",
       "ado: Azure DevOps remote contoso/widgets/widget-service",
+      "kusto: Azure DevOps remote contoso/widgets/widget-service",
     ])
   })
 
@@ -68,9 +71,22 @@ describe("resolveAzureMcpFlags — precedence", () => {
   test("--no-<capability> wins over discovery", () => {
     expect(resolve({ bluebirdFlag: false }, DISCOVERED).bluebird).toBe(false)
     expect(resolve({ adoFlag: false }, DISCOVERED).ado).toBe(false)
-    // The one it was not told to refuse still comes on.
+    expect(resolve({ kustoFlag: false }, DISCOVERED).kusto).toBe(false)
+    // The ones it was not told to refuse still come on.
     const onlyAdo = resolve({ bluebirdFlag: false }, DISCOVERED)
     expect(onlyAdo.ado).toBe(true)
+    expect(onlyAdo.kusto).toBe(true)
+  })
+
+  test("a refusal is per surface: an ADO remote still enables Kusto beside two refusals", () => {
+    // Pinned as a decision rather than left to accident. The remote is evidence
+    // of an Azure workspace, and `--no-bluebird` / `--no-ado` are statements
+    // about those two surfaces, not about Kusto. An operator who wants none of
+    // the three has `--no-kusto` or `GH_ROUTER_AZURE_MCPS=off`, and both are
+    // asserted above.
+    const flags = resolve({ bluebirdFlag: false, adoFlag: false }, DISCOVERED)
+    expect([flags.bluebird, flags.ado, flags.kusto]).toEqual([false, false, true])
+    expect(flags.reasons).toEqual(["kusto: Azure DevOps remote contoso/widgets/widget-service"])
   })
 
   test("--no-<capability> wins over its own env positive", () => {
@@ -111,15 +127,20 @@ describe("resolveAzureMcpFlags — precedence", () => {
   })
 })
 
-describe("resolveAzureMcpFlags — Kusto is opt-in, never remote-driven", () => {
-  test("discovery alone never enables Kusto", () => {
-    expect(resolve({}, DISCOVERED).kusto).toBe(false)
+describe("resolveAzureMcpFlags — Kusto's three opt-ins", () => {
+  test("discovery alone enables Kusto, with no cluster of its own", () => {
+    // The remote says "this is an Azure workspace", and the cluster became a
+    // per-call argument, so the group is useful without a launch default. What
+    // discovery must never do is pick a cluster: it has none to pick from, and
+    // which data to read with the operator's credentials is the operator's
+    // identity to decide.
+    const flags = resolve({}, DISCOVERED)
+    expect(flags.kusto).toBe(true)
+    expect(flags.kustoCluster).toBeNull()
   })
 
-  test("--kusto-cluster is its own opt-in", () => {
-    const flags = resolve({ kustoCluster: "https://example.kusto.windows.net" })
-    expect(flags.kusto).toBe(true)
-    expect(flags.kustoCluster).toBe("https://example.kusto.windows.net")
+  test("no remote and no flag leaves Kusto off", () => {
+    expect(resolve({}, null).kusto).toBe(false)
   })
 
   test("a malformed cluster fails the launch instead of becoming a dead default", () => {
@@ -142,6 +163,18 @@ describe("resolveAzureMcpFlags — Kusto is opt-in, never remote-driven", () => 
     expect(flags.kusto).toBe(true)
     expect(flags.kustoCluster).toBeNull()
     expect(flags.warnings).toEqual([])
+    // A discovered remote was present and did NOT cause this one. The banner
+    // names the cause of each enabled surface, so it must not credit a remote
+    // with a decision the operator made.
+    expect(flags.reasons.filter((r) => r.startsWith("kusto:"))).toEqual([])
+  })
+
+  test("a named cluster is itself an opt-in, and the launch default", () => {
+    const flags = resolve({ kustoCluster: "https://example.kusto.windows.net" })
+    expect(flags.kusto).toBe(true)
+    expect(flags.kustoCluster).toBe("https://example.kusto.windows.net")
+    // The operator named the cluster, so nothing is announced as auto-enabled.
+    expect(flags.reasons).toEqual([])
   })
 
   test("GH_ROUTER_ENABLE_KUSTO=1 is the env equivalent, and still needs no cluster", () => {
@@ -154,9 +187,10 @@ describe("resolveAzureMcpFlags — Kusto is opt-in, never remote-driven", () => 
     expect(flags.warnings).toEqual([])
   })
 
-  test("--no-kusto beats the flag and the env, cluster or not", () => {
+  test("--no-kusto beats the flag, the env and discovery, cluster or not", () => {
     expect(resolve({ kustoFlag: false, kustoCluster: "https://example.kusto.windows.net" }).kusto)
       .toBe(false)
+    expect(resolve({ kustoFlag: false }, DISCOVERED).kusto).toBe(false)
     const envOff = resolveAzureMcpFlags(
       { kustoFlag: false, env: { GH_ROUTER_ENABLE_KUSTO: "1" } },
       null,
@@ -237,30 +271,48 @@ describe("resolveAzureMcpFlags — Azure DevOps organization", () => {
 })
 
 describe("azureDiscoveryNeeded", () => {
-  test("true while either remote-scoped capability is undecided", () => {
+  test("true while any remote-scoped capability is undecided", () => {
     expect(azureDiscoveryNeeded({ env: NO_ENV })).toBe(true)
-    // Bluebird refused, ADO undecided and unscoped: the probe still matters.
+    // Bluebird refused, the other two undecided: the probe still matters.
     expect(azureDiscoveryNeeded({ env: NO_ENV, bluebirdFlag: false })).toBe(true)
   })
 
+  test("each surface keeps the probe alive while its own outcome is open", () => {
+    // Bluebird has no flag, so it is undecided even with an ADO scope and a
+    // named cluster settling the other two.
+    expect(azureDiscoveryNeeded({ env: NO_ENV, adoOrganization: "contoso" })).toBe(true)
+    // Kusto is the last one standing: both others are decided and it is not.
+    expect(azureDiscoveryNeeded({
+      env: NO_ENV,
+      bluebirdFlag: false,
+      adoOrganization: "contoso",
+    })).toBe(true)
+  })
+
   test("false once the remote could not change anything", () => {
-    // Both refused.
-    expect(azureDiscoveryNeeded({ env: NO_ENV, bluebirdFlag: false, adoFlag: false })).toBe(false)
-    // Both decided positively.
+    // All three refused.
+    expect(azureDiscoveryNeeded({
+      env: NO_ENV,
+      bluebirdFlag: false,
+      adoFlag: false,
+      kustoFlag: false,
+    })).toBe(false)
+    // All three decided positively.
     expect(azureDiscoveryNeeded({
       env: NO_ENV,
       bluebirdFlag: true,
       adoFlag: true,
       adoOrganization: "contoso",
+      kustoFlag: true,
     })).toBe(false)
-    // ADO has a scope and Bluebird was refused.
+    // A named cluster settles Kusto on its own: discovery can only ever turn
+    // the group ON, so there is nothing left for the probe to decide.
     expect(azureDiscoveryNeeded({
       env: NO_ENV,
-      bluebirdFlag: false,
+      bluebirdFlag: true,
       adoOrganization: "contoso",
+      kustoCluster: "https://example.kusto.windows.net",
     })).toBe(false)
-    // Bluebird has no flag, so it is still undecided even with an ADO scope.
-    expect(azureDiscoveryNeeded({ env: NO_ENV, adoOrganization: "contoso" })).toBe(true)
   })
 
   test("false under the wholesale kill switch", () => {

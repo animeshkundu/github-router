@@ -1,20 +1,24 @@
 /**
  * Which Azure-backed MCP surfaces this launch enables, and why.
  *
- * Two surfaces share one discovery signal: the workspace's git remotes. A
+ * Three surfaces share one discovery signal: the workspace's git remotes. A
  * checkout whose `origin` is an Azure DevOps repository turns Bluebird code
- * search and the Azure DevOps MCP group on by default. The rule exists because
- * that remote is already proof that both are useful here, and the alternative —
- * an opt-in flag every session — meant nobody enabled them.
+ * search, the Azure DevOps MCP group and the Kusto group on by default. The rule
+ * exists because that remote is already proof this is an Azure workspace, and
+ * the alternative — an opt-in flag every session — meant nobody enabled them.
  *
- * Kusto is resolved here too but is NOT discovery-driven: a git remote carries
- * no cluster identity, so an operator flag is its only gate and the discovery
- * probe can neither supply nor substitute for one. It lives in this module
- * because the three surfaces share one precedence table and one banner.
+ * Kusto joined that rule later, when the cluster became a per-call argument.
+ * What kept it out before was that a git remote carries no cluster identity, so
+ * a discovery-enabled group would have advertised five tools that could not
+ * answer anything. With the cluster named per call, the same remote that says
+ * "this is an Azure workspace" is enough to offer the tool, and the operator
+ * still owns the only thing that bounds what it can read: their own identity in
+ * the cluster. See `resolveAzureMcpFlags` for where the three surfaces'
+ * precedence tables and one banner live.
  *
  * **The trust question is answered, not ignored.** A cloned repository's
  * `origin` is attacker-controllable, so with this rule opening someone else's
- * repo would silently provision two credentialed network clients. Four
+ * repo would silently provision three credentialed network clients. Four
  * properties bound that:
  *
  *   1. Auto-enable can never produce a WRITE surface. `--ado-write` is a flag
@@ -24,13 +28,15 @@
  *      wholesale (`GH_ROUTER_AZURE_MCPS=off`), and an explicit negative always
  *      beats an explicit positive.
  *   3. The launch banner names both the enabled set and, per surface, the CAUSE
- *      that enabled it, so a session that suddenly carries two more servers is
+ *      that enabled it, so a session that suddenly carries three more servers is
  *      explainable rather than mysterious — and so a surface turned on by a
  *      flag is never miscredited to a remote.
- *   4. Kusto additionally requires an explicit operator opt-in that discovery
- *      never supplies, so an ADO repo alone can never provision it. The cluster
- *      it queries is chosen per call, held to a Kusto-shaped https origin, and
- *      bounded by whatever the operator's own identity can already read.
+ *   4. Kusto is the one surface whose reach extends past the repository, so its
+ *      cluster is never discovered: discovery may turn the GROUP on, and a call
+ *      names the cluster it reads, held to a Kusto-shaped https origin. What a
+ *      session can actually read is therefore still bounded by the operator's
+ *      own identity in each cluster, which the router neither widens nor
+ *      substitutes for.
  *
  * This is a deliberate difference from the deny-by-default
  * `GH_ROUTER_FM_SCAFFOLD_REPOS` precedent: that allowlist guards a tool that
@@ -178,8 +184,11 @@ function readIntent(inputs: AzureMcpInputs): Intent {
  * not pay for a `git remote -v` process — the probe must not become an
  * unconditional pre-listen spawn on every launch.
  *
- * Only Bluebird and Azure DevOps can be decided BY discovery. Kusto is not
- * listed because its gate is an operator flag, which discovery never supplies.
+ * All three surfaces can be decided BY discovery, so each one keeps the probe
+ * alive while its outcome is open. The cost of getting this wrong is a surface
+ * that silently never appears; the cost of erring the other way is one bounded
+ * `git remote -v` in a launch where it changed nothing, so the test is per
+ * surface and only skips the spawn when every answer is already fixed.
  */
 export function azureDiscoveryNeeded(inputs: AzureMcpInputs): boolean {
   if (azureMcpsSuppressed(inputs.env ?? process.env)) return false
@@ -187,18 +196,24 @@ export function azureDiscoveryNeeded(inputs: AzureMcpInputs): boolean {
   // Bluebird's outcome is undecided unless a flag already fixed it.
   if (intent.bluebird === undefined) return true
   // ADO's outcome is undecided unless a flag fixed it or a scope was named.
-  return intent.ado === undefined && !intent.adoOrganization
+  if (intent.ado === undefined && !intent.adoOrganization) return true
+  // Kusto's outcome is undecided unless a flag or a cluster already fixed it.
+  // A named cluster settles it on its own, because discovery can only ever turn
+  // the group ON: there is nothing left for the probe to decide.
+  return intent.kusto === undefined && !intent.kustoCluster
 }
 
 /**
  * Turn resolved intent plus the discovered repository into the final flags.
  *
  * Precedence per capability: explicit negative → explicit positive →
- * discovery → off. Kusto's gate is the flag: asked for means on (unless
- * refused), absent means off with no guess. Naming a scope on the command line
- * (`--ado-org`, `--kusto-cluster`) is itself a positive statement of intent,
- * because nobody supplies an endpoint they do not want used — but a scope is no
- * longer REQUIRED, since the cluster is selectable per call.
+ * discovery → off. For Kusto the positive step has two forms, a flag or a named
+ * cluster, and the discovery step now exists: an Azure DevOps remote is what
+ * offers the group. Naming a scope on the command line (`--ado-org`,
+ * `--kusto-cluster`) is itself a positive statement of intent, because nobody
+ * supplies an endpoint they do not want used — but a scope is no longer
+ * REQUIRED, since the cluster is selectable per call and discovery supplies
+ * none.
  */
 export function resolveAzureMcpFlags(
   inputs: AzureMcpInputs,
@@ -242,11 +257,8 @@ export function resolveAzureMcpFlags(
     }
   }
 
-  // --- Kusto. Enabled by the flag alone; the cluster is only a default.
-  //
-  // Kusto contributes no `reasons` line even when a remote was discovered: the
-  // remote did not enable it, the flag did. A banner whose whole purpose is
-  // explainability must not name a cause that had no effect.
+  // --- Kusto. A flag, a named cluster, or the discovered remote turns it on;
+  // the cluster is only a default and discovery never supplies one.
   let kusto = false
   if (!suppressAll && intent.kusto !== false) {
     if (intent.kustoCluster) {
@@ -263,6 +275,13 @@ export function resolveAzureMcpFlags(
       // a scope is a positive statement of intent, and so is the flag, so this
       // no longer needs a cluster to be useful.
       kusto = true
+    } else if (discovered) {
+      // The remote is the cause here and is named as such. Both arms above are
+      // operator statements, so neither pushes a reason: a banner whose whole
+      // purpose is explainability must not credit a remote with a decision the
+      // operator made.
+      kusto = true
+      reasons.push(`kusto: Azure DevOps remote ${origin}`)
     }
   }
 
