@@ -455,6 +455,13 @@ export async function setupAndServe(
   // no equivalent: its five tools are static and its reachability is proven by
   // the first tool call, which carries an actionable error.
   if (state.adoEnabled) {
+    // Announced BEFORE the await, because this is the one launch step whose
+    // cost is measured in seconds: the handshake mints an `az` token (measured
+    // 6.5-14 s on Windows, cold or warm) and round-trips the remote server. A
+    // silent multi-second pause before the launch card is indistinguishable
+    // from a hang, and the line after the await only explains a wait that is
+    // already over.
+    consola.info("Azure DevOps MCP: provisioning the remote tool surface...")
     const result = await provisionAdoTools()
     if (result.ok) consola.info(`Azure DevOps MCP: ${result.toolCount} tool(s) exposed.`)
   }
