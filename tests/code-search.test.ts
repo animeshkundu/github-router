@@ -31,6 +31,7 @@ import {
   resolveRipgrep,
   resolveAstGrep,
   __setAstGrepResolverForTest,
+  __setStructuralBudgetForTest,
 } from "../src/lib/code-search"
 import { PATHS } from "../src/lib/paths"
 import { firstText } from "~/lib/attachments"
@@ -357,7 +358,11 @@ describe("searchCode integration", () => {
     } finally {
       wideFx.cleanup()
     }
-  })
+    // The search itself is one ripgrep call over a one-file fixture; the wall
+    // clock is the lane-1 event loop. Three heavy suites sharing this process
+    // took this test to 7945 ms against bun's 5000 ms default while it behaved
+    // correctly, so the budget states the measurement instead of the runner.
+  }, 20_000)
 
   test("query with null byte is rejected", async () => {
     await expect(
@@ -442,25 +447,44 @@ describe("BM25F ranking", () => {
   })
 
   test("determinism — 5 consecutive runs produce identical output", async () => {
-    const runs: Array<string> = []
-    for (let i = 0; i < 5; i++) {
-      const r = await searchCode({
-        query: "strongSignal",
-        workspace: fx.root,
-        mode: "ranked",
-        limit: 20,
-      })
-      // Strip elapsed_ms (variable) before comparison
-      const stable = {
-        results: r.results,
-        truncated: r.truncated,
-        scanned_files: r.scanned_files,
-        ranking: r.ranking,
+    // The structural pass runs under a 200 ms wall-clock budget (product
+    // policy, see STRUCTURAL_BUDGET_MS), and on overrun the remaining hits drop
+    // back to the regex heuristic, which leaves a hit's `role` unconfirmed
+    // (measured on this fixture: at a 20 ms budget the same query returned
+    // `src/core.ts:2` as `definition` in some runs and as unconfirmed in
+    // others). That made this test a measurement of the runner as much as of
+    // the ranking: under a contended lane-1 run one of the five searches could
+    // exceed the budget while the other four did not, and the set grew to two
+    // distinct outputs. The claim here is that the RANKING is deterministic
+    // given the same inputs, so the budget is lifted for the duration and the
+    // overrun path stays covered by the budget-boundary tests in
+    // tests/tree-sitter-pool.test.ts.
+    __setStructuralBudgetForTest(3_600_000)
+    try {
+      const runs: Array<string> = []
+      for (let i = 0; i < 5; i++) {
+        const r = await searchCode({
+          query: "strongSignal",
+          workspace: fx.root,
+          mode: "ranked",
+          limit: 20,
+        })
+        // Strip elapsed_ms (variable) before comparison
+        const stable = {
+          results: r.results,
+          truncated: r.truncated,
+          scanned_files: r.scanned_files,
+          ranking: r.ranking,
+        }
+        runs.push(JSON.stringify(stable))
       }
-      runs.push(JSON.stringify(stable))
+      expect(new Set(runs).size).toBe(1)
+    } finally {
+      __setStructuralBudgetForTest(null)
     }
-    expect(new Set(runs).size).toBe(1)
-  })
+    // Five full searches: the default 5 s budget is a runner measurement when
+    // the lane is loaded, and this test asserts output equality, not speed.
+  }, 30_000)
 
   test("field_contributions sum to total score (within epsilon)", async () => {
     const r = await searchCode({

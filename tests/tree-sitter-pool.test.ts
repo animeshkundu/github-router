@@ -208,10 +208,18 @@ poolDescribe("tree-sitter pool — determinism (pooled ≡ in-process)", () => {
         runs.add(stable(await runRanked(fx.root)))
       }
       expect(runs.size).toBe(1)
+      // Five pooled searches with cold workers: the bun default of 5 s was
+      // measured at 5030 ms under a loaded lane, and a timeout here is worse
+      // than a failure anywhere else in this file. The rejection does not stop
+      // the loop, so the remaining iterations then run against the shared
+      // afterEach teardown (pool reset, structural budget back to the product's
+      // 200 ms) and a correct pool reports a second digest. That is what turns
+      // a slow run into a determinism failure, so the budget states the
+      // measurement rather than letting the runner invent a bug.
     } finally {
       fx.cleanup()
     }
-  })
+  }, 30_000)
 
   test("definitions are AST-confirmed via the worker path", async () => {
     const fx = makeFixture(spreadFixture(20))
@@ -479,24 +487,25 @@ poolDescribe("tree-sitter pool — budget / abort / shutdown never hang", () => 
       const pool = getTreeSitterPool()
       expect(pool).not.toBeNull()
       const jobs = buildJobs(fx.root, 40)
-      const t0 = Date.now()
-      // A zero budget must NOT wait for all 40 parses; queued jobs are dropped.
+      // A zero budget must NOT wait for a single parse: the pool stops before
+      // dispatching, so every job resolves as a miss and nothing is parsed.
+      // That is the claim, and it is stronger than the elapsed-time bound this
+      // test used to carry: a wall-clock bound measures the runner, and under a
+      // contended lane-1 run this same call could take seconds while behaving
+      // exactly as designed.
       const run = await pool!.parseFiles(jobs, {
         budgetMs: 0,
         signal: new AbortController().signal,
       })
-      const elapsed = Date.now() - t0
-      // Resolved (not null = pool ran) and FAST — well under what 40 serial
-      // parses would take, and far under the bun:test 5s timeout.
       expect(run).not.toBeNull()
       expect(run!.budgetHit).toBe(true)
-      expect(elapsed).toBeLessThan(2000)
+      expect(run!.byFile.size).toBe(0)
     } finally {
       fx.cleanup()
     }
   })
 
-  test("abort during parseFiles resolves promptly", async () => {
+  test("abort during parseFiles resolves without hanging", async () => {
     const fx = makeFixture(spreadFixture(40))
     try {
       process.env.GH_ROUTER_ENABLE_TS_POOL = "1"
@@ -506,15 +515,23 @@ poolDescribe("tree-sitter pool — budget / abort / shutdown never hang", () => 
       const ac = new AbortController()
       // Abort almost immediately.
       setTimeout(() => ac.abort("test"), 1)
-      const t0 = Date.now()
       const run = await pool.parseFiles(jobs, { budgetMs: 10_000, signal: ac.signal })
-      expect(Date.now() - t0).toBeLessThan(2000)
-      // Aborted runs resolve (possibly partial) — never hang.
+      // The claim is that the abort is OBSERVED and the call resolves, not that
+      // it resolves within a fixed number of milliseconds. The 2000 ms bound
+      // that used to be here measured the runner: this call took 2430 ms under
+      // a contended lane-1 run while behaving correctly, because the 1 ms timer
+      // that fires the abort waits behind whatever else is queued on the starved
+      // loop. An abort is honored between files rather than preemptively (the
+      // worker parse loop is synchronous), so the files it did parse are bounded
+      // by dispatch progress under that same loop, never by a wall clock.
       expect(run).not.toBeNull()
+      expect(run!.byFile.size).toBeLessThan(40)
     } finally {
       fx.cleanup()
     }
-  })
+    // A hang is indefinite: the bun budget is what catches one now, and the
+    // pool's own 10 s parse budget bounds the correct path well inside it.
+  }, 20_000)
 
   test("shutdown during an in-flight parseFiles does not hang the caller", async () => {
     const fx = makeFixture(spreadFixture(40))
