@@ -111,7 +111,7 @@ describe("resolveAzureMcpFlags — precedence", () => {
   })
 })
 
-describe("resolveAzureMcpFlags — Kusto needs a cluster, never a remote", () => {
+describe("resolveAzureMcpFlags — Kusto is opt-in, never remote-driven", () => {
   test("discovery alone never enables Kusto", () => {
     expect(resolve({}, DISCOVERED).kusto).toBe(false)
   })
@@ -122,23 +122,47 @@ describe("resolveAzureMcpFlags — Kusto needs a cluster, never a remote", () =>
     expect(flags.kustoCluster).toBe("https://example.kusto.windows.net")
   })
 
-  test("a malformed cluster fails the launch instead of advertising a dead group", () => {
-    // Every kusto tool would fail in the client's own validator, after the
-    // group had already been listed and the banner had already said it was on.
-    // The cluster is normalized at the point it enters the process so the
-    // operator gets the expectation named, in the style of the ADO toolset
-    // typo above.
+  test("a malformed cluster fails the launch instead of becoming a dead default", () => {
+    // A call that names its own cluster still works with a bad default, but the
+    // default would be a host nothing can reach, and the operator would learn
+    // that from a model's failed call rather than from the launch. The cluster
+    // is normalized at the point it enters the process so the operator gets the
+    // expectation named, in the style of the ADO toolset typo above.
     expect(() => resolve({ kustoCluster: "http://example.kusto.windows.net" })).toThrow(/https/)
     expect(() => resolve({ kustoCluster: "not a host" })).toThrow(/not a valid/)
     expect(() => resolve({ kustoCluster: "https://user:pw@example.kusto.windows.net" }))
       .toThrow(/credentials/)
   })
 
-  test("--kusto without a cluster warns instead of guessing one", () => {
+  test("--kusto alone is a complete opt-in, with no cluster and no complaint", () => {
+    // The group is on and the calls name their own cluster. It must not warn:
+    // a warning here would tell an operator their deliberate configuration is
+    // broken, and the one line the launch still prints is informational.
     const flags = resolve({ kustoFlag: true }, DISCOVERED)
-    expect(flags.kusto).toBe(false)
+    expect(flags.kusto).toBe(true)
     expect(flags.kustoCluster).toBeNull()
-    expect(flags.warnings).toEqual(["kusto: requested but no cluster (--kusto-cluster)"])
+    expect(flags.warnings).toEqual([])
+  })
+
+  test("GH_ROUTER_ENABLE_KUSTO=1 is the env equivalent, and still needs no cluster", () => {
+    const flags = resolveAzureMcpFlags(
+      { env: { GH_ROUTER_ENABLE_KUSTO: "1" } },
+      DISCOVERED,
+    )
+    expect(flags.kusto).toBe(true)
+    expect(flags.kustoCluster).toBeNull()
+    expect(flags.warnings).toEqual([])
+  })
+
+  test("--no-kusto beats the flag and the env, cluster or not", () => {
+    expect(resolve({ kustoFlag: false, kustoCluster: "https://example.kusto.windows.net" }).kusto)
+      .toBe(false)
+    const envOff = resolveAzureMcpFlags(
+      { kustoFlag: false, env: { GH_ROUTER_ENABLE_KUSTO: "1" } },
+      null,
+    )
+    expect(envOff.kusto).toBe(false)
+    expect(envOff.kustoCluster).toBeNull()
   })
 
   test("a discovered remote plus an env cluster enables Kusto, which the remote did not cause", () => {

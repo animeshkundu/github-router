@@ -8,45 +8,90 @@
  * "read-only" so the model does not spend a turn attempting a mutation, not
  * because the text is what stops one.
  *
- * The group is registered only when a cluster is configured. A git remote
+ * The group is registered by `--kusto` (or `GH_ROUTER_ENABLE_KUSTO=1`). A
+ * launch cluster (`--kusto-cluster`) is the DEFAULT for calls that do not name
+ * one; it is no longer what turns the group on, because different tables live
+ * in different clusters and a single pinned cluster made a cross-cluster
+ * question unanswerable. Every tool therefore takes an optional `cluster`, held
+ * to a Kusto-shaped https origin (`normalizeKustoCallClusterUri`), and a call
+ * reaches whatever the current Azure identity can read there. A git remote
  * supplies no cluster identity, so nothing here is auto-enabled by repository
- * discovery — the operator names the cluster or the group stays off.
+ * discovery: the operator opts in, the model picks the cluster.
  */
 
 import type { NonPersonaMcpTool } from "./peer-mcp-personas"
-import { renderKustoResponse, KustoClient, KustoError } from "./kusto-client"
+import {
+  renderKustoResponse,
+  KustoClient,
+  KustoError,
+  normalizeKustoCallClusterUri,
+  normalizeKustoClusterUri,
+} from "./kusto-client"
 import { state } from "./state"
 import { relaySafeText } from "./worker-agent/relay-cap"
 
 const KUSTO_GROUP = "kusto" as const
 
 /**
- * One process-lifetime client per resolved cluster. Keyed on the cluster URI
- * because that is also the token audience: a second cluster needs a second
- * token, and a stale client on the wrong cluster would silently answer about
- * the wrong data.
+ * One process-lifetime client per resolved cluster, keyed on the NORMALIZED
+ * origin so `name`, `name/` and a full https form share one entry.
+ *
+ * Keyed on the cluster URI because that is also the token audience: a second
+ * cluster needs a second token, and a client answering for a cluster other than
+ * the one its token was minted for would silently report the wrong data.
+ *
+ * Deliberately UNCAPPED. A `KustoClient` is a pure value (origin plus a default
+ * database name); the material per-cluster object is the access token, and that
+ * already lives uncapped for the process's lifetime in the shared
+ * `AzCliAccessTokenCache` in `./kusto-client`. A cap here would bound a few
+ * hundred bytes while inviting a false reading that the per-cluster footprint
+ * is bounded. See the docs' note on a per-session distinct-cluster budget.
  */
-let cached: { cluster: string; client: KustoClient } | null = null
+const clients = new Map<string, KustoClient>()
 
-/** Test seam: drop the memoized client so the next call rebuilds it. */
+/** Test seam: drop the memoized clients so the next call rebuilds them. */
 export function resetKustoClientForTesting(): void {
-  cached = null
+  clients.clear()
 }
 
-function kustoClient(): KustoClient {
-  const cluster = state.kustoCluster
-  if (!cluster) {
+/** Test seam: how many clusters this process has built a client for. */
+export function kustoClientCountForTesting(): number {
+  return clients.size
+}
+
+/**
+ * The cluster a call runs against: the call's own `cluster` first, else the
+ * launch's `--kusto-cluster`. Resolved synchronously, before a handler awaits
+ * anything, so a shape error costs no token mint and no request.
+ */
+function resolveCluster(args: Record<string, unknown>): string {
+  const value = args.cluster
+  if (value !== undefined) {
+    if (typeof value !== "string" || !value.trim()) {
+      throw new KustoError("`cluster` must be a non-empty string when provided.", { retriable: false })
+    }
+    return normalizeKustoCallClusterUri(value)
+  }
+  const launch = state.kustoCluster
+  if (!launch) {
     throw new KustoError(
-      "No Kusto cluster is configured. Launch with `--kusto-cluster <uri>` or set GH_ROUTER_KUSTO_CLUSTER.",
+      "No Kusto cluster selected. Pass `cluster` (a host such as "
+        + "<name>.<region>.kusto.windows.net, or a full https URI), or launch with "
+        + "`--kusto-cluster <uri>`.",
       { retriable: false },
     )
   }
-  if (cached?.cluster === cluster) return cached.client
+  return normalizeKustoClusterUri(launch)
+}
+
+function kustoClient(clusterUri: string): KustoClient {
+  const existing = clients.get(clusterUri)
+  if (existing) return existing
   const client = new KustoClient({
-    clusterUri: cluster,
+    clusterUri,
     ...(state.kustoDatabase ? { database: state.kustoDatabase } : {}),
   })
-  cached = { cluster, client }
+  clients.set(clusterUri, client)
   return client
 }
 
@@ -83,6 +128,20 @@ const DATABASE_PROPERTY = {
   },
 }
 
+/**
+ * The outer scope, so it precedes `database` in every tool that takes both:
+ * a table name means nothing without the cluster it lives in. Any cluster the
+ * current Azure identity can read may be named here, so a question that spans
+ * two clusters is answered by two calls with different `cluster` values.
+ */
+const CLUSTER_PROPERTY = {
+  cluster: {
+    type: "string",
+    description:
+      "Kusto cluster to query, e.g. https://example.kusto.windows.net. Defaults to the launch's --kusto-cluster, and is required when that was not set.",
+  },
+}
+
 const READ_ONLY_NOTE =
   " Read-only: the request runs under service-enforced read-only mode, so a mutating command is refused by Kusto rather than by this proxy."
 
@@ -92,11 +151,12 @@ export const KUSTO_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
     group: KUSTO_GROUP,
     capability: "kusto",
     description:
-      "List the Kusto databases the current Azure identity can see. Call this first when you do not know which database to query, or before reporting that a database does not exist."
+      "List the Kusto databases the current Azure identity can see in one cluster. Call this first when you do not know which database to query, or before reporting that a database does not exist. This proxy cannot list clusters, so when the cluster is not already known, ask the user which one to query."
       + READ_ONLY_NOTE,
-    inputSchema: { type: "object", additionalProperties: false, properties: {} },
-    async handler(_args, signal) {
-      return text(await kustoClient().databasesList(signal))
+    inputSchema: { type: "object", additionalProperties: false, properties: { ...CLUSTER_PROPERTY } },
+    async handler(args, signal) {
+      const cluster = resolveCluster(args)
+      return text(await kustoClient(cluster).databasesList(signal))
     },
   },
   {
@@ -109,11 +169,12 @@ export const KUSTO_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      properties: { ...DATABASE_PROPERTY },
+      properties: { ...CLUSTER_PROPERTY, ...DATABASE_PROPERTY },
     },
     async handler(args, signal) {
+      const cluster = resolveCluster(args)
       const { database } = databaseArg(args)
-      return text(await kustoClient().tablesList(database, signal))
+      return text(await kustoClient(cluster).tablesList(database, signal))
     },
   },
   {
@@ -129,12 +190,14 @@ export const KUSTO_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
       additionalProperties: false,
       properties: {
         table: { type: "string", description: "Table or function name (a simple identifier)." },
+        ...CLUSTER_PROPERTY,
         ...DATABASE_PROPERTY,
       },
     },
     async handler(args, signal) {
+      const cluster = resolveCluster(args)
       const { database } = databaseArg(args)
-      return text(await kustoClient().tableSchema(String(args.table ?? ""), database, signal))
+      return text(await kustoClient(cluster).tableSchema(String(args.table ?? ""), database, signal))
     },
   },
   {
@@ -154,13 +217,15 @@ export const KUSTO_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
           type: "number",
           description: "How many rows to return, 1-100. Default 10.",
         },
+        ...CLUSTER_PROPERTY,
         ...DATABASE_PROPERTY,
       },
     },
     async handler(args, signal) {
+      const cluster = resolveCluster(args)
       const { database } = databaseArg(args)
       const rows = typeof args.rows === "number" ? args.rows : 10
-      return text(await kustoClient().sample(String(args.table ?? ""), rows, database, signal))
+      return text(await kustoClient(cluster).sample(String(args.table ?? ""), rows, database, signal))
     },
   },
   {
@@ -180,16 +245,18 @@ export const KUSTO_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
           description:
             "The KQL to run. A leading '.' makes it a management command (e.g. `.show tables`); everything else is a query.",
         },
+        ...CLUSTER_PROPERTY,
         ...DATABASE_PROPERTY,
       },
     },
     async handler(args, signal) {
+      const cluster = resolveCluster(args)
       const { database } = databaseArg(args)
       const csl = typeof args.csl === "string" ? args.csl : ""
       if (!csl.trim()) {
         throw new KustoError("`csl` must be a non-empty KQL query.", { retriable: false })
       }
-      const result = await kustoClient().runCsl(csl, {
+      const result = await kustoClient(cluster).runCsl(csl, {
         ...(database ? { database } : {}),
         ...(signal ? { signal } : {}),
       })

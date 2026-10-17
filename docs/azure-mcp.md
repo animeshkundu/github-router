@@ -20,6 +20,7 @@ tool under them inherits.
 ```sh
 github-router claude --ado --ado-org contoso
 github-router claude --kusto-cluster https://example.kusto.windows.net --kusto-database Telemetry
+github-router claude --kusto      # no default cluster: every call names the one it queries
 ```
 
 | Flag | Effect |
@@ -29,9 +30,9 @@ github-router claude --kusto-cluster https://example.kusto.windows.net --kusto-d
 | `--ado-toolsets <csv>` | Toolsets to request. Default `repos,wit,pipelines,wiki` |
 | `--ado-all-toolsets` | Request every toolset (sends no `X-MCP-Toolsets` header) |
 | `--ado-write` | Omit `X-MCP-Readonly`, making mutating tools reachable |
-| `--kusto` / `--no-kusto` | Expose / refuse the Kusto group |
-| `--kusto-cluster <uri>` | Cluster origin. **Naming one is itself an opt-in** |
-| `--kusto-database <name>` | Default database for calls that do not name one |
+| `--kusto` / `--no-kusto` | Expose / refuse the Kusto group. The flag alone is a complete opt-in |
+| `--kusto-cluster <uri>` | Default cluster origin for the calls that do not name one |
+| `--kusto-database <name>` | Default database for the calls that do not name one, on whichever cluster a call resolves |
 
 Environment equivalents: `GH_ROUTER_ENABLE_ADO`, `GH_ROUTER_ADO_ORG`,
 `GH_ROUTER_ADO_TOOLSETS`, `GH_ROUTER_ADO_ALL_TOOLSETS`, `GH_ROUTER_ENABLE_KUSTO`,
@@ -43,8 +44,8 @@ positives.
 
 Launching inside a checkout whose git remotes resolve to an Azure DevOps
 repository turns **Bluebird and `ado`** on without a flag. `kusto` does not
-auto-enable: a git remote carries no cluster identity, and guessing one would run
-queries against the wrong data with the operator's credentials.
+auto-enable: a git remote carries no cluster identity, and choosing which data to
+read with the operator's credentials is not a discovery decision.
 
 Resolution order per capability:
 
@@ -64,8 +65,10 @@ the user did not type. Four properties bound it:
 - The banner names both what turned on and the remote that caused it, so a
   session that suddenly has two more servers is explainable rather than
   mysterious.
-- Kusto, the one surface that can read arbitrary data from an arbitrary cluster,
-  requires an operator-named cluster that discovery never supplies.
+- Kusto requires an explicit operator opt-in that discovery never supplies, and
+  the cluster a call names is held to a Kusto-shaped https origin. What a call
+  can actually read is bounded by the operator's own identity: the router grants
+  no cluster access the `az` session behind it did not already have.
 
 The probe is one memoized, bounded (`5 s`) `git` read per process, and any
 failure resolves to "not an Azure DevOps workspace" rather than failing the
@@ -198,17 +201,56 @@ commands (`| getschema`, `| take N`) are restricted to
 `[A-Za-z_][A-Za-z0-9_]*` rather than escaped, because a smaller reviewable
 surface beats an escaper.
 
+### Choosing a cluster
+
+`cluster` is optional on all five tools. A call that omits it runs against the
+launch's `--kusto-cluster`; a launch with no cluster leaves every call to name
+its own, and one that does not is refused with both ways out (name a cluster, or
+set a default at launch). Different tables live in different clusters, so a
+question spanning two of them is two calls with two `cluster` values.
+
+A call-named cluster goes through a **stricter** normalizer than the launch one:
+the same https / no-credentials / no-path rules, plus a requirement that the
+hostname carry a `kusto` label (`<name>.<region>.kusto.windows.net`,
+`*.kusto.usgovcloudapi.net`, `*.kusto.chinacloudapi.cn`,
+`*.kusto.azuresynapse.net`, `*.kusto.fabric.microsoft.com`). Three properties of
+that split are deliberate:
+
+- **The label rule is a shape guard, not an allowlist.** Anything
+  Kusto-shaped is accepted; no list of pre-approved clusters exists, matching the
+  code-search model where a workspace is any path the process can read. The real
+  boundary is AAD, which mints no token for a resource the identity cannot reach
+  (each cluster is its own audience), plus the identity's RBAC inside the
+  cluster.
+- **A launch cluster stays permissive.** An operator may legitimately point
+  `--kusto-cluster` at a reverse proxy or a private-DNS front end that carries no
+  `kusto` label, so that path keeps the other rules only. A call cannot name such
+  a host, and the refusal says to omit `cluster`.
+- **Clusters cannot be enumerated.** `clusters_list` is absent (see below), so
+  when the cluster is not already known the `databases` description tells the
+  model to ask the user rather than guess at a name.
+
+Every tool takes `cluster` before `database`, because the database is scoped by
+the cluster: the same database name can exist in two clusters with different
+contents.
+
 ### Tools
 
 Five, all read-only, all in the `kusto` group:
 
 | Tool | Arguments | Purpose |
 | --- | --- | --- |
-| `databases` | none | The databases this identity can see |
-| `tables` | optional `database` | Tables and stored functions |
-| `schema` | required `table`, optional `database` | Column names and types |
-| `sample` | required `table`, optional `rows` (1-100), `database` | First N rows, as a grid |
-| `query` | required `csl`, optional `database` | Arbitrary KQL |
+| `databases` | optional `cluster` | The databases this identity can see in one cluster |
+| `tables` | optional `cluster`, `database` | Tables and stored functions in one database |
+| `schema` | required `table`, optional `cluster`, `database` | Column names and types |
+| `sample` | required `table`, optional `rows` (1-100), `cluster`, `database` | First N rows, as a grid |
+| `query` | required `csl`, optional `cluster`, `database` | Arbitrary KQL |
+
+`cluster` is conditionally required in prose rather than in the schema: nothing
+here validates arguments against `inputSchema`, and the refusal names what to
+pass, which is more useful to a model than a schema error. `--kusto` with no
+cluster is therefore a working group whose calls must each name a cluster, not a
+degraded one.
 
 `clusters_list` is deliberately absent: enumerating clusters is an ARM
 (`management.azure.com`) operation on a different audience and token, so it had
@@ -233,9 +275,10 @@ file carries that client's own truncation trailer so "full" is never read as
 ### Token refresh
 
 One process-lifetime cache keyed by cluster URI (which is also the audience),
-with a 5-minute refresh margin ahead of the reported expiry and **single-flighted**
-refresh: concurrent callers that see the same expired entry await ONE `az`
-invocation. A token whose expiry `az` does not report is used but **not cached**,
+with one entry per distinct origin, so a session that queries two clusters holds
+two live tokens and mints each on first use. A 5-minute refresh margin ahead of
+the reported expiry and a **single-flighted** refresh: concurrent callers that
+see the same expired entry await ONE `az` invocation. A token whose expiry `az` does not report is used but **not cached**,
 because a cache entry with no deadline can only be either immortal (serving a
 dead token) or arbitrary (minting in a loop). A **401 alone** invalidates the
 cached entry, so the retry (and every later call) mints a fresh token rather
@@ -269,6 +312,11 @@ bearer in three layers: an environment override (`BLUEBIRD_TOKEN`,
 `ADO_MCP_TOKEN`, `KUSTO_TOKEN`), then a **silent** `az account get-access-token
 --resource <r>`, then a single interactive login when, and only when, the silent
 mint fails for a credential-shaped reason.
+
+`KUSTO_TOKEN` is a single value with no audience of its own, and it is used
+verbatim for whichever cluster a call names. It is therefore correct only when
+every call in the session targets one cluster; a session that queries two needs
+the `az` path, which mints per cluster.
 
 The classification is the point, because the remedies differ:
 

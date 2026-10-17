@@ -18,7 +18,7 @@ The groups are:
 - `fleet` → `/mcp/fleet` (gated remote-session control)
 - `first-mate` → `/mcp/first-mate` (gated cloud-agent control)
 - `ado` → `/mcp/ado` (the Azure DevOps remote MCP surface, read-only by default; loaded only when the group is enabled)
-- `kusto` → `/mcp/kusto` (Azure Data Explorer, five read-only tools; loaded only when a cluster is configured)
+- `kusto` → `/mcp/kusto` (Azure Data Explorer, five read-only tools, the cluster named per call or defaulted at launch; loaded only when the group is enabled)
 
 A launch profile projects only the groups it allows; not every session registers all ten.
 

@@ -5,6 +5,7 @@ import {
   KustoError,
   KUSTO_TOKEN_ENV,
   getKustoToken,
+  normalizeKustoCallClusterUri,
   normalizeKustoClusterUri,
   renderKustoResponse,
   type KustoResponse,
@@ -125,6 +126,61 @@ describe("normalizeKustoClusterUri", () => {
     )
     expect(() => normalizeKustoClusterUri("not a host")).toThrow(KustoError)
     expect(() => normalizeKustoClusterUri("")).toThrow(/empty/)
+  })
+})
+
+describe("normalizeKustoCallClusterUri", () => {
+  test("accepts a Kusto-shaped host with or without a scheme", () => {
+    expect(normalizeKustoCallClusterUri("https://example.kusto.windows.net")).toBe(CLUSTER)
+    expect(normalizeKustoCallClusterUri("example.kusto.windows.net/")).toBe(CLUSTER)
+    // The other public clouds, so the rule cannot drift into "windows.net only".
+    for (const host of [
+      "example.kusto.usgovcloudapi.net",
+      "example.kusto.chinacloudapi.cn",
+      "example.kusto.azuresynapse.net",
+      "cluster.kusto.fabric.microsoft.com",
+    ]) {
+      // Concatenated, not a template literal: the isolation guard extracts
+      // every scheme-prefixed occurrence in this file textually, and a template
+      // would be read as the host `${host}`, which is not a reserved name.
+      expect(normalizeKustoCallClusterUri(host)).toBe("https://" + host)
+    }
+  })
+
+  test("rejects a well-formed host that carries no kusto service label", () => {
+    // The reason this function exists rather than reusing the permissive
+    // launch normalizer: the model names the host, so a typo or a hallucinated
+    // endpoint has to fail before a token is minted for it.
+    for (const host of [
+      "gateway.example.com",
+      "example.windows.net",
+      // A bare suffix is a valid domain and would `az --resource` fine.
+      "kusto.windows.net",
+      // Begins with the word rather than carrying the label, so it is not an
+      // ADX endpoint shape. Pinned so the rule cannot widen by accident.
+      "kusto.fabric.microsoft.com",
+    ]) {
+      expect(() => normalizeKustoCallClusterUri(host)).toThrow(/must name a Kusto endpoint/)
+    }
+  })
+
+  test("inherits every base refusal", () => {
+    expect(() => normalizeKustoCallClusterUri("http://example.kusto.windows.net")).toThrow(/https/)
+    expect(() => normalizeKustoCallClusterUri("user:pass@example.kusto.windows.net")).toThrow(
+      /credentials/,
+    )
+    expect(() => normalizeKustoCallClusterUri("https://example.kusto.windows.net/rest/query")).toThrow(
+      /no path/,
+    )
+    expect(() => normalizeKustoCallClusterUri("")).toThrow(/empty/)
+    expect(() => normalizeKustoCallClusterUri("not a host")).toThrow(KustoError)
+  })
+
+  test("the launch form stays permissive, deliberately", () => {
+    // An operator may point --kusto-cluster at a reverse proxy in front of ADX,
+    // and that stays possible: only the model-supplied argument is label-checked.
+    expect(normalizeKustoClusterUri("gateway.example.com")).toBe("https://gateway.example.com")
+    expect(() => normalizeKustoCallClusterUri("gateway.example.com")).toThrow(KustoError)
   })
 })
 

@@ -545,6 +545,12 @@ function maxToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   if (tool.capability === "fleet") return fleetToolsEnabled()
   if (tool.capability === "agents") return agentToolsEnabled()
   if (tool.capability === "artifact") return artifactToolsEnabled()
+  // The Azure groups, mirroring `fastToolIsEnabled`. Without these arms the
+  // fall-through below admitted them on a launch that never enabled the
+  // capability: the names were listed and every call answered -32601. The
+  // capability gate is the same predicate the standard projection applies.
+  if (tool.group === "ado") return adoToolsEnabled()
+  if (tool.group === "kusto") return kustoToolsEnabled()
   return true
 }
 

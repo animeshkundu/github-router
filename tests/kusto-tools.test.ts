@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { readFileSync, rmSync } from "node:fs"
 
 import { KUSTO_TOKEN_ENV } from "../src/lib/kusto-client"
-import { KUSTO_TOOLS, resetKustoClientForTesting } from "../src/lib/kusto-tools"
+import {
+  KUSTO_TOOLS,
+  kustoClientCountForTesting,
+  resetKustoClientForTesting,
+} from "../src/lib/kusto-tools"
 import { state } from "../src/lib/state"
 
 // Hermetic: a fictional cluster host, an injected `fetch`, and a synthetic
@@ -33,6 +37,23 @@ function installKusto(kustoJson: unknown): void {
       status: 200,
       headers: { "content-type": "application/json" },
     })) as unknown as typeof fetch
+}
+
+/**
+ * Same stub, recording every requested URL. The per-call cluster tests assert
+ * on the ORIGIN that was actually contacted, because that is the property under
+ * test: an argument echoed into the wrong client would still render a result.
+ */
+function capturingFetch(kustoJson: unknown): { urls: Array<string> } {
+  const urls: Array<string> = []
+  globalThis.fetch = (async (input: unknown) => {
+    urls.push(String(input))
+    return new Response(JSON.stringify(kustoJson), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })
+  }) as unknown as typeof fetch
+  return { urls }
 }
 
 function tool(name: string) {
@@ -108,5 +129,107 @@ describe("kusto tool boundary — relay cap", () => {
     expect(spilled).toContain("… result truncated at the client's row/character cap")
     expect(spilled.length).toBeLessThanOrEqual(60_000 + 120)
     rmSync(saved!, { force: true })
+  })
+})
+
+// Different tables live in different clusters, so the cluster is a per-call
+// argument: `--kusto-cluster` is a default, not the whole capability.
+describe("kusto tool boundary — per-call cluster", () => {
+  // A second cluster on an IANA-reserved label, like the first: the isolation
+  // guard in `bluebird-test-isolation.test.ts` requires every host named by a
+  // client suite to be unresolvable, and a Kusto-shaped host that COULD resolve
+  // would be a fixture that can reach a real service.
+  const SECOND = "https://other.example.kusto.windows.net"
+
+  function configure(cluster: string | null): void {
+    process.env[KUSTO_TOKEN_ENV] = SYNTHETIC_TOKEN
+    state.kustoCluster = cluster
+    state.kustoDatabase = "Telemetry"
+  }
+
+  test("a call's `cluster` overrides the launch default", async () => {
+    configure(CLUSTER)
+    const { urls } = capturingFetch(envelope(1, 3))
+
+    await tool("query").handler({ csl: "Events | count", cluster: SECOND })
+
+    expect(urls).toHaveLength(1)
+    expect(new URL(urls[0]!).origin).toBe(SECOND)
+  })
+
+  test("with no launch cluster, a call that names one works and one that omits it says what to do", async () => {
+    configure(null)
+    const { urls } = capturingFetch(envelope(1, 3))
+
+    await tool("databases").handler({ cluster: SECOND })
+    expect(new URL(urls[0]!).origin).toBe(SECOND)
+    expect(urls[0]).toContain("/v1/rest/mgmt")
+
+    await expect(tool("query").handler({ csl: "Events | count" }))
+      .rejects.toThrow(/Pass `cluster`/)
+    // The refusal is a shape verdict: nothing was minted and nothing was sent.
+    expect(urls).toHaveLength(1)
+  })
+
+  test("one client per cluster, keyed on the normalized origin", async () => {
+    configure(CLUSTER)
+    const { urls } = capturingFetch(envelope(1, 3))
+
+    await tool("query").handler({ csl: "Events | count" })
+    await tool("query").handler({ csl: "Events | count", cluster: SECOND })
+    await tool("query").handler({ csl: "Events | count", cluster: "other.example.kusto.windows.net" })
+    await tool("query").handler({ csl: "Events | count" })
+
+    // Three spellings of the second cluster, two clusters, two clients.
+    expect(kustoClientCountForTesting()).toBe(2)
+    expect(urls.map((url) => new URL(url).origin)).toEqual([
+      CLUSTER,
+      SECOND,
+      SECOND,
+      CLUSTER,
+    ])
+  })
+
+  test("a bare host and a trailing-slash URI are the same cluster", async () => {
+    // The default is set in a spelling the call argument does not use. Keys
+    // built from raw text would hold two clients for one cluster, and the
+    // second one's token audience would come from a string, not an origin.
+    configure(`${CLUSTER}/`)
+    capturingFetch(envelope(1, 3))
+
+    await tool("query").handler({ csl: "Events | count" })
+    await tool("query").handler({ csl: "Events | count", cluster: "example.kusto.windows.net" })
+
+    expect(kustoClientCountForTesting()).toBe(1)
+  })
+
+  test("a host without the kusto service label is refused before any request", async () => {
+    configure(CLUSTER)
+    const { urls } = capturingFetch(envelope(1, 3))
+
+    await expect(
+      tool("query").handler({ csl: "Events | count", cluster: "https://gateway.example.com" }),
+    ).rejects.toThrow(/must name a Kusto endpoint/)
+
+    expect(urls).toHaveLength(0)
+  })
+
+  test("a malformed `cluster` is a shape error, not a request", async () => {
+    configure(CLUSTER)
+    const { urls } = capturingFetch(envelope(1, 3))
+
+    for (const bad of [
+      7,
+      "",
+      "   ",
+      "http://example.kusto.windows.net",
+      "https://example.kusto.windows.net/path",
+      "https://user:pass@example.kusto.windows.net",
+    ]) {
+      await expect(tool("query").handler({ csl: "Events | count", cluster: bad }))
+        .rejects.toThrow()
+    }
+
+    expect(urls).toHaveLength(0)
   })
 })

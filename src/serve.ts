@@ -214,7 +214,7 @@ export const serve = defineCommand({
     "kusto-over-tunnel": {
       type: "boolean",
       default: false,
-      description: "Expose the Kusto MCP group (queries data with your az identity) even when tunnel-exposed (only with fully-trusted tunnel access)",
+      description: "Expose the Kusto MCP group (reads any cluster your az identity can reach, named per call) even when tunnel-exposed (only with fully-trusted tunnel access)",
     },
     "no-install": {
       type: "boolean",
@@ -391,7 +391,7 @@ export const serve = defineCommand({
     }
     if (tunnelExposed && state.kustoEnabled && args["kusto-over-tunnel"] !== true) {
       consola.info(
-        "Kusto MCP is disabled over the tunnel (it queries data with your az identity). Pass --kusto-over-tunnel to enable it for fully-trusted access.",
+        "Kusto MCP is disabled over the tunnel (it reads any cluster your az identity can reach). Pass --kusto-over-tunnel to enable it for fully-trusted access.",
       )
     }
 

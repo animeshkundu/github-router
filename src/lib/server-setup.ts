@@ -427,6 +427,13 @@ export async function setupAndServe(
   state.kustoEnabled = azureFlags.kusto
   state.kustoCluster = azureFlags.kustoCluster
   state.kustoDatabase = azureFlags.kustoDatabase
+  // Said here rather than at the first tool call: a `--kusto` that was meant as
+  // `--kusto-cluster` would otherwise stay silent until a model spent a turn
+  // discovering the group needs a cluster per call. Informational, not a
+  // warning — the group works, it just has no default host.
+  if (state.kustoEnabled && state.kustoCluster === null) {
+    consola.info("Kusto MCP: no default cluster; every call must name one (--kusto-cluster sets a default).")
+  }
   for (const reason of azureFlags.reasons) {
     consola.info(`Azure MCP auto-enabled (${reason}). Suppress with --no-bluebird / --no-ado / --no-kusto, or GH_ROUTER_AZURE_MCPS=off.`)
   }
@@ -750,19 +757,19 @@ export const sharedServerArgs = {
     type: "boolean" as const,
     default: undefined,
     description:
-      "Expose the Kusto (Azure Data Explorer) MCP group (mcp__kusto__*), read-only. Requires --kusto-cluster. GH_ROUTER_ENABLE_KUSTO=1 is the env equivalent.",
+      "Expose the Kusto (Azure Data Explorer) MCP group (mcp__kusto__*), read-only. Without --kusto-cluster every call must name the cluster to query, since different tables live in different clusters. GH_ROUTER_ENABLE_KUSTO=1 is the env equivalent.",
     negativeDescription:
-      "Never expose the Kusto MCP group, even when a cluster is configured.",
+      "Never expose the Kusto MCP group, even when a cluster is configured or the env equivalent is set.",
   },
   "kusto-cluster": {
     type: "string" as const,
     description:
-      "Kusto cluster URI, e.g. https://example.kusto.windows.net. Naming a cluster enables the `kusto` group and is its own opt-in. Falls back to GH_ROUTER_KUSTO_CLUSTER.",
+      "Default Kusto cluster URI, e.g. https://example.kusto.windows.net, used by calls that do not name one. Naming a cluster enables the `kusto` group and is its own opt-in. Falls back to GH_ROUTER_KUSTO_CLUSTER.",
   },
   "kusto-database": {
     type: "string" as const,
     description:
-      "Default Kusto database for calls that do not name one. Falls back to GH_ROUTER_KUSTO_DATABASE.",
+      "Default Kusto database for calls that do not name one, applied to whichever cluster the call resolves. Falls back to GH_ROUTER_KUSTO_DATABASE.",
   },
 } as const
 

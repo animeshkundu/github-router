@@ -2830,7 +2830,13 @@ describe("/mcp worker_* tools — call routing (mocked upstream)", () => {
     }
     expect(result.isError).toBeFalsy()
     expect(result.content[0].text).toContain("implement-direct-result")
-  })
+    // Explicit budget, the same mis-sizing the worktree case below documents:
+    // this path spawns the vendored Pi runtime and drives one model round trip,
+    // which is I/O-bound on Windows and does not fit the default 5s (observed
+    // timing out at 5.01s on a run that then completed successfully, and green
+    // on every run given this budget). Not a retry and not a skip: a real hang
+    // still fails here, just at 30s instead of 5s.
+  }, 30_000)
 
   test("worker_implement (worktree:true) succeeds inside the github-router repo (which IS a git repo)", async () => {
     // process.cwd() during tests is the github-router repo root — a real
@@ -4025,7 +4031,7 @@ describe("/mcp ado + kusto groups — scoping and gating", () => {
     disableAzure()
   })
 
-  test("kusto tools/list is exactly the five static tools, and only when a cluster is set", async () => {
+  test("kusto tools/list is exactly the five static tools when the group is on", async () => {
     state.kustoEnabled = true
     state.kustoCluster = "https://example.kusto.windows.net"
     const { json } = await scopedRpc("kusto", { jsonrpc: "2.0", id: 900, method: "tools/list" })
@@ -4033,13 +4039,15 @@ describe("/mcp ado + kusto groups — scoping and gating", () => {
     expect(names).toEqual(["databases", "query", "sample", "schema", "tables"])
   })
 
-  test("kusto is invisible without a cluster even when the flag is on", async () => {
-    // The cluster is the capability: `--kusto` alone is a request the resolver
-    // refuses to satisfy by guessing one, so the group must not advertise.
+  test("kusto lists its five tools with no cluster, because each call names one", async () => {
+    // `--kusto` alone is a complete opt-in: the cluster is a per-call argument
+    // now, and different tables live in different clusters, so requiring a
+    // launch default here would hide four working tools behind a preference.
     state.kustoEnabled = true
     state.kustoCluster = null
     const { json } = await scopedRpc("kusto", { jsonrpc: "2.0", id: 901, method: "tools/list" })
-    expect((json.result as { tools: Array<unknown> }).tools).toEqual([])
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name).sort()
+    expect(names).toEqual(["databases", "query", "sample", "schema", "tables"])
   })
 
   test("kusto is invisible by default", async () => {
@@ -4047,22 +4055,39 @@ describe("/mcp ado + kusto groups — scoping and gating", () => {
     expect((json.result as { tools: Array<unknown> }).tools).toEqual([])
   })
 
-  test("kusto stays hidden when the configured cluster would not normalize", async () => {
-    // A cluster the client would reject is not a capability: advertising five
-    // tools whose every call fails is the empty-server smell the gate exists
-    // to prevent. The launch path throws before it ever sets this state, so
-    // this arm covers directly-written state and must agree with it.
+  test("a default cluster that would not normalize costs the calls that rely on it, not the group", async () => {
+    // The old gate hid all five tools behind one bad default, which is a
+    // silently absent capability. The group lists now; what fails is the call
+    // that falls back to that default, and the message names the expectation.
+    // The launch path throws before it ever sets this state, so this arm covers
+    // directly-written state and must agree with the call path.
     state.kustoEnabled = true
     state.kustoCluster = "http://example.kusto.windows.net"
     const listed = await scopedRpc("kusto", { jsonrpc: "2.0", id: 907, method: "tools/list" })
-    expect((listed.json.result as { tools: Array<unknown> }).tools).toEqual([])
-    const called = await scopedRpc("kusto", {
+    expect((listed.json.result as { tools: Array<unknown> }).tools).toHaveLength(5)
+
+    const omitted = await scopedRpc("kusto", {
       jsonrpc: "2.0",
       id: 908,
       method: "tools/call",
       params: { name: "databases", arguments: {} },
     })
-    expect(called.json.error).toMatchObject({ code: -32601 })
+    const failed = omitted.json.result as { isError?: boolean; content: Array<{ text: string }> }
+    expect(failed.isError).toBe(true)
+    expect(failed.content[0]!.text).toContain("must use https")
+
+    // A call that names its own cluster reaches the handler: the shape error is
+    // the proof, because it is thrown before any token mint or request. An
+    // -32601 here would mean the capability gate had swallowed the call.
+    const named = await scopedRpc("kusto", {
+      jsonrpc: "2.0",
+      id: 909,
+      method: "tools/call",
+      params: { name: "databases", arguments: { cluster: "gateway.example.com" } },
+    })
+    const namedResult = named.json.result as { isError?: boolean; content: Array<{ text: string }> }
+    expect(namedResult.isError).toBe(true)
+    expect(namedResult.content[0]!.text).toContain("must name a Kusto endpoint")
   })
 
   test("ado tools/list is the upstream snapshot, and empty when the group is off", async () => {
@@ -4125,7 +4150,11 @@ describe("/mcp ado + kusto groups — scoping and gating", () => {
     expect((json.error as { code: number }).code).toBe(-32601)
   })
 
-  test("a hard-coded kusto call with no cluster is -32601", async () => {
+  test("a hard-coded kusto call with no cluster is a tool error naming the argument", async () => {
+    // Not -32601: the group IS enabled, so the call is dispatched and what
+    // fails is the missing cluster. The model gets the argument it should have
+    // passed rather than "unknown tool", which would send it looking for a
+    // server that is right there.
     state.kustoEnabled = true
     state.kustoCluster = null
     const { json } = await rpc({
@@ -4133,6 +4162,21 @@ describe("/mcp ado + kusto groups — scoping and gating", () => {
       id: 910,
       method: "tools/call",
       params: { name: "databases", arguments: {} },
+    })
+    expect(json.error).toBeUndefined()
+    const result = json.result as { isError?: boolean; content: Array<{ text: string }> }
+    expect(result.isError).toBe(true)
+    expect(result.content[0]!.text).toContain("Pass `cluster`")
+    expect(result.content[0]!.text).toContain("--kusto-cluster")
+  })
+
+  test("a hard-coded kusto call on a launch that never enabled the group is -32601", async () => {
+    disableAzure()
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 916,
+      method: "tools/call",
+      params: { name: "databases", arguments: { cluster: "example.kusto.windows.net" } },
     })
     expect((json.error as { code: number }).code).toBe(-32601)
   })
@@ -4239,6 +4283,66 @@ describe("/mcp ado + kusto groups — scoping and gating", () => {
         .map((t) => t.name)
       expect(names).not.toContain("repo_pull_request")
       expect(names).not.toContain("databases")
+
+      // The gate is the flag, not a launch cluster: turned on with no default,
+      // the same pinned profile lists all five.
+      state.kustoEnabled = true
+      const on = await rpc(
+        { jsonrpc: "2.0", id: 917, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const onNames = (on.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      expect(onNames).toContain("databases")
+      expect(onNames).not.toContain("repo_pull_request")
+    } finally {
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
+  test("the max profile admits kusto through its capability gate too", async () => {
+    // The max projection has its own predicate, and it fell through for the
+    // Azure groups: a max launch that never enabled them still LISTED their
+    // names while every call answered -32601. Admitted or absent, never listed
+    // and uncallable.
+    disableAzure()
+    const nonce = "f".repeat(64)
+    const launch = registerLaunch({
+      profileId: "max",
+      nonce,
+      secret: "max-azure-gate-secret",
+      allowedGroups: new Set(["search", "kusto"]),
+    })
+    try {
+      const off = await rpc(
+        { jsonrpc: "2.0", id: 918, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const offNames = (off.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      expect(offNames).not.toContain("databases")
+
+      state.kustoEnabled = true
+      const on = await rpc(
+        { jsonrpc: "2.0", id: 919, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const onNames = (on.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      const kustoNames = new Set(["databases", "query", "sample", "schema", "tables"])
+      expect(onNames.filter((name) => kustoNames.has(name)).sort())
+        .toEqual(["databases", "query", "sample", "schema", "tables"])
+
+      // Call time follows list time: the same predicate gates dispatch.
+      const called = await rpc({
+        jsonrpc: "2.0",
+        id: 920,
+        method: "tools/call",
+        params: { name: "databases", arguments: {} },
+      }, { auth: `Bearer ${nonce}` })
+      const result = called.json.result as { isError?: boolean; content: Array<{ text: string }> }
+      expect(result.isError).toBe(true)
+      expect(result.content[0]!.text).toContain("Pass `cluster`")
     } finally {
       unregisterLaunch(launch.launchId)
     }

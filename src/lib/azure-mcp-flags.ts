@@ -8,9 +8,9 @@
  * an opt-in flag every session — meant nobody enabled them.
  *
  * Kusto is resolved here too but is NOT discovery-driven: a git remote carries
- * no cluster identity, so an operator-named cluster is its only gate and the
- * discovery probe can neither supply nor substitute for one. It lives in this
- * module because the three surfaces share one precedence table and one banner.
+ * no cluster identity, so an operator flag is its only gate and the discovery
+ * probe can neither supply nor substitute for one. It lives in this module
+ * because the three surfaces share one precedence table and one banner.
  *
  * **The trust question is answered, not ignored.** A cloned repository's
  * `origin` is attacker-controllable, so with this rule opening someone else's
@@ -27,9 +27,10 @@
  *      that enabled it, so a session that suddenly carries two more servers is
  *      explainable rather than mysterious — and so a surface turned on by a
  *      flag is never miscredited to a remote.
- *   4. Kusto additionally requires a cluster, which discovery never supplies,
- *      so an ADO repo alone can never point queries at a guessed cluster with
- *      the operator's credentials.
+ *   4. Kusto additionally requires an explicit operator opt-in that discovery
+ *      never supplies, so an ADO repo alone can never provision it. The cluster
+ *      it queries is chosen per call, held to a Kusto-shaped https origin, and
+ *      bounded by whatever the operator's own identity can already read.
  *
  * This is a deliberate difference from the deny-by-default
  * `GH_ROUTER_FM_SCAFFOLD_REPOS` precedent: that allowlist guards a tool that
@@ -178,7 +179,7 @@ function readIntent(inputs: AzureMcpInputs): Intent {
  * unconditional pre-listen spawn on every launch.
  *
  * Only Bluebird and Azure DevOps can be decided BY discovery. Kusto is not
- * listed because its gate is the cluster, which discovery never supplies.
+ * listed because its gate is an operator flag, which discovery never supplies.
  */
 export function azureDiscoveryNeeded(inputs: AzureMcpInputs): boolean {
   if (azureMcpsSuppressed(inputs.env ?? process.env)) return false
@@ -193,10 +194,11 @@ export function azureDiscoveryNeeded(inputs: AzureMcpInputs): boolean {
  * Turn resolved intent plus the discovered repository into the final flags.
  *
  * Precedence per capability: explicit negative → explicit positive →
- * discovery → off. Kusto's gate is the cluster: configured means on (unless
+ * discovery → off. Kusto's gate is the flag: asked for means on (unless
  * refused), absent means off with no guess. Naming a scope on the command line
  * (`--ado-org`, `--kusto-cluster`) is itself a positive statement of intent,
- * because nobody supplies an endpoint they do not want used.
+ * because nobody supplies an endpoint they do not want used — but a scope is no
+ * longer REQUIRED, since the cluster is selectable per call.
  */
 export function resolveAzureMcpFlags(
   inputs: AzureMcpInputs,
@@ -240,23 +242,27 @@ export function resolveAzureMcpFlags(
     }
   }
 
-  // --- Kusto. The cluster is mandatory and is never inferred.
+  // --- Kusto. Enabled by the flag alone; the cluster is only a default.
   //
   // Kusto contributes no `reasons` line even when a remote was discovered: the
-  // remote did not enable it, the configured cluster did. A banner whose whole
-  // purpose is explainability must not name a cause that had no effect.
+  // remote did not enable it, the flag did. A banner whose whole purpose is
+  // explainability must not name a cause that had no effect.
   let kusto = false
   if (!suppressAll && intent.kusto !== false) {
     if (intent.kustoCluster) {
       // Validated here, once, at the point the value enters the process. The
       // client normalizes again on every request, but by then a typo would
-      // have advertised five tools whose every call fails, and the operator
-      // would have no signal: a malformed host throws here, with the
-      // expectation named, in the same style as an unknown ADO toolset.
+      // have advertised five tools whose calls fall back to a host nothing can
+      // reach, and the operator would have no signal: a malformed host throws
+      // here, with the expectation named, in the same style as an unknown ADO
+      // toolset.
       normalizeKustoClusterUri(intent.kustoCluster)
       kusto = true
     } else if (intent.kusto === true) {
-      warnings.push("kusto: requested but no cluster (--kusto-cluster)")
+      // On, with no default host: every call must name its own cluster. Naming
+      // a scope is a positive statement of intent, and so is the flag, so this
+      // no longer needs a cluster to be useful.
+      kusto = true
     }
   }
 

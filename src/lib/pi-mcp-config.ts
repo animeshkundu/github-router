@@ -71,7 +71,7 @@ export function readMcpServerKeys(raw: string): Array<string> | null {
  */
 const GROUP_DESCRIPTIONS: Record<string, string> = {
   ado: "Azure DevOps for the open repository: repositories, work items, pipelines and wikis.",
-  kusto: "Azure Data Explorer: query and management commands against the configured cluster.",
+  kusto: "Azure Data Explorer: query and management commands against the cluster named on each call, or the launch default.",
 }
 
 export interface PiSurfaceDecision {

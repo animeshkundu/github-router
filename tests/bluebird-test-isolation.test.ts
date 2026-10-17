@@ -21,10 +21,13 @@ const AZURE_TEST_FILES = [
   "bluebird-provision.test.ts",
   "bluebird-routing.test.ts",
   "kusto-client.test.ts",
+  // Listed because it now names a cluster PER CALL, so it is a suite that
+  // decides which host a request goes to, not just one that reads a response.
+  "kusto-tools.test.ts",
 ]
 
-/** The two suites whose ENTIRE job is protocol traffic against a client. */
-const CLIENT_TEST_FILES = ["ado-client.test.ts", "kusto-client.test.ts"]
+/** The suites whose ENTIRE job is protocol traffic against a client. */
+const CLIENT_TEST_FILES = ["ado-client.test.ts", "kusto-client.test.ts", "kusto-tools.test.ts"]
 
 /** Names that are not derivable from source: the manually validated workspace. */
 const FORBIDDEN_SUBSTRINGS = ["teams-modular-packages", "domoreexp"]

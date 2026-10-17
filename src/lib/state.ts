@@ -232,11 +232,16 @@ export interface State {
   adoReadOnly: boolean
 
   /**
-   * Kusto (Azure Data Explorer) MCP group (`mcp__kusto__*`). Requires a
-   * configured cluster; a git remote supplies no cluster identity, so
+   * Kusto (Azure Data Explorer) MCP group (`mcp__kusto__*`). Turned on by the
+   * operator's `--kusto` flag; a git remote supplies no cluster identity, so
    * discovery alone never enables this group.
    */
   kustoEnabled: boolean
+  /**
+   * Default cluster for calls that do not name one, or null. Null no longer
+   * turns the group off: every kusto tool takes its own `cluster`, so a launch
+   * with no default still works, it just requires the argument.
+   */
   kustoCluster: string | null
   kustoDatabase: string | null
 
