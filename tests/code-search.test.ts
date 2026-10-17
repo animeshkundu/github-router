@@ -11,7 +11,7 @@
  *   ~/.local/share/.../plans/what-are-the-following-wild-tarjan.md
  */
 
-import { test, expect, describe, beforeAll, afterAll } from "bun:test"
+import { test, expect, describe, beforeAll, afterAll, beforeEach, afterEach } from "bun:test"
 import {
   existsSync,
   mkdirSync,
@@ -1150,6 +1150,20 @@ describe("searchCode — structural summary", () => {
 // ============================================================
 
 describe("searchCode — floor guarantee (ranked ⊇ grep)", () => {
+  // Every test in here asserts WHICH hits come back and how they are TAGGED,
+  // and `role: "definition"` is set only when the structural pass AST-confirms
+  // a hit. That pass runs under a 200 ms wall-clock budget (product policy, see
+  // STRUCTURAL_BUDGET_MS), and an overrun drops the remaining hits back to the
+  // regex heuristic, which leaves `role` unconfirmed — by design. Under a
+  // contended lane-1 run the C# case below received `undefined` where the same
+  // test passed 3/3 in isolation, so what failed was the runner's share of the
+  // machine, not the ranking. The claim here is about AST confirmation, so the
+  // budget is lifted for this describe, exactly as the determinism test above
+  // lifts it for its duration; the overrun path itself stays covered by the
+  // budget-boundary tests in tests/tree-sitter-pool.test.ts.
+  beforeEach(() => __setStructuralBudgetForTest(3_600_000))
+  afterEach(() => __setStructuralBudgetForTest(null))
+
   // "ab" substring-matches `ab`, `grab`, `fabric`, `label` — but BM25F
   // tokenizes grab/fabric/label away (they score 0), so the precision
   // shoulder cut drops them. complete:true must return them.
