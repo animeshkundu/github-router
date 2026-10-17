@@ -116,6 +116,9 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
+/** Arbitrary sampling parameters merged into the request body as-is. */
+export type SamplingParams = Record<string, unknown>;
+
 export interface StreamOptions {
 	temperature?: number;
 	maxTokens?: number;
@@ -147,6 +150,12 @@ export interface StreamOptions {
 	 * its body stream is consumed.
 	 */
 	onResponse?: (response: ProviderResponse, model: Model<Api>) => void | Promise<void>;
+	/**
+	 * Optional observer for each parsed provider stream event before Pi normalization.
+	 * Event data is adapter-owned and must be treated as read-only.
+	 * Adapter support is explicit; unsupported adapters do not invoke it.
+	 */
+	onProviderStreamEvent?: (data: unknown, model: Model<Api>) => void | Promise<void>;
 	/**
 	 * Optional custom HTTP headers to include in API requests.
 	 * Merged with provider defaults; caller values override default headers.
@@ -180,6 +189,13 @@ export interface StreamOptions {
 	 * Default: 60000 (60 seconds). Set to 0 to disable the cap.
 	 */
 	maxRetryDelayMs?: number;
+	/**
+	 * Arbitrary sampling parameters merged into the request body as-is, after the named request
+	 * fields, so keys here override them. Lets custom OpenAI-compatible servers (llama.cpp, vLLM,
+	 * and similar) be driven without adding a first-class field. Only applied by adapters that
+	 * declare support.
+	 */
+	samplingParams?: SamplingParams;
 	/**
 	 * Optional metadata to include in API requests.
 	 * Providers extract the fields they understand and ignore the rest.
@@ -383,7 +399,37 @@ export interface Usage {
 	};
 }
 
-export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
+export type StopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "aborted";
+
+export type JsonValue = null | boolean | number | string | readonly JsonValue[] | JsonObject;
+export type JsonObject = { [key: string]: JsonValue };
+
+/**
+ * A system message in the transcript. The leading system message carries the base
+ * prompt and the initial tool declarations; later ones amend either: `content` adds
+ * instructions from that point on, `sections` replace or remove named prompt
+ * sections, and `toolsAdded`/`toolsRemoved` change the tool set. Replaying every
+ * system message in order yields the current prompt and tools. Providers that accept
+ * system messages mid-conversation send each one in place; other providers rebuild
+ * the leading system message from the replayed state.
+ */
+export interface SystemMessage {
+	role: "system";
+	/** Instruction text. On the leading message this is the base prompt; later, additional instructions. */
+	content: string | TextContent[];
+	/**
+	 * Named, ordered prompt sections rendered verbatim after `content`. The leading message
+	 * declares them; later messages replace sections by name, and `null` removes one. Keep
+	 * each section self-delimiting (a tag, a heading) so the model can relate an update to
+	 * the original. Avoid integer-like names; JSON objects reorder those.
+	 */
+	sections?: Record<string, string | null>;
+	/** Complete definitions of tools that become available at this point. */
+	toolsAdded?: Tool[];
+	/** Tools that stop being available at this point. */
+	toolsRemoved?: ToolReference[];
+	timestamp: number; // Unix timestamp in milliseconds
+}
 
 export interface UserMessage {
 	role: "user";
@@ -399,6 +445,8 @@ export interface AssistantMessage {
 	model: string;
 	responseModel?: string; // Concrete `chunk.model` when different from the requested `model` (e.g. OpenRouter `auto` -> `anthropic/...`)
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	/** Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses. */
+	providerThinkingLevel?: string;
 	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
 	usage: Usage;
 	stopReason: StopReason;
@@ -424,7 +472,7 @@ export interface ToolResultMessage<TDetails = any> {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
-export type Message = UserMessage | AssistantMessage | ToolResultMessage;
+export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;
 
 export type ImagesInputContent = TextContent | ImageContent;
 export type ImagesOutputContent = TextContent | ImageContent;
@@ -478,11 +526,34 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	constrainedSampling?: false | ConstrainedSamplingConfig;
 }
 
+export interface ToolReference {
+	name: string;
+}
+
+/**
+ * Request input accepted by the public stream entry points (`Models.stream()`,
+ * `streamSimple()`, ...). `systemPrompt` and `tools` are shorthand for a leading
+ * system message; `normalizeContext()` folds them into one before the request
+ * reaches a provider.
+ */
 export interface Context {
 	systemPrompt?: string;
 	messages: Message[];
 	tools?: Tool[];
 }
+
+declare const transcriptContextBrand: unique symbol;
+
+/**
+ * Normalized request context passed to providers and API implementations. The
+ * prompt and tool declarations are carried by the transcript's system messages.
+ * Only `normalizeContext()` produces this type, so a raw `Context` cannot reach
+ * provider code by accident.
+ */
+export type TranscriptContext = {
+	messages: Message[];
+	readonly [transcriptContextBrand]: true;
+};
 
 /**
  * Event protocol for AssistantMessageEventStream.

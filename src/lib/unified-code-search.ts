@@ -52,6 +52,7 @@ import {
   type CodeSearchResponse,
 } from "./code-search"
 import { colbertSearchEnabled, runSemanticSearch, runServiceSearch, serviceBackendEnabled } from "./colbert"
+import { colbertPlatformSupported } from "./colbert/manifest"
 import type { SemanticSearchResult, SemanticStatus } from "./colbert/runner"
 import { state } from "./state"
 import { outlineFile } from "./tree-sitter-grammars"
@@ -188,6 +189,28 @@ function semanticFallbackNotice(sem: SemanticSearchResult): string {
   if (!sem.notice) return fallbackNoticeFor(sem.status)
   if (sem.notice.includes(FALLBACK_GUIDANCE_MARKER)) return sem.notice
   return `${sem.notice} — ${FALLBACK_GUIDANCE}`
+}
+
+/**
+ * Why semantic search did not run, in the terms the reader can act on.
+ *
+ * `--search` is the right lever only on a platform-arch that HAS a colgrep
+ * build. Where the manifest has no asset (win32-arm64 today) provisioning has
+ * nothing to fetch and the smoke test can never pass, so `colbertSearchEnabled()`
+ * is false for a reason no flag can change — and the old text told the operator
+ * to pass that flag anyway, which turns a permanent platform limitation into a
+ * mystery that looks like a misconfiguration. The capability gate is shared
+ * with `mcp-capabilities`, so its honesty is what the model and the operator
+ * both read.
+ */
+function semanticOffNotice(): string {
+  if (!colbertPlatformSupported()) {
+    return (
+      `semantic search is unavailable on this platform ` +
+      `(${process.platform}-${process.arch} has no prebuilt engine); returned lexical results`
+    )
+  }
+  return "semantic search is off (launch with --search to enable); returned lexical results"
 }
 
 async function outlinesForSemanticResults(
@@ -420,10 +443,7 @@ export async function runUnifiedCodeSearch(
     const r = await runLexical(input, "lexical", "lexical-fallback", signal)
     return {
       ...r,
-      notice: joinNotice(
-        r.notice,
-        "semantic search is off (launch with --search to enable); returned lexical results",
-      ),
+      notice: joinNotice(r.notice, semanticOffNotice()),
     }
   }
 

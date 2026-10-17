@@ -15,8 +15,19 @@ export default defineConfig([
 
     sourcemap: true,
     clean: true,
-    removeNodeProtocol: false,
+    // Leave `node:` protocol prefixes exactly as authored in the source. The
+    // pre-0.23 spelling of this was `removeNodeProtocol: false`; 0.23 renamed
+    // the option and the meaning is unchanged (`false` = install no
+    // protocol-rewriting plugin), so the four entries here are a pure rename.
+    // The hook-launcher bundle in particular is asserted to carry no
+    // non-`node:` import, and a rewriting plugin is one way that could drift.
+    nodeProtocol: false,
 
+    // `deps.resolveDepSubpath` flipped default from true (0.22) to false (0.23).
+    // Checked rather than assumed: this config builds byte-identical output with
+    // either value (full dist hash diff, 138 files, both directions), so nothing
+    // in the tree resolves an externalized subpath at build time and the 0.23
+    // default stands. Re-run that diff before setting it to restore 0.22 shape.
     env: {
       NODE_ENV: "production",
     },
@@ -38,7 +49,7 @@ export default defineConfig([
 
     sourcemap: false,
     clean: false,
-    removeNodeProtocol: false,
+    nodeProtocol: false,
 
     env: {
       NODE_ENV: "production",
@@ -67,7 +78,7 @@ export default defineConfig([
 
     sourcemap: false,
     clean: false,
-    removeNodeProtocol: false,
+    nodeProtocol: false,
 
     env: {
       NODE_ENV: "production",
@@ -117,7 +128,7 @@ export default defineConfig([
 
     sourcemap: false,
     clean: false,
-    removeNodeProtocol: false,
+    nodeProtocol: false,
 
     env: {
       NODE_ENV: "production",

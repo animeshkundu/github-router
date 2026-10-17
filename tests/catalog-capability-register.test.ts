@@ -122,6 +122,23 @@ const SOURCE_FILES = collectSourceFiles(SRC_ROOT).filter((f) => {
   return !EXCLUDED_FILES.has(rel)
 })
 
+/**
+ * Source texts, read once per process.
+ *
+ * `readSitesOutsidePrinter` runs once per classified key (8 DISPLAY_ONLY keys
+ * alone, plus the CONSUMED walk), so reading all 332 files on every call was
+ * 2,600+ file opens for a set of contents that cannot change while the suite
+ * runs: nothing here writes to `src/`. Measured on a loaded lane-1 run, the
+ * DISPLAY_ONLY test exceeded its 15 s lane timeout doing exactly that, against
+ * ~1-2 s in isolation. One read per file is the same answer without the
+ * repeated opens.
+ */
+let sourceTextsCache: Array<string> | null = null
+function sourceTexts(): Array<string> {
+  sourceTextsCache ??= SOURCE_FILES.map((file) => readFileSync(file, "utf8"))
+  return sourceTextsCache
+}
+
 function readSitesOutsidePrinter(key: string): number {
   // Match the PARENT-QUALIFIED path, not the bare leaf. Several capability
   // names collide with wire fields of the same name — `parallel_tool_calls` is
@@ -136,8 +153,7 @@ function readSitesOutsidePrinter(key: string): number {
     parent + QUESTION + DOT + leaf,
   ]
   let n = 0
-  for (const file of SOURCE_FILES) {
-    const text = readFileSync(file, "utf8")
+  for (const text of sourceTexts()) {
     for (const needle of needles) {
       let from = text.indexOf(needle)
       while (from !== -1) {

@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import os from "node:os"
+import path from "node:path"
 
 import { buildCapabilityRejectedMessage } from "../../src/lib/error"
-import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
+import {
+  anyContractGroupMatches,
+  bundleContainsAll,
+  bundleContainsAny,
+  installedClaudeBundle,
+} from "./installed-claude"
 
 /**
  * Drift canary for the two client-owned mechanisms the overflow fix rides on.
@@ -76,6 +84,21 @@ const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
     "NVe=1e5,_ot=1e6",
     "kPe(\"CLAUDE_CODE_AUTO_COMPACT_WINDOW\",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,NVe,_ot);if(j.status!==\"invalid\"){let he=Math.max(NVe,j.effective)",
   ],
+  // 2.1.301: the pair moved into the auto-compact settings module and the
+  // parser call site was restructured to an early `if (process.env...)`
+  // guard. The bounds are unchanged (floor 1e5, cap 1e6) and the floor is
+  // still applied with Math.max, which is the property we depend on.
+  [
+    "GO=1e5,Q$=1e6",
+    'oje("CLAUDE_CODE_AUTO_COMPACT_WINDOW",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,GO,Q$);if(y.status!=="invalid"){let S=Math.max(GO,y.effective)',
+  ],
+  // 2.1.302: identifiers rolled once more, shape untouched. Still the same
+  // pair of facts - the 1e5/1e6 bounds and the `Math.max` floor applied to
+  // the parsed value before it is handed back as the env-sourced window.
+  [
+    "oI=1e5,dU=1e6",
+    'Kje("CLAUDE_CODE_AUTO_COMPACT_WINDOW",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,oI,dU);if(y.status!=="invalid"){let S=Math.max(oI,y.effective)',
+  ],
 ]
 
 describe("client overflow-contract canary", () => {
@@ -120,11 +143,10 @@ describe("client overflow-contract canary", () => {
       expect(present).toBe(true)
     }
 
-    const parserContractPresent = await Promise.all(
-      AUTO_COMPACT_CONTRACTS.map(async (markers) =>
-        (await Promise.all(markers.map((marker) => bundleContainsAny(bundle, [marker]))))
-          .every(Boolean)),
-    ).then((matches) => matches.some(Boolean))
+    const parserContractPresent = await anyContractGroupMatches(
+      bundle,
+      AUTO_COMPACT_CONTRACTS,
+    )
     if (!parserContractPresent) {
       throw new Error(
         `Auto-compact parser contract no longer appears in ${bundle}.\n`
@@ -137,4 +159,38 @@ describe("client overflow-contract canary", () => {
     }
     expect(parserContractPresent).toBe(true)
   }, 120_000)
+})
+
+describe("contract-group matching semantics", () => {
+  test("a group requires EVERY marker, and groups are alternatives to each other", async () => {
+    // Drives the same helpers the canary above uses against synthetic content,
+    // so this runs on a machine with no client installed (CI) where that canary
+    // skips. The failure it guards is silent by construction: evaluating a group
+    // with `bundleContainsAny`'s ALTERNATIVES combinator would pass on today's
+    // build and stop discriminating only once a marker disappears for real,
+    // which is exactly when nobody is looking.
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gh-router-canary-"))
+    const file = path.join(dir, "synthetic-bundle")
+    const constants = "EFe=1e5,vYe=1e6"
+    const callSite = "Math.max(EFe,U.effective)"
+    try {
+      writeFileSync(file, `${constants} and nothing else`)
+      // Half a group is not a group. The constants alone are exactly the
+      // identifiers-only match the pairing exists to reject.
+      expect(await bundleContainsAll(file, [constants, callSite])).toBe(false)
+      expect(await bundleContainsAll(file, [constants])).toBe(true)
+
+      writeFileSync(file, `${constants} ... ${callSite}`)
+      expect(await bundleContainsAll(file, [constants, callSite])).toBe(true)
+
+      // Across groups the relation is OR: a developer on an older build must
+      // keep passing on that build's group.
+      const groups = [[constants, callSite], ["GO=1e5,Q$=1e6"]]
+      expect(await anyContractGroupMatches(file, groups)).toBe(true)
+      writeFileSync(file, `${constants} and nothing else`)
+      expect(await anyContractGroupMatches(file, groups)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

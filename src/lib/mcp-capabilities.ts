@@ -874,3 +874,40 @@ export function semanticSearchEnabled(): boolean {
   return colbertSearchEnabled()
 }
 
+
+/**
+ * Gate for the Azure DevOps MCP group (`mcp__ado__*`).
+ *
+ * Returns true iff `setupAndServe` resolved the group ON. The flag is the
+ * whole predicate: unlike `browserToolsEnabled()` there is no separate
+ * installed-dependency probe, because the launch path already performed the
+ * only availability check that matters — it fetched the upstream `tools/list`
+ * and turned the group off when that failed (see `provisionAdoTools` in
+ * `~/lib/ado-tools`). Re-deriving reachability here would either duplicate a
+ * network call on every `tools/list` or disagree with the snapshot that
+ * `tools/list` is about to serve.
+ */
+export function adoToolsEnabled(): boolean {
+  return state.adoEnabled
+}
+
+/**
+ * Gate for the Kusto MCP group (`mcp__kusto__*`).
+ *
+ * Returns true iff `setupAndServe` resolved the group ON, exactly like
+ * `adoToolsEnabled()`. It once ALSO required a configured cluster, on the
+ * grounds that five tools whose every call fails with "no cluster configured"
+ * are the empty-server smell. Per-call clusters retire that: the group is
+ * useful with no launch cluster at all, because the CALL names one, so the old
+ * arm would hide a working capability.
+ *
+ * The removed normalize probe has a replacement, and it is not a weaker one: a
+ * malformed launch cluster used to make the whole group vanish silently, while
+ * now the group lists and only the call that actually falls back to the bad
+ * default fails, with the normalizer's own message naming the expectation. That
+ * is a strictly better signal, and it costs nothing on a session that passes an
+ * explicit `cluster`.
+ */
+export function kustoToolsEnabled(): boolean {
+  return state.kustoEnabled
+}

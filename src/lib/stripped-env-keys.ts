@@ -52,6 +52,12 @@ export const STRIPPED_AUTH_ROUTING_ENV_KEYS = [
   // Optional Bluebird MCP bearer override. The router may consume it, but the
   // spawned CLI and its descendant tools/MCPs must never inherit it.
   "BLUEBIRD_TOKEN",
+  // Azure DevOps remote MCP bearer override. Same rule as BLUEBIRD_TOKEN:
+  // the router may consume it, the spawned CLI and every tool/MCP under it
+  // must never see it.
+  "ADO_MCP_TOKEN",
+  // Kusto (Azure Data Explorer) bearer override. Same rule.
+  "KUSTO_TOKEN",
   // Codex CLI auth surface
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",

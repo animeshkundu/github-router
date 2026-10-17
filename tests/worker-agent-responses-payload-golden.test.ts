@@ -20,6 +20,12 @@ import type {
   Context,
   Model as PiModel,
 } from "@earendil-works/pi-ai"
+// Value import: since the Pi v1.3.0 agent core the `StreamFn` contract takes a
+// normalized `TranscriptContext`, which only `normalizeContext` produces. The
+// fixtures stay in the natural `Context` shape and are normalized at the single
+// call boundary below, so this golden still pins the real
+// `Context → normalizeContext → buildResponsesPayload` path.
+import { normalizeContext } from "@earendil-works/pi-ai"
 
 import { state } from "~/lib/state"
 import type { Model } from "~/services/copilot/get-models"
@@ -264,7 +270,7 @@ async function drainWith(
   ctx: Context,
 ): Promise<Record<string, unknown>> {
   const streamFn = createCopilotStreamFn({ resolved })
-  const stream = await streamFn(NOOP_MODEL, ctx, undefined)
+  const stream = await streamFn(NOOP_MODEL, normalizeContext(ctx), undefined)
   // Drive the stream to completion so the upstream fetch runs and is captured.
   for await (const ev of stream) {
     if (ev.type === "error") break

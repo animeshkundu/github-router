@@ -135,8 +135,10 @@ import {
   resolveLeadSlugArg,
 } from "./lib/port"
 import {
+  adoToolsEnabled,
   agentToolsEnabled,
   artifactToolsEnabled,
+  kustoToolsEnabled,
   browseAgentEnabled,
   browserCompoundToolsEnabled,
   browserToolsEnabled,
@@ -1069,6 +1071,8 @@ export const claude = defineCommand({
       await stopKeepAwake()
       const { disposeBluebirdClients } = await import("./lib/bluebird-client")
       await disposeBluebirdClients()
+      const { disposeAdoClients } = await import("./lib/ado-tools")
+      await disposeAdoClients()
       await removeOwnClaudeConfigMirror()
       await removeAicLedgerFile()
     }
@@ -1256,6 +1260,16 @@ export const claude = defineCommand({
         if (directBrowserAvailable && (!fastDescriptor.allowedGroups || fastDescriptor.allowedGroups.has("browser"))) {
           enabledGroups.push("browser")
         }
+        // Azure read-only lookups. These are data lookups like `search`, not
+        // agent spawners, so every profile that allows `search` allows them
+        // too; the descriptor gate is still consulted rather than assumed, so
+        // a future profile can drop them without touching this line. `ado` is
+        // already false here when its launch probe failed, which is how a
+        // listed-but-uncallable group is avoided.
+        const allowsGroup = (group: McpGroup): boolean =>
+          !fastDescriptor.allowedGroups || fastDescriptor.allowedGroups.has(group)
+        if (adoToolsEnabled() && allowsGroup("ado")) enabledGroups.push("ado")
+        if (kustoToolsEnabled() && allowsGroup("kusto")) enabledGroups.push("kusto")
         if (!isPinnedProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
         if (!isPinnedProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
         if (isMaxProfile && fleetToolsEnabled()) enabledGroups.push("fleet")

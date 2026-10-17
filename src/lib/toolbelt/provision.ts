@@ -37,7 +37,7 @@ import process from "node:process"
 
 import consola from "consola"
 
-import { resolveExecutable, runCommandCapture } from "../exec"
+import { isWindowsScriptShim, resolveExecutable, runCommandCapture } from "../exec"
 import { PATHS } from "../paths"
 import { withInstallLock } from "../update-lock"
 
@@ -120,9 +120,13 @@ async function pruneUnexpected(binDir: string): Promise<void> {
 
 async function provisionRg(binDir: string, skip: Set<string>): Promise<void> {
   const dest = path.join(binDir, "rg" + EXE_EXT)
-  if (skip.has("rg") || resolveExecutable("rg")) {
-    // User has rg (or skipped) — don't shadow it. code_search uses its
-    // own resolver regardless.
+  const pathRg = resolveExecutable("rg")
+  if (skip.has("rg") || (pathRg && !isWindowsScriptShim(pathRg))) {
+    // User has a LAUNCHABLE rg (or skipped) — don't shadow it. code_search
+    // uses its own resolver regardless. A Windows `.cmd` shim does not count:
+    // the toolbelt's consumers spawn with `shell:false`, which cannot launch
+    // one, so yielding to it would materialize nothing and leave every caller
+    // with an EINVAL.
     await removeBin(dest)
     return
   }
@@ -199,7 +203,17 @@ async function provisionTool(
   // router-owned paths first, so ours wins where it matters while the
   // user's shell keeps theirs.
   const onPath = resolveExecutable(spec.command)
-  if (onPath && (await pathCopyIsAdequate(spec, onPath))) {
+  // A Windows `.cmd`/`.bat` copy is never adequate, whatever version it
+  // reports. `pathCopyIsAdequate` may find it new enough, because its probe
+  // goes through `buildExecInvocation` and CAN read a shim; every consumer of
+  // the materialized tools instead spawns with `shell:false`, and
+  // CreateProcess refuses a script with EINVAL. The observed case was a
+  // globally npm-installed ast-grep 0.45.3: it satisfied `minVersion`, we
+  // yielded to it, and `mode:"ast"` could not launch at all on the canonical
+  // Windows host. Materializing ours is safe — the toolbelt bin dir is
+  // prepended for agents and code search consults the router-owned paths
+  // first, so the user's own shell keeps its copy untouched.
+  if (onPath && !isWindowsScriptShim(onPath) && (await pathCopyIsAdequate(spec, onPath))) {
     await removeTool(spec, binDir)
     return
   }

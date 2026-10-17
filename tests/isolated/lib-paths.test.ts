@@ -1886,6 +1886,207 @@ test("ensureClaudeConfigMirror SHARED-symlink concurrent wrong-target replace: p
   expect(tempLitter).toEqual([])
 })
 
+test("ensureClaudeConfigMirror accepts a lost .claude.json rename when the winner APPLIED the gate (a destination that got better)", async () => {
+  // Why acceptance is not byte equality. The write path used to accept a
+  // lost rename only when the on-disk bytes equalled its own `desiredJson`,
+  // on the stated premise that "the write content is fully deterministic ...
+  // so a successful rename by ANY racer produces the same bytes we'd
+  // produce". The source-priority list includes this very mirror file, so a
+  // racer whose lstat lands after another racer's write merges from the
+  // mirror and legitimately computes different bytes: the premise is false
+  // by construction, and the benign loser threw out of the launch.
+  //
+  // What has to be true instead is that the destination got BETTER while we
+  // were failing. Here it had no gate at all before the write attempt and a
+  // valid gate afterwards, which is the from-scratch shape: somebody applied
+  // the gate to this path, i.e. the job this call does.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  const mirrorJsonPath = path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json")
+
+  // A DIFFERENT writer's merge: the gate is applied (so accepting it is
+  // correct) plus a key our own merge would never emit (so the bytes are
+  // guaranteed unequal to `desiredJson`, which is what makes this the
+  // non-byte-equality case).
+  const concurrentMerge = JSON.stringify(
+    {
+      hasCompletedOnboarding: true,
+      bypassPermissionsModeAccepted: true,
+      oauthAccount: {
+        accountUuid: "11111111-1111-1111-1111-111111111111",
+        organizationUuid: "22222222-2222-2222-2222-222222222222",
+      },
+      writtenByConcurrentRacer: true,
+    },
+    null,
+    2,
+  ) + "\n"
+
+  const originalRename = fs.rename
+  const renameSpy = mock(async (from: string, to: string) => {
+    // Fail only the .claude.json replace; the credentials write and the
+    // SHARED-slot renames must behave normally or the test would be
+    // exercising a different failure. The winner's file is materialized
+    // before the throw: that is what a real cross-process race leaves behind
+    // (their rename succeeds, ours does not).
+    if (String(to).endsWith(".claude.json")) {
+      await fs.writeFile(to, concurrentMerge, "utf8")
+      const err = new Error("simulated rename failure (lost race)") as NodeJS.ErrnoException
+      err.code = "EPERM"
+      throw err
+    }
+    return originalRename(from, to)
+  })
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  try {
+    await expectFsSpyInstalled("rename", renameSpy)
+    await expect(ensureClaudeConfigMirror()).resolves.toBeUndefined()
+  } finally {
+    ;(fs as unknown as { rename: unknown }).rename = originalRename
+  }
+
+  // The raced file is the one on disk (we accepted it, we did not overwrite
+  // it with our merge) and the gate the postcondition asserts holds.
+  const applied = JSON.parse(await fs.readFile(mirrorJsonPath, "utf8")) as Record<
+    string,
+    unknown
+  >
+  expect(applied.writtenByConcurrentRacer).toBe(true)
+  expect(applied.hasCompletedOnboarding).toBe(true)
+  expect(applied.bypassPermissionsModeAccepted).toBe(true)
+})
+
+test("ensureClaudeConfigMirror accepts a lost .claude.json rename when the bytes on disk are exactly what it meant to write", async () => {
+  // The other acceptable shape, and the stronger evidence: whoever wrote the
+  // destination wrote the merge this call computed, byte for byte. Nothing
+  // was dropped, so nothing is reported.
+  //
+  // Reachable via a racer that merged from the same source we did. The setup
+  // below produces it deterministically: the HOME-level source makes the
+  // merge a pure function of that file, so the second call computes the very
+  // bytes the first call already installed.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  const homeLevelClaudeJson = path.join(tempDir, ".claude.json")
+  await fs.writeFile(
+    homeLevelClaudeJson,
+    JSON.stringify({ marker: "byte-equality-case", mcpServers: { user: {} } }, null, 2),
+    "utf8",
+  )
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await ensureClaudeConfigMirror()
+
+  const mirrorJsonPath = path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json")
+  const before = await fs.readFile(mirrorJsonPath, "utf8")
+
+  const originalRename = fs.rename
+  const renameSpy = mock(async (from: string, to: string) => {
+    if (String(to).endsWith(".claude.json")) {
+      const err = new Error("simulated rename failure (lost race)") as NodeJS.ErrnoException
+      err.code = "EPERM"
+      throw err
+    }
+    return originalRename(from, to)
+  })
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  try {
+    await expectFsSpyInstalled("rename", renameSpy)
+    await expect(ensureClaudeConfigMirror()).resolves.toBeUndefined()
+    // The spy really was on the failing path: this test would pass vacuously
+    // if the write had been skipped before the rename.
+    expect(
+      renameSpy.mock.calls.some((call) => String(call[1]).endsWith(".claude.json")),
+    ).toBe(true)
+  } finally {
+    ;(fs as unknown as { rename: unknown }).rename = originalRename
+  }
+
+  expect(await fs.readFile(mirrorJsonPath, "utf8")).toBe(before)
+  await fs.unlink(homeLevelClaudeJson).catch(() => {})
+})
+
+test("ensureClaudeConfigMirror REFUSES a lost .claude.json rename when the destination only already had the gate (a real write failure must not pass as a race)", async () => {
+  // The finding this pins. The previous shape of the tolerance accepted any
+  // gate-valid destination, and a gate-valid destination is exactly what a
+  // legacy `~/.claude/.claude.json` shadow (or any mirror an earlier launch
+  // prepared) provides — with or without our write. So a genuine failure
+  // (disk full, an antivirus holding the file, a read-only profile) was
+  // accepted silently: the merge, including the user's user-scope MCPs and
+  // settings, never reached the mirror and one `consola.debug` was the only
+  // trace. The launch must fail loudly instead.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  await fs.unlink(path.join(tempDir, ".claude.json")).catch(() => {})
+  await fs.rm(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, force: true })
+  await fs.mkdir(PATHS.CLAUDE_CONFIG_DIR, { recursive: true, mode: 0o700 })
+
+  const mirrorJsonPath = path.join(PATHS.CLAUDE_CONFIG_DIR, ".claude.json")
+  const staleButValid = JSON.stringify(
+    {
+      hasCompletedOnboarding: true,
+      bypassPermissionsModeAccepted: true,
+      oauthAccount: {
+        accountUuid: "11111111-1111-1111-1111-111111111111",
+        organizationUuid: "22222222-2222-2222-2222-222222222222",
+      },
+      staleFromAnEarlierLaunch: true,
+    },
+    null,
+    2,
+  ) + "\n"
+  await fs.writeFile(mirrorJsonPath, staleButValid, "utf8")
+
+  const originalRename = fs.rename
+  const renameSpy = mock(async (from: string, to: string) => {
+    if (String(to).endsWith(".claude.json")) {
+      const err = new Error("simulated rename failure (lost race)") as NodeJS.ErrnoException
+      err.code = "EPERM"
+      throw err
+    }
+    return originalRename(from, to)
+  })
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  let refusal: Error | null = null
+  try {
+    await expectFsSpyInstalled("rename", renameSpy)
+    try {
+      await ensureClaudeConfigMirror()
+    } catch (err) {
+      refusal = err as Error
+    }
+  } finally {
+    ;(fs as unknown as { rename: unknown }).rename = originalRename
+  }
+  expect(refusal).toBeInstanceOf(Error)
+  expect(refusal!.message).toContain("already held the onboarding gate before this write")
+  // The syscall failure is still named: a diagnosis that reported only the
+  // policy reason would send the reader hunting for a logic bug instead of a
+  // filesystem one.
+  expect(refusal!.message).toContain("simulated rename failure")
+  // Nothing was clobbered: the stale file is still what is on disk.
+  expect(await fs.readFile(mirrorJsonPath, "utf8")).toBe(staleButValid)
+
+  // And the shape the earlier version of this test pinned, which must keep
+  // throwing: a destination that cannot hold the gate at all.
+  await fs.writeFile(mirrorJsonPath, "{ not json", "utf8")
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  try {
+    await expectFsSpyInstalled("rename", renameSpy)
+    await expect(ensureClaudeConfigMirror()).rejects.toThrow(
+      /does not hold the onboarding gate either/,
+    )
+  } finally {
+    ;(fs as unknown as { rename: unknown }).rename = originalRename
+  }
+})
+
 // ============================================================
 // Round-3 G2: diagnostic test for the SHARED-symlink fast path
 // ============================================================
@@ -2051,6 +2252,77 @@ test("ensureSharedSymlink: rename failure surfaces a consola.warn and cleans up 
   } finally {
     ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
     ;(fs as unknown as { unlink: typeof fs.unlink }).unlink = originalUnlink
+    ;(consola as unknown as { warn: typeof consola.warn }).warn = originalWarn
+  }
+})
+
+test("ensureSharedSymlink: a rename that lost a race to a sibling's correct junction does NOT warn", async () => {
+  // Companion to G5 above, which pins the genuine-failure branch to a warn.
+  // This pins the branch that must stay QUIET. Under contention on Windows
+  // (two startups, or one startup racing a stale sweep) the loser's rename
+  // fails against a destination that is momentarily open while the slot is
+  // already pointing at the right source — the state the function exists to
+  // produce. Warning on that made the contended path emit dozens of EPERM
+  // warns per startup, and a warn stream that is usually expected noise is
+  // how a real rename failure hides (the exact bug class the G5 warn was
+  // added for), so "verify before shouting" is a correctness property here,
+  // not cosmetic.
+  const claudeHome = path.join(tempDir, ".claude")
+  await fs.rm(claudeHome, { recursive: true, force: true })
+  await fs.mkdir(claudeHome, { recursive: true })
+  const mirrorDir = path.join(
+    tempDir,
+    `mirror-rename-race-${randomBytes(4).toString("hex")}`,
+  )
+  await fs.mkdir(mirrorDir, { recursive: true })
+
+  // Wrong-target junction at the slot: the replace path, and the decoy is
+  // intact so the fast path cannot return early.
+  const decoy = path.join(tempDir, `decoy-race-${randomBytes(4).toString("hex")}`)
+  await fs.mkdir(decoy, { recursive: true })
+  const slotPath = path.join(mirrorDir, "projects")
+  const sourcePath = path.join(claudeHome, "projects")
+  await fs.symlink(
+    decoy,
+    slotPath,
+    process.platform === "win32" ? "junction" : "dir",
+  )
+
+  const originalRename = fs.rename
+  const originalWarn = consola.warn
+  const warnSpy = mock(originalWarn.bind(consola))
+  // The sibling racer: it installs the correct junction between our unlink
+  // and our rename, so our rename lands and then fails against the fresh
+  // target. Doing the real rename first is what makes the simulation
+  // faithful instead of merely asserting on a stubbed error.
+  const renameSpy = mock(async (from: string, to: string) => {
+    await fs.unlink(to).catch(() => {})
+    await originalRename(from, to)
+    const err = new Error(
+      "simulated rename failure (sibling won the race)",
+    ) as NodeJS.ErrnoException
+    err.code = "EPERM"
+    throw err
+  })
+  ;(fs as unknown as { rename: unknown }).rename = renameSpy
+  ;(consola as unknown as { warn: unknown }).warn = warnSpy
+  try {
+    await expectFsSpyInstalled("rename", renameSpy)
+    await expectConsolaSpyInstalled("warn", warnSpy)
+
+    await __testing.ensureSharedSymlink("projects", claudeHome, mirrorDir)
+
+    // The failing branch really did run...
+    expect(renameSpy).toHaveBeenCalled()
+    // ...the slot really does resolve to the source...
+    expect(await fs.realpath(slotPath)).toBe(await fs.realpath(sourcePath))
+    // ...and the losing racer stayed silent.
+    const warnedAboutRename = warnSpy.mock.calls.some(
+      (call) => typeof call[0] === "string" && call[0].includes("rename"),
+    )
+    expect(warnedAboutRename).toBe(false)
+  } finally {
+    ;(fs as unknown as { rename: typeof fs.rename }).rename = originalRename
     ;(consola as unknown as { warn: typeof consola.warn }).warn = originalWarn
   }
 })

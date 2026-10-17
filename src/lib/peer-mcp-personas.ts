@@ -24,6 +24,11 @@
 import path from "node:path"
 
 import { ARTIFACT_TOOLS } from "./artifact/tools"
+import {
+  CHEAPEST_REWRITE_EFFORT,
+  CHEAPEST_REWRITE_MODEL,
+} from "./cheapest-prompt-rewrite"
+import { runHookPromptBrief } from "./hook-prompt-brief"
 import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
 import { MAX_PROFILE_MODELS } from "./max-profile-contract"
 import {
@@ -34,6 +39,10 @@ import {
 import type { McpToolResult } from "./attachments"
 import { FLEET_TOOLS } from "./fleet/tools"
 import { FIRST_MATE_TOOLS } from "./first-mate/tools"
+// Kusto's five tools are static. This is NOT a cycle: `kusto-tools` imports
+// `NonPersonaMcpTool` from here with `import type`, which the compiler elides,
+// so nothing at runtime reaches back into this module during its init.
+import { KUSTO_TOOLS } from "./kusto-tools"
 import { runUnifiedCodeSearch } from "./unified-code-search"
 // Static import is safe: the previous module-init cycle (peer-mcp-personas
 // → worker-agent/index → engine → tools → peer-mcp-personas) was caused
@@ -81,6 +90,11 @@ import {
 // and avoids the worker-agent index cycle.
 import { relaySafeText } from "~/lib/worker-agent/relay-cap"
 import { searchWeb } from "~/services/copilot/web-search"
+// Same direction `~/lib/orchestration/decompose-live` already imports it, which
+// is what makes this cycle (handler -> personas -> handler) pre-existing rather
+// than new. The binding is read only inside `prompt_brief`'s handler, never at
+// module init, so the cycle resolves to live bindings and not to a TDZ.
+import { dispatchModelCall } from "~/routes/mcp/handler"
 import { runStandIn, type StandInInput } from "~/lib/stand-in"
 import { state } from "~/lib/state"
 import { verifyWorkflowIR, decomposeWorkflow, attestRun, type AttestNode, type WorkflowIR } from "~/lib/orchestration"
@@ -108,7 +122,7 @@ import { runWorkflowLive } from "~/lib/orchestration/run-workflow-live"
  *   - `fleet`   — remote ai-or-die session-control tools
  *   - `first-mate` — durable GitHub cloud-agent controller tools
  */
-export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide" | "fleet" | "first-mate"
+export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide" | "fleet" | "first-mate" | "ado" | "kusto"
 /** Either a single group (scoped endpoint) or the full union (`/mcp`). */
 export type McpScope = McpGroup | "all"
 export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
@@ -120,6 +134,8 @@ export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
   "decide",
   "fleet",
   "first-mate",
+  "ado",
+  "kusto",
 ])
 
 export interface McpGroupMeta {
@@ -147,6 +163,8 @@ export const GROUP_META: Record<McpGroup, McpGroupMeta> = Object.freeze({
   decide: { preferredKey: "decide", urlSuffix: "decide", serverInfoName: "github-router-decide" },
   fleet: { preferredKey: "fleet", urlSuffix: "fleet", serverInfoName: "github-router-fleet" },
   "first-mate": { preferredKey: "first-mate", urlSuffix: "first-mate", serverInfoName: "github-router-first-mate" },
+  ado: { preferredKey: "ado", urlSuffix: "ado", serverInfoName: "github-router-ado" },
+  kusto: { preferredKey: "kusto", urlSuffix: "kusto", serverInfoName: "github-router-kusto" },
 })
 
 /** True iff `s` is a registered group name (route `:group` param validation). */
@@ -1411,7 +1429,21 @@ export interface NonPersonaMcpTool {
    * Absent on `web` / `code`; those are always available once the proxy is
    * in claude mode (loopback + nonce already gate `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "agents" | "artifact"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "agents" | "artifact" | "kusto" | "ado"
+  /**
+   * Hook-channel only: CALLABLE, but never advertised in `tools/list`.
+   *
+   * This is the one honest exception to "every tool is model-visible", and it
+   * exists because `prompt_brief` is not the model's tool. The brief it returns
+   * is injected ABOVE the model's own turn by the Pi extension's
+   * `before_agent_start` handler — the model never decides to call it. Listing
+   * it would spend context on a name the model must never use, and a model that
+   * DID call it would get a rewrite of its own prompt back, which is circular
+   * and useless. `handleToolsCall` looks tools up in `allNonPersonaTools()`, a
+   * different path from `toolEntries()`, so filtering it out of the list leaves
+   * it fully callable over the authenticated hook channel.
+   */
+  hookOnly?: true
   /**
    * Server-side handler. Receives the raw `arguments` object from the
    * `tools/call` request and an optional AbortSignal that is signalled
@@ -2034,6 +2066,114 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
           const msg = err instanceof Error ? err.message : String(err)
           return {
             content: [{ type: "text", text: `code search failed: ${msg}` }],
+            isError: true,
+          }
+        }
+      },
+    },
+    // HOOK CHANNEL ONLY (`hookOnly`): the Pi extension's `before_agent_start`
+    // handler calls this to get the cheapest-profile EXECUTION BRIEF for the
+    // prompt the user just typed, and injects the text above the model's turn.
+    // The model never calls it and never sees it in `tools/list` — see the
+    // `hookOnly` field doc for why listing it would be worse than useless.
+    //
+    // It lives in `search` because that group is the one every launch profile
+    // enables (`resolveSearchFlags` writes `state.searchEnabled` for all of
+    // them), so the Pi extension can always reach it at `/mcp/search` without a
+    // profile-specific carve-out. The rewrite itself is `runCheapestRewrite`
+    // over the same grounding search the `code` tool serves.
+    //
+    // WHY SERVER-SIDE, and not in the extension: the extension is a generated
+    // STRING executed by the installed Pi CLI with no import surface, so it
+    // cannot reach `cheapest-prompt-rewrite`, `callInference`, or the repo. The
+    // brief has to be produced where that code lives.
+    {
+      toolNameHttp: "prompt_brief",
+      group: "search",
+      hookOnly: true,
+      description:
+        "Internal hook channel: returns the cheapest-profile grounded execution brief for one user prompt. Called by the Pi extension's before_agent_start handler, never by the model. Returns an empty text block when the profile is not cheapest, the prompt is trivial, the session already spent its rewrite, or the rewrite missed.",
+      inputSchema: {
+        type: "object",
+        required: ["prompt", "session_id"],
+        additionalProperties: false,
+        properties: {
+          prompt: {
+            type: "string",
+            description: "The user prompt to brief, verbatim.",
+          },
+          session_id: {
+            type: "string",
+            description:
+              "Pi session id. Keys the one-shot per-session rewrite flag, so the "
+              + "first non-trivial prompt of a session spends the rewrite and "
+              + "later prompts reuse the brief the model already has.",
+          },
+          workspace: {
+            type: "string",
+            description:
+              "Absolute path to search for grounding. Defaults to the session "
+              + "workspace header when omitted.",
+          },
+        },
+      },
+      async handler(
+        args: Record<string, unknown>,
+        signal?: AbortSignal,
+        ctx?: McpToolCallContext,
+      ): Promise<McpToolResult> {
+        const prompt = typeof args.prompt === "string" ? args.prompt : ""
+        const sessionId =
+          typeof args.session_id === "string" ? args.session_id : ""
+        const workspace =
+          typeof args.workspace === "string" ? args.workspace : ""
+        if (prompt.trim().length === 0 || sessionId.trim().length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "prompt_brief: arguments.prompt and arguments.session_id are required (non-empty strings)",
+              },
+            ],
+            isError: true,
+          }
+        }
+        try {
+          const result = await runHookPromptBrief({
+            prompt,
+            sessionId,
+            workspace,
+            // `ctx.profileId` is the launch's registered profile, which is what
+            // eligibility keys on. Absent (a raw MCP client on the unscoped
+            // union) reads as not-cheapest, which is the correct default: the
+            // brief is a cheapest-profile contract.
+            profile: ctx?.profileId ?? "standard",
+            // Search capability for grounding. Bluebird replaces the local
+            // engine when it is on, so `runUnifiedCodeSearch` routes it; the
+            // flags only decide whether the SEMANTIC round is attempted at all.
+            searchEnabled: state.searchEnabled === true,
+            bluebirdEnabled: state.bluebirdEnabled === true,
+            signal,
+            infer: (system, user, callSignal) =>
+              dispatchModelCall({
+                model: CHEAPEST_REWRITE_MODEL,
+                endpoint: "/v1/responses",
+                instructions: system,
+                userText: user,
+                effort: CHEAPEST_REWRITE_EFFORT,
+                signal: callSignal,
+              }),
+          })
+          // An empty text block is the "no brief" answer the extension treats as
+          // "inject nothing" — a MISS is not an error, and marking it `isError`
+          // would make the extension log a failure for the ordinary case.
+          return {
+            content: [{ type: "text", text: result.brief ?? "" }],
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return {
+            content: [{ type: "text", text: `prompt_brief failed: ${msg}` }],
             isError: true,
           }
         }
@@ -3086,7 +3226,30 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "browser" as const,
       toolNameHttp: t.toolNameHttp.replace(/^browser_/, ""),
     })),
+    // Kusto is static (five hand-written tools over the in-repo client) and
+    // therefore joins the frozen registry that the boot assertion pins. The
+    // `ado` group is the one dynamic member and is NOT here — see
+    // `~/lib/ado-tools` for why, and `allNonPersonaTools()` in the MCP
+    // handler for the single accessor that folds it in.
+    ...KUSTO_TOOLS,
   ])
+
+/**
+ * Every MCP tool name the proxy serves itself: the personas (definitionally the
+ * `peers` group) plus the non-persona utilities.
+ *
+ * Exported because a dynamic upstream listing has to refuse these too. The
+ * Azure DevOps server forwards `tools/list` verbatim, so an upstream rename
+ * could hand back a name this proxy already owns; `handleToolsCall` keys
+ * dispatch on the bare name, so the caller would see the tool listed and reach
+ * the proxy's own handler instead.
+ */
+export function proxyOwnedMcpToolNames(): ReadonlySet<string> {
+  const names = new Set<string>()
+  for (const p of [...PERSONAS_READ, ...PERSONAS_WRITE]) names.add(p.toolNameHttp)
+  for (const t of NON_PERSONA_MCP_TOOLS) names.add(t.toolNameHttp)
+  return names
+}
 
 /**
  * Startup invariant: every MCP tool name must be unique within its group

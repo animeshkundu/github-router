@@ -73,6 +73,7 @@ import {
   type TreeSitterPool,
 } from "~/lib/tree-sitter-pool/pool";
 import {
+  isWindowsScriptShim,
   resolveExecutable,
   runManagedExeCapture,
   spawnTaskkillBestEffort,
@@ -1927,8 +1928,17 @@ export function resolveAstGrep(): string | null {
     if (existsSync(candidate)) return candidate;
   }
 
-  // `ast-grep` is unambiguous and safe to resolve from the system PATH.
-  return resolveExecutable("ast-grep", { env: process.env });
+  // `ast-grep` is unambiguous and safe to resolve from the system PATH —
+  // but only when the result is something this module can actually LAUNCH.
+  // Every caller here spawns with `shell:false`, and CreateProcess refuses a
+  // batch script with EINVAL, so an npm-installed `ast-grep.cmd` is not a
+  // usable binary: returning it turned every `mode:"ast"` call into
+  // "ast-grep failed to launch" while `sgAvailable` in the test gate, and
+  // `scripts/ensure-ast-grep.ts` in CI, both read it as available. `null`
+  // is the honest answer, and it is the one that lets the toolbelt gap-fill
+  // materialize the router-owned `.exe` instead (see `toolbelt/provision`).
+  const fromPath = resolveExecutable("ast-grep", { env: process.env });
+  return fromPath && !isWindowsScriptShim(fromPath) ? fromPath : null;
 }
 
 /**

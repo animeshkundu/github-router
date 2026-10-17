@@ -1701,4 +1701,38 @@ describe("getPiLaunchEnvVars npm quiet", () => {
       else process.env.GH_ROUTER_PI_VERBOSE_NPM = prior
     }
   })
+
+  test("an inherited npm_config_allow_scripts is emptied for the Pi child", () => {
+    // npm >= 11.19 throws EALLOWSCRIPTS when allow-scripts arrives from the
+    // CLI/env layer of a project-scoped install, which is exactly what Pi's
+    // per-boot `npm install <pkg> --prefix <mirror>/npm` is. Emitting `''`
+    // (rather than inheriting the value) lets npm fall through to the
+    // .npmrc cascade. Measured on npm 11.19.1: with the export present the
+    // install fails; with it emptied the same install succeeds.
+    const prior = process.env.npm_config_allow_scripts
+    process.env.npm_config_allow_scripts = "koffi"
+    try {
+      const vars = getPiLaunchEnvVars("/tmp/mirror")
+      expect(vars.npm_config_allow_scripts).toBe("")
+    } finally {
+      if (prior === undefined) delete process.env.npm_config_allow_scripts
+      else process.env.npm_config_allow_scripts = prior
+    }
+  })
+
+  test("the allow-scripts neutralization is independent of the verbosity opt-out", () => {
+    // GH_ROUTER_PI_VERBOSE_NPM is about log noise, not about whether Pi can
+    // install its packages at all - a regression that folded this into the
+    // verbosity block would reintroduce a launch-killing failure exactly for
+    // operators who asked for stock npm output.
+    const prior = process.env.GH_ROUTER_PI_VERBOSE_NPM
+    process.env.GH_ROUTER_PI_VERBOSE_NPM = "1"
+    try {
+      const vars = getPiLaunchEnvVars("/tmp/mirror")
+      expect(vars.npm_config_allow_scripts).toBe("")
+    } finally {
+      if (prior === undefined) delete process.env.GH_ROUTER_PI_VERBOSE_NPM
+      else process.env.GH_ROUTER_PI_VERBOSE_NPM = prior
+    }
+  })
 })

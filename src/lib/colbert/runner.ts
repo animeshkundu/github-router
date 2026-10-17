@@ -279,6 +279,19 @@ export async function runSemanticSearch(opts: {
   const fresh = await freshnessVerdict(workspace)
 
   switch (fresh.verdict) {
+    case "unsupported":
+      // No prebuilt colgrep/ORT asset for this platform-arch. This is not a
+      // transient state and no query can change it, so do NOT kick a
+      // background init: that build fails at the binary lookup
+      // ("colgrep binary is missing") and burns a failure streak with
+      // backoff on a workspace whose index may be perfectly good.
+      return {
+        status: "unavailable",
+        isError: true,
+        notice:
+          `semantic search has no prebuilt engine for this platform ` +
+          `(${process.platform}-${process.arch}); use code_search with specific symbol/keyword terms`,
+      }
     case "absent": {
       // Never indexed → kick a debounced background init, tell the model
       // it's not available yet (isError per the contract's defense-in-

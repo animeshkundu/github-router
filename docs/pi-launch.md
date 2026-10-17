@@ -56,9 +56,11 @@ plus the mode identity. Each surface rides a flag:
 | `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: `pi-mcp-adapter`, allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer and no `files` picker, whose `ctrl+shift+o` would collide with the UI's extra-detail toggle), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
 | `--ui` / `--no-ui` | **on** | Claude-Code look: genuine `claude-code-dark` theme (`#D77757` coral palette; all six CC variants pickable via `/settings`), fixed Claude palette in tool rows (`themeAdaptive: false`), one-line tool rows (`summary`/`count` modes), transparent tool backgrounds. Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag (the cc-ui `Thought for Xs` one-liner has no off switch upstream — it is the minimum). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
 | `--swe` | off | Pipeline surface: `gh-delegate` (+cheapest `gh-advisor`) skills, `review` / `parallel-review` (+cheapest `plan-review`) prompts |
-| `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill (tool and prose appear together or not at all) |
+| `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill. The prose rides this flag alone; the tool also appears under `--bluebird`, below |
 | `--browse` | off | Browser tool surface when a supported browser is installed |
-| `--bluebird` | off | No Pi-side surface; reaches Bluebird server-side through `/mcp/search/code` |
+| `--bluebird` | auto on an Azure DevOps remote | Routes the `code` tool's `semantic` and `lexical` modes to Bluebird server-side, and emits the `code_search` seam **even without `--search`** — same tool, remote engine, and the description says so (no local fallback: a failure is `source:"error"`, not an empty result). `gh-search-first` prose and `pi-web-access` deliberately stay on `--search`: neither is Bluebird's job |
+| `--ado` | auto on an Azure DevOps remote | `ado` MCP group, reached through `pi-mcp-adapter` from `<mirror>/mcp.json` (key `gh-router-ado` -> `<serverUrl>/mcp/ado`, read-only unless `--ado-write`). Needs `--helpers` **and** `--peers`; either one off leaves Pi with no Azure MCP surface |
+| `--kusto` | auto on an Azure DevOps remote | `kusto` MCP group by the same route (key `gh-router-kusto`). A remote enables it and the flag forces it anywhere; `--kusto-cluster` only sets a default, and without one every call names the cluster it queries. There is no launch-side reachability probe: the group is served read-only by the service |
 | `--memory-bridge` / `--no-memory-bridge` | **on** | Copilot (`.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` `applyTo`) + Claude (`.claude/rules/`, `.claude/CLAUDE.md`, `~/.claude/CLAUDE.md`, `~/.copilot/copilot-instructions.md`) bridge. Static repo-wide slice synthesizes into the mirror `AGENTS.md` (Pi-native candidate, 24KB budget, secrets-redacted, fenced idempotent); path-scoped rules lazy-attach on matching `read/edit/write` (once/session). Auto-memory (`~/.claude/projects/<slug>/memory/MEMORY.md`, 200-line/25KB) is on-demand via `/memory` only, never auto-injected. Honors `GH_ROUTER_PI_BRIDGE=0` / `GH_ROUTER_DISABLE_PI_BRIDGE=1` and Pi's own `--no-context-files`/`-nc` passthrough. `--no-memory-bridge` = Pi-native `AGENTS.md`/`CLAUDE.md` discovery only. |
 
 Always injected regardless of flags (like Claude's operating
@@ -68,6 +70,20 @@ the `gh-router-pi` extension — no third-party package; opt out with
 `GH_ROUTER_DISABLE_AIC_STATUSLINE=1`), toolbelt PATH (opt out with
 `GH_ROUTER_DISABLE_TOOLBELT=1`), launch binding. The user's own
 `~/.pi/agent` snapshot is their Pi default, never gated.
+
+**Pi's own `mcp.json`.** The two Azure groups have no extension seam, so they are
+published through Pi's own MCP config in the mirror (`<mirror>/mcp.json`, which
+`pi-mcp-adapter` reads as a user-global source on Pi 0.99+). The file is written
+only when a group is enabled *and* the adapter ships (`--helpers` + `--peers`),
+is read-merged so a user's own `mcpServers` survive untouched, and carries the
+bearer as `Bearer ${GH_ROUTER_HOOK_NONCE}` — a placeholder the adapter expands at
+connect time, never a token on disk. Keys are always `gh-router-<group>`, never
+the bare name: project files (`.mcp.json`, `.pi/mcp.json`,
+`.pi/mcp-adapter.json`) outrank the mirror and replace a same-named server
+wholesale, so a bare `ado` key would be hijacked by the workspace's own. A
+project file that declares one of our prefixed keys is reported in a launch
+warning, never edited. A file we cannot parse is left exactly as it is, and the
+groups are simply not exposed that launch.
 
 Deliberate divergence: pinned Claude profiles refuse `--no-codex-mcp`;
 Pi allows `--no-peers`. Do not "fix" this back into parity.
@@ -117,6 +133,22 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   guidance lives in skills (`gh-oracle`, `gh-search-first`,
   `gh-delegate`, cheapest-only `gh-advisor`) and `/review`,
   `/parallel-review` (+ cheapest-only `/plan-review`) prompts.
+- **Per-prompt execution brief, cheapest only.** The extension also
+  registers a `before_agent_start` handler that relays the user's prompt to
+  a hook-only MCP tool, `prompt_brief` (group `search`, hook-nonce
+  authenticated, never listed to the model), and re-emits the reply as a
+  custom message ABOVE the user turn — additive, `systemPrompt` untouched.
+  The proxy produces it with the same `runCheapestRewrite` the Claude
+  `UserPromptSubmit` hook uses (`src/lib/hook-prompt-brief.ts` over
+  `src/lib/cheapest-prompt-rewrite.ts`), grounding search, static pack, and
+  one-shot per-session flag included, so `GH_ROUTER_DISABLE_CHEAPEST_REWRITE=1`
+  opts both front-ends out. Trivial prompts decline; the handler stands down
+  inside a `pi-subagents` child process so a fanout cannot spend one brief
+  per child. Deliberately narrower than the Claude hook: no prior-turn
+  findings and no Stop-gate budget reset (Pi has no `Stop` hook to produce
+  them), and a missed or timed-out rewrite injects nothing where Claude
+  falls open to the search tip plus the grounded scope note. `balanced` is
+  floor-free on both counts, like its advisor.
 - **Native compaction stays authoritative.** Each model row carries its
   Default-tier `contextWindow` (272K for Luna/Sol, 200K for Grok — never the
   advertised 1.05M), and `compaction.reserveTokens` is derived per model from
@@ -128,8 +160,9 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   ceiling — the Pi-native analogue of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. The
   extension's `session_before_compact` handler observes only and always
   falls back to native.
-- **Pi lifecycle respected.** Version floor Pi ≥ 0.87.1 / Node ≥ 22.19.
-  Startup never waits on npm: a fast local `pi --version` probe gates
+- **Pi lifecycle respected.** Version floor Pi ≥ 1.3.0 (`PI_MIN_VERSION`,
+  `src/lib/pi-version-check.ts`) / Node ≥ 22.19. Startup never waits on npm:
+  a fast local `pi --version` probe gates
   the floor foreground; a missing Pi installs in parallel with server
   boot (joined fail-closed before launch, aborted if setup fails); a
   healthy install refreshes in the background (throttled hourly probe,
@@ -279,9 +312,12 @@ bun test tests/pi-memory-bridge.test.ts tests/pi-models-settings.test.ts
 bun run typecheck && bun run lint:all && bun run build
 ```
 
-Spike note: Pi 0.87.1 (latest at time of writing) vs the vendored
-worker runtime pin v0.82.0 — the launcher uses the installed Pi and is
-independent of the vendor tree.
+Spike note, recorded when Pi 0.87.1 was the latest release and the vendored
+worker runtime pinned v0.82.0: the launcher uses the installed Pi and is
+independent of the vendor tree. Both have since moved in step to the 1.3.0
+line (`PI_MIN_VERSION` and `docs/pi-vendor-sync.md`), so an install below
+1.3.0 now fails the launch floor instead of running the older shape this
+note was measured against.
 
 ## Helpful bundle (exclusion guardrails)
 
@@ -296,3 +332,25 @@ stays observe-only), and provider/model overriders (would break the
 fixed-roster cost contract). `--ui` opts into `pi-code` +
 `pi-claude-code-ui`; `pi-lean-ctx` stays a docs recipe until its
 manifest paths are pinned.
+
+## npm `allow-scripts` is neutralized for the Pi child
+
+Pi installs the mirror's `packages[]` on every boot with a project-scoped
+install (`npm install <pkg> --prefix <mirror>/npm`). npm 11.19 refuses a
+CLI- or env-sourced `allow-scripts` for that shape
+(`resolveAllowScripts`: `cliPolicy && !npm.global && !skipProjectConfig`
+throws `EALLOWSCRIPTS`), so a shell export of `npm_config_allow_scripts` -
+routine on managed corporate machines - kills the launch before a single
+package lands, naming a flag the caller never passed. Measured on npm
+11.19.1 with the real command against a scratch prefix: with the export
+present the install fails; with it unset or emptied it succeeds.
+
+`getPiLaunchEnvVars` therefore emits `npm_config_allow_scripts=""` for the
+Pi child only. Empty is not a policy change: npm reads it as no
+configuration and falls through to the `.npmrc` cascade, which is exactly
+where npm's own error message says the setting belongs - so an operator
+who allowlists a package for install scripts in `.npmrc` keeps that
+allowlist, and their shell export still applies to their own npm use. The
+router's other npm invocations are `npm install -g` (Pi's own install and
+update), which the rule exempts because global installs have no project
+context to protect.

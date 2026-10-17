@@ -32,6 +32,19 @@ const appDir = path.join(TEST_HOME, ".local", "share", "github-router")
 const colbertDir = path.join(appDir, "colbert")
 
 /**
+ * Does this platform-arch have a prebuilt colgrep/ORT asset?
+ *
+ * Everything below is real machine logic with one platform-shaped input: an
+ * unsupported arch has no engine sha to compare against, so the availability
+ * gate can never become true, a recorded engine sha can never differ from a
+ * current one, and `freshnessVerdict` substitutes `unsupported` for the
+ * servable verdicts (see `colbertPlatformSupported`). Tests state the contract
+ * of the host they run on instead of skipping the file: an x64 CI runner
+ * exercises the supported branch, an arm64 dev box the other.
+ */
+const PLATFORM_SUPPORTED = (await import("../../src/lib/colbert/manifest")).colbertPlatformSupported()
+
+/**
  * Write ONLY inside the mocked test home, and abort loudly otherwise.
  *
  * This file installs a process-global `mock.module("node:os")` to point
@@ -69,6 +82,42 @@ async function writeInsideTestHome(target: string, content: string): Promise<voi
     )
   }
   await fs.writeFile(target, content)
+}
+
+/**
+ * Synthesize the on-disk artifact set + `.smoke-ok` marker the availability
+ * gate checks. The marker's content must match what `colbertSmokeOk()`
+ * validates for the CURRENT manifest (binary + ORT shas + model revision), so
+ * it can only be written where the manifest has shas to name: on a
+ * platform-arch with no prebuilt asset, `expectedSmokeMarker()` renders both as
+ * "?", and a "valid" marker here would assert a smoke test that never ran.
+ * Returns whether a real marker was written.
+ */
+async function synthesizeArtifacts(): Promise<boolean> {
+  const prov = await import("../../src/lib/colbert/provision")
+  const man = await import("../../src/lib/colbert/manifest")
+  const binDir = path.dirname(prov.colgrepBinaryPath())
+  const modelDir = prov.colbertModelDir()
+  const ortPath = prov.colbertOrtDylibPath()
+  await fs.mkdir(binDir, { recursive: true })
+  await fs.mkdir(modelDir, { recursive: true })
+  await fs.mkdir(path.dirname(ortPath), { recursive: true })
+  await writeInsideTestHome(prov.colgrepBinaryPath(), "binary")
+  await fs.writeFile(path.join(modelDir, "model_int8.onnx"), "model")
+  await fs.writeFile(ortPath, "dylib")
+
+  const bin = man.colgrepBinAsset()
+  const ort = man.ortLibAsset()
+  if (!bin || !ort) return false
+  await fs.mkdir(colbertDir, { recursive: true })
+  await fs.writeFile(
+    path.join(colbertDir, ".smoke-ok"),
+    `colbert-smoke-ok\n`
+      + `binary=${bin.sha256}\n`
+      + `ort=${ort.sha256}\n`
+      + `model=${man.MODEL_REVISION}\n`,
+  )
+  return true
 }
 
 afterEach(async () => {
@@ -227,27 +276,19 @@ describe("semanticSearchEnabled (internal colgrep-availability predicate)", () =
     // Synthesize the on-disk presence the gate checks — without any opt-in
     // signal the gate must still be false (semantic search is off by default).
     const prov = await import("../../src/lib/colbert/provision")
-    const binDir = path.dirname(prov.colgrepBinaryPath())
-    const modelDir = prov.colbertModelDir()
-    const ortPath = prov.colbertOrtDylibPath()
-    await fs.mkdir(binDir, { recursive: true })
-    await fs.mkdir(modelDir, { recursive: true })
-    await fs.mkdir(path.dirname(ortPath), { recursive: true })
-    await writeInsideTestHome(prov.colgrepBinaryPath(), "binary")
-    await fs.writeFile(path.join(modelDir, "model_int8.onnx"), "model")
-    await fs.writeFile(ortPath, "dylib")
-    await fs.mkdir(colbertDir, { recursive: true })
-    const man = await import("../../src/lib/colbert/manifest")
-    const validMarker =
-      `colbert-smoke-ok\n` +
-      `binary=${man.colgrepBinAsset()!.sha256}\n` +
-      `ort=${man.ortLibAsset()!.sha256}\n` +
-      `model=${man.MODEL_REVISION}\n`
-    await fs.writeFile(path.join(colbertDir, ".smoke-ok"), validMarker)
+    const markerWritten = await synthesizeArtifacts()
+    const cap = await import("../../src/lib/mcp-capabilities")
 
     expect(prov.colbertArtifactsPresent()).toBe(true)
+    if (!markerWritten) {
+      // No prebuilt engine for this arch, so there is no sha a marker could
+      // legitimately name; the gate is off with or without the opt-in. The
+      // supported-host branch below is what CI (x64) exercises.
+      expect(prov.colbertSmokeOk()).toBe(false)
+      expect(cap.semanticSearchEnabled()).toBe(false)
+      return
+    }
     expect(prov.colbertSmokeOk()).toBe(true)
-    const cap = await import("../../src/lib/mcp-capabilities")
     expect(cap.semanticSearchEnabled()).toBe(false)
   })
 
@@ -276,28 +317,19 @@ describe("semanticSearchEnabled (internal colgrep-availability predicate)", () =
     process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH = "1"
     // Synthesize the on-disk presence the gate checks.
     const prov = await import("../../src/lib/colbert/provision")
-    const binDir = path.dirname(prov.colgrepBinaryPath())
-    const modelDir = prov.colbertModelDir()
-    const ortPath = prov.colbertOrtDylibPath()
-    await fs.mkdir(binDir, { recursive: true })
-    await fs.mkdir(modelDir, { recursive: true })
-    await fs.mkdir(path.dirname(ortPath), { recursive: true })
-    await writeInsideTestHome(prov.colgrepBinaryPath(), "binary")
-    await fs.writeFile(path.join(modelDir, "model_int8.onnx"), "model")
-    await fs.writeFile(ortPath, "dylib")
-    // smoke marker — must match the version-keyed content colbertSmokeOk
-    // validates (binary + ORT SHAs + model revision from the manifest).
-    await fs.mkdir(colbertDir, { recursive: true })
-    const man = await import("../../src/lib/colbert/manifest")
-    const validMarker =
-      `colbert-smoke-ok\n` +
-      `binary=${man.colgrepBinAsset()!.sha256}\n` +
-      `ort=${man.ortLibAsset()!.sha256}\n` +
-      `model=${man.MODEL_REVISION}\n`
-    await fs.writeFile(path.join(colbertDir, ".smoke-ok"), validMarker)
-
+    const markerWritten = await synthesizeArtifacts()
     const cap = await import("../../src/lib/mcp-capabilities")
+
     expect(prov.colbertArtifactsPresent()).toBe(true)
+    if (!markerWritten) {
+      // No prebuilt engine for this arch: artifacts can be present, but a
+      // smoke test cannot have run against shas that do not exist, so the gate
+      // stays off however it is configured. CI (x64) exercises the branch
+      // below, which is what this test's title describes.
+      expect(prov.colbertSmokeOk()).toBe(false)
+      expect(cap.semanticSearchEnabled()).toBe(false)
+      return
+    }
     expect(prov.colbertSmokeOk()).toBe(true)
     expect(cap.semanticSearchEnabled()).toBe(true)
 
@@ -452,10 +484,13 @@ describe("index-store: meta keying + freshness verdict", () => {
     expect(/^[0-9a-f]{8}$/.test(a)).toBe(true)
   })
 
-  test("absent meta → verdict absent", async () => {
+  test("absent meta → verdict absent where an engine can exist, unsupported where none can", async () => {
     const store = await import("../../src/lib/colbert/index-store")
     const v = await store.freshnessVerdict("/tmp/never-indexed-xyz")
-    expect(v.verdict).toBe("absent")
+    // "absent" is an invitation to build. On a platform-arch with no prebuilt
+    // colgrep/ORT asset that build can only die in the binary lookup, so the
+    // verdict names the platform instead of the missing index (see the header).
+    expect(v.verdict).toBe(PLATFORM_SUPPORTED ? "absent" : "unsupported")
   })
 
   test("status:building → verdict building (no spawn)", async () => {
@@ -841,7 +876,13 @@ describe("runSemanticSearch: no-fallback contract", () => {
       expect(meta?.status).toBe("ready")
       expect(meta?.failedAttempts).toBe(0)
       expect(store.validateIndexIntegrity(path.join(projectDir, "index")).verdict).toBe("coherent")
-      expect(await store.freshnessVerdict(ws)).toMatchObject({ verdict: "fresh" })
+      // The quarantine → rebuild → coherent-index chain above is
+      // platform-independent, but whether the rebuilt index is SERVABLE is not:
+      // with no prebuilt engine here the verdict is `unsupported` instead of
+      // `fresh`, and never servable either way.
+      const rebuilt = await store.freshnessVerdict(ws)
+      expect(rebuilt.verdict).toBe(PLATFORM_SUPPORTED ? "fresh" : "unsupported")
+      expect(store.isServableVerdict(rebuilt)).toBe(PLATFORM_SUPPORTED)
     } finally {
       runner.__setInitRunnerForTests(undefined)
     }
@@ -1092,6 +1133,17 @@ describe("runSemanticSearch: no-fallback contract", () => {
     const { runSemanticSearch } = await import("../../src/lib/colbert/runner")
     const r = await runSemanticSearch({ query: "auth", workspace: ws })
 
+    if (!PLATFORM_SUPPORTED) {
+      // No prebuilt engine here, so the recorded shas cannot differ from a
+      // current pair (that comparison needs both sides, and there is no current
+      // side) and no engine upgrade can ever arrive. The cap must keep binding
+      // rather than fabricate a changed input and start a rebuild storm.
+      expect(r.status).toBe("failed")
+      expect(r.notice).toMatch(/unavailable/i)
+      expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(3)
+      return
+    }
+
     expect(r.notice).toMatch(/inputs changed|rebuild was started/i)
     expect((await store.readColbertMeta(ws))?.failedAttempts).toBe(0)
   })
@@ -1218,48 +1270,61 @@ describe("startupKickAllowed (restart anti-burn guard)", () => {
 // ---------------------------------------------------------------------
 
 describe("provisionColbert: download + SHA verification", () => {
-  test("unsupported platform → status unsupported, no download attempted", async () => {
+  test("no prebuilt asset for the host arch → status unsupported, no download attempted", async () => {
     const prov = await import("../../src/lib/colbert/provision")
-    const m = await import("../../src/lib/colbert/manifest")
-    // Force an unsupported platform-arch by emptying the asset maps for
-    // the running platform via a fetch that should never be called.
+    // A fetch that records and refuses. Both host branches assert: with no
+    // pinned artifact for the arch, provisioning must refuse BEFORE the network;
+    // with one, it must actually reach it. (The old shape asserted only the
+    // first, so an x64 CI runner — the primary target — asserted nothing here.)
     let fetchCalled = false
     const origFetch = globalThis.fetch
     globalThis.fetch = (async () => {
       fetchCalled = true
-      throw new Error("should not fetch on unsupported platform")
+      throw new Error("no real downloads in tests")
     }) as unknown as typeof fetch
     try {
-      // Only assert the no-fetch property when this platform genuinely
-      // has no manifest entry; on supported hosts this branch is skipped.
-      if (!m.colbertPlatformSupported()) {
-        const r = await prov.provisionColbert()
-        expect(r.status).toBe("unsupported")
-        expect(fetchCalled).toBe(false)
+      const r = await prov.provisionColbert()
+      if (PLATFORM_SUPPORTED) {
+        expect(r.status).not.toBe("unsupported")
+        expect(fetchCalled).toBe(true)
+        return
       }
+      expect(r.status).toBe("unsupported")
+      expect(fetchCalled).toBe(false)
     } finally {
       globalThis.fetch = origFetch
     }
   })
 
   test("SHA mismatch on the colgrep binary aborts provisioning (incomplete, no install)", async () => {
-    const m = await import("../../src/lib/colbert/manifest")
-    if (!m.colbertPlatformSupported()) return // can't exercise on unsupported host
     const prov = await import("../../src/lib/colbert/provision")
     // Mock fetch to return bytes whose SHA will NOT match the pinned
     // digest, for every artifact URL.
     const origFetch = globalThis.fetch
-    globalThis.fetch = (async () =>
-      new Response(Buffer.from("tampered-bytes"), { status: 200 })) as unknown as typeof fetch
+    let fetchCalled = false
+    globalThis.fetch = (async () => {
+      fetchCalled = true
+      return new Response(Buffer.from("tampered-bytes"), { status: 200 })
+    }) as unknown as typeof fetch
     try {
       const r = await prov.provisionColbert()
-      // The first artifact (binary) fails SHA verification → incomplete,
-      // and the binary must NOT be installed on disk.
-      expect(r.status).toBe("incomplete")
       const onDisk = await fs
         .stat(prov.colgrepBinaryPath())
         .then(() => true)
         .catch(() => false)
+      if (!PLATFORM_SUPPORTED) {
+        // There is no pinned digest to verify against here, so the tampered
+        // download this test targets cannot even start: provisioning refuses up
+        // front and nothing lands on disk. The in-complete branch below is what
+        // CI (x64) exercises.
+        expect(r.status).toBe("unsupported")
+        expect(fetchCalled).toBe(false)
+        expect(onDisk).toBe(false)
+        return
+      }
+      // The first artifact (binary) fails SHA verification → incomplete,
+      // and the binary must NOT be installed on disk.
+      expect(r.status).toBe("incomplete")
       expect(onDisk).toBe(false)
     } finally {
       globalThis.fetch = origFetch

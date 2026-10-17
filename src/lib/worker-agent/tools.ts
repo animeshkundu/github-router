@@ -1829,7 +1829,12 @@ function renderPiMessagesAsText(
         `TOOL_RESULT ${m.toolName ?? "?"}${flag}: ${stringifyMessageContent(m.content)}`,
       )
     }
-    // Custom harness messages (chat-status, etc.) — skip.
+    // Custom harness messages (chat-status, etc.) and the transcript's own
+    // `system` messages — skip. The advisor is asked about the CONVERSATION,
+    // and the system prompt is a fixed role frame the caller already decides;
+    // forwarding it would spend context on text the advisor cannot act on.
+    // (Before the Pi v1.3.0 agent core the prompt was not in `messages` at all,
+    // so this preserves the previous advisor input exactly.)
   }
   let joined = lines.join("\n\n")
   if (joined.length <= maxChars) return joined

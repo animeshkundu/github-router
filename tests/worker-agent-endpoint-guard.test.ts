@@ -25,6 +25,9 @@ import type {
   Context,
   Model as PiModel,
 } from "@earendil-works/pi-ai"
+// Value import: since the Pi v1.3.0 agent core the `StreamFn` contract takes a
+// normalized `TranscriptContext`, which only `normalizeContext` produces.
+import { normalizeContext } from "@earendil-works/pi-ai"
 
 import { state } from "~/lib/state"
 import type { Model } from "~/services/copilot/get-models"
@@ -97,7 +100,7 @@ async function drain(): Promise<{
   final: AssistantMessage
 }> {
   const streamFn = createCopilotStreamFn({ resolved: RESOLVED })
-  const stream = await streamFn(NOOP_MODEL, USER_CTX, undefined)
+  const stream = await streamFn(NOOP_MODEL, normalizeContext(USER_CTX), undefined)
   const events: Array<AssistantMessageEvent> = []
   for await (const ev of stream) events.push(ev)
   return { events, final: await stream.result() }

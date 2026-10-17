@@ -172,6 +172,16 @@ async function mkModelDir(): Promise<void> {
   await fs.mkdir(path.join(TEST_HOME, "colbert-models", "edge"), { recursive: true })
 }
 
+/**
+ * Is there a next-plaid-api build for this platform-arch? The manifest ships
+ * cpu (+ cuda on x64) for win32-x64, linux-x64 and macOS only, so an arm64
+ * Windows box has no downloadable server. The gates below then close the
+ * DOWNLOAD path entirely; an operator-provided `GH_ROUTER_NEXTPLAID_BIN` is the
+ * only way in, which is what these tests assert on such a host.
+ */
+const SERVER_ASSET_FOR_HOST = (await import("../../src/lib/colbert/manifest"))
+  .nextPlaidServerAsset("cpu") !== undefined
+
 beforeEach(async () => {
   backend = await import("../../src/lib/colbert/service-backend")
   fakeIndices.clear()
@@ -211,6 +221,17 @@ describe("backend selection", () => {
 
   test("serviceBackendEnabled needs model + (binary or promoted download)", async () => {
     process.env.GH_ROUTER_SEMANTIC_BACKEND = "service"
+    if (!SERVER_ASSET_FOR_HOST) {
+      // No server build for this arch, so the promoted-download route is closed
+      // and the explicit binary is the only one — same shape as the supported
+      // branch below, reached through a different door.
+      expect(backend.serviceBackendEnabled()).toBe(false)
+      process.env.GH_ROUTER_NEXTPLAID_BIN = process.execPath
+      expect(backend.serviceBackendEnabled()).toBe(true)
+      await fs.rm(path.join(TEST_HOME, "colbert-models"), { recursive: true, force: true })
+      expect(backend.serviceBackendEnabled()).toBe(false)
+      return
+    }
     // Promoted SHAs (current manifest) make the backend actionable even
     // with no binary on disk — ensureServer provisions on demand.
     expect(backend.serviceBackendEnabled()).toBe(true)
@@ -225,6 +246,17 @@ describe("backend selection", () => {
   test("serviceBackendProvisionable ignores the env opt-in (index auto path)", async () => {
     // No GH_ROUTER_SEMANTIC_BACKEND set here: provisionability is about
     // artifacts, not the query-path opt-in.
+    if (!SERVER_ASSET_FOR_HOST) {
+      // The model dir is present (beforeEach) and it is still not provisionable:
+      // there is nothing for this arch to download. An operator-provided binary
+      // is the only route, and the model dir still gates it.
+      expect(backend.serviceBackendProvisionable()).toBe(false)
+      process.env.GH_ROUTER_NEXTPLAID_BIN = process.execPath
+      expect(backend.serviceBackendProvisionable()).toBe(true)
+      await fs.rm(path.join(TEST_HOME, "colbert-models"), { recursive: true, force: true })
+      expect(backend.serviceBackendProvisionable()).toBe(false)
+      return
+    }
     expect(backend.serviceBackendProvisionable()).toBe(true)
     await fs.rm(path.join(TEST_HOME, "colbert-models"), { recursive: true, force: true })
     expect(backend.serviceBackendProvisionable()).toBe(false)

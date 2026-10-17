@@ -17,6 +17,10 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
+// Value import: since the Pi v1.3.0 agent core the `StreamFn` contract takes a
+// normalized `TranscriptContext`, which only `normalizeContext` produces.
+import { normalizeContext } from "@earendil-works/pi-ai"
+
 import { state } from "~/lib/state"
 import { makeContextBudget } from "~/lib/worker-agent/context-budget"
 import { runWorkerAgent } from "~/lib/worker-agent/engine"
@@ -123,11 +127,16 @@ test("fallback window overflow warns but proceeds to upstream", async () => {
   })
   const stream = await streamFn(
     {} as never,
-    {
+    // Normalized, because since the Pi v1.3.0 agent core the `StreamFn` contract
+    // takes a `TranscriptContext`: the prompt travels as a leading system
+    // message, and `estimateContextBytes` replays it out of the transcript. A
+    // raw `Context` here would reach the backstop with an empty transcript and
+    // the oversized-prompt assertion below would pass for the wrong reason.
+    normalizeContext({
       systemPrompt: "X".repeat(400_000),
       tools: [],
       messages: [],
-    },
+    }),
   )
   await Array.fromAsync(stream)
   const final = await stream.result()
@@ -184,5 +193,31 @@ describe("estimateContextBytes — image cost is the token-equivalent, not base6
     } as any
     expect(estimateContextBytes(fnCall)).toBeGreaterThan(490_000)
     expect(estimateContextBytes(fnOutput)).toBeGreaterThan(490_000)
+  })
+
+  test("the transcript's system message is counted once, not twice", () => {
+    // Since the Pi v1.3.0 agent core the prompt travels as a leading system
+    // message, so BOTH sources can see it: `getCurrentSystemPrompt` replays it
+    // out of the transcript, and the message loop then reads that same
+    // message's `content` string. The shape matters, and only the production
+    // one reproduces it: `normalizeContext` is the only producer of a
+    // TranscriptContext, and it stamps the leading system message with
+    // `timestamp: 0`, which is what makes `getCurrentSystemPrompt` replay it
+    // rather than return "". Counting both adds a second copy of the prompt,
+    // firing the request-boundary backstop a whole prompt early on a payload
+    // that fits.
+    const prompt = "S".repeat(100_000)
+    const ctx = normalizeContext({
+      systemPrompt: prompt,
+      tools: [],
+      messages: [{ role: "user", content: "hi" }],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)
+    const bytes = estimateContextBytes(ctx)
+    // Once, because the prompt is on the wire exactly once: the chat builder
+    // pushes it as a system message and the /responses builder passes it as
+    // `instructions`, while both drop the transcript's own system message.
+    expect(bytes).toBeGreaterThanOrEqual(prompt.length)
+    expect(bytes).toBeLessThan(prompt.length * 1.05)
   })
 })

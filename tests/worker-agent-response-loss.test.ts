@@ -18,6 +18,9 @@
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
+// Value import: since the Pi v1.3.0 agent core the `StreamFn` contract takes a
+// normalized `TranscriptContext`, which only `normalizeContext` produces.
+import { normalizeContext } from "@earendil-works/pi-ai"
 import type { Context, Model as PiModel } from "@earendil-works/pi-ai"
 
 import { state } from "~/lib/state"
@@ -80,7 +83,9 @@ async function drain(
   const streamFn = createCopilotStreamFn({ resolved })
   const stream = await streamFn(
     NOOP_MODEL,
-    { messages: [{ role: "user", content: "hi", timestamp: 0 }] } as unknown as Context,
+    normalizeContext({
+      messages: [{ role: "user", content: "hi", timestamp: 0 }],
+    } as unknown as Context),
     undefined,
   )
   const out: Array<{ type: string; error?: { errorMessage?: string; stopReason?: string } }> = []

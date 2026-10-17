@@ -52,7 +52,9 @@ import {
 import {
   agentToolsEnabled,
   artifactToolsEnabled,
+  adoToolsEnabled,
   browseAgentEnabled,
+  kustoToolsEnabled,
   browserCompoundToolsEnabled,
   browserPowerToolsEnabled,
   browserToolsEnabled,
@@ -69,6 +71,9 @@ import {
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
 import { maxPersonasFor } from "~/lib/peer-mcp-personas"
+// The `ado` group is the one non-persona group whose tool set is not a static
+// array: Azure DevOps advertises it at runtime. See the module header for why.
+import { adoMcpToolEntries } from "~/lib/ado-tools"
 import {
   CHEAP_PROFILE_ASTRA_EFFORT,
   CHEAP_PROFILE_ASTRA_MODEL,
@@ -334,6 +339,40 @@ function checkAuth(
 // `handleToolsCall` (-32601 for hard-coded tool-name bypasses).
 
 /**
+ * The non-persona tool registry for this process: the static array plus any
+ * group whose surface an upstream server advertises at runtime.
+ *
+ * Every consumer — `tools/list`, the `tools/call` lookup, the max/fast
+ * profile allow-list checks — goes through here rather than reading
+ * `NON_PERSONA_MCP_TOOLS` directly, so the two surfaces cannot disagree about
+ * which tools exist. Reading the static array in one place and this in another
+ * is exactly how a tool becomes listed-but-uncallable.
+ *
+ * Returns the static array itself (not a copy) when the dynamic group is off,
+ * which is every launch unless `--ado` resolved on.
+ */
+function allNonPersonaTools(): ReadonlyArray<NonPersonaMcpTool> {
+  const dynamic = adoMcpToolEntries()
+  if (dynamic.length === 0) return NON_PERSONA_MCP_TOOLS
+  return [...NON_PERSONA_MCP_TOOLS, ...dynamic]
+}
+
+/**
+ * The LIST surface only: `allNonPersonaTools()` minus hook-channel tools.
+ *
+ * Every `toolEntries()` path reads this; every `tools/call` lookup reads
+ * `allNonPersonaTools()`. That asymmetry is the whole point of `hookOnly` (see
+ * the field doc in `peer-mcp-personas`): the Pi extension must be able to CALL
+ * `prompt_brief` over the authenticated hook channel, while the model must not
+ * see a name it is never supposed to use. Splitting the two accessors keeps the
+ * list/call surfaces from disagreeing about the tools that ARE gated, which is
+ * the property the capability chain already relies on.
+ */
+function listableNonPersonaTools(): ReadonlyArray<NonPersonaMcpTool> {
+  return allNonPersonaTools().filter((tool) => tool.hookOnly !== true)
+}
+
+/**
  * opus_critic's effective model, resolved against the live catalog.
  *
  * Prefers `claude-opus-5.5` — the dotted catalog id that is natively 1M
@@ -506,6 +545,12 @@ function maxToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   if (tool.capability === "fleet") return fleetToolsEnabled()
   if (tool.capability === "agents") return agentToolsEnabled()
   if (tool.capability === "artifact") return artifactToolsEnabled()
+  // The Azure groups, mirroring `fastToolIsEnabled`. Without these arms the
+  // fall-through below admitted them on a launch that never enabled the
+  // capability: the names were listed and every call answered -32601. The
+  // capability gate is the same predicate the standard projection applies.
+  if (tool.group === "ado") return adoToolsEnabled()
+  if (tool.group === "kusto") return kustoToolsEnabled()
   return true
 }
 
@@ -554,6 +599,15 @@ function fastToolIsEnabled(tool: NonPersonaMcpTool): boolean {
       && tool.capability === "browse_agent"
       && browseAgentEnabled()
   }
+  // The Azure groups are read-only, operator-opted-in data tools, so every
+  // profile whose `allowedGroups` carries them (all five pinned profiles do)
+  // must also LIST and CALL them: this predicate is the fast family's whole
+  // projection, shared by `tools/list` and `tools/call`. Gating falls through
+  // to the same capability predicates the standard projection applies, and the
+  // caller's `allowedGroups` check still runs first, so an opt-in on a launch
+  // that never enabled the group changes nothing.
+  if (tool.group === "ado") return adoToolsEnabled()
+  if (tool.group === "kusto") return kustoToolsEnabled()
   if (tool.group !== "browser") return false
   if (!browserToolsEnabled()) return false
   if (tool.capability === "browser_compound") return browserCompoundToolsEnabled()
@@ -599,7 +653,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
           },
         },
       }))
-    const nonPersonaEntries = NON_PERSONA_MCP_TOOLS
+    const nonPersonaEntries = listableNonPersonaTools()
       .filter((tool) => maxAllowsTool(scope, launch, { group: tool.group, name: tool.toolNameHttp, tool }))
       .map((tool) => {
         if (tool.toolNameHttp === "stand_in") {
@@ -651,7 +705,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
     ) {
       entries.push(astraToolEntry(isCheap))
     }
-    for (const tool of NON_PERSONA_MCP_TOOLS) {
+    for (const tool of listableNonPersonaTools()) {
       if (!fastAllowsTool(scope, launch, { group: tool.group, name: tool.toolNameHttp, tool })) continue
       entries.push(nonPersonaToolEntry(tool))
     }
@@ -724,7 +778,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
   // `browserToolsEnabled()`). They share the same `tools/list` surface but
   // have their own input schemas (no prompt/context/effort) and skip the
   // per-persona validation gates in handleToolsCall.
-  const nonPersonaEntries: Array<ToolEntry> = NON_PERSONA_MCP_TOOLS.filter(
+  const nonPersonaEntries: Array<ToolEntry> = listableNonPersonaTools().filter(
     (t) => {
       if (scope !== "all" && t.group !== scope) return false
       if (launch.allowedGroups && !launch.allowedGroups.has(t.group)) return false
@@ -735,6 +789,8 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       if (t.capability === "fleet") return fleetToolsEnabled()
       if (t.capability === "agents") return agentToolsEnabled()
       if (t.capability === "artifact") return artifactToolsEnabled()
+      if (t.capability === "ado") return adoToolsEnabled()
+      if (t.capability === "kusto") return kustoToolsEnabled()
       // Compound tools require BOTH the browser surface opt-in AND a
       // compressor backend in the catalog. Without browseEnabled the
       // compound tools must be invisible alongside the L0/L1 primitives.
@@ -1343,6 +1399,11 @@ function toolAcceptsWorkspace(tool: NonPersonaMcpTool): boolean {
   return tool.capability === "worker"
     || tool.toolNameHttp === "code"
     || tool.toolNameHttp === "run_workflow"
+    // The Pi extension sends the session workspace header on the `search`
+    // group, and `prompt_brief` must accept it: the extension has no other way
+    // to name the tree it is briefing against, and an empty workspace would
+    // refuse every call.
+    || tool.toolNameHttp === "prompt_brief"
 }
 
 /**
@@ -1395,7 +1456,7 @@ async function handleToolsCall(
 
   if (launch.profileId === "max") {
     const maxPersona = activePersonas(launch).find((persona) => persona.toolNameHttp === name)
-    const maxTool = NON_PERSONA_MCP_TOOLS.find((tool) => tool.toolNameHttp === name)
+    const maxTool = allNonPersonaTools().find((tool) => tool.toolNameHttp === name)
     const maxAllowed = maxPersona
       ? maxAllowsTool(scope, launch, { group: "peers", name, persona: maxPersona })
       : maxTool
@@ -1408,7 +1469,7 @@ async function handleToolsCall(
 
   if ((launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "balanced") && name !== "oracle" && name !== "astra") {
     const fastPersona = activePersonas(launch).find((persona) => persona.toolNameHttp === name)
-    const fastTool = NON_PERSONA_MCP_TOOLS.find((tool) => tool.toolNameHttp === name)
+    const fastTool = allNonPersonaTools().find((tool) => tool.toolNameHttp === name)
     const fastAllowed = fastPersona
       ? fastAllowsTool(scope, launch, { group: "peers", name, persona: fastPersona })
       : fastTool
@@ -1592,7 +1653,7 @@ async function handleToolsCall(
   const persona = activePersonas(launch).find((p) => p.toolNameHttp === name)
   const nonPersonaTool: NonPersonaMcpTool | undefined = persona
     ? undefined
-    : NON_PERSONA_MCP_TOOLS.find((t) => t.toolNameHttp === name)
+    : allNonPersonaTools().find((t) => t.toolNameHttp === name)
 
   if (!persona && !nonPersonaTool) {
     return rpcError(
@@ -1739,6 +1800,26 @@ async function handleToolsCall(
     && nonPersonaTool.capability === "browser_power"
     && !(browserToolsEnabled() && browserPowerToolsEnabled())
   ) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  // The Azure groups are gated on the flags `setupAndServe` resolved, so a
+  // client that hard-codes `mcp__ado__*` or `mcp__kusto__*` on a launch that
+  // never enabled them reaches the same -32601 as an unknown tool. For `ado`
+  // this also covers the runtime case: the group is switched off when its
+  // launch probe failed, and `allNonPersonaTools()` then serves no `ado` entry
+  // for this lookup to find in the first place.
+  if (nonPersonaTool && nonPersonaTool.capability === "ado" && !adoToolsEnabled()) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (nonPersonaTool && nonPersonaTool.capability === "kusto" && !kustoToolsEnabled()) {
     return rpcError(
       body.id,
       RPC_METHOD_NOT_FOUND,

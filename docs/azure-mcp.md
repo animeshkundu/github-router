@@ -1,0 +1,453 @@
+# Azure MCP groups: `ado` and `kusto`
+
+Two scoped MCP groups expose Microsoft's Azure surfaces to the model, in the same
+shape as the Bluebird integration ([`docs/bluebird-search.md`](bluebird-search.md)):
+
+| Group | Server name | Endpoint | Tools |
+| --- | --- | --- | --- |
+| `ado` | `github-router-ado` | `https://mcp.dev.azure.com/{organization}` | whatever the remote advertises under the selected toolsets |
+| `kusto` | `github-router-kusto` | `{cluster}/v1/rest/{query,mgmt}` | five static tools over an in-repo client |
+
+Both are **off unless something turns them on** (a flag, or repository
+discovery in an Azure DevOps checkout, see below), and both mint their own Azure
+access token through the already-authenticated `az` CLI. Neither token ever reaches a child
+process: `ADO_MCP_TOKEN` and `KUSTO_TOKEN` are in the stripped-env key list
+beside `BLUEBIRD_TOKEN`, so a value the operator exports for a manual run is
+consumed by the router and removed from the environment Claude, Codex, and every
+tool under them inherits.
+
+## Enabling
+
+```sh
+github-router claude --ado --ado-org contoso
+github-router claude --kusto-cluster https://example.kusto.windows.net --kusto-database Telemetry
+github-router claude --kusto      # no default cluster: every call names the one it queries
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--ado` / `--no-ado` | Expose / refuse the Azure DevOps group |
+| `--ado-org <org>` | Organization. Overrides the git remote; naming one is itself an opt-in |
+| `--ado-toolsets <csv>` | Toolsets to request. Default `repos,wit,pipelines,wiki` |
+| `--ado-all-toolsets` | Request every toolset (sends no `X-MCP-Toolsets` header) |
+| `--ado-write` | Omit `X-MCP-Readonly`, making mutating tools reachable |
+| `--kusto` / `--no-kusto` | Expose / refuse the Kusto group. The flag alone is a complete opt-in; an Azure DevOps remote enables it too |
+| `--kusto-cluster <uri>` | Default cluster origin for the calls that do not name one |
+| `--kusto-database <name>` | Default database for the calls that do not name one, on whichever cluster a call resolves |
+
+Environment equivalents: `GH_ROUTER_ENABLE_ADO`, `GH_ROUTER_ADO_ORG`,
+`GH_ROUTER_ADO_TOOLSETS`, `GH_ROUTER_ADO_ALL_TOOLSETS`, `GH_ROUTER_ENABLE_KUSTO`,
+`GH_ROUTER_KUSTO_CLUSTER`, `GH_ROUTER_KUSTO_DATABASE`. `GH_ROUTER_AZURE_MCPS=off`
+(or `0` / `no` / `false`) suppresses every Azure surface including explicit
+positives.
+
+## Auto-enable on Azure DevOps repository discovery
+
+Launching inside a checkout whose git remotes resolve to an Azure DevOps
+repository turns **Bluebird, `ado` and `kusto`** on without a flag.
+
+Kusto joined that rule when the cluster became a per-call argument. What kept it
+out before was that a git remote carries no cluster identity, so a
+discovery-enabled group would have advertised five tools that could not answer
+anything. With the cluster named per call, the remote says only "this is an
+Azure workspace" and the model picks the cluster; the operator still owns the
+only thing that bounds what a call can read, which is their own identity in each
+cluster. Discovery never supplies a cluster, and the launch says so when the
+group came on without one.
+
+Resolution order per capability:
+
+1. explicit negative (`--no-*`, or the kill switch),
+2. explicit positive (`--*`, `GH_ROUTER_ENABLE_*`),
+3. Azure DevOps remote discovery,
+4. off.
+
+**The trust question, answered rather than ignored.** A cloned repository's
+`origin` is attacker-controllable, so this rule does derive authority from a URL
+the user did not type. Four properties bound it:
+
+- It can never enable writes. `--ado-write` is an explicit flag that discovery
+  does not touch.
+- It is suppressible per capability (`--no-bluebird`, `--no-ado`, `--no-kusto`)
+  and wholesale (`GH_ROUTER_AZURE_MCPS=off`).
+- The banner names both what turned on and the remote that caused it, so a
+  session that suddenly has three more servers is explainable rather than
+  mysterious; a surface a flag enabled is never miscredited to the remote.
+- Kusto is the one surface whose reach extends past the repository, and
+  discovery does not extend it: discovery may turn the *group* on, never the
+  cluster, and the cluster a call names is held to a Kusto-shaped https origin.
+  What a call can actually read is bounded by the operator's own identity: the
+  router grants no cluster access the `az` session behind it did not already
+  have.
+
+The probe is one memoized, bounded (`5 s`) `git` read per process, and any
+failure resolves to "not an Azure DevOps workspace" rather than failing the
+launch. Tests inject a synthetic probe; see "Testing" below.
+
+## Azure DevOps (`ado`)
+
+### Authentication
+
+`az account get-access-token --resource 2a72489c-aab2-4b65-b93a-a91edccf33b8`
+(app-id / audience for the remote server, scope `Ado.Mcp.Tools`). `az` is a
+`.cmd` shim on Windows, so every invocation goes through `resolveExecutable` /
+`buildExecInvocation` in `src/lib/exec.ts` like the rest of the tree.
+
+Microsoft documents the remote server as Entra-OAuth for clients that support the
+interactive flow with a custom app registration. This proxy is not such a client:
+it mints a bearer with the already-authenticated `az` session, which was verified
+to work. A tenant without the `Ado.Mcp.Tools` enterprise application, without
+admin consent, or without a matching `az login` fails at the launch probe with an
+actionable warning, and the group is switched off rather than advertised empty.
+
+### Read-only by default
+
+`X-MCP-Readonly: true` is sent on every request. The header is the control: the
+server removes the mutating tools from `tools/list` and refuses a mutation at
+call time. Measured live (2026-10-15, read-only, `tools/list` only): with
+`X-MCP-Toolsets: repos,wit,pipelines,wiki` the server advertises **20 tools**
+under `X-MCP-Readonly: true` and **31** without it; across every toolset the
+counts are **26** and **43**. The read-only set is a strict subset whose
+difference is exactly the 11 tools named
+`*_write` / `*_upload` / `*_create_*` / `upsert`.
+
+`--ado-write` omits the header for an operator who explicitly wants mutations,
+and prints a banner line so an elevated session is never silent. The two knobs
+are **independent**: the toolset filter applies identically in both modes, so
+`--ado-all-toolsets` alone can never produce a write tool (pinned by a test).
+
+### Toolset selection
+
+`X-MCP-Toolsets` accepts `all`, `repos`, `advsec`, `wit`, `pipelines`, `wiki`,
+`work`, `testplan`, `elm`. **`core` and `repositories` are not valid values**
+(they were a wrong guess in an earlier draft of this work and are rejected
+client-side so the mistake cannot reach the wire). The curated default is
+`repos,wit,pipelines,wiki`: pull requests and files, work items, builds, and
+wiki, excluding the toolsets whose tools are off the main repository loop. The
+four `core_*` tools are always present regardless of toolset.
+
+### Why the tool list is dynamic
+
+Every other group in `NON_PERSONA_MCP_TOOLS` is a frozen array of hand-written
+entries, pinned at boot by `assertMcpToolSurfaceConsistent()`. This group cannot
+be: the remote server owns the tool set, it is large, and its names and
+descriptions change on Microsoft's schedule. Freezing twenty entries would mean a
+transcription that drifts silently and a proxy release for every upstream rename.
+
+So `tools/list` is forwarded from the upstream `tools/list`, and the two headers
+above ARE the filter. What the static contract still guarantees:
+
+- **Name uniqueness.** The dynamic entries are checked against the static
+  registry at snapshot time, and a collision drops the upstream tool with a
+  warning rather than shadowing a proxy tool. A duplicate would be worse than a
+  missing tool: the model would call one name and reach the other's code.
+- **Scope and capability symmetry.** Each entry carries `group: "ado"` and
+  `capability: "ado"`, so the same list-time filter and the same call-time gate
+  apply as to any static tool.
+- **Read-only default.** The subset is whatever the server returned after being
+  told `X-MCP-Readonly: true`, not a classification computed here.
+
+The snapshot is taken **once at launch**, awaited (20 s bound) before the child
+process starts, because `toolEntries()` is synchronous and cannot fetch. A
+failure disables the group: an `ado` server that advertises no tools is worse
+than an absent one, because the model would see the group, find nothing usable,
+and have no way to tell whether the group or its own query was wrong.
+
+The `action` argument on the dispatcher tools is advertised as a plain `string`
+with no `enum`; the accepted values live only inside the description text. No
+client-side classification is therefore possible, which is the second reason the
+headers are the filter.
+
+## Kusto (`kusto`)
+
+### Why an in-repo client
+
+There is no public Microsoft-hosted remote MCP endpoint for Azure Data Explorer.
+The official route is the `kusto` namespace inside `@azure/mcp` 3.0.0: seven
+tools, stdio transport, shipped as a **122 MB** platform binary needing a managed
+.NET child process, for tools whose entire value is one authenticated POST to
+`/v1/rest/query`. A wrong-shaped request here is a JSON body; a wrong-shaped
+request there is a failed native spawn on the canonical Windows environment. The
+router therefore owns a thin client.
+
+### Read-only is enforced by the service
+
+Every request carries **both**:
+
+- the `x-ms-readonly: true` header, and
+- `properties.Options.request_readonly_hardline: true` in the body.
+
+Kusto documents both as unavailable to a `set` statement, so a hostile query
+string cannot lift them. That is the property a leading-dot or text allowlist in
+the client could not provide: Kusto composes multiple `;`-separated statements
+per request, so "does this text contain a mutating command" is not a question a
+prefix check answers. **The client performs no KQL inspection** and relies on the
+service to refuse a mutation.
+
+### Wire shape
+
+| | |
+| --- | --- |
+| Query | `POST {cluster}/v1/rest/query` |
+| Management (leading `.`) | `POST {cluster}/v1/rest/mgmt` |
+| Body | `{db, csl, properties: {Options: {...}}}` |
+| Audience | the cluster URI |
+
+The query field is **`csl`**, not `query` — a `query` field is silently ignored
+by the service. `truncationmaxrecords` (200) and `truncationmaxsize` (64 MiB)
+bound the response; an 8 MiB client-side cap and a rendered-size cap bound it
+again; a response over either is a stated truncation, never a silent short read.
+The 8 MiB cap is counted in **bytes**, not UTF-16 code units, and a
+`content-length` that already declares an oversize body is refused before the
+body is buffered at all: a character count lets a multi-byte body past a budget
+named in bytes.
+
+Cluster references are normalized to a bare https origin. Anything else is
+refused, because the value becomes both a request URL and an `az --resource`
+argument: `http` would send a bearer in cleartext, a path would silently address
+a different endpoint than the audience, and embedded credentials would be echoed
+into a command line. Table and column identifiers interpolated into generated
+commands (`| getschema`, `| take N`) are restricted to
+`[A-Za-z_][A-Za-z0-9_]*` rather than escaped, because a smaller reviewable
+surface beats an escaper.
+
+### Choosing a cluster
+
+`cluster` is optional on all five tools. A call that omits it runs against the
+launch's `--kusto-cluster`; a launch with no cluster leaves every call to name
+its own, and one that does not is refused with both ways out (name a cluster, or
+set a default at launch). Different tables live in different clusters, so a
+question spanning two of them is two calls with two `cluster` values.
+
+A call-named cluster goes through a **stricter** normalizer than the launch one:
+the same https / no-credentials / no-path rules, plus a requirement that the
+hostname carry a `kusto` label (`<name>.<region>.kusto.windows.net`,
+`*.kusto.usgovcloudapi.net`, `*.kusto.chinacloudapi.cn`,
+`*.kusto.azuresynapse.net`, `*.kusto.fabric.microsoft.com`). Three properties of
+that split are deliberate:
+
+- **The label rule is a shape guard, not an allowlist.** Anything
+  Kusto-shaped is accepted; no list of pre-approved clusters exists, matching the
+  code-search model where a workspace is any path the process can read. What the
+  label buys is the audience namespace. AAD mints a token per cluster URI and
+  does not check that the cluster exists or that the identity can reach it:
+  measured on 2026-10-16, an invented host
+  (`https://gh-router-probe-xyz123.kusto.windows.net`) returned a token whose
+  audience is that exact URI, while `https://example.com` was refused with
+  AADSTS500011. So the shape rule is what keeps the audience inside the Kusto
+  family, and the data boundary is the cluster's own authorization of that token,
+  which is the identity's RBAC inside the cluster (a 403, see "Token refresh").
+  A host that does not resolve surfaces as the client's own transport error.
+- **A launch cluster stays permissive.** An operator may legitimately point
+  `--kusto-cluster` at a reverse proxy or a private-DNS front end that carries no
+  `kusto` label, so that path keeps the other rules only. A call cannot name such
+  a host, and the refusal says to omit `cluster`.
+- **Clusters cannot be enumerated.** `clusters_list` is absent (see below), so
+  when the cluster is not already known the `databases` description tells the
+  model to ask the user rather than guess at a name.
+
+Every tool takes `cluster` before `database`, because the database is scoped by
+the cluster: the same database name can exist in two clusters with different
+contents.
+
+### Tools
+
+Five, all read-only, all in the `kusto` group:
+
+| Tool | Arguments | Purpose |
+| --- | --- | --- |
+| `databases` | optional `cluster` | The databases this identity can see in one cluster |
+| `tables` | optional `cluster`, `database` | Tables and stored functions in one database |
+| `schema` | required `table`, optional `cluster`, `database` | Column names and types |
+| `sample` | required `table`, optional `rows` (1-100), `cluster`, `database` | First N rows, as a grid |
+| `query` | required `csl`, optional `cluster`, `database` | Arbitrary KQL |
+
+`cluster` is conditionally required in prose rather than in the schema: nothing
+here validates arguments against `inputSchema`, and the refusal names what to
+pass, which is more useful to a model than a schema error. `--kusto` with no
+cluster is therefore a working group whose calls must each name a cluster, not a
+degraded one.
+
+`clusters_list` is deliberately absent: enumerating clusters is an ARM
+(`management.azure.com`) operation on a different audience and token, so it had
+no implementation path under the cluster-scoped token this client mints.
+
+Results are rendered as a compact aligned grid, never raw wire JSON —
+`{"Tables":[{"Columns":[{"ColumnName":…` is both unreadable to the model and
+several times the tokens of the same content as columns and rows.
+
+### Results at the relay boundary
+
+Both groups' tool results pass through `relaySafeText` as the last transform
+before they leave `/mcp`. A result over the relay cap spills **in full** to a
+file and the model receives a bounded preview plus that path, instead of a
+string truncated where the model cannot see it (the ADO client had its own 60k
+character clip for exactly that, and it is deleted: clipping there made the
+relay's "full result saved to" trailer untrue). Kusto's rendered-size cap
+stays, because it bounds RENDERING work rather than relay size, and the spill
+file carries that client's own truncation trailer so "full" is never read as
+"everything the service had".
+
+### Token refresh
+
+One process-lifetime cache keyed by cluster URI (which is also the audience),
+with one entry per distinct origin, so a session that queries two clusters holds
+two live tokens and mints each on first use. An `az` mint against a cold or
+expired MSAL entry measured 7-20 s on the machine this was written on, against
+the client's 20 s `AZ_TIMEOUT_MS`, so the first call of a session can fail with
+the retriable "Azure CLI did not answer" timeout before the cache is warm; the
+retry succeeds. A 5-minute refresh margin ahead of
+the reported expiry and a **single-flighted** refresh: concurrent callers that
+see the same expired entry await ONE `az` invocation. A token whose expiry `az` does not report is used but **not cached**,
+because a cache entry with no deadline can only be either immortal (serving a
+dead token) or arbitrary (minting in a loop). A **401 alone** invalidates the
+cached entry, so the retry (and every later call) mints a fresh token rather
+than replaying the dead value. A **403 does not**, and is not reported as a
+credential problem: ADX answers 403 for a valid identity that has no access to
+the cluster or database, so invalidating would send the operator to
+re-authenticate against a token that is fine while spawning an `az` call per
+attempt that still 403s. The service's own text names the missing grant, so it
+is read (under the same byte cap) and surfaced rather than replaced by a guess.
+This is the same distinction `src/lib/token.ts` makes for GitHub: only a 401 is
+a rejected credential, a bare 403 is not.
+
+### Retries
+
+429 and 5xx, plus transport failures, retry three times at 1/2/4 seconds, with
+`Retry-After` winning when the service sends one (both the delta-seconds and
+the HTTP-date forms, clamped to 300 s). Every request here is read-only, which
+is what makes resending it safe:
+no tool in this client mutates anything, by construction rather than by
+convention, since read-only is enforced by the service. A 401 retries at most
+once, and only after the cache invalidation above, so a second 401 from a
+freshly minted token is a real auth verdict instead of something another `az`
+call would fix. The ladder is injectable through the client's `retryDelaysMs`
+seam; an empty array makes every retriable verdict final, which is how the
+suites assert a verdict without paying the production backoff.
+
+## Token acquisition
+
+All three Azure clients share `src/lib/azure-cli-token.ts`, which resolves a
+bearer in three layers: an environment override (`BLUEBIRD_TOKEN`,
+`ADO_MCP_TOKEN`, `KUSTO_TOKEN`), then a **silent** `az account get-access-token
+--resource <r>`, then a single interactive login when, and only when, the silent
+mint fails for a credential-shaped reason.
+
+`KUSTO_TOKEN` is a single value with no audience of its own, and it is used
+verbatim for whichever cluster a call names. It is therefore correct only when
+every call in the session targets one cluster; a session that queries two needs
+the `az` path, which mints per cluster.
+
+The classification is the point, because the remedies differ:
+
+| `az` stderr | Class | What the router does |
+| --- | --- | --- |
+| `Please run 'az login' to setup account.` | `login-required` | one interactive login, then one re-mint |
+| `V2Error: invalid_resource AADSTS500011` | `tenant` | never a login: names the resource and tenant, points at `AZURE_TENANT_ID` |
+| binary not resolvable | `az-missing` | never a login: names the install |
+| timeout | `timeout` | surfaces the timeout |
+| anything else | `unknown` | surfaces the text |
+
+`AZURE_TENANT_ID` (or `--tenant` semantics) is applied to both the mint and the
+interactive login, so a multi-tenant operator does not have to re-point `az`
+globally.
+
+The interactive login is `az login` first (the browser carries the session), then
+`az login --use-device-code` when the browser cannot complete it; the code and URL
+are printed to the operator's own terminal, which is why the child inherits stdio.
+It is bounded (120 s browser, 300 s device code), single-flighted so concurrent
+callers share one login, and counted **only when an attempt completes**: an
+aborted attempt does not permanently consume the session's one try, and a
+genuinely failed attempt backs off (5 min) rather than retrying per request. A
+caller that goes away does not kill a login other callers are waiting on: the
+login runs under its own controller, not the caller's signal.
+
+Two paths deliberately **never** reach it. The launch probe (`provisionAdoTools`)
+runs under `PROVISION_TIMEOUT_MS = 20_000`, and its abort tree-kills the child, so
+a 120 s browser login underneath it would be killed at 20 s and reported as a
+failure; the probe stays silent-mint only and keeps its existing behavior of
+switching the group off with a visible reason. And an environment override
+short-circuits the whole ladder, so an operator-supplied token is never
+second-guessed by a browser popup.
+
+Every client invalidates its cache entry on a 401 before re-minting, so the retry
+sends a genuinely fresh token instead of replaying the rejected one. A 401 is the
+only invalidation trigger, matching the Kusto rationale above: a 403 is an
+authorization verdict, not a credential verdict.
+
+## Clients that receive these groups
+
+| Client | `ado` / `kusto` |
+| --- | --- |
+| `github-router claude` | yes: scoped `mcpServers` entries injected into the mirrored `.claude.json` |
+| `github-router serve` | yes: same injection through `src/lib/serve/enhancements.ts` |
+| `github-router pi` | yes: entries written to `<mirror>/mcp.json`, read by `pi-mcp-adapter` |
+| `github-router codex` | no: nothing registers MCP servers for Codex today |
+| worker subagents (`explore` / `review` / `implement`) | no: the worker toolset is its own fixed list |
+
+The Pi route differs from the Claude one. Pi reaches `peers`, `search`, and
+`browser` through a generated extension that calls `/mcp/<group>` directly; the
+two Azure groups have no extension seam, so they ride **Pi's own `mcp.json`** in
+the per-launch mirror (`<Pi agent dir>/mcp.json`, which the adapter reads on Pi
+0.99+). Three consequences worth knowing:
+
+- Every key is prefixed `gh-router-<group>`. In the adapter's precedence order
+  the mirror file is a user-global source, and `.mcp.json` / `.pi/mcp.json` /
+  `.pi/mcp-adapter.json` all outrank it and replace a same-named server
+  **wholesale**. A bare `ado` key would therefore hand the model the workspace's
+  own `ado` server under a name meant for ours. A project file that declares one
+  of our prefixed keys is reported at launch, never edited.
+- The bearer is written as `Bearer ${GH_ROUTER_HOOK_NONCE}`, which the adapter
+  interpolates from the child environment at connect time. The file never
+  contains a token.
+- The write is gated on `--helpers` **and** `--peers` (the adapter's own gates)
+  plus the group being enabled. `--no-helpers` and `--no-peers` therefore leave
+  Pi with no Azure MCP surface at all, and so does a failed offline install of
+  the adapter package. The gate is deliberately conservative in the other
+  direction too: the same file is Pi's *built-in* MCP config, so writing it
+  without the adapter would expose the groups through a backend this path has
+  never validated.
+
+Observed on a real launch (Pi 1.3.0 on Windows, adapter installed into the
+mirror): the adapter's own `mcp-cache.json` lists `gh-router-ado` with exactly
+20 tools (`repo_repository`, `repo_pull_request`, `wit_work_item`,
+`pipelines_build`, `wiki`, `repo_search_commits`, ...) - the read-only set, so
+`X-MCP-Readonly` holds through this route as well - and the session transcript
+shows a completed model turn, which is the end-to-end proof that the nonce
+interpolation and the scoped URL work from Pi. That cache file is the check to
+reach for, because it can only exist after the adapter has connected.
+
+The same launch surfaced a non-network way for the install to fail: npm >= 11.19
+rejects a CLI- or env-sourced `allow-scripts` for a project-scoped install, and
+Pi's per-boot `npm install --prefix <mirror>/npm` is exactly that shape, so a
+shell export of `npm_config_allow_scripts` killed the whole launch before any
+package landed. `getPiLaunchEnvVars` now emits `npm_config_allow_scripts=""` for
+the Pi child, which hands the decision back to the `.npmrc` cascade (rationale
+and measurements in [`pi-launch.md`](pi-launch.md)).
+
+## Testing policy
+
+The `docs/bluebird-search.md` policy extends verbatim to both clients: **unit and
+end-to-end tests must not call the real Azure DevOps endpoint, a real Kusto
+cluster, or a real repository.** Tests inject a fictional base URL, mock `fetch`,
+and use synthetic paths, queries, organization names, and tokens. Live checks are
+manual, read-only, and must never print or inspect an access token.
+
+`tests/bluebird-test-isolation.test.ts` enforces this for the whole family. It
+reads the live endpoint constants **out of the client sources** rather than
+transcribing them, so a guard that would stop guarding when a constant moves
+follows it instead, and it asserts that the protocol suites address only
+IANA-reserved hosts (`example.*`, `.test`, `.invalid`) — a host that could
+resolve to a real service is unrepresentable rather than merely discouraged.
+
+`AdoMcpClient` takes an optional `baseUrl` for exactly this reason, so no test
+ever names the production host.
+
+## Related
+
+- [`docs/peer-mcp-design.md`](peer-mcp-design.md) — the group system, the scoped
+  `/mcp/<group>` endpoints, and the tool-surface minimality rule.
+- [`docs/bluebird-search.md`](bluebird-search.md) — the sibling integration this
+  one follows, including the shared Azure CLI token plumbing.
+- [`docs/unsupported-features.md`](unsupported-features.md) — Anthropic surfaces
+  with no Copilot equivalent.

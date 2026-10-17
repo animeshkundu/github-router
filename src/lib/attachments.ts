@@ -26,14 +26,14 @@
  *
  * WHY A LOCAL MAGIC-BYTE DETECTOR
  *
- * `src/vendor/pi/agent/harness/tools/image.ts` has a detector already, but it
- * is vendored (see `docs/pi-vendor-sync.md`) and its supported set is Pi's, not
- * Copilot's: it recognizes BMP, which no Copilot model accepts, and misses
- * HEIC/HEIF, which gemini advertises. Identification here is deliberately keyed
- * to what the live catalog's `limits.vision.supported_media_types` actually
- * lists, so a sniff result can be compared against a model's allowlist without
- * a translation step. Base64 encoding uses Node's `Buffer`, not the vendored
- * hand-rolled encoder.
+ * Pi ships a detector of its own, but its supported set is Pi's, not Copilot's:
+ * it recognizes BMP, which no Copilot model accepts, and misses HEIC/HEIF, which
+ * gemini advertises. (It also is not available here — the `agent/harness/` tree
+ * that carried it left `packages/agent/src/` upstream and is not vendored; see
+ * `docs/pi-vendor-sync.md`.) Identification here is deliberately keyed to what
+ * the live catalog's `limits.vision.supported_media_types` actually lists, so a
+ * sniff result can be compared against a model's allowlist without a translation
+ * step. Base64 encoding uses Node's `Buffer`, not a hand-rolled encoder.
  *
  * Detection is by CONTENT, never by file extension. A caller-supplied
  * `media_type` (or a `.png` suffix) is an assertion, not evidence; the wire

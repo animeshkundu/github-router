@@ -2447,6 +2447,8 @@ describe("resolveGroupKeysFromMirror", () => {
         decide: "decide",
         fleet: "fleet",
         "first-mate": "first-mate",
+        ado: "ado",
+        kusto: "kusto",
       })
     })
   })

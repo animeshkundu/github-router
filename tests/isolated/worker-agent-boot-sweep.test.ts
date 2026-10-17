@@ -252,16 +252,24 @@ describe("sweepStaleWorktreesAtBoot — E2E with real git worktrees", () => {
     "ledger entry pointing at a deleted repo → sweep skips gracefully (no throw)",
     async () => {
       await __clearLedgerForTests()
-      // Record a repo, then nuke it from disk so the sweep hits ENOENT
-      // when it tries to `readdir(<repoRoot>/.git/worker-worktrees)`.
-      const repo = makeRepo()
-      await recordWorkerRepo(repo.root)
-      repo.cleanup()
-      expect(await dirExists(repo.root)).toBe(false)
+      // The state under test is a ledger entry whose `repoRoot` is not on
+      // disk. `recordWorkerRepo` only appends the string, so it is reached
+      // directly here. Reaching it by building a real repo and deleting it
+      // measured the recursive delete instead: on a macOS runner the
+      // indexer can still hold a freshly written tree, `rmSync` then fails
+      // after its retries, and `cleanup` swallows that as best-effort, so
+      // the assertion below failed on a condition unrelated to the sweep
+      // (observed on macos-latest, green on re-run). A path that was never
+      // created produces the same ENOENT at the same `readdir`, since the
+      // sweep reads `<repoRoot>/.git/worker-worktrees` and never stats the
+      // repo itself.
+      const repoRoot = path.join(tempHome, "trunk", "deleted-repo")
+      await recordWorkerRepo(repoRoot)
+      expect(await dirExists(repoRoot)).toBe(false)
 
-      // The sweep walks the (now-missing) parent dir, catches the
-      // readdir failure, and `continue`s to the next ledger entry.
-      // Must resolve cleanly.
+      // The sweep walks the (missing) parent dir, catches the readdir
+      // failure, and `continue`s to the next ledger entry. Must resolve
+      // cleanly.
       await expect(sweepStaleWorktreesAtBoot()).resolves.toBeUndefined()
     },
     30_000,

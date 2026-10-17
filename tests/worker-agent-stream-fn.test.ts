@@ -7,6 +7,12 @@ import type {
   Model,
   Tool as PiTool,
 } from "@earendil-works/pi-ai"
+// Value import: since the Pi v1.3.0 agent core the `StreamFn` contract takes a
+// normalized `TranscriptContext`, which only `normalizeContext` produces. The
+// fixtures below stay written in the natural `Context` shape and are normalized
+// at the call boundary, so these tests exercise the same normalization the
+// agent loop performs rather than hand-building a branded object.
+import { normalizeContext } from "@earendil-works/pi-ai"
 
 import { state } from "~/lib/state"
 import { __resetAicLedgerForTests, aicSnapshot } from "~/lib/aic-ledger"
@@ -71,7 +77,7 @@ async function drain(
   // StreamFn's declared return is `Stream | Promise<Stream>`; our concrete
   // impl is sync, but we await to cover the type union and any future async
   // refactor that respects the contract.
-  const stream = await streamFn(NOOP_MODEL, ctx, signal ? { signal } : undefined)
+  const stream = await streamFn(NOOP_MODEL, normalizeContext(ctx), signal ? { signal } : undefined)
   const events: Array<AssistantMessageEvent> = []
   for await (const ev of stream) events.push(ev)
   const final = await stream.result()

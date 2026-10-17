@@ -199,7 +199,7 @@ security boundary. This is inherent to a zero-login local control plane.
 ### Per-capability gating for remote (tunnel) access
 Remote exposure (`--tunnel` / `--public-url`) is authenticated but **not necessarily single-user**, and
 the control plane's capabilities span a wide privilege range (a shell, the filesystem, the operator's
-browser identity, GitHub writes). So the two highest-blast-radius capabilities are **withheld by default
+browser identity, GitHub writes). So the highest-blast-radius capabilities are **withheld by default
 whenever the control plane is tunnel-exposed** (`tunnelExposed = --tunnel || --public-url`), gated in
 `provisionServeEnhancements`:
 
@@ -209,6 +209,9 @@ whenever the control plane is tunnel-exposed** (`tunnelExposed = --tunnel || --p
   tunnel only with `--agents-over-tunnel`.
 - **fleet** — drives remote coding sessions with the operator's stored fleet credentials
   (code-execution-by-proxy on remote instances). Enable over a tunnel only with `--fleet-over-tunnel`.
+- **Azure DevOps / Kusto MCP** — both read with the operator's `az` identity, and Kusto can name any
+  cluster that identity reaches on each call. Enable over a tunnel only with `--ado-over-tunnel` /
+  `--kusto-over-tunnel`.
 
 Local (loopback-only) serve is unaffected — both are gated purely on the tunnel-exposed condition, and
 `serve` prints a one-line hint when it withholds a capability.
@@ -227,7 +230,7 @@ command rather than half-starting.
 `--no-install`, `--cloudcli-version <v>`, `-m/--model <slug>` (accepts the `4.7`/`4.8` Opus-family
 shorthand + default fallback-cache walk, like `github-router claude`), `--no-open`, `--tunnel`,
 `--public-url <url>`, `--codex-cli`, `--browse-over-tunnel`, `--agents-over-tunnel`,
-`--fleet-over-tunnel`, plus the shared
+`--fleet-over-tunnel`, `--ado-over-tunnel`, `--kusto-over-tunnel`, plus the shared
 server args (including `--browse` / `--fleet` / `--agents`). `--browse` enables the **server-side**
 browser MCP (it drives the machine running `serve`).
 

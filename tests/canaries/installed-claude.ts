@@ -122,3 +122,48 @@ export async function bundleContainsAny(
     await handle.close()
   }
 }
+
+/**
+ * True when EVERY marker of one contract group is present.
+ *
+ * A group is a conjunction of facts, not a list of alternatives: the
+ * auto-compact groups pair the 100K/1M constants with the call site that
+ * feeds them to the env parser and raises the effective value to the floor.
+ * A build that renamed the constants satisfies neither half, and one that
+ * kept the names but dropped the `Math.max` satisfies only the half that
+ * proves nothing on its own.
+ *
+ * It lives here, and is asserted directly, because the two are easy to
+ * confuse: `bundleContainsAny` takes an ALTERNATIVES list, so a group
+ * evaluated with the wrong combinator would still pass on the build that
+ * happens to be installed today and only stop discriminating later, when
+ * nothing is watching. The helper is deliberately generic over the marker
+ * list so a test can drive it with synthetic content on a machine that has no
+ * client installed at all (CI).
+ */
+export async function bundleContainsAll(
+  path: string,
+  needles: ReadonlyArray<string>,
+): Promise<boolean> {
+  const found = await Promise.all(
+    needles.map((needle) => bundleContainsAny(path, [needle])),
+  )
+  return found.every(Boolean)
+}
+
+/**
+ * True when at least one contract group fully matches.
+ *
+ * Groups ARE alternatives to each other: each one pins the same behavior as
+ * minified identifiers rolled across releases, so a developer on an older
+ * build must keep passing on the older group.
+ */
+export async function anyContractGroupMatches(
+  path: string,
+  groups: ReadonlyArray<ReadonlyArray<string>>,
+): Promise<boolean> {
+  const matches = await Promise.all(
+    groups.map((group) => bundleContainsAll(path, group)),
+  )
+  return matches.some(Boolean)
+}

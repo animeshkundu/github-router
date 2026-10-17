@@ -3,6 +3,46 @@ Copyright (c) 2026 animeshkundu
 Licensed under the MIT License (see LICENSE).
 
 ================================================================================
+Third-party software DISTRIBUTED inside this package
+================================================================================
+
+Pi agent runtime (@earendil-works/pi-agent-core and the retained pi-ai slice)
+----------------------------------------------------------------------------
+github-router vendors the Pi agent runtime at `src/vendor/pi/` (rather than
+depending on it) and bundles it into `dist/`, so published artifacts DO contain
+Pi source. MIT requires the copyright notice and permission notice below to
+travel with every copy, and this file is what ships them: the vendored tree's
+own `src/vendor/pi/LICENSE` is not part of the published tarball, since
+`package.json` ships only `dist/`, the named docs, and this NOTICE.
+
+  Source:     https://github.com/earendil-works/pi-mono
+  Vendored:   tag v1.3.0, commit 71023aec1546d6d677a65669c5665c0927ce0dd0
+  License:    MIT (full text below)
+  Provenance: src/vendor/pi/PROVENANCE.md, docs/pi-vendor-sync.md
+
+MIT License
+
+Copyright (c) 2025 Mario Zechner
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+================================================================================
 Third-party software launched at the user's direction (NOT distributed with
 github-router)
 ================================================================================

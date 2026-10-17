@@ -7,7 +7,15 @@ import process from "node:process"
 import { defineCommand, type ArgsDef } from "citty"
 import consola from "consola"
 
-import { ensurePiInstalled, getInstalledPiVersion, meetsPiMinVersion, refreshPiInBackground, updatePi } from "./lib/pi-version-check"
+import {
+  ensurePiInstalled,
+  getInstalledPiVersion,
+  meetsPiMinVersion,
+  PI_MIN_VERSION,
+  refreshPiInBackground,
+  resolvePiRegistry,
+  updatePi,
+} from "./lib/pi-version-check"
 import { warnOnTierPriceDriftForModels } from "./lib/pi-tier-windows"
 import {
   AIC_LEDGER_ENV,
@@ -68,7 +76,8 @@ import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
-import { browserToolsEnabled } from "./lib/mcp-capabilities"
+import { browserToolsEnabled, adoToolsEnabled, kustoToolsEnabled } from "./lib/mcp-capabilities"
+import { resolvePiSurfaces, writePiMcpJson } from "./lib/pi-mcp-config"
 import {
   formatBalancedPrerequisiteFailure,
   formatCheapestPrerequisiteFailure,
@@ -298,7 +307,7 @@ export const pi = defineCommand({
         installedVersion = await pendingInstall.promise
       } catch (err) {
         consola.error(
-          `Pi is not installed and automatic install failed (${err instanceof Error ? err.message : String(err)}). Install it with \`npm install -g @earendil-works/pi-coding-agent\`, then retry.`,
+          `Pi is not installed and automatic install failed (${err instanceof Error ? err.message : String(err)}). Install it with \`npm install -g @earendil-works/pi-coding-agent --registry=${resolvePiRegistry()}\`, then retry.`,
         )
         process.exit(1)
       } finally {
@@ -318,14 +327,14 @@ export const pi = defineCommand({
             installedVersion = await getInstalledPiVersion()
           } catch (err) {
             consola.error(
-              `Installed Pi v${installedVersion} is below the supported floor and auto-upgrade failed (${err instanceof Error ? err.message : String(err)}). Upgrade manually: \`npm install -g @earendil-works/pi-coding-agent@latest\`.`,
+              `Installed Pi v${installedVersion} is below the supported floor and auto-upgrade failed (${err instanceof Error ? err.message : String(err)}). Upgrade manually: \`npm install -g @earendil-works/pi-coding-agent@latest --registry=${resolvePiRegistry()}\`.`,
             )
             process.exit(1)
           }
         }
         if (!meetsPiMinVersion(installedVersion)) {
           consola.error(
-            `Installed Pi v${installedVersion} is below the supported floor. Upgrade: \`npm install -g @earendil-works/pi-coding-agent@latest\`.`,
+            `Installed Pi v${installedVersion} is below the supported floor (v${PI_MIN_VERSION}). Upgrade: \`npm install -g @earendil-works/pi-coding-agent@latest --registry=${resolvePiRegistry()}\`.`,
           )
           process.exit(1)
         }
@@ -348,6 +357,18 @@ export const pi = defineCommand({
     const searchEnabled =
       parsed.searchEnabled || process.env.GH_ROUTER_ENABLE_SEMANTIC_SEARCH === "1"
     const browseEnabled = browserToolsEnabled()
+    // Which Pi surfaces this launch emits, in one place. `codeSearch` is the
+    // Bluebird seam: Bluebird answers the `code` tool without `--search`, so
+    // the generated seam follows it, while `pi-web-access` and the ColBERT
+    // skill prose keep following `--search`. See `resolvePiSurfaces`.
+    const surfaces = resolvePiSurfaces({
+      searchEnabled,
+      bluebirdEnabled: state.bluebirdEnabled === true,
+      adoEnabled: adoToolsEnabled(),
+      kustoEnabled: kustoToolsEnabled(),
+      helpersEnabled,
+      peersEnabled,
+    })
 
     // Pin-mode prerequisites against the live catalog (fail-closed).
     // Peerless launches validate the lead only (nothing else is consumed).
@@ -490,12 +511,39 @@ export const pi = defineCommand({
         path.join(mirror, "extensions", "gh-router-pi", "index.ts"),
         buildPiExtensionSource({
           profileId,
-          searchEnabled,
+          searchEnabled: surfaces.codeSearch,
+          searchBackend: surfaces.codeSearchBackend,
           browseEnabled,
           peers: peersEnabled,
           bridge: bridgeStats ? { stats: bridgeStats, scopedRules: bridgeScoped } : undefined,
         }),
       )
+      // The Azure groups reach Pi through Pi's own `mcp.json` in the mirror,
+      // which `pi-mcp-adapter` reads (`<Pi agent dir>/mcp.json`, Pi 0.99+).
+      // Pi reaches `peers` / `search` / `browser` through the generated
+      // extension instead; these two have no extension seam, so the adapter is
+      // their only route. A user-owned `mcp.json` is merged over, never
+      // replaced, and a project file that would shadow an entry is reported
+      // rather than repaired.
+      if (surfaces.groups.length > 0) {
+        const written = await writePiMcpJson({
+          mirrorDir: mirror,
+          workspace: process.cwd(),
+          serverUrl,
+          groups: surfaces.groups,
+        })
+        if (written.skippedReason) {
+          consola.warn(
+            `Pi MCP: left ${written.path} alone (${written.skippedReason}); the Azure groups are not exposed to Pi this launch.`,
+          )
+        } else {
+          for (const { key, file } of written.shadowed) {
+            consola.warn(
+              `Pi MCP: ${file} declares "${key}" and outranks the mirror copy, so the router's version is not the one Pi will run. Rename that entry to keep both.`,
+            )
+          }
+        }
+      }
       // Peer floor (agents + consult skills) rides --peers; the SWE
       // pipeline (delegate/advisor skills, review prompts) rides --swe AND
       // --peers (without agents + the subagent provider its prose dangles,
@@ -654,6 +702,10 @@ export const pi = defineCommand({
         swe: sweEnabled,
         search: searchEnabled,
         browse: browseEnabled,
+        // From the resolved decision, not from `state`: the Azure groups only
+        // reach the session through the helpers bundle, so the card must name
+        // exactly what the mirror carries.
+        azureGroups: surfaces.groups.map((g) => g.group),
         serverUrl,
       })}\n`,
     )
@@ -664,6 +716,7 @@ export const pi = defineCommand({
     }
 
     const { disposeBluebirdClients } = await import("./lib/bluebird-client")
+    const { disposeAdoClients } = await import("./lib/ado-tools")
     launchChild(
       {
         kind: "pi",
@@ -694,6 +747,7 @@ export const pi = defineCommand({
           unregisterLaunch(entry.launchId)
           await stopKeepAwake()
           await disposeBluebirdClients()
+          await disposeAdoClients()
           // Persist this launch's installed <mirror>/npm for the next
           // launch's pre-seed (keyed by the exact packages[] slice), then
           // remove the per-launch mirror as before. Best-effort, never

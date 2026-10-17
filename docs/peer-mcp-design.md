@@ -6,7 +6,7 @@ Expose five peer-model review tools - `gpt-6-sol` (codex_critic), `gpt-5.3-codex
 
 ### Intent-scoped server split
 
-The original single `gh-router-peers` MCP server is split into **eight intent-named MCP groups**. Each enabled group is a distinct `mcpServers` entry pointing at `/mcp/<group>`; the single `/mcp` union path remains for BYO clients.
+The original single `gh-router-peers` MCP server is split into **ten intent-named MCP groups**. Each enabled group is a distinct `mcpServers` entry pointing at `/mcp/<group>`; the single `/mcp` union path remains for BYO clients.
 
 The groups are:
 - `peers` → `/mcp/peers` (model critics/reviewers and profile-specific peer tools)
@@ -17,8 +17,10 @@ The groups are:
 - `decide` → `/mcp/decide` (`stand_in`)
 - `fleet` → `/mcp/fleet` (gated remote-session control)
 - `first-mate` → `/mcp/first-mate` (gated cloud-agent control)
+- `ado` → `/mcp/ado` (the Azure DevOps remote MCP surface, read-only by default; loaded only when the group is enabled)
+- `kusto` → `/mcp/kusto` (Azure Data Explorer, five read-only tools, the cluster named per call or defaulted at launch; loaded only when the group is enabled)
 
-A launch profile projects only the groups it allows; not every session registers all eight.
+A launch profile projects only the groups it allows; not every session registers all ten.
 
 Under this new topology, the lead model sees names prefixed as `mcp__<group>__<newname>`, e.g., `mcp__search__code`, `mcp__browser__navigate`, `mcp__peers__codex_critic`, `mcp__workers__explore`, `mcp__decide__stand_in`.
 
@@ -28,7 +30,7 @@ Config keys are bare by default (`peers`, `search`, etc.). To prevent a user's o
 
 ## Current Architecture
 
-The proxy at `src/routes/mcp/` exposes eight intent-scoped MCP groups on loopback endpoints. Core groups are `peers`, `search`, `workers`, `orchestrate`, `browser`, and `decide`; `fleet` and `first-mate` are optional control-plane groups. A launch profile projects only the groups its policy permits.
+The proxy at `src/routes/mcp/` exposes ten intent-scoped MCP groups on loopback endpoints. Core groups are `peers`, `search`, `workers`, `orchestrate`, `browser`, and `decide`; `fleet` and `first-mate` are optional control-plane groups, and `ado` and `kusto` are opt-in Azure surfaces that are off unless the launch enables them (see [`docs/azure-mcp.md`](azure-mcp.md)). A launch profile projects only the groups its policy permits.
 
 Auto-injection: `github-router claude` registers these servers by **merging them into the per-launch mirrored `<CLAUDE_CONFIG_DIR>/.claude.json`'s `mcpServers` map** (`injectPeerMcpIntoMirror` in `src/lib/codex-mcp-config.ts`). This is the load-bearing fix for subagent MCP visibility - subagents (Agent-tool, forks, agent-teams subprocesses) discover MCP servers from `CLAUDE_CONFIG_DIR/.claude.json` user-scope, NOT from a parent-process-only CLI flag, so the mirror approach makes the peer tools visible to every spawned tier. The merge is non-destructive (the user's pre-existing user-scope MCPs are preserved). On collision, we dynamically resolve the server keys using a fallback name (`gh-router-<group>`) as described above; subagents inherit the fallback keys identically. Subagent persona prompts are written to `<CLAUDE_CONFIG_DIR>/agents/peer-<pid>-<rand>-<name>.md` and pass an `--agents`-style discovery path; the frontmatter has **no `tools:` field** so the subagent inherits the parent's full toolset (built-ins + every MCP visible to the parent, incl. our injected tools). Per-launch mirror dir (`<pid>-<rand>` under `~/.local/share/github-router/claude-config/`) means two concurrent launches never race on the `.claude.json` write or share an MCP nonce; orphan dirs from SIGKILL'd proxies are reclaimed by a boot-time PID-alive sweep. Project-scope MCPs (`<workspace>/.mcp.json`) are untouched - the spawned `claude` inherits the parent's cwd via `launchChild`'s no-`cwd:` spawn, so Claude Code reads them directly from the workspace; the proxy never mirrors or sanitizes project-scope. Auth: per-launch random 32-byte nonce as Bearer token + Host header check (loopback only); the proxy validates against the launch nonce regardless of which channel - mirror or `--mcp-config` fallback - the request came through.
 
@@ -399,6 +401,21 @@ The internal `CodeSearchResponse` type in `src/lib/code-search.ts` is rich on pu
 
 For each proposed input or output field, answer in one sentence: **"What would the model do with this?"** If the answer is "nothing" or "look at it for context but not act on it," cut it. Default to absent - adding back later is cheap; pulling out a field clients have already learned to expect is breaking.
 
+### When a group's tool list is dynamic (`ado`)
+
+`NON_PERSONA_MCP_TOOLS` is a frozen array of hand-written entries, pinned at boot by `assertMcpToolSurfaceConsistent()`. The `ado` group is the one exception, and it is worth stating exactly what that costs and what it does not.
+
+The upstream Azure DevOps remote MCP server owns its tool set: it advertises 20 tools under the curated toolsets with `X-MCP-Readonly: true`, 31 without it, and 43 with every toolset. Its names and descriptions change on Microsoft's schedule, and its dispatcher tools take a free-string `action` argument with **no `enum`**, so the accepted values exist only inside description prose and no client-side classification is possible. Freezing twenty entries would therefore be a transcription that drifts silently, requiring a proxy release for every upstream rename, and one that a reader could not verify from the code alone.
+
+So `ado` forwards `tools/list` from upstream. The static contract is preserved by narrower means rather than waived:
+
+- The two headers that define the surface (`X-MCP-Toolsets`, `X-MCP-Readonly`) **are** the filter, applied by the server. The read-only subset is measured, not computed here: it is a strict subset of the full list whose difference is exactly the 11 `*_write` / `*_upload` / `*_create_*` / `upsert` tools.
+- Name uniqueness is still checked, at snapshot time against the static registry, and a collision drops the upstream tool with a warning rather than shadowing a proxy tool. The boot assertion sees the static registry only, so it cannot do this and the check lives where the two lists meet.
+- Every dynamic entry carries `group: "ado"` and `capability: "ado"`, so the same list-time filter and the same call-time gate apply as to any static tool. A client that hard-codes `mcp__ado__*` on a launch that never enabled the group reaches the same `-32601` as an unknown tool.
+- The snapshot is taken once at launch (20 s bound, awaited before the child spawns) because `toolEntries()` is synchronous. A failure disables the group rather than advertising an empty one.
+
+The distinction from a static group is therefore about **where the list comes from**, not about what is enforced. `tests/ado-client.test.ts` pins the mapping, the collision behaviour, and the fixture count; a silent upstream expansion shows up as a changed fixture rather than only in production.
+
 ## Worker tools (`explore`, `review`, `plan`, `implement`, `test`, `browse`)
 
 The six mode tools `mcp__workers__explore`, `mcp__workers__review`, `mcp__workers__plan`, `mcp__workers__implement`, `mcp__workers__test`, and `mcp__workers__browse` delegate scoped work to an **autonomous worker subagent** backed by the **Pi agent runtime** (vendored at `src/vendor/pi/`); the seventh tool, `mcp__workers__worker_defaults`, inspects or changes their in-memory defaults. **Per-mode built-in defaults:** read-only `explore` → `gpt-6-luna` at `high`; read-only `review` → `gemini-3.1-pro-preview` at `xhigh` (clamped to `high` at call time because Gemini does not advertise xhigh); read-only `plan` → `claude-opus-5.5` at `high`; read+write `implement`/`test` → `gpt-6-sol` at `high`; browser-control `browse` → `gpt-6-luna` at `low` (page-driving is observation-heavy but reasoning-light). Luna's full effort ladder makes explore's `high` a real choice rather than a clamp. The `high` plan/implement/test defaults favour time-to-outcome; a caller can restore a higher tier because thinking resolution is **per-call `thinking` > `worker_defaults` session override > built-in**. The worker plans its own tool calls, decides when it's done, and returns a single text answer (plus a unified diff for an implementation/test run that changed files). Implementation: `src/lib/worker-agent/engine.ts` (`runWorkerAgent`, which holds the `DEFAULT_MODEL_CHAIN`/`IMPLEMENT_DEFAULT_MODEL`/`BROWSE_DEFAULT_MODEL` constants) and `src/lib/worker-agent/tools.ts` (the worker-side `AgentTool` definitions).
@@ -503,7 +520,7 @@ The worker's read-only file tools refuse paths matching `.env*`, `*.pem`, `id_rs
 
 ### Vendored Pi runtime
 
-The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice) is **vendored** at `src/vendor/pi/` rather than depended on via `package.json`. The vendor sync protocol - how to refresh the snapshot, what to keep in sync, and what to deliberately diverge on - is documented in [`pi-vendor-sync.md`](pi-vendor-sync.md). MIT attribution is preserved verbatim in `src/vendor/pi/LICENSE` and via comment headers on every vendored file.
+The Pi agent runtime (`@earendil-works/pi-agent-core` + a minimal `pi-ai` slice) is **vendored** at `src/vendor/pi/` rather than depended on via `package.json`. The vendor sync protocol - how to refresh the snapshot, what to keep in sync, and what to deliberately diverge on - is documented in [`pi-vendor-sync.md`](pi-vendor-sync.md). MIT attribution is preserved verbatim in `src/vendor/pi/LICENSE`, restated in the package-level `NOTICE`, and carried as a local comment header or patch note on the five files we touched (`agent/index.ts`, `agent/proxy.ts`, `ai/index.ts`, `ai/types.ts`, `ai/utils/diagnostics.ts`) rather than on every vendored file. The `NOTICE` copy is the load-bearing one for redistribution: `package.json` `files` ships `dist/`, the named docs, and `NOTICE`, not `src/vendor/`, while `dist/` bundles the runtime. `scripts/check-pack-no-agpl.mjs` asserts it at release time.
 
 ### Compatibility probes (worker model + body-shape contracts)
 

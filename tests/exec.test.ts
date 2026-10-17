@@ -334,14 +334,32 @@ describe("runManagedExeCapture — inactivity watchdog", () => {
     (out === 0 ? `clearInterval(t);setTimeout(()=>process.exit(0),${idleMs});` : ``)
 
   test("silent child past the window is killed with stalled:true", async () => {
+    // The child is silent and never exits on its own, so a verdict can only
+    // come from the watchdog killing it. A bun timeout here therefore means
+    // exactly one thing: the kill was never issued or never landed.
+    //
+    // Wall-clock is deliberately NOT asserted. The watchdog timer shares an
+    // event loop with the other 286 lane-1 files in this process, and
+    // synchronous work there delays the callback while the kill path itself
+    // stays fast. Measured both ways: a deliberate 5s spin in this process
+    // turned a 1500ms window into a 5021ms firing and a 5264ms total, and a
+    // full-suite run produced the same shape at 14789ms with a CORRECT
+    // `stalled` verdict. An elapsed bound would assert the runner's
+    // scheduling, not the watchdog. The kill path has its own coverage in the
+    // `onInactivityCheck:false kills` case below.
+    //
+    // The window is 1500ms rather than a token value because the sibling
+    // chatty-child test documents spawn→first-output at p50 369ms / max 496ms
+    // on a loaded Windows runner; a window below child-boot cost makes the
+    // verdict depend on which of the two wins.
     const res = await runManagedExeCapture(
       node,
-      ["-e", "setTimeout(()=>process.exit(0), 60000)"], // 60s, no output
-      { inactivityTimeoutMs: 250 },
+      ["-e", "setInterval(() => {}, 1000)"], // silent, never exits
+      { inactivityTimeoutMs: 1500 },
     )
     expect(res.stalled).toBe(true)
     expect(res.timedOut).toBe(false)
-  }, 15_000)
+  }, 60_000)
 
   test("a chatty child resets the watchdog and runs to completion", async () => {
     // 4 ticks 100ms apart, then exit cleanly. The window must clear
@@ -396,18 +414,27 @@ describe("runManagedExeCapture — inactivity watchdog", () => {
   }, 15_000)
 
   test("byte cap: default kills; truncateInsteadOfKill drains + completes", async () => {
-    // Emit 1KB every 20ms for 30 ticks (~600ms), then exit 0. With a 4KB cap
-    // the overflow lands mid-run (~5 ticks) while the child is still alive.
-    const bigScript =
-      'let i=0;const t=setInterval(()=>{if(i++>=30){clearInterval(t);process.exit(0)}' +
+    // The kill leg needs a child that CANNOT finish on its own. Its claim is
+    // that the byte cap kills the process, and a zero exit is the failure it
+    // looks for, so a BOUNDED writer makes the test measure the runner instead:
+    // when the lane starves this test's read loop, the child (which exited
+    // after ~600 ms by design) can finish before the kill lands, and a correct
+    // cap looks like a missed kill. An endless writer cannot produce that
+    // reading, and a kill that never lands now fails as a 15 s timeout instead
+    // of as a passing assertion. The drained leg keeps the bounded writer,
+    // because there the claim is the opposite one: the child runs to
+    // completion because nothing kills it.
+    const writeTicks = (ticks: number) =>
+      'let i=0;const t=setInterval(()=>{if(i++>=' + ticks + '){clearInterval(t);process.exit(0)}' +
       'else process.stdout.write("x".repeat(1000))},20)'
-    const killed = await runManagedExeCapture(node, ["-e", bigScript], {
+    const endlessWriter = 'const t=setInterval(()=>process.stdout.write("x".repeat(1000)),20)'
+    const killed = await runManagedExeCapture(node, ["-e", endlessWriter], {
       maxStdoutBytes: 4096,
     })
     expect(killed.stdoutTruncated).toBe(true)
     expect(killed.code).not.toBe(0) // tree-killed mid-output
 
-    const drained = await runManagedExeCapture(node, ["-e", bigScript], {
+    const drained = await runManagedExeCapture(node, ["-e", writeTicks(30)], {
       maxStdoutBytes: 4096,
       truncateInsteadOfKill: true,
     })
