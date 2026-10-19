@@ -312,15 +312,6 @@ export function applyResponsesCachePolicy(
   payload: ResponsesPayload,
   opts: ResponsesCachePolicyOptions,
 ): ResponsesPayload {
-  logCacheSignature({
-    endpoint: "/responses",
-    model: payload.model,
-    workload: opts.workload,
-    system: opts.stablePrefix ?? payload.instructions,
-    tools: payload.tools,
-    messages: payload.input,
-  })
-
   if (
     opts.workload !== "reusable-prefix"
     || !gpt56ExplicitCacheEnabled(payload.model)
@@ -330,6 +321,15 @@ export function applyResponsesCachePolicy(
   ) {
     return payload
   }
+
+  logCacheSignature({
+    endpoint: "/responses",
+    model: payload.model,
+    workload: opts.workload,
+    system: opts.stablePrefix ?? payload.instructions,
+    tools: payload.tools,
+    messages: payload.input,
+  })
 
   const stablePrefix = opts.stablePrefix ?? payload.instructions
   // True UTF-8 bytes, not `.length` (which is UTF-16 code units) — see

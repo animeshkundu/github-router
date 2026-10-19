@@ -1454,7 +1454,7 @@ async function runAdvisor(
       // advisor adds most of its value on the FIRST call (per cc-backup
       // ADVISOR_TOOL_INSTRUCTIONS line 31), so don't be cheap.
       reasoning: { effort: advisorEffort },
-    } satisfies ResponsesPayload, { workload: "reusable-prefix" })
+    } satisfies ResponsesPayload, { workload: cheapestProfile ? "passthrough" : "reusable-prefix" })
     const response = (await withTransientRetry(
       () => createResponses(payload, undefined, signal),
       { signal, label: resolvedAdvisorModel },
@@ -1575,7 +1575,7 @@ async function runAdvisor(
             : {}),
         }
       : {}),
-  }), { workload: "reusable-prefix" })
+  }), { workload: cheapestProfile ? "passthrough" : "reusable-prefix" })
   const response = await withTransientRetry(
     () => createMessages(advisorBody, {}, signal),
     { signal, label: resolvedAdvisorModel },
