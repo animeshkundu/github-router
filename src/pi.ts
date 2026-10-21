@@ -86,6 +86,7 @@ import {
   validateBalancedProfilePrerequisites,
   validateCheapestProfilePrerequisites,
 } from "./lib/launch-profile"
+import { isBalancedFamily, isCheapestFamily } from "./lib/profile-family"
 import {
   getPiLaunchEnvVars,
   parseSharedArgs,
@@ -99,7 +100,7 @@ export const piArgs = {
     alias: "m",
     type: "string",
     description:
-      "Pi launch profile: cheapest (Luna-led, cheapest tier) or balanced (Sol-led, most-complex-tasks tier). Only these two aliases are supported for `github-router pi`.",
+      "Pi launch profile: cheapest/cheapest2 (Luna-led, cheapest tier) or balanced/balanced2 (Sol-led, most-complex-tasks tier). The `-2` aliases move the Sol tier from 5.6 to 6.1; cheapest2 also raises the Advisor to high, and balanced2's Oracle is Grok 4.7. Only these four aliases are supported for `github-router pi`.",
   },
   "update-check": {
     type: "boolean" as const,
@@ -117,13 +118,13 @@ export const piArgs = {
     type: "boolean" as const,
     default: false,
     description:
-      "Enable the SWE pipeline surface: delegation/review skills (gh-delegate, cheapest-only gh-advisor) and the review prompt shortcuts (/review, /parallel-review, cheapest-only /plan-review). Off by default; a bare launch advertises no skills or prompts.",
+      "Enable the SWE pipeline surface: delegation/review skills (gh-delegate, cheapest-family gh-advisor) and the review prompt shortcuts (/review, /parallel-review, cheapest-family /plan-review). Off by default; a bare launch advertises no skills or prompts.",
   },
   peers: {
     type: "boolean" as const,
     default: true,
     description:
-      "Wire the peer/subagent floor: native agent files, the oracle tool (plus cheapest-only advisor), the gh-oracle skill, and the pi-subagents package. Set to false (--no-peers) for a lead-only session; prereqs then validate the lead model only.",
+      "Wire the peer/subagent floor: native agent files, the oracle tool (plus cheapest-family advisor), the gh-oracle skill, and the pi-subagents package. Set to false (--no-peers) for a lead-only session; prereqs then validate the lead model only.",
   },
   helpers: {
     type: "boolean" as const,
@@ -214,7 +215,7 @@ async function writeTextFile(file: string, content: string): Promise<void> {
 export const pi = defineCommand({
   meta: {
     name: "pi",
-    description: "Start the proxy server and launch the Pi coding agent (cheapest/balanced)",
+    description: "Start the proxy server and launch the Pi coding agent (cheapest/balanced families)",
   },
   args: piArgs,
   async run({ args, rawArgs }) {
@@ -226,14 +227,15 @@ export const pi = defineCommand({
 
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
     const launchProfileId = resolveLaunchProfile(args.model)
-    if (launchProfileId !== "cheapest" && launchProfileId !== "balanced") {
+    if (
+      !isCheapestFamily(launchProfileId) && !isBalancedFamily(launchProfileId)
+    ) {
       process.stderr.write(
-        `github-router pi supports only -m cheapest and -m balanced (got ${JSON.stringify(args.model ?? "")}). ` +
-          `Run plain \`github-router pi -m cheapest\` or \`github-router pi -m balanced\`.\n`,
+        `github-router pi supports only -m cheapest, -m cheapest2, -m balanced, and -m balanced2 (got ${JSON.stringify(args.model ?? "")}).\n`,
       )
       process.exit(1)
     }
-    const profileId = launchProfileId as PiProfileId
+    const profileId: PiProfileId = launchProfileId
 
     let server: Awaited<ReturnType<typeof setupAndServe>>["server"]
     let serverUrl: string
@@ -372,15 +374,21 @@ export const pi = defineCommand({
 
     // Pin-mode prerequisites against the live catalog (fail-closed).
     // Peerless launches validate the lead only (nothing else is consumed).
-    const prereqCheck =
-      profileId === "cheapest"
-        ? validateCheapestProfilePrerequisites(state.models, { peers: peersEnabled })
-        : validateBalancedProfilePrerequisites(state.models, { peers: peersEnabled })
+    const prereqCheck = isCheapestFamily(profileId)
+      ? validateCheapestProfilePrerequisites(
+          state.models,
+          { peers: peersEnabled },
+          profileId,
+        )
+      : validateBalancedProfilePrerequisites(
+          state.models,
+          { peers: peersEnabled },
+          profileId,
+        )
     if (!prereqCheck.ok) {
-      const message =
-        profileId === "cheapest"
-          ? formatCheapestPrerequisiteFailure(prereqCheck.missing)
-          : formatBalancedPrerequisiteFailure(prereqCheck.missing)
+      const message = isCheapestFamily(profileId)
+        ? formatCheapestPrerequisiteFailure(prereqCheck.missing, profileId)
+        : formatBalancedPrerequisiteFailure(prereqCheck.missing, profileId)
       consola.error(message)
       process.stderr.write(`${message}\n`)
       process.exit(1)

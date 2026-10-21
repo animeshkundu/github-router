@@ -65,6 +65,7 @@ import {
   CHEAPEST_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_MAX,
   CHEAPEST_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_MIN,
 } from "~/lib/cheapest-profile-contract"
+import { displayModelName } from "~/lib/profile-family"
 import { MAX_ADVISOR_SYSTEM_PROMPT } from "~/lib/max-profile-prompts"
 import {
   fastEndpointForCatalogId,
@@ -177,25 +178,27 @@ function fastProfileAdvisorAvailable(): boolean {
 export const ADVISOR_CHEAPEST_PROFILE_MODEL = CHEAPEST_PROFILE_ADVISOR_MODEL
 export const ADVISOR_CHEAPEST_PROFILE_EFFORT = CHEAPEST_PROFILE_ADVISOR_EFFORT
 
-/** True only when the live Sol entry satisfies the fixed cheapest
- * transport (Responses). */
-function cheapestProfileAdvisorAvailable(): boolean {
-  return fastEndpointForCatalogId(
-    ADVISOR_CHEAPEST_PROFILE_MODEL,
-    state.models?.data,
-  ) === "responses"
+/** True only when the live family Sol entry satisfies the fixed cheapest
+ * transport (Responses). The family id is supplied by the caller so
+ * `cheapest2`'s `gpt-6.1-sol` goes through the same gate. */
+function cheapestProfileAdvisorAvailable(
+  model: string = ADVISOR_CHEAPEST_PROFILE_MODEL,
+): boolean {
+  return fastEndpointForCatalogId(model, state.models?.data) === "responses"
 }
 
-/** Pick the cheapest Advisor model. Throws when the catalog gate fails so
- * the launch prerequisite surface (not a silent downgrade) owns the error. */
-export function resolveCheapestAdvisorModel(): AdvisorModelChoice {
-  if (!cheapestProfileAdvisorAvailable()) {
+/** Pick the cheapest-family Advisor model. Throws when the catalog gate fails
+ * so the launch prerequisite surface (not a silent downgrade) owns the error. */
+export function resolveCheapestAdvisorModel(
+  model: string = ADVISOR_CHEAPEST_PROFILE_MODEL,
+): AdvisorModelChoice {
+  if (!cheapestProfileAdvisorAvailable(model)) {
     throw new Error(
-      `cheapest Advisor invariant failed: ${ADVISOR_CHEAPEST_PROFILE_MODEL} must advertise the Responses endpoint`,
+      `cheapest Advisor invariant failed: ${displayModelName(model)} (${model}) must advertise the Responses endpoint`,
     )
   }
   return {
-    model: ADVISOR_CHEAPEST_PROFILE_MODEL,
+    model,
     escalated: false,
     fastProfile: true,
   }

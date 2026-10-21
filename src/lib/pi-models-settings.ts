@@ -1,22 +1,14 @@
-import {
-  BALANCED_PROFILE_MODELS,
-  BALANCED_PROFILE_NATIVE_EFFORTS,
-  BALANCED_PROFILE_ORACLE_EFFORT,
-  BALANCED_PROFILE_ORACLE_MODEL,
-} from "./balanced-profile-contract"
-import {
-  CHEAPEST_PROFILE_ADVISOR_EFFORT,
-  CHEAPEST_PROFILE_ADVISOR_MODEL,
-  CHEAPEST_PROFILE_MODELS,
-  CHEAPEST_PROFILE_NATIVE_EFFORTS,
-  CHEAPEST_PROFILE_ORACLE_EFFORT,
-  CHEAPEST_PROFILE_ORACLE_MODEL,
-} from "./cheapest-profile-contract"
 import { CHEAPEST_CONSULT_CONTRACT } from "./claude-md-injection"
+import {
+  balancedContractFor,
+  cheapestContractFor,
+  isBalancedFamily,
+  isCheapestFamily,
+} from "./profile-family"
 import { PI_MIN_VERSION } from "./pi-version-check"
 import { piContextWindowFor } from "./pi-tier-windows"
 
-export type PiProfileId = "cheapest" | "balanced"
+export type PiProfileId = "cheapest" | "cheapest2" | "balanced" | "balanced2"
 
 /** Minimal catalog view the Pi builders need (adapted from state.models). */
 export interface PiCatalogModel {
@@ -95,39 +87,40 @@ export const PI_PROVIDER_NAME = "gh-router" as const
 
 const PI_MIN_VERSION_NOTE = `Requires Pi >= ${PI_MIN_VERSION} and Node >= 22.19.`
 
+/**
+ * The family contract for a Pi profile. `cheapest2` and `balanced2` are
+ * derived from their bases, so every resolver below reads one object and a
+ * `-2` launch cannot pick up a base literal by omission.
+ */
+function piContractFor(profileId: PiProfileId) {
+  return isCheapestFamily(profileId)
+    ? cheapestContractFor(profileId)
+    : balancedContractFor(profileId)
+}
+
 export function piLeadModel(profileId: PiProfileId): string {
-  return profileId === "cheapest"
-    ? CHEAPEST_PROFILE_MODELS.lead
-    : BALANCED_PROFILE_MODELS.lead
+  return piContractFor(profileId).models.lead
 }
 
 export function piLeadThinking(profileId: PiProfileId): string {
-  // Cheapest lead runs at max effort; balanced at medium (frontier
-  // reasoning without the pricey tiers).
-  return profileId === "cheapest" ? "max" : "medium"
+  return piContractFor(profileId).leadEffort
 }
 
 export function piOracleModel(profileId: PiProfileId): string {
-  return profileId === "cheapest"
-    ? CHEAPEST_PROFILE_ORACLE_MODEL
-    : BALANCED_PROFILE_ORACLE_MODEL
+  return piContractFor(profileId).oracleModel
 }
 
 export function piOracleThinking(profileId: PiProfileId): string {
-  return profileId === "cheapest"
-    ? CHEAPEST_PROFILE_ORACLE_EFFORT
-    : BALANCED_PROFILE_ORACLE_EFFORT
+  return piContractFor(profileId).oracleEffort
 }
 
 /** Cheapest-only advisor. Balanced is advisor-free by design: undefined. */
 export function piAdvisorModel(
   profileId: PiProfileId,
 ): { model: string; thinking: string } | undefined {
-  if (profileId !== "cheapest") return undefined
-  return {
-    model: CHEAPEST_PROFILE_ADVISOR_MODEL,
-    thinking: CHEAPEST_PROFILE_ADVISOR_EFFORT,
-  }
+  if (!isCheapestFamily(profileId)) return undefined
+  const contract = cheapestContractFor(profileId)
+  return { model: contract.advisorModel, thinking: contract.advisorEffort }
 }
 
 export interface PiNativeRole {
@@ -138,45 +131,24 @@ export interface PiNativeRole {
 }
 
 export function piNativeRoles(profileId: PiProfileId): Array<PiNativeRole> {
-  if (profileId === "cheapest") {
-    return [
-      {
-        name: "Explore",
-        model: CHEAPEST_PROFILE_MODELS.explore,
-        thinking: CHEAPEST_PROFILE_NATIVE_EFFORTS.Explore,
-        readOnly: true,
-      },
-      {
-        name: "General-Purpose",
-        model: CHEAPEST_PROFILE_MODELS["General-Purpose"],
-        thinking: CHEAPEST_PROFILE_NATIVE_EFFORTS["General-Purpose"],
-        readOnly: false,
-      },
-      {
-        name: "reviewer",
-        model: CHEAPEST_PROFILE_MODELS.reviewer,
-        thinking: CHEAPEST_PROFILE_NATIVE_EFFORTS.reviewer,
-        readOnly: true,
-      },
-    ]
-  }
+  const { nativeModels, nativeEfforts: efforts } = piContractFor(profileId)
   return [
     {
       name: "Explore",
-      model: BALANCED_PROFILE_MODELS.explore,
-      thinking: BALANCED_PROFILE_NATIVE_EFFORTS.Explore,
+      model: nativeModels.Explore,
+      thinking: efforts.Explore,
       readOnly: true,
     },
     {
       name: "General-Purpose",
-      model: BALANCED_PROFILE_MODELS["General-Purpose"],
-      thinking: BALANCED_PROFILE_NATIVE_EFFORTS["General-Purpose"],
+      model: nativeModels["General-Purpose"],
+      thinking: efforts["General-Purpose"],
       readOnly: false,
     },
     {
       name: "reviewer",
-      model: BALANCED_PROFILE_MODELS.reviewer,
-      thinking: BALANCED_PROFILE_NATIVE_EFFORTS.reviewer,
+      model: nativeModels.reviewer,
+      thinking: efforts.reviewer,
       readOnly: true,
     },
   ]
@@ -969,11 +941,12 @@ function roleDescription(
     return "Fast read-only recon: locate code, answer evidence questions, return compressed context."
   }
   if (role.name === "General-Purpose") {
-    return profileId === "balanced"
+    const isBalanced = isBalancedFamily(profileId)
+    return isBalanced
       ? `General implementation and follow-through on scoped tasks. May hand the result to reviewer only when the change alters behavior. ${oracleNote}`
       : `General implementation and follow-through on scoped tasks. May hand the result to reviewer for assessment. ${oracleNote}`
   }
-  return profileId === "balanced"
+  return isBalancedFamily(profileId)
     ? "Behavior-changing review only: assess a change, narrow scope with search first, delegate targeted discovery to Explore rather than sweeping the repo."
     : "Code review and assessment, including reproducing and root-causing a failure.";
 }
@@ -1041,7 +1014,7 @@ export function buildPiAgentFiles(
     const tools = isImplementer
       ? "read, grep, find, ls, bash, edit, write, subagent, contact_supervisor"
       : isReviewer
-        ? profileId === "balanced"
+        ? isBalancedFamily(profileId)
           ? "read, grep, find, ls, watchdog_diff, subagent"
           : "read, grep, find, ls, watchdog_diff"
         : "read, grep, find, ls, bash";
@@ -1086,7 +1059,7 @@ export function buildPiAgentFiles(
         "allowedAgents: reviewer, oracle",
       );
     }
-    if (profileId === "balanced" && isReviewer) {
+    if (isBalancedFamily(profileId) && isReviewer) {
       lines.push("allowNestedSubagents: true", "allowedAgents: Explore");
     }
     lines.push("---", "");
@@ -1250,7 +1223,7 @@ export function buildPiAppendSystem(
     lines.push(
       `- Delegate FREELY to Explore for discovery and General-Purpose for scoped work.`,
       `- Call subagent directly (agent + task); save workflows for genuinely parallel fanout.`,
-      profileId === "balanced"
+      isBalancedFamily(profileId)
         ? `- Send work to reviewer ONLY when the change alters behavior.`
         : `- Send finished work to reviewer for assessment.`,
       `- Ask oracle for a second opinion when the decision itself feels risky.`,

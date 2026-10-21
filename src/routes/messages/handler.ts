@@ -41,6 +41,7 @@ import { maxRequestError } from "~/lib/max-request-preprocess"
 import { FAST_PROFILE_ADVISOR_MODEL } from "~/lib/fast-profile-contract"
 import { CHEAP_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheap-profile-contract"
 import { CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheapest-profile-contract"
+import { cheapestContractFor, isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
 import {
   MAX_PROFILE_ADVISOR_INSTRUCTIONS,
   maxAdvisorEffortForModel,
@@ -218,7 +219,10 @@ function fastAdvisorMetadataMismatch(rawBody: string): string | undefined {
   return undefined
 }
 
-function cheapestAdvisorMetadataMismatch(rawBody: string): string | undefined {
+function cheapestAdvisorMetadataMismatch(
+  rawBody: string,
+  expectedModel: string,
+): string | undefined {
   let body: AnyRecord
   try {
     body = JSON.parse(rawBody) as AnyRecord
@@ -234,8 +238,8 @@ function cheapestAdvisorMetadataMismatch(rawBody: string): string | undefined {
     if (typeof model !== "string") {
       return "the native Advisor tool omitted its fixed model"
     }
-    if (stripTrailingOneMSuffix(model).base !== CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL) {
-      return `the native Advisor tool requested ${JSON.stringify(model)} instead of ${JSON.stringify(CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL)}`
+    if (stripTrailingOneMSuffix(model).base !== expectedModel) {
+      return `the native Advisor tool requested ${JSON.stringify(model)} instead of ${JSON.stringify(expectedModel)}`
     }
   }
   return undefined
@@ -473,8 +477,17 @@ export async function handleCompletion(c: Context) {
   const maxProfileRequest = identity.launch?.profileId === "max"
   const cheapProfileRequest =
     identity.launch?.profileId === "cheap" || identity.launch?.profileId === "cheap1m"
-  const cheapestProfileRequest = identity.launch?.profileId === "cheapest"
-  const balancedProfileRequest = identity.launch?.profileId === "balanced"
+  const cheapestProfileRequest = isCheapestFamily(identity.launch?.profileId)
+  const balancedProfileRequest = isBalancedFamily(identity.launch?.profileId)
+  // The cheapest family's Advisor identity follows its contract: `cheapest`
+  // pins `gpt-5.6-sol`, `cheapest2` pins `gpt-6.1-sol`. The client pin and the
+  // wire model are the same bare 200K slug for both siblings.
+  const cheapestFamilyAdvisorModel = isCheapestFamily(identity.launch?.profileId)
+    ? cheapestContractFor(identity.launch?.profileId).advisorModel
+    : undefined
+  const cheapestFamilyAdvisorClientModel = isCheapestFamily(identity.launch?.profileId)
+    ? cheapestContractFor(identity.launch?.profileId).advisorClientModel
+    : undefined
   const subagentAgentId = (c.req.header("x-claude-code-agent-id") ?? "").trim()
   const subagentRequest = subagentAgentId.length > 0
   const fastSubagentRequest = fastProfileRequest && subagentRequest
@@ -614,7 +627,10 @@ export async function handleCompletion(c: Context) {
   if (cheapestAdvisorEnabled) {
     // Fixed Sol advisor at the 200K default window (bare client pin) with
     // the 200K transcript cap applied at dispatch, mirroring cheap's shape.
-    const mismatch = cheapestAdvisorMetadataMismatch(rawBody)
+    const mismatch = cheapestAdvisorMetadataMismatch(
+      rawBody,
+      cheapestFamilyAdvisorClientModel ?? CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL,
+    )
 
     if (mismatch) {
       return c.json(
@@ -624,14 +640,14 @@ export async function handleCompletion(c: Context) {
             type: "invalid_request_error",
             message:
               `Cheapest Advisor model mismatch: ${mismatch}. `
-              + `Run \`/advisor ${CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL}\` to restore the fixed cheapest profile, or relaunch with \`github-router claude -m cheapest\`.`,
+              + `Run \`/advisor ${cheapestFamilyAdvisorClientModel ?? CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL}\` to restore the fixed cheapest profile, or relaunch with \`github-router claude -m ${identity.launch?.profileId ?? "cheapest"}\`.`,
           },
         },
         400,
       )
     }
     try {
-      fastAdvisorChoice = resolveCheapestAdvisorModel()
+      fastAdvisorChoice = resolveCheapestAdvisorModel(cheapestFamilyAdvisorModel)
     } catch (error) {
       return c.json(
         {
@@ -650,7 +666,7 @@ export async function handleCompletion(c: Context) {
     // proxy injects the tool itself), so skip the mismatch check and resolve
     // the same fixed Sol advisor. Throws -> 503 like the lead path.
     try {
-      fastAdvisorChoice = resolveCheapestAdvisorModel()
+      fastAdvisorChoice = resolveCheapestAdvisorModel(cheapestFamilyAdvisorModel)
     } catch (error) {
       return c.json(
         {
@@ -672,11 +688,13 @@ export async function handleCompletion(c: Context) {
   )
   if (fastPreprocess.retiredAlias || fastPreprocess.rejectedAlias || fastPreprocess.rejectedModel) {
     const profileId = identity.launch?.profileId
+    // Name the profile the launch actually is, so a rejection on `cheapest2`
+    // or `balanced2` never tells the user to retry a different alias.
     const profileLabel =
       profileId === "cheap" || profileId === "cheap1m"
         ? "cheap"
-        : profileId === "cheapest"
-          ? "cheapest"
+        : isCheapestFamily(profileId) || isBalancedFamily(profileId)
+          ? profileId
           : "fast"
     const message = fastPreprocess.retiredAlias
       ? `Router-owned model alias ${JSON.stringify(fastPreprocess.retiredAlias)} belongs to a retired Fast role and is no longer valid. Relaunch or select a current Fast role.`

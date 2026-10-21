@@ -79,7 +79,8 @@ async function searchText(
 /**
  * Produce the cheapest-profile brief for one prompt.
  *
- * `profile` is the launch profile id; only `"cheapest"` is eligible, matching
+ * `profile` is the launch profile id; only the cheapest family
+ * (`cheapest`/`cheapest2`) is eligible, matching
  * the Claude hook exactly (the launcher exports `GH_ROUTER_PROFILE` into the
  * hook process there, and the launch registry carries it here). The one-shot
  * flag is keyed on `sessionId` and marked on ATTEMPT, so a session that spends

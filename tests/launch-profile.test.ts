@@ -21,6 +21,7 @@ import {
   LUNA_SONNET_ALIAS_ID,
   canonicalizeAliasModel,
   formatBalancedPrerequisiteFailure,
+  formatCheapestPrerequisiteFailure,
   formatCheap1mPrerequisiteFailure,
   formatCheapPrerequisiteFailure,
   formatFastPrerequisiteFailure,
@@ -31,6 +32,7 @@ import {
   resolveLaunchProfile,
   resolveModelAlias,
   validateBalancedProfilePrerequisites,
+  validateCheapestProfilePrerequisites,
   validateCheap1mProfilePrerequisites,
   validateCheapProfilePrerequisites,
   validateFastProfilePrerequisites,
@@ -62,6 +64,14 @@ import {
   BALANCED_PROFILE_DELEGATION_GRAPH,
   BALANCED_PROFILE_LEAD_EFFORT,
 } from "../src/lib/balanced-profile-contract"
+import {
+  BALANCED2_PROFILE_CONTRACT,
+  BALANCED2_PROFILE_MODELS,
+} from "../src/lib/balanced2-profile-contract"
+import {
+  CHEAPEST2_PROFILE_CONTRACT,
+  CHEAPEST2_PROFILE_MODELS,
+} from "../src/lib/cheapest2-profile-contract"
 import { FAST_PROFILE_DELEGATION_GRAPH } from "../src/lib/fast-profile-contract"
 
 const model = (id: string, opts: {
@@ -151,6 +161,45 @@ describe("launch profile selection", () => {
     expect([...profileDescriptor("balanced").nativeRoster!].sort()).toEqual(["Explore", "General-Purpose", "reviewer"])
     expect([...profileDescriptor("cheapest").nativeRoster!].sort()).toEqual(["Explore", "General-Purpose", "reviewer"])
   })
+
+  test("the derived -2 aliases select their own pinned surface", () => {
+    for (const [arg, id] of [
+      ["cheapest2", "cheapest2"],
+      [" CHEAPEST2 ", "cheapest2"],
+      ["balanced2", "balanced2"],
+      [" Balanced2", "balanced2"],
+    ] as const) {
+      expect(resolveLaunchProfile(arg)).toBe(id)
+    }
+    // Not prefixes of each other: a near miss stays standard.
+    for (const arg of ["cheapest-2", "balanced-2", "cheapest 2", "balanced 2"]) {
+      expect(resolveLaunchProfile(arg)).toBe("standard")
+    }
+
+    for (const [id, contract, oracle] of [
+      ["cheapest2", CHEAPEST2_PROFILE_CONTRACT, "gpt-6.1-sol"],
+      ["balanced2", BALANCED2_PROFILE_CONTRACT, "grok-4.7"],
+    ] as const) {
+      const descriptor = profileDescriptor(id)
+      expect(descriptor.id).toBe(id)
+      expect(descriptor.hasCoordinator).toBe(false)
+      expect([...descriptor.nativeRoster!].sort()).toEqual(
+        ["Explore", "General-Purpose", "reviewer"],
+      )
+      expect([...descriptor.personaAllowlist!]).toEqual(["oracle"])
+      // The roster comes from the family contract, not a parallel copy.
+      expect([...descriptor.nativeRoster!].sort()).toEqual(
+        [...contract.nativeAgentNames].sort(),
+      )
+      expect(descriptor.allowedGroups).toEqual(
+        profileDescriptor(id === "cheapest2" ? "cheapest" : "balanced").allowedGroups,
+      )
+      // Oracle-only peer set, and the Oracle id is the one the contract names.
+      expect(descriptor.personaAllowlist!.has("astra")).toBe(false)
+      expect(contract.synthesizedPeers).toEqual(["oracle"])
+      expect(contract.oracleModel).toBe(oracle)
+    }
+  })
 })
 
 describe("Luna aliases", () => {
@@ -230,6 +279,39 @@ describe("cheap-family subagent aliases", () => {
     expect(resolveModelAlias(CHEAP_PLAN_ALIAS_ID)?.realModel).toBe(CHEAP_PROFILE_MODELS.plan)
     expect(resolveModelAlias(CHEAPEST_EXPLORE_ALIAS_ID)?.realModel).toBe(CHEAPEST_PROFILE_MODELS.explore)
     expect(resolveModelAlias(CHEAPEST_REVIEWER_ALIAS_ID)?.realModel).toBe(CHEAPEST_PROFILE_MODELS.reviewer)
+  })
+
+  test("reviewer aliases resolve per profile, base ids elsewhere", () => {
+    // `balanced2` moves its reviewer to Sol 6.1, so the same wire alias must
+    // canonicalize to a different real id per launch profile. Everything
+    // else — including a family alias used on the wrong profile — keeps the
+    // base real id, so a profile id can never silently retarget another
+    // family's roster.
+    expect(resolveModelAlias(BALANCED_REVIEWER_ALIAS_ID, "balanced2")?.realModel)
+      .toBe(BALANCED2_PROFILE_MODELS.reviewer)
+    expect(canonicalizeAliasModel(BALANCED_REVIEWER_ALIAS_ID, "balanced2"))
+      .toBe("gpt-6.1-sol")
+    expect(canonicalizeAliasModel(`${BALANCED_REVIEWER_ALIAS_ID}[1m]`, "balanced2"))
+      .toBe("gpt-6.1-sol[1m]")
+    expect(resolveModelAlias(BALANCED_REVIEWER_ALIAS_ID, "balanced")?.realModel)
+      .toBe(BALANCED_PROFILE_MODELS.reviewer)
+    expect(resolveModelAlias(BALANCED_REVIEWER_ALIAS_ID, "balanced2")?.absentEffortDefault)
+      .toBe(BALANCED_PROFILE_NATIVE_EFFORTS.reviewer)
+
+    // The cheapest family reviews on Luna in both siblings; the alias id and
+    // its effort are unchanged, and the override is identity-equal.
+    expect(resolveModelAlias(CHEAPEST_REVIEWER_ALIAS_ID, "cheapest2")?.realModel)
+      .toBe(CHEAPEST2_PROFILE_MODELS.reviewer)
+    expect(resolveModelAlias(CHEAPEST_REVIEWER_ALIAS_ID, "cheapest2")?.realModel)
+      .toBe(CHEAPEST_PROFILE_MODELS.reviewer)
+
+    // Cross-family use keeps the base target.
+    expect(canonicalizeAliasModel(BALANCED_REVIEWER_ALIAS_ID, "cheapest2"))
+      .toBe(BALANCED_PROFILE_MODELS.reviewer)
+    expect(canonicalizeAliasModel(CHEAPEST_REVIEWER_ALIAS_ID, "balanced2"))
+      .toBe(CHEAPEST_PROFILE_MODELS.reviewer)
+    expect(canonicalizeAliasModel(BALANCED_REVIEWER_ALIAS_ID, "standard"))
+      .toBe(BALANCED_PROFILE_MODELS.reviewer)
   })
 
   test("shared browse alias resolves Luna at low effort for every pinned non-max profile", () => {
@@ -492,16 +574,18 @@ describe("cheap-family startup prerequisites", () => {
   })
 })
 
-describe("balanced startup prerequisites", () => {
-  const balancedCatalog = () => ({
+function balancedCatalog() {
+  return {
     object: "list" as const,
     data: [
       model("gpt-5.6-sol", { context: 500_000, prompt: 372_000, efforts: ["medium", "high"], endpoints: ["/responses"] }),
       model("gpt-6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
       model("grok-4.6", { context: 500_000, prompt: 372_000, efforts: ["low", "medium"], endpoints: ["/responses"] }),
     ],
-  })
+  }
+}
 
+describe("balanced startup prerequisites", () => {
   test("accepts the Sol-led 200K catalog", () => {
     expect(validateBalancedProfilePrerequisites(balancedCatalog() as never)).toEqual({ ok: true, missing: [] })
   })
@@ -538,6 +622,122 @@ describe("balanced startup prerequisites", () => {
     expect(message).toContain("gpt-6-luna")
     expect(message).toContain("grok-4.6")
     expect(message).toContain("github-router claude -m balanced")
+  })
+})
+
+describe("derived -2 startup prerequisites", () => {
+  /**
+   * The cheapest roster is Luna everywhere except the Sol-tier Oracle, so the
+   * catalog is the same shape for both siblings — only the Sol id moves.
+   */
+  const cheapest2Catalog = (
+    sol: string = CHEAPEST2_PROFILE_CONTRACT.oracleModel,
+  ) => ({
+    object: "list" as const,
+    data: [
+      model("gpt-6-luna", {
+        context: 1_050_000,
+        prompt: 872_000,
+        efforts: ["high", "xhigh", "max"],
+        endpoints: ["/responses"],
+      }),
+      model(sol, {
+        context: 500_000,
+        prompt: 372_000,
+        efforts: ["high", "xhigh"],
+        endpoints: ["/responses"],
+      }),
+    ],
+  })
+
+  const balanced2Catalog = (
+    sol = BALANCED2_PROFILE_CONTRACT.models.lead,
+    oracle = BALANCED2_PROFILE_CONTRACT.oracleModel,
+  ) => ({
+    object: "list" as const,
+    data: [
+      model(sol, { context: 500_000, prompt: 372_000, efforts: ["medium", "high"], endpoints: ["/responses"] }),
+      model("gpt-6-luna", { context: 500_000, prompt: 372_000, efforts: ["high", "max"], endpoints: ["/responses"] }),
+      model(oracle, { context: 500_000, prompt: 372_000, efforts: ["low", "medium"], endpoints: ["/responses"] }),
+    ],
+  })
+
+  test("cheapest2 validates the 6.1 Sol Oracle and rejects the 5.6-only catalog", () => {
+    expect(validateCheapestProfilePrerequisites(cheapest2Catalog() as never, {}, "cheapest2"))
+      .toEqual({ ok: true, missing: [] })
+    // The BASE profile is untouched: the same catalog still validates it.
+    expect(
+      validateCheapestProfilePrerequisites(
+        cheapest2Catalog(CHEAPEST_PROFILE_MODELS.oracle) as never,
+      ),
+    ).toEqual({ ok: true, missing: [] })
+
+    // A 5.6-only catalog fails cheapest2 and names the missing id, never a
+    // generic "check your model".
+    const fiveOnly = validateCheapestProfilePrerequisites(
+      cheapest2Catalog("gpt-5.6-sol") as never,
+      {},
+      "cheapest2",
+    )
+    expect(fiveOnly.ok).toBe(false)
+    expect(fiveOnly.missing).toEqual([
+      "gpt-6.1-sol: absent from the live catalog",
+    ])
+    const message = formatCheapestPrerequisiteFailure(fiveOnly.missing, "cheapest2")
+    expect(message).toContain("github-router claude -m cheapest2")
+    expect(message).toContain("gpt-6.1-sol")
+    expect(message).not.toContain("-m cheapest requires")
+  })
+
+  test("balanced2 validates the 6.1 lead plus the Grok 4.7 Oracle", () => {
+    expect(validateBalancedProfilePrerequisites(balanced2Catalog() as never, {}, "balanced2"))
+      .toEqual({ ok: true, missing: [] })
+    // The base profile still expects its own identities on the base catalog.
+    expect(validateBalancedProfilePrerequisites(balancedCatalog() as never))
+      .toEqual({ ok: true, missing: [] })
+
+    const baseOnly = validateBalancedProfilePrerequisites(
+      balancedCatalog() as never,
+      {},
+      "balanced2",
+    )
+    expect(baseOnly.ok).toBe(false)
+    expect(baseOnly.missing).toEqual([
+      "gpt-6.1-sol: absent from the live catalog",
+      "gpt-6.1-sol: absent from the live catalog",
+      "grok-4.7: absent from the live catalog",
+    ])
+    const message = formatBalancedPrerequisiteFailure(baseOnly.missing, "balanced2")
+    expect(message).toContain("github-router claude -m balanced2")
+    expect(message).toContain("grok-4.7")
+  })
+
+  test("the Grok 4.7 Oracle must satisfy the same brief metadata gate", () => {
+    const noPrompt = balanced2Catalog()
+    noPrompt.data = noPrompt.data.map((entry) =>
+      entry.id === "grok-4.7"
+        ? {
+            ...entry,
+            capabilities: {
+              ...entry.capabilities,
+              limits: { max_context_window_tokens: 500_000 },
+            },
+          }
+        : entry,
+    ) as typeof noPrompt.data
+    expect(
+      validateBalancedProfilePrerequisites(noPrompt as never, {}, "balanced2").missing,
+    ).toEqual(["grok-4.7: no usable max_prompt_tokens metadata"])
+  })
+
+  test("the inherited astra slot is unchanged and stays non-callable", () => {
+    // Declarative only on the balanced family: no balanced launch exposes an
+    // `astra` tool, so the `-2` sibling inherits the declaration verbatim
+    // rather than re-pointing it at a model nothing calls.
+    expect(BALANCED_PROFILE_MODELS.astra).toBe("gpt-6-astra")
+    expect(BALANCED2_PROFILE_MODELS.astra).toBe("gpt-6-astra")
+    expect(BALANCED2_PROFILE_MODELS.astra).toBe(BALANCED_PROFILE_MODELS.astra)
+    expect([...profileDescriptor("balanced2").personaAllowlist!]).not.toContain("astra")
   })
 })
 

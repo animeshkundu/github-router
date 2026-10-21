@@ -23,7 +23,12 @@ import { piTierThresholdFor } from "~/lib/pi-tier-windows"
  * - supervisor pings from leaves (noise + cost)
  * - Long-tier pricing leaking in via contextWindow
  */
-const PROFILES: ReadonlyArray<PiProfileId> = ["cheapest", "balanced"]
+const PROFILES: ReadonlyArray<PiProfileId> = [
+  "cheapest",
+  "cheapest2",
+  "balanced",
+  "balanced2",
+]
 
 const VISION_CATALOG: ReadonlyArray<PiCatalogModel> = [
   {
@@ -52,6 +57,25 @@ const VISION_CATALOG: ReadonlyArray<PiCatalogModel> = [
     maxPromptTokens: 300_000,
     maxOutputTokens: 128_000,
     efforts: ["medium"],
+    endpoints: ["responses"],
+    vision: false,
+  },
+  {
+    id: "gpt-6.1-sol",
+    maxContextTokens: 500_000,
+    maxPromptTokens: 400_000,
+    maxOutputTokens: 64_000,
+    efforts: ["medium", "high"],
+    endpoints: ["responses"],
+    vision: true,
+    maxImageBytes: 3 * 1024 * 1024,
+  },
+  {
+    id: "grok-4.7",
+    maxContextTokens: 500_000,
+    maxPromptTokens: 300_000,
+    maxOutputTokens: 128_000,
+    efforts: ["low", "medium", "high", "xhigh"],
     endpoints: ["responses"],
     vision: false,
   },

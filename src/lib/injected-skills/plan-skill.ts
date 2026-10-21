@@ -1,3 +1,4 @@
+import { isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
 
 /**
@@ -8,7 +9,7 @@ import type { InjectedSkill } from "./index"
 export type PlanSkillProfile = "cheapest" | "cheapest2" | "balanced" | "balanced2"
 
 export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
-  const leadPlansDirectly = profile === "cheapest" || profile === "cheapest2" || profile === "balanced" || profile === "balanced2"
+  const leadPlansDirectly = isCheapestFamily(profile) || isBalancedFamily(profile)
   const planningMeans = leadPlansDirectly
     ? "the lead plans directly (no Plan subagent exists on the cheapest/balanced rosters)"
     : "dispatch the native Plan subagent (subagent_type Plan) present on the profile roster where provided; profile frontmatter pins its model and effort (Sol at the 200K default window)"
@@ -33,7 +34,7 @@ export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProf
    send ONE bounded follow-up to the same Plan dispatch naming the exact gaps
    (at most 2 follow-up rounds total). If still underspecified, checkpoint
    with the gaps as residual risk instead of pretending the plan is complete.`
-  const advisorStep = profile === "cheapest" || profile === "cheapest2"
+  const advisorStep = isCheapestFamily(profile)
     ? `
 6. Review the final plan with the Advisor before presenting it to the user:
    consult \`advisor\` once for a framing check. It is non-binding counsel;
@@ -41,8 +42,11 @@ export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProf
 
 `
     : ""
-  const persistStepNumber = leadPlansDirectly ? (profile === "cheapest" || profile === "cheapest2" ? 7 : 6) : 5
-  const checkpointStepNumber = leadPlansDirectly ? (profile === "cheapest" || profile === "cheapest2" ? 8 : 7) : 6
+  // Step numbering follows the rendered procedure: the advisor review is
+  // step 6 on the cheapest family, so persistence/checkpoint shift by one.
+  const persistStepNumber =
+    5 + (leadPlansDirectly ? 1 : 0) + (advisorStep ? 1 : 0)
+  const checkpointStepNumber = persistStepNumber + 1
   return {
   name: "gh-plan",
   md: `---

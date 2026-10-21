@@ -31,6 +31,7 @@ import {
   PI_PROFILE_CONTEXT_TOKENS,
 } from "~/lib/pi-models-settings"
 import { EFFORT_ORDER } from "~/lib/reasoning-effort"
+import { piTierThresholdFor } from "~/lib/pi-tier-windows"
 
 describe("pi cheapest profile", () => {
   test("Luna/max lead, all roles bare 200K", () => {
@@ -742,5 +743,130 @@ describe("pi extension source", () => {
     // NUL bytes are stripped before crossing the MCP boundary so strict
     // downstream JSON consumers never see a literal U+0000.
     expect(src).toContain("stripNul")
+  })
+})
+
+describe("pi derived -2 profiles", () => {
+  // The `-2` aliases are derived, not copied: every surface must equal its
+  // base's output under the declared substitutions. Comparing full rendered
+  // output (rather than a handful of ids) is what catches a surface that was
+  // missed when the alias was added.
+  const plain = (text: string): string =>
+    text
+      .replaceAll("gpt-5.6-sol", "gpt-6.1-sol")
+      .replaceAll("grok-4.6", "grok-4.7")
+      .replaceAll("Grok 4.6", "Grok 4.7")
+
+  test("cheapest2 resolves like cheapest apart from the contracted Sol slots", () => {
+    expect(piLeadModel("cheapest2")).toBe(piLeadModel("cheapest"))
+    expect(piLeadThinking("cheapest2")).toBe(piLeadThinking("cheapest"))
+    expect(piNativeRoles("cheapest2")).toEqual(piNativeRoles("cheapest"))
+    expect(piOracleModel("cheapest2")).toBe("gpt-6.1-sol")
+    expect(piOracleModel("cheapest")).toBe("gpt-5.6-sol")
+    expect(piAdvisorModel("cheapest2")).toEqual({
+      model: "gpt-6.1-sol",
+      // The one non-id delta: cheapest declares medium, cheapest2 high.
+      thinking: "high",
+    })
+    expect(piAdvisorModel("cheapest")).toEqual({ model: "gpt-5.6-sol", thinking: "medium" })
+    expect([...piProfileModelIds("cheapest2")].sort()).toEqual(
+      [...piProfileModelIds("cheapest").filter((id) => id !== "gpt-5.6-sol"), "gpt-6.1-sol"].sort(),
+    )
+    for (const id of piProfileModelIds("cheapest2")) expect(id).not.toContain("[1m]")
+  })
+
+  test("cheapest2 agent files differ only in the Sol id and the advisor effort", () => {
+    const base = buildPiAgentFiles("cheapest")
+    const derived = buildPiAgentFiles("cheapest2")
+    expect(Object.keys(derived)).toEqual(Object.keys(base))
+    for (const key of Object.keys(base)) {
+      const expected =
+        key === "agents/advisor.md"
+          ? plain(base[key]).replace("thinking: medium", "thinking: high")
+          : plain(base[key])
+      expect(derived[key]).toBe(expected)
+    }
+    // The advisor is the surface that carries the raised effort.
+    expect(derived["agents/advisor.md"]).toContain("model: gh-router/gpt-6.1-sol")
+    expect(derived["agents/advisor.md"]).toContain("thinking: high")
+  })
+
+  test("cheapest2 prompt/prose surfaces differ only by the contracted identity", () => {
+    expect(plain(buildPiAppendSystem("cheapest")).replace("cheapest mode", "cheapest2 mode")).toBe(
+      buildPiAppendSystem("cheapest2"),
+    )
+    expect(
+      plain(
+        buildPiExtensionSource({ profileId: "cheapest", searchEnabled: true, browseEnabled: true }),
+      ).replace("cheapest mode", "cheapest2 mode"),
+    ).toBe(buildPiExtensionSource({ profileId: "cheapest2", searchEnabled: true, browseEnabled: true }))
+    // Skills and prompts carry no Sol identity at all, so they are identical.
+    expect(
+      buildPiSkills({ profileId: "cheapest2", peers: true, swe: true }),
+    ).toEqual(buildPiSkills({ profileId: "cheapest", peers: true, swe: true }))
+    expect(buildPiPrompts({ profileId: "cheapest2", swe: true })).toEqual(
+      buildPiPrompts({ profileId: "cheapest", swe: true }),
+    )
+  })
+
+  test("balanced2 moves only the lead/reviewer Sol slots and the Grok Oracle", () => {
+    expect(piLeadModel("balanced2")).toBe("gpt-6.1-sol")
+    expect(piLeadModel("balanced")).toBe("gpt-5.6-sol")
+    expect(piLeadThinking("balanced2")).toBe(piLeadThinking("balanced"))
+    expect(piOracleModel("balanced2")).toBe("grok-4.7")
+    expect(piOracleModel("balanced")).toBe("grok-4.6")
+    expect(piAdvisorModel("balanced2")).toBeUndefined()
+    const derivedRoles = piNativeRoles("balanced2")
+    const baseRoles = piNativeRoles("balanced")
+    expect(derivedRoles.map((r) => ({ ...r, model: undefined }))).toEqual(
+      baseRoles.map((r) => ({ ...r, model: undefined })),
+    )
+    expect(derivedRoles.map((r) => r.model)).toEqual(["gpt-6-luna", "gpt-6-luna", "gpt-6.1-sol"])
+    for (const id of piProfileModelIds("balanced2")) expect(id).not.toContain("[1m]")
+  })
+
+  test("balanced2 agent files keep every non-model line identical", () => {
+    const base = buildPiAgentFiles("balanced")
+    const derived = buildPiAgentFiles("balanced2")
+    expect(Object.keys(derived)).toEqual(Object.keys(base))
+    for (const key of Object.keys(base)) expect(derived[key]).toBe(plain(base[key]))
+    expect(derived["agents/oracle.md"]).toContain("model: gh-router/grok-4.7")
+    expect(derived["agents/reviewer.md"]).toContain("model: gh-router/gpt-6.1-sol")
+  })
+
+  test("balanced2 stays advisor-free across every surface", () => {
+    expect(
+      plain(buildPiAppendSystem("balanced")).replace("balanced mode", "balanced2 mode"),
+    ).toBe(buildPiAppendSystem("balanced2"))
+    const ext = buildPiExtensionSource({ profileId: "balanced2", searchEnabled: true, browseEnabled: true })
+    expect(ext).not.toContain("advisor")
+    for (const content of Object.values(buildPiAgentFiles("balanced2"))) {
+      expect(content.toLowerCase()).not.toContain("advisor")
+    }
+  })
+
+  test("models.json renders the -2 identities as bare rows at the 200K window", () => {
+    const catalog = [
+      { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["high", "max"], endpoints: ["responses"] },
+      { id: "gpt-6.1-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["medium", "high"], endpoints: ["responses"] },
+      { id: "grok-4.7", maxContextTokens: 500_000, maxPromptTokens: 300_000, efforts: ["medium"], endpoints: ["responses"] },
+    ] as const
+    for (const profileId of ["cheapest2", "balanced2"] as const) {
+      const json = buildPiModelsJson({ serverUrl: "http://127.0.0.1:8787", profileId, catalog: [...catalog] })
+      const ids = json.providers["gh-router"].models.map((m) => m.id)
+      expect(ids).toContain("gpt-6.1-sol")
+      if (profileId === "balanced2") expect(ids).toContain("grok-4.7")
+      for (const row of json.providers["gh-router"].models) {
+        expect(row.id).not.toContain("[1m]")
+        // The per-model cheap-tier ceiling (Luna 1.05M, Sol 272K) capped by
+        // the catalog total — Long-tier pricing stays unreachable.
+        expect(row.contextWindow).toBeLessThanOrEqual(piTierThresholdFor(row.id))
+        expect(row.contextWindow).toBeLessThanOrEqual(1_050_000)
+      }
+      // models.json rows name themselves by the bare catalog id (the display
+      // form "GPT-6.1 Sol" lives in the prose surfaces, not the picker row).
+      const sol = json.providers["gh-router"].models.find((m) => m.id === "gpt-6.1-sol")
+      expect(sol?.name).toBe("gpt-6.1-sol")
+    }
   })
 })

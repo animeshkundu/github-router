@@ -92,3 +92,31 @@ export const BALANCED_PROFILE_DELEGATION_GRAPH = Object.freeze({
   BalancedProfileNativeAgentName,
   ReadonlyArray<BalancedProfileNativeAgentName>
 >)
+
+/**
+ * Every fixed identity for `-m balanced` in one frozen aggregate.
+ *
+ * `balanced2-profile-contract.ts` derives from this by spread, overriding only
+ * the Sol lead/reviewer identities and the Oracle. Keeping the aggregate here
+ * means a field added to the family later is inherited by BOTH siblings
+ * automatically instead of being silently absent from the copy nobody
+ * remembered to edit.
+ *
+ * The family is Advisor-free by design, so there are deliberately no advisor
+ * fields here.
+ */
+export const BALANCED_PROFILE_CONTRACT = Object.freeze({
+  models: BALANCED_PROFILE_MODELS,
+  nativeAgentNames: BALANCED_PROFILE_NATIVE_AGENT_NAMES,
+  nativeModels: BALANCED_PROFILE_NATIVE_MODELS,
+  nativeEfforts: BALANCED_PROFILE_NATIVE_EFFORTS,
+  leadContextTokens: BALANCED_PROFILE_LEAD_CONTEXT_TOKENS,
+  subagentContextTokens: BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+  leadEffort: BALANCED_PROFILE_LEAD_EFFORT,
+  oracleModel: BALANCED_PROFILE_ORACLE_MODEL,
+  oracleEffort: BALANCED_PROFILE_ORACLE_EFFORT,
+  synthesizedPeers: BALANCED_PROFILE_SYNTHESIZED_PEERS,
+  delegationGraph: BALANCED_PROFILE_DELEGATION_GRAPH,
+})
+
+export type BalancedProfileContract = typeof BALANCED_PROFILE_CONTRACT

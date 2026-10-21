@@ -1226,7 +1226,7 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   const cheapDigestWithoutAstra = buildOperatingDefaultsDigest({ profile: "cheap" })
   expect(cheapDigestWithoutAstra).toContain("Cheap launch profile")
   expect(cheapDigestWithoutAstra).toContain("`oracle`")
-  expect(cheapDigestWithoutAstra).toContain("Grok 4.7 200K/medium")
+  expect(cheapDigestWithoutAstra).toContain("Grok 4.6 200K/medium")
   expect(cheapDigestWithoutAstra).not.toContain("`astra`")
 
   const balancedDigest = buildOperatingDefaultsDigest({ profile: "balanced" })
@@ -1234,8 +1234,8 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(balancedDigest).toContain("`Explore`")
   expect(balancedDigest).toContain("`General-Purpose`")
   expect(balancedDigest).toContain("`reviewer`")
-  expect(balancedDigest).toContain("Grok 4.7 200K/medium")
-  expect(balancedDigest).toContain("(Grok 4.7 200K/medium, lead-only)")
+  expect(balancedDigest).toContain("Grok 4.6 200K/medium")
+  expect(balancedDigest).toContain("(Grok 4.6 200K/medium, lead-only)")
   expect(balancedDigest).not.toContain("`astra`")
   expect(balancedDigest).not.toContain("`Plan`")
   // Balanced exposes Oracle but no Advisor: the digest must not name the
@@ -1252,6 +1252,21 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(balancedDigest).toContain("delegate to `General-Purpose` FREELY")
   expect(balancedDigest).toContain("ONLY when")
 
+  // `-m balanced2`: the same prose with the Sol-6.1 lead/reviewer and the
+  // Grok-4.7 Oracle. Only the Oracle descriptor may name a model here, so an
+  // unexpected "GPT-6.1 Sol" would mean the digest leaked a role label.
+  const balanced2Digest = buildOperatingDefaultsDigest({ profile: "balanced2" })
+  expect(balanced2Digest).toContain("Balanced launch profile")
+  expect(balanced2Digest).toContain("(Grok 4.7 200K/medium, lead-only)")
+  expect(balanced2Digest).not.toContain("Grok 4.6")
+  expect(balanced2Digest).not.toContain("`advisor`")
+  expect(balanced2Digest).not.toContain("Advisor")
+  expect(balanced2Digest).not.toContain("`astra`")
+  expect(balanced2Digest).toContain("Funnel unknowns cheapest-first")
+  expect(balanced2Digest).toContain("The lead owns planning, implementation, and verification by default")
+  // Byte-identical to `balanced` apart from the declared Oracle identity.
+  expect(balanced2Digest).toBe(balancedDigest.replaceAll("Grok 4.6", "Grok 4.7"))
+
   const cheapestDigest = buildOperatingDefaultsDigest({ profile: "cheapest" })
   expect(cheapestDigest).toContain("Cheapest launch profile")
   expect(cheapestDigest).toContain("directly")
@@ -1261,7 +1276,27 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   // (advisory) before presenting it.
   expect(cheapestDigest).toContain("produce the plan and acceptance criteria directly")
   expect(cheapestDigest).toContain("consult `advisor` once for a framing check")
-  expect(cheapestDigest).toContain("(Sol/medium, lead-only)")
+  expect(cheapestDigest).toContain("(GPT-5.6 Sol/medium, lead-only)")
+  expect(cheapestDigest).toContain("(GPT-5.6 Sol 200K/high, lead-only)")
+
+  // `-m cheapest2`: identical prose, contract-derived Sol-6.1 Advisor (high)
+  // and Oracle labels. Nothing else may change.
+  const cheapest2Digest = buildOperatingDefaultsDigest({ profile: "cheapest2" })
+  expect(cheapest2Digest).toContain("Cheapest launch profile")
+  expect(cheapest2Digest).toContain("(GPT-6.1 Sol/high, lead-only)")
+  expect(cheapest2Digest).toContain("(GPT-6.1 Sol 200K/high, lead-only)")
+  expect(cheapest2Digest).not.toContain("GPT-5.6 Sol")
+  expect(cheapest2Digest).not.toContain("`Plan`")
+  expect(cheapest2Digest).toContain("All roles run at a 200K context window")
+  expect(cheapest2Digest).toContain("produce the plan and acceptance criteria directly")
+  expect(cheapest2Digest).toContain("consult `advisor` once for a framing check")
+  // Byte-identical to `cheapest` apart from the two declared deltas: the Sol
+  // identity and the Advisor effort (`medium` → `high`).
+  expect(cheapest2Digest).toBe(
+    cheapestDigest
+      .replaceAll("GPT-5.6 Sol", "GPT-6.1 Sol")
+      .replace("(GPT-6.1 Sol/medium, lead-only)", "(GPT-6.1 Sol/high, lead-only)"),
+  )
 
   // `-m cheap` deliberately runs without astra even if the caller hints the
   // peer is "available" — the profile never wires it; only cheap1m does.
@@ -1309,6 +1344,7 @@ test("balanced directive funnels unknowns search-first with no Advisor", () => {
   // Search-first GATHER + Oracle second-opinion framing + cost line.
   expect(directive).toContain("narrow scope first with `code_search`")
   expect(directive).toContain("a second opinion for precise, self-contained architectural/spec trade-offs")
+  expect(directive).toContain("Grok 4.6 (200K/medium)")
   expect(directive).toContain("available to the lead; `reviewer` and other subagents cannot call Oracle")
   expect(directive).toContain("lowest cost")
   // Reviewer → Explore edge is documented in the delegation graph.
@@ -1333,10 +1369,28 @@ test("cheapest directive has the lead plan directly with an advisory Advisor rev
   expect(directive).toContain("8-10 advisor calls")
   expect(directive).toContain("the lead may invoke all three")
   expect(directive).toContain("available to the lead, preferred over advisor")
+  expect(directive).toContain("GPT-5.6 Sol (200K/high)")
+})
+
+test("the -2 profiles differ from their bases only in the contract-declared labels", () => {
+  // The strongest statement of "nothing else changes": every byte of the
+  // rendered directive is the base profile's, with only the declared model
+  // identity substituted. A future divergence in roster, consultation ladder
+  // or window prose fails here rather than shipping silently.
+  const cheapest = buildOperatingDefaultsDirective({ profile: "cheapest" })
+  const cheapest2 = buildOperatingDefaultsDirective({ profile: "cheapest2" })
+  expect(cheapest2).toBe(cheapest.replaceAll("GPT-5.6 Sol", "GPT-6.1 Sol"))
+  expect(cheapest2).toContain("is GPT-6.1 Sol (200K/high)")
+
+  const balanced = buildOperatingDefaultsDirective({ profile: "balanced" })
+  const balanced2 = buildOperatingDefaultsDirective({ profile: "balanced2" })
+  expect(balanced2).toBe(balanced.replaceAll("Grok 4.6", "Grok 4.7"))
+  expect(balanced2).toContain("is Grok 4.7 (200K/medium)")
+  expect(balanced2).not.toContain("Advisor")
 })
 
 test("200K profiles name targeted reads; fast/standard/max do not", () => {
-  for (const profile of ["cheapest", "balanced"] as const) {
+  for (const profile of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
     const directive = buildOperatingDefaultsDirective({ profile })
     expect(directive).toContain("All roles run at a 200K context window")
     const digest = buildOperatingDefaultsDigest({ profile })
@@ -1364,7 +1418,7 @@ test("sweEnabled:false omits every pipeline-skill reference from directive and d
     "/gh-swe-pipeline",
     "Pipeline skills",
   ]
-  for (const profile of ["fast", "cheap", "cheap1m", "cheapest", "balanced", "max"] as const) {
+  for (const profile of ["fast", "cheap", "cheap1m", "cheapest", "cheapest2", "balanced", "balanced2", "max"] as const) {
     const directive = buildOperatingDefaultsDirective({ profile, sweEnabled: false })
     const digest = buildOperatingDefaultsDigest({ profile, sweEnabled: false })
     for (const ref of skillRefs) {

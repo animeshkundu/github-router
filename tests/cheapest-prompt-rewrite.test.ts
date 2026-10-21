@@ -81,9 +81,13 @@ describe("cheapest rewrite env + eligibility", () => {
     }
   })
 
-  test("eligible only for cheapest + non-trivial + steer on + not disabled", () => {
+  test("eligible only for the cheapest family + non-trivial + steer on + not disabled", () => {
     const base = { profile: "cheapest", promptIsNonTrivial: true, steerEnabled: true, rewriteDisabled: false }
     expect(isCheapestRewriteEligible(base)).toBe(true)
+    // The derived alias is eligible through the same family predicate.
+    expect(isCheapestRewriteEligible({ ...base, profile: "cheapest2" })).toBe(true)
+    expect(isCheapestRewriteEligible({ ...base, profile: "balanced" })).toBe(false)
+    expect(isCheapestRewriteEligible({ ...base, profile: "balanced2" })).toBe(false)
     expect(isCheapestRewriteEligible({ ...base, profile: "standard" })).toBe(false)
     expect(isCheapestRewriteEligible({ ...base, profile: undefined })).toBe(false)
     expect(isCheapestRewriteEligible({ ...base, promptIsNonTrivial: false })).toBe(false)

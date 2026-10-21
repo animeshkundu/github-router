@@ -6,6 +6,14 @@ import consola from "consola"
 
 import { MAX_PARALLELISM_RULE } from "./max-profile-prompts"
 import { isUnderClaudeConfigMirror, PATHS } from "./paths"
+import {
+  balancedContractFor,
+  cheapestContractFor,
+  displayModelName,
+  isBalancedFamily,
+  isCheapestFamily,
+  isPinnedLaunchProfile,
+} from "./profile-family"
 
 /**
  * Marker fences for each injection block. The literal text of each
@@ -202,12 +210,13 @@ export interface NativeAgentAvailability {
    *  hard restriction (not a catalog-availability signal, unlike every
    *  `*Available` flag above). `"cheap"`/`"cheap1m"` select the same
    *  restricted roster prose with the cheap family's oracle identities
-   *  (`"cheap1m"` additionally wires the astra peer). `"cheapest"` selects
-   *  the same restricted roster prose with the cheapest identities
-   *  (Luna lead and reviewer, Sol Advisor/Oracle; never astra) minus the
-   *  `Plan` role (the lead plans directly).
-   *  `"balanced"` selects the same restricted roster prose Sol-led with the
-   *  Grok Oracle (never astra), likewise without a `Plan` role. When set,
+   *  (`"cheap1m"` additionally wires the astra peer). The cheapest family
+   *  (`"cheapest"`/`"cheapest2"`) selects the same restricted roster prose
+   *  with its contracted identities (Luna lead and reviewer, the family's
+   *  Sol Advisor/Oracle; never astra) minus the `Plan` role (the lead plans
+   *  directly). The balanced family (`"balanced"`/`"balanced2"`) selects the
+   *  same restricted roster prose Sol-led with its Grok Oracle (never astra),
+   *  likewise without a `Plan` role. When set,
    *  `buildNativeReachClauses` and
    *  `buildOperatingDefaultsDirective` return a short, self-contained
    *  rendering naming only the profile's own natives
@@ -276,8 +285,8 @@ function joinClauses(parts: ReadonlyArray<string>): string {
  *  there is no quality-for-cost trade being hidden by leading with the cheap
  *  tier; reserve `reviewer` for the higher-stakes assessment it is there for. */
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "cheapest2" || opts.profile === "balanced" || opts.profile === "balanced2") {
-    if (opts.profile === "cheapest" || opts.profile === "cheapest2") {
+  if (isPinnedLaunchProfile(opts.profile)) {
+    if (isCheapestFamily(opts.profile)) {
       return joinClauses([
         "`Explore` (Luna/high, cheap breadth) for discovery, dependency mapping, and convention tracking spanning more than a couple of files",
         "`General-Purpose` (Luna/max, the heavy execution tier) for mixed, iterative, or multi-step execution",
@@ -286,7 +295,7 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
     }
     // Balanced: lead owns planning, implementation, verification by default —
     // only the reviewer is gated behind genuine need.
-    if (opts.profile === "balanced" || opts.profile === "balanced2") {
+    if (isBalancedFamily(opts.profile)) {
       return joinClauses([
         "`Explore` for broad repository discovery, dependency mapping, and convention tracking (launch in parallel)",
         "`General-Purpose` for mixed, iterative, or multi-step execution tasks (delegate freely)",
@@ -481,14 +490,21 @@ export function buildOperatingDefaultsDirective(
       + pipelineClause
     )
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "cheapest2" || opts.profile === "balanced" || opts.profile === "balanced2") {
+  if (isPinnedLaunchProfile(opts.profile)) {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
-    const isCheapest = opts.profile === "cheapest" || opts.profile === "cheapest2"
-    const isBalanced = opts.profile === "balanced" || opts.profile === "balanced2"
+    const isCheapest = isCheapestFamily(opts.profile)
+    const isBalanced = isBalancedFamily(opts.profile)
     const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
-    const oracleDescriptor = isCheapest
-      ? "GPT-6 Sol (200K/high)"
-      : isCheap || isBalanced
+    // The family contract names the Oracle identity, so `balanced` renders
+    // Grok 4.6 and `balanced2` Grok 4.7 without a parallel literal here.
+    const familyContract = isCheapest
+      ? cheapestContractFor(opts.profile)
+      : isBalanced
+        ? balancedContractFor(opts.profile)
+        : undefined
+    const oracleDescriptor = familyContract
+      ? `${displayModelName(familyContract.oracleModel)} (200K/${familyContract.oracleEffort})`
+      : isCheap
         ? "Grok 4.6 (200K/medium)"
         : "exact Opus 5.5 (1M/high)"
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
@@ -654,7 +670,7 @@ export function buildOperatingDefaultsDigest(
   // so their sentence names lead-direct planning instead of a Plan dispatch.
   const digestPipelineSentence = opts.sweEnabled === false
     ? ""
-    : opts.profile === "cheapest" || opts.profile === "cheapest2" || opts.profile === "balanced" || opts.profile === "balanced2"
+    : isCheapestFamily(opts.profile) || isBalancedFamily(opts.profile)
       ? "Pipeline skills (all 200K default, native subagents only): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (the lead plans directly on this profile; trivial exits planless, waits for user approval), `/gh-implement` after approval with parallel subagents and conditional reviewer. Skip for trivial work.\n\n"
       : "Pipeline skills (all 200K default, native subagents only): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (trivial exits planless, waits for user approval), `/gh-implement` after approval with parallel subagents and conditional reviewer. Skip for trivial work.\n\n"
   if (opts.profile === "max") {
@@ -667,21 +683,31 @@ export function buildOperatingDefaultsDigest(
       + "Synthesize and verify: run the code, inspect outputs, and check tests. Agent count and agreement are not evidence. Use a fresh-context peer only for consequential judgment that remains after direct checks, and use the coordinator only when several distinct lenses could change the decision. Advisor is optional, non-binding, primary-lead-only counsel for one focused consequential uncertainty; it is not an approval or completion gate."
     )
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "cheapest2" || opts.profile === "balanced" || opts.profile === "balanced2") {
+  if (isPinnedLaunchProfile(opts.profile)) {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
-    const isCheapest = opts.profile === "cheapest" || opts.profile === "cheapest2"
-    const isBalanced = opts.profile === "balanced" || opts.profile === "balanced2"
+    const isCheapest = isCheapestFamily(opts.profile)
+    const isBalanced = isBalancedFamily(opts.profile)
     const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
-    const oracleDescriptor = isCheapest
-      ? "(GPT-6 Sol 200K/high, lead-only)"
-      : isBalanced
-        ? "(Grok 4.6 200K/medium, lead-only)"
-        : isCheap
-          ? "(Grok 4.6 200K/medium, lead and Plan)"
-          : "(Opus 5 1M/high, lead and Plan)"
+    const cheapestContract = isCheapest
+      ? cheapestContractFor(opts.profile)
+      : undefined
+    const balancedContract = isBalanced
+      ? balancedContractFor(opts.profile)
+      : undefined
+    const familyContract = cheapestContract ?? balancedContract
+    // Both families are lead-only on Oracle (neither has a Plan role), so one
+    // contract-derived form serves both: `balanced` Grok 4.6 →
+    // `balanced2` Grok 4.7, `cheapest` GPT-5.6 Sol → `cheapest2` GPT-6.1 Sol.
+    const oracleDescriptor = familyContract
+      ? `(${displayModelName(familyContract.oracleModel)} 200K/${familyContract.oracleEffort}, lead-only)`
+      : isCheap
+        ? "(Grok 4.6 200K/medium, lead and Plan)"
+        : "(Opus 5 1M/high, lead and Plan)"
     // No balanced branch: balanced exposes Oracle but no Advisor, so its
     // ladder (consultationLadder below) never interpolates this descriptor.
-    const advisorDescriptor = isCheapest ? "(Sol/medium, lead-only)" : "(Sol/high, lead-only)"
+    const advisorDescriptor = cheapestContract
+      ? `(${displayModelName(cheapestContract.advisorModel)}/${cheapestContract.advisorEffort}, lead-only)`
+      : "(Sol/high, lead-only)"
     const astraStep =
     opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? `; (4) \`astra\` (GPT-6 Astra 200K/${isCheap ? "medium" : "high"}, lead-only) only as a last resort when direct evidence, Advisor, and Oracle cannot produce a defensible path (at most 1-2 calls per decision).`

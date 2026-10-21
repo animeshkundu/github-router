@@ -285,18 +285,15 @@ mock.module("~/lib/mcp-capabilities", () => ({
   cheapAstraModel: mock(() => "gpt-6-astra"),
   // Cheapest-profile resolvers (only exercised under `-m cheapest`); stubbed
   // for the same static-import-graph reason as the cheap entries above.
+  // Family-aware: each takes an optional profile id and the -2 aliases ride
+  // the same resolver, so there is no separate cheapest2/balanced2 stub.
   cheapestOracleModel: mock(() => "gpt-5.6-sol"),
   cheapestAdvisorModel: mock(() => "gpt-5.6-sol"),
   cheapestReviewerModel: mock(() => "gpt-6-luna"),
-  cheapest2OracleModel: mock(() => "gpt-5.6-sol"),
-  cheapest2AdvisorModel: mock(() => "gpt-5.6-sol"),
-  cheapest2ReviewerModel: mock(() => "gpt-6-luna"),
   // Balanced-profile resolvers (only exercised under `-m balanced`); stubbed
   // for the same static-import-graph reason as the cheap entries above.
-  balancedOracleModel: mock(() => "grok-4.7"),
+  balancedOracleModel: mock(() => "grok-4.6"),
   balancedReviewerModel: mock(() => "gpt-5.6-sol"),
-  balanced2OracleModel: mock(() => "grok-4.7"),
-  balanced2ReviewerModel: mock(() => "gpt-5.6-sol"),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
   FAST_GENERAL_PURPOSE_EFFORT: "max",

@@ -230,7 +230,8 @@ export async function decidePromptSubmitV2(input: {
   searchEnabled?: boolean
   /** Whether Bluebird owns semantic and lexical search for this launch. */
   bluebirdEnabled?: boolean
-  /** Launch profile id; only `"cheapest"` enables the Sol rewrite branch. */
+  /** Launch profile id; only the cheapest family (`cheapest`/`cheapest2`)
+   *  enables the Sol rewrite branch. */
   profile?: string
   /** True when `GH_ROUTER_DISABLE_CHEAPEST_REWRITE` opts out of the rewrite. */
   rewriteDisabled?: boolean

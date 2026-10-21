@@ -24,6 +24,7 @@ import { defineCommand } from "citty"
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs"
 
 import { buildStaticPack } from "./internal-prompt-submit"
+import { cheapestRewriteModelFor, isCheapestFamily } from "./lib/profile-family"
 import {
   buildDoneDigest,
   buildRebriefContext,
@@ -32,7 +33,6 @@ import {
 import {
   buildRebriefSystem,
   CHEAPEST_REWRITE_EFFORT,
-  CHEAPEST_REWRITE_MODEL,
   isCheapestRewriteDisabledEnv,
 } from "./lib/cheapest-prompt-rewrite"
 import { parseBoolEnv } from "./lib/exec"
@@ -72,9 +72,9 @@ export function isRebriefUserInvoked(env: NodeJS.ProcessEnv = process.env): bool
   return v === "1" || v === "true"
 }
 
-/** Cheapest-only gate (literal alias, lowercased). Exported for tests. */
+/** Cheapest-family gate (either alias, lowercased). Exported for tests. */
 export function isRebriefProfileEligible(profile: string | undefined): boolean {
-  return (profile ?? "").trim().toLowerCase() === "cheapest"
+  return isCheapestFamily((profile ?? "").trim().toLowerCase())
 }
 
 export interface RebriefPayload {
@@ -391,7 +391,7 @@ export const internalRebrief = defineCommand({
           inferSol: (system, user, signal) =>
             callInference({
               serverUrl: runtime.serverUrl,
-              model: CHEAPEST_REWRITE_MODEL,
+              model: cheapestRewriteModelFor(profile),
               instructions: system,
               input: user,
               effort: CHEAPEST_REWRITE_EFFORT,

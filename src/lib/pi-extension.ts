@@ -5,6 +5,7 @@ import {
   piLeadModel,
   piLeadThinking,
 } from "./pi-models-settings"
+import { isBalancedFamily, isCheapestFamily } from "./profile-family"
 import {
   AIC_STATUSLINE_DISABLE_ENV,
 } from "./aic-statusline-settings"
@@ -407,7 +408,7 @@ export function buildPiExtensionSource(opts: {
   // Cheapest-only, like the advisor: the brief is the front-end half of the
   // same floor-raising surface `buildPiAppendSystem` writes the consult contract
   // for, and `balanced` is deliberately floor-free on both counts.
-  const promptBrief = opts.profileId === "cheapest"
+  const promptBrief = isCheapestFamily(opts.profileId)
   const lines: Array<string> = []
   lines.push(
     `// gh-router-pi extension (${opts.profileId} mode). Generated per launch; do not edit.`,
@@ -815,7 +816,7 @@ export function buildPiSkills(opts: {
     // Balanced is advisor-free: the roster line must not name a consultant
     // that has neither tool nor agent file on that profile.
     const consults =
-      opts.profileId === "balanced" ? "`oracle` for consults" : "`oracle`/`advisor` for consults"
+      isBalancedFamily(opts.profileId) ? "`oracle` for consults" : "`oracle`/`advisor` for consults"
     skills.push({
       dir: "gh-delegate",
       content: [
@@ -839,7 +840,7 @@ export function buildPiSkills(opts: {
         "our agents run foreground and background runs add spawn overhead.",
         "After any subagent work completes, always write the final answer",
         "yourself; never end on tool output or completion notices alone.",
-        opts.profileId === "balanced"
+        isBalancedFamily(opts.profileId)
           ? "Send work to reviewer ONLY when the change alters behavior."
           : "Send finished work to reviewer for assessment.",
       ].join("\n"),

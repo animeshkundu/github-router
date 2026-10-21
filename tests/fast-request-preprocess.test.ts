@@ -51,6 +51,18 @@ const balancedLaunch: LaunchRegistryEntry = {
   profileId: "balanced",
 }
 
+const cheapest2Launch: LaunchRegistryEntry = {
+  ...fastLaunch,
+  launchId: "cheapest2",
+  profileId: "cheapest2",
+}
+
+const balanced2Launch: LaunchRegistryEntry = {
+  ...fastLaunch,
+  launchId: "balanced2",
+  profileId: "balanced2",
+}
+
 function body(model: string, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({ model, messages: [], ...extra })
 }
@@ -488,6 +500,121 @@ describe("fast request preprocessing", () => {
           expect(parsed.output_config.effort).toBe(effort)
         }
       }
+    })
+  })
+
+  describe("derived -2 profiles", () => {
+    test("cheapest2 is cheapest with the 6.1 Sol identities on the wire", () => {
+      // Lead stays Luna; Sol 6.1 is the Advisor/Oracle tier, so a bare
+      // request is accepted at the shared `high` (the Advisor's declared
+      // effort is not a lead-effort seed).
+      for (const [model, effort] of [
+        ["gpt-6-luna", "max"],
+        ["gpt-6.1-sol", "high"],
+      ] as const) {
+        const parsed = JSON.parse(
+          preprocessFastRequest(body(model), cheapest2Launch).body,
+        )
+        expect(parsed.model).toBe(model)
+        expect(parsed.output_config.effort).toBe(effort)
+      }
+      // Bare 200K: the `[1m]` bracket is stripped on lead AND subagent traffic.
+      expect(
+        JSON.parse(preprocessFastRequest(body("gpt-6-luna[1m]"), cheapest2Launch).body)
+          .model,
+      ).toBe("gpt-6-luna")
+      // Everything the base profile rejects, this one rejects too.
+      expect(
+        preprocessFastRequest(body("gpt-4o"), cheapest2Launch).rejectedModel,
+      ).toBe("gpt-4o")
+      // Aliases outside the family resolve exactly as they do on the base —
+      // the profile id only overrides the identities a family declares.
+      expect(
+        JSON.parse(
+          preprocessFastRequest(body(BALANCED_REVIEWER_ALIAS_ID), cheapest2Launch)
+            .body,
+        ).model,
+      ).toBe(
+        JSON.parse(
+          preprocessFastRequest(body(BALANCED_REVIEWER_ALIAS_ID), cheapestLaunch)
+            .body,
+        ).model,
+      )
+    })
+
+    test("cheapest2 role aliases are the cheapest aliases at bare 200K", () => {
+      for (const [alias, real, effort] of [
+        [CHEAPEST_EXPLORE_ALIAS_ID, "gpt-6-luna", "high"],
+        [CHEAPEST_GENERAL_PURPOSE_ALIAS_ID, "gpt-6-luna", "max"],
+        // The cheapest family reviews on Luna in both siblings; only the
+        // Sol-tier identities move, so this alias is unchanged.
+        [CHEAPEST_REVIEWER_ALIAS_ID, "gpt-6-luna", "max"],
+      ] as const) {
+        const sub = preprocessFastRequest(
+          body(`${alias}[1m]`, { output_config: { effort: "low" } }),
+          cheapest2Launch,
+          true,
+        )
+        expect(sub.rejectedAlias).toBeUndefined()
+        const parsed = JSON.parse(sub.body)
+        expect(parsed.model).toBe(real)
+        expect(parsed.output_config.effort).toBe(effort)
+      }
+    })
+
+    test("balanced2 leads Sol 6.1 at medium and subagents at high", () => {
+      const lead = JSON.parse(
+        preprocessFastRequest(body("gpt-6.1-sol"), balanced2Launch).body,
+      )
+      expect(lead.output_config.effort).toBe("medium")
+      const leadExplicit = JSON.parse(
+        preprocessFastRequest(
+          body("gpt-6.1-sol", { output_config: { effort: "xhigh" } }),
+          balanced2Launch,
+        ).body,
+      )
+      expect(leadExplicit.output_config.effort).toBe("xhigh")
+      const sub = JSON.parse(
+        preprocessFastRequest(
+          body("gpt-6.1-sol", { output_config: { effort: "medium" } }),
+          balanced2Launch,
+          true,
+        ).body,
+      )
+      expect(sub.output_config.effort).toBe("high")
+      // The new Oracle is a first-class row, at inherited medium.
+      const grok = JSON.parse(
+        preprocessFastRequest(body("grok-4.7"), balanced2Launch).body,
+      )
+      expect(grok.model).toBe("grok-4.7")
+      expect(grok.output_config.effort).toBe("medium")
+    })
+
+    test("balanced2's shared reviewer alias resolves to Sol 6.1", () => {
+      for (const wire of [BALANCED_REVIEWER_ALIAS_ID, `${BALANCED_REVIEWER_ALIAS_ID}[1m]`]) {
+        const sub = preprocessFastRequest(
+          body(wire, { output_config: { effort: "low" } }),
+          balanced2Launch,
+          true,
+        )
+        expect(sub.rejectedAlias).toBeUndefined()
+        const parsed = JSON.parse(sub.body)
+        expect(parsed.model).toBe("gpt-6.1-sol")
+        expect(parsed.output_config.effort).toBe("high")
+      }
+      // The base profile's alias is unchanged: profile-aware, not global.
+      expect(
+        JSON.parse(
+          preprocessFastRequest(body(BALANCED_REVIEWER_ALIAS_ID), balancedLaunch, true)
+            .body,
+        ).model,
+      ).toBe("gpt-5.6-sol")
+      expect(
+        JSON.parse(
+          preprocessFastRequest(body(CHEAPEST_REVIEWER_ALIAS_ID), cheapestLaunch, true)
+            .body,
+        ).model,
+      ).toBe("gpt-6-luna")
     })
   })
 })
