@@ -46,7 +46,7 @@ export interface InjectedSkill {
 }
 
 export interface InjectedSkillSelection {
-  profileId: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
+  profileId: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "max"
   workerSkillsActive: boolean
   firstMateEnabled: boolean
   /**
@@ -158,7 +158,7 @@ export function injectedSkillsForLaunch(
   const bluebirdEnabled = selection.bluebirdEnabled === true
   const allSkills = getInjectedSkills(searchEnabled, bluebirdEnabled)
   const planProfile: PlanSkillProfile | undefined =
-    selection.profileId === "cheapest" || selection.profileId === "balanced"
+    selection.profileId === "cheapest" || selection.profileId === "cheapest2" || selection.profileId === "balanced" || selection.profileId === "balanced2"
       ? selection.profileId
       : undefined
   const pipelineSkills = getPipelineSkills(searchEnabled, bluebirdEnabled, planProfile)
@@ -175,7 +175,7 @@ export function injectedSkillsForLaunch(
       // Cheapest keeps its user-only rebrief escape hatch without --swe:
       // the first-prompt rewrite is one-shot, and a drifted mid-session has
       // no other on-demand re-grounding path. Other pinned profiles get none.
-      if (selection.profileId === "cheapest") {
+      if (selection.profileId === "cheapest" || selection.profileId === "cheapest2") {
         return [buildRebriefSkill(searchEnabled, bluebirdEnabled)]
       }
       return []
@@ -190,7 +190,7 @@ export function injectedSkillsForLaunch(
       }
       return pipeline
     }
-    if (selection.profileId === "cheapest") {
+    if (selection.profileId === "cheapest" || selection.profileId === "cheapest2") {
       return [...pipelineSkills.slice(), buildRebriefSkill(searchEnabled, bluebirdEnabled)]
     }
     return pipelineSkills.slice()

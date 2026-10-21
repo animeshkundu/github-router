@@ -1226,7 +1226,7 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   const cheapDigestWithoutAstra = buildOperatingDefaultsDigest({ profile: "cheap" })
   expect(cheapDigestWithoutAstra).toContain("Cheap launch profile")
   expect(cheapDigestWithoutAstra).toContain("`oracle`")
-  expect(cheapDigestWithoutAstra).toContain("Grok 4.6 200K/medium")
+  expect(cheapDigestWithoutAstra).toContain("Grok 4.7 200K/medium")
   expect(cheapDigestWithoutAstra).not.toContain("`astra`")
 
   const balancedDigest = buildOperatingDefaultsDigest({ profile: "balanced" })
@@ -1234,8 +1234,8 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(balancedDigest).toContain("`Explore`")
   expect(balancedDigest).toContain("`General-Purpose`")
   expect(balancedDigest).toContain("`reviewer`")
-  expect(balancedDigest).toContain("Grok 4.6 200K/medium")
-  expect(balancedDigest).toContain("(Grok 4.6 200K/medium, lead-only)")
+  expect(balancedDigest).toContain("Grok 4.7 200K/medium")
+  expect(balancedDigest).toContain("(Grok 4.7 200K/medium, lead-only)")
   expect(balancedDigest).not.toContain("`astra`")
   expect(balancedDigest).not.toContain("`Plan`")
   // Balanced exposes Oracle but no Advisor: the digest must not name the

@@ -12,6 +12,17 @@ import {
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
 } from "./cheapest-profile-contract"
 import {
+  CHEAPEST2_PROFILE_MODELS,
+  CHEAPEST2_PROFILE_NATIVE_AGENT_NAMES,
+  CHEAPEST2_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+} from "./cheapest2-profile-contract"
+import {
+  BALANCED2_PROFILE_MODELS,
+  BALANCED2_PROFILE_NATIVE_AGENT_NAMES,
+  BALANCED2_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+  BALANCED2_PROFILE_LEAD_EFFORT,
+} from "./balanced2-profile-contract"
+import {
   BALANCED_PROFILE_LEAD_EFFORT,
   BALANCED_PROFILE_MODELS,
   BALANCED_PROFILE_NATIVE_AGENT_NAMES,
@@ -70,7 +81,9 @@ export type LaunchProfileId =
   | "cheap"
   | "cheap1m"
   | "cheapest"
+  | "cheapest2"
   | "balanced"
+  | "balanced2"
 
 /**
  * Everything a launch profile needs to declare about its own surface.
@@ -183,6 +196,22 @@ export const BALANCED_PROFILE: LaunchProfileDescriptor = Object.freeze({
   hasCoordinator: false,
 })
 
+export const CHEAPEST2_PROFILE: LaunchProfileDescriptor = Object.freeze({
+  id: "cheapest2",
+  nativeRoster: new Set(CHEAPEST2_PROFILE_NATIVE_AGENT_NAMES),
+  personaAllowlist: new Set(["oracle"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser", "ado", "kusto"]),
+  hasCoordinator: false,
+})
+
+export const BALANCED2_PROFILE: LaunchProfileDescriptor = Object.freeze({
+  id: "balanced2",
+  nativeRoster: new Set(BALANCED2_PROFILE_NATIVE_AGENT_NAMES),
+  personaAllowlist: new Set(["oracle"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser", "ado", "kusto"]),
+  hasCoordinator: false,
+})
+
 /**
  * The `-m max` profile: Sol/Luna-led, browse-only workers, and explicit
  * cross-lab peer names. The descriptor is a hard projection for bound launch
@@ -212,7 +241,9 @@ export function profileDescriptor(id: LaunchProfileId): LaunchProfileDescriptor 
   if (id === "cheap1m") return CHEAP1M_PROFILE
   if (id === "cheap") return CHEAP_PROFILE
   if (id === "cheapest") return CHEAPEST_PROFILE
+  if (id === "cheapest2") return CHEAPEST2_PROFILE
   if (id === "balanced") return BALANCED_PROFILE
+  if (id === "balanced2") return BALANCED2_PROFILE
   return STANDARD_PROFILE
 }
 
@@ -234,7 +265,9 @@ export function resolveLaunchProfile(modelArg: string | undefined): LaunchProfil
   if (arg === "cheap1m") return "cheap1m"
   if (arg === "cheap") return "cheap"
   if (arg === "cheapest") return "cheapest"
+  if (arg === "cheapest2") return "cheapest2"
   if (arg === "balanced") return "balanced"
+  if (arg === "balanced2") return "balanced2"
   return "standard"
 }
 
@@ -1266,3 +1299,284 @@ export function formatBalancedPrerequisiteFailure(
     + `profile's exact roster. Run plain \`github-router claude\` instead.`
   )
 }
+
+
+export interface Cheapest2PrerequisiteCheck {
+  ok: boolean
+  missing: ReadonlyArray<string>
+}
+
+export interface Balanced2PrerequisiteCheck {
+  ok: boolean
+  missing: ReadonlyArray<string>
+}
+
+export function validateCheapest2ProfilePrerequisites(
+  catalog: ModelsResponse | undefined,
+  opts: { peers?: boolean } = {},
+): Cheapest2PrerequisiteCheck {
+  const peers = opts.peers !== false
+  const missing: Array<string> = []
+
+  const luna = findModel(catalog, CHEAPEST2_PROFILE_MODELS.lead)
+  if (!luna) {
+    missing.push(`${CHEAPEST2_PROFILE_MODELS.lead}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(luna)) {
+      missing.push(`${CHEAPEST2_PROFILE_MODELS.lead}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(luna, CHEAPEST2_PROFILE_SUBAGENT_CONTEXT_TOKENS)) {
+      missing.push(
+        `${CHEAPEST2_PROFILE_MODELS.lead}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (
+      !supportsEffort(luna, "high")
+      || !supportsEffort(luna, "max")
+      || !supportsEffort(luna, "xhigh")
+    ) {
+      missing.push(
+        `${CHEAPEST2_PROFILE_MODELS.lead}: does not advertise "high", "max", and "xhigh" reasoning effort`,
+      )
+    }
+    if (!supportsEndpoint(luna, "responses")) {
+      missing.push(`${CHEAPEST2_PROFILE_MODELS.lead}: does not advertise a supported Responses endpoint`)
+    }
+  }
+
+  // Sol Oracle (same id as the reviewer role): the lead's only consultant
+  // besides the Advisor. The reviewer block below covers Sol tool-calling;
+  // this block covers the Oracle brief's prompt-metadata requirement.
+  // Skipped under `peers: false` — a peerless launch consumes neither.
+  if (peers) {
+    const oracle = findModel(catalog, CHEAPEST2_PROFILE_MODELS.oracle)
+    if (!oracle) {
+      missing.push(`${CHEAPEST2_PROFILE_MODELS.oracle}: absent from the live catalog`)
+    } else {
+      if (!hasContextAtLeast(oracle, CHEAPEST2_PROFILE_SUBAGENT_CONTEXT_TOKENS)) {
+        missing.push(
+          `${CHEAPEST2_PROFILE_MODELS.oracle}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(oracle, "high")) {
+        missing.push(`${CHEAPEST2_PROFILE_MODELS.oracle}: does not advertise a "high" reasoning effort`)
+      }
+      if (!supportsEndpoint(oracle, "responses")) {
+        missing.push(`${CHEAPEST2_PROFILE_MODELS.oracle}: does not advertise a supported Responses endpoint`)
+      }
+      if (!hasUsablePromptMetadata(oracle)) {
+        missing.push(`${CHEAPEST2_PROFILE_MODELS.oracle}: no usable max_prompt_tokens metadata (Oracle brief)`)
+      }
+    }
+
+    const reviewer = findModel(catalog, CHEAPEST2_PROFILE_MODELS.reviewer)
+    if (!reviewer) {
+      missing.push(`${CHEAPEST2_PROFILE_MODELS.reviewer}: absent from the live catalog`)
+    } else {
+      if (!hasToolCalls(reviewer)) {
+        missing.push(`${CHEAPEST2_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
+      }
+      if (!hasContextAtLeast(reviewer, CHEAPEST2_PROFILE_SUBAGENT_CONTEXT_TOKENS)) {
+        missing.push(
+          `${CHEAPEST2_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(reviewer, "high")) {
+        missing.push(`${CHEAPEST2_PROFILE_MODELS.reviewer}: does not advertise a "high" reasoning effort`)
+      }
+      if (!supportsEndpoint(reviewer, "responses")) {
+        missing.push(
+          `${CHEAPEST2_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`,
+        )
+      }
+    }
+  }
+
+  return { ok: missing.length === 0, missing }
+}
+
+/**
+ * Format `validateCheapest2ProfilePrerequisites`'s failure list into the
+ * launch error message.
+ */
+
+export function validateBalanced2ProfilePrerequisites(
+  catalog: ModelsResponse | undefined,
+  opts: { peers?: boolean } = {},
+): Balanced2PrerequisiteCheck {
+  const peers = opts.peers !== false
+  const missing: Array<string> = []
+
+  const sol = findModel(catalog, BALANCED2_PROFILE_MODELS.lead)
+  if (!sol) {
+    missing.push(`${BALANCED2_PROFILE_MODELS.lead}: absent from the live catalog`)
+  } else {
+    if (!hasToolCalls(sol)) {
+      missing.push(`${BALANCED2_PROFILE_MODELS.lead}: does not advertise tool_calls`)
+    }
+    if (!hasContextAtLeast(sol, BALANCED2_PROFILE_SUBAGENT_CONTEXT_TOKENS)) {
+      missing.push(
+        `${BALANCED2_PROFILE_MODELS.lead}: advertised context window is below the 200K subagent floor`,
+      )
+    }
+    if (!supportsEffort(sol, "high")) {
+      missing.push(`${BALANCED2_PROFILE_MODELS.lead}: does not advertise a "high" reasoning effort`)
+    }
+    // The launcher seeds the session effort to the contracted lead effort
+    // (`BALANCED2_PROFILE_LEAD_EFFORT`, medium), so the gate must require it
+    // too: a catalog entry advertising `high` but not `medium` would pass
+    // launch and then clamp or reject every lead turn.
+    if (!supportsEffort(sol, BALANCED2_PROFILE_LEAD_EFFORT)) {
+      missing.push(
+        `${BALANCED2_PROFILE_MODELS.lead}: does not advertise a "${BALANCED2_PROFILE_LEAD_EFFORT}" reasoning effort (the contracted lead effort)`,
+      )
+    }
+    if (!supportsEndpoint(sol, "responses")) {
+      missing.push(`${BALANCED2_PROFILE_MODELS.lead}: does not advertise a supported Responses endpoint`)
+    }
+  }
+
+  // Native roles + Oracle are skipped under `peers: false` — a peerless
+  // launch consumes only the lead validated above.
+  if (peers) {
+    const luna = findModel(catalog, BALANCED2_PROFILE_MODELS.explore)
+    if (!luna) {
+      missing.push(`${BALANCED2_PROFILE_MODELS.explore}: absent from the live catalog`)
+    } else {
+      if (!hasToolCalls(luna)) {
+        missing.push(`${BALANCED2_PROFILE_MODELS.explore}: does not advertise tool_calls`)
+      }
+      if (!hasContextAtLeast(luna, BALANCED2_PROFILE_SUBAGENT_CONTEXT_TOKENS)) {
+        missing.push(
+          `${BALANCED2_PROFILE_MODELS.explore}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(luna, "high") || !supportsEffort(luna, "max")) {
+        missing.push(`${BALANCED2_PROFILE_MODELS.explore}: does not advertise both "high" and "max" reasoning effort`)
+      }
+      if (!supportsEndpoint(luna, "responses")) {
+        missing.push(`${BALANCED2_PROFILE_MODELS.explore}: does not advertise a supported Responses endpoint`)
+      }
+    }
+
+    const generalPurpose = findModel(catalog, BALANCED2_PROFILE_MODELS["General-Purpose"])
+    if (!generalPurpose) {
+      missing.push(`${BALANCED2_PROFILE_MODELS["General-Purpose"]}: absent from the live catalog`)
+    } else {
+      if (!hasToolCalls(generalPurpose)) {
+        missing.push(`${BALANCED2_PROFILE_MODELS["General-Purpose"]}: does not advertise tool_calls`)
+      }
+      if (!hasContextAtLeast(generalPurpose, BALANCED2_PROFILE_SUBAGENT_CONTEXT_TOKENS)) {
+        missing.push(
+          `${BALANCED2_PROFILE_MODELS["General-Purpose"]}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(generalPurpose, "max")) {
+        missing.push(`${BALANCED2_PROFILE_MODELS["General-Purpose"]}: does not advertise a "max" reasoning effort`)
+      }
+      if (!supportsEndpoint(generalPurpose, "responses")) {
+        missing.push(
+          `${BALANCED2_PROFILE_MODELS["General-Purpose"]}: does not advertise a supported Responses endpoint`,
+        )
+      }
+    }
+
+    const balancedReviewer = findModel(catalog, BALANCED2_PROFILE_MODELS.reviewer)
+    if (!balancedReviewer) {
+      missing.push(`${BALANCED2_PROFILE_MODELS.reviewer}: absent from the live catalog`)
+    } else {
+      if (!hasToolCalls(balancedReviewer)) {
+        missing.push(`${BALANCED2_PROFILE_MODELS.reviewer}: does not advertise tool_calls`)
+      }
+      if (!hasContextAtLeast(balancedReviewer, BALANCED2_PROFILE_SUBAGENT_CONTEXT_TOKENS)) {
+        missing.push(
+          `${BALANCED2_PROFILE_MODELS.reviewer}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(balancedReviewer, "high")) {
+        missing.push(`${BALANCED2_PROFILE_MODELS.reviewer}: does not advertise a "high" reasoning effort`)
+      }
+      if (!supportsEndpoint(balancedReviewer, "responses")) {
+        missing.push(
+          `${BALANCED2_PROFILE_MODELS.reviewer}: does not advertise a supported Responses endpoint`,
+        )
+      }
+    }
+
+    const grok = findModel(catalog, BALANCED2_PROFILE_MODELS.oracle)
+    if (!grok) {
+      missing.push(`${BALANCED2_PROFILE_MODELS.oracle}: absent from the live catalog`)
+    } else {
+      if (!hasContextAtLeast(grok, BALANCED2_PROFILE_SUBAGENT_CONTEXT_TOKENS)) {
+        missing.push(
+          `${BALANCED2_PROFILE_MODELS.oracle}: advertised context window is below the 200K subagent floor`,
+        )
+      }
+      if (!supportsEffort(grok, "medium")) {
+        missing.push(`${BALANCED2_PROFILE_MODELS.oracle}: does not advertise a "medium" reasoning effort`)
+      }
+      if (!hasUsablePromptMetadata(grok)) {
+        missing.push(`${BALANCED2_PROFILE_MODELS.oracle}: no usable max_prompt_tokens metadata`)
+      }
+      if (!supportsEndpoint(grok, "responses")) {
+        missing.push(`${BALANCED2_PROFILE_MODELS.oracle}: does not advertise a supported Responses endpoint`)
+      }
+    }
+  }
+
+  return { ok: missing.length === 0, missing }
+}
+
+/**
+ * Format `validateBalanced2ProfilePrerequisites`'s failure list into the
+ * launch error message.
+ */
+
+export function formatCheapest2PrerequisiteFailure(
+  missing: ReadonlyArray<string>,
+): string {
+  return (
+    `github-router claude -m cheapest2 requires the following live-catalog capabilities, `
+    + `which this account's catalog does not fully provide:\n`
+    + missing.map((m) => `  - ${m}`).join("\n")
+    + `\n\nFalling back or silently dropping an agent is not supported for the cheapest2 `
+    + `profile's exact roster. Run plain \`github-router claude\` instead.`
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Balanced-profile startup prerequisites (`-m balanced`, Sol-led 200K tier)
+// ---------------------------------------------------------------------------
+
+export interface BalancedPrerequisiteCheck {
+  ok: boolean
+  /** Human-readable description of each missing/invalid requirement, empty
+   *  when `ok`. */
+  missing: ReadonlyArray<string>
+}
+
+
+/**
+ * Validate the live Copilot catalog for `-m balanced`: Sol lead at the 200K
+ * default window, Luna Explore/General-Purpose roles, a Sol/high reviewer,
+ * and a Grok Oracle — all at the 200K default with their
+ * fixed efforts and supported endpoints. There is no `Plan` role: the lead
+ * owns planning directly.
+ *
+ * `opts.peers === false` (the Pi `--no-peers` path) validates the LEAD only;
+ * see `validateCheapest2ProfilePrerequisites` for why. Defaults to full-roster
+ * validation (every existing caller is unaffected).
+ */
+
+export function formatBalanced2PrerequisiteFailure(
+  missing: ReadonlyArray<string>,
+): string {
+  return (
+    `github-router claude -m balanced2 requires the following live-catalog capabilities, `
+    + `which this account's catalog does not fully provide:\n`
+    + missing.map((m) => `  - ${m}`).join("\n")
+    + `\n\nFalling back or silently dropping an agent is not supported for the balanced2 `
+    + `profile's exact roster. Run plain \`github-router claude\` instead.`
+  )
+}
+

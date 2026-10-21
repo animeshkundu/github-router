@@ -665,7 +665,7 @@ export function buildPeerAwarenessSnippet(opts: {
    *  renders its own native/peer roster and gated retained groups.
    *  Absent/`"standard"` preserves the full standard surface. Same field as
    *  `NativeAgentAvailability.profile` in claude-md-injection.ts. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "max"
   /** Whether local ColBERT semantic search or Bluebird semantic routing is
    *  available for this launch. When false/absent the `code` tool is lexical-only. */
   semanticSearchAvailable?: boolean
@@ -699,10 +699,10 @@ export function buildPeerAwarenessSnippet(opts: {
       `\`mcp__${searchKey}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search (failures stay visible with no local fallback)" : opts.semanticSearchAvailable === true ? "local ColBERT semantic-first search with lexical fallback" : "local lexical search"} and \`mcp__${searchKey}__web\` provides citable web sources. Advisor is transcript-aware, primary-lead-only, and unavailable to native subagents and browse workers; it can detect framing drift but is not independent verification.${browserClause}${workerClause}${decideClause}${fleetClause}${agentsClause}${artifactClause}`,
     ].join("\n")
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "cheapest2" || opts.profile === "balanced" || opts.profile === "balanced2") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
-    const isCheapest = opts.profile === "cheapest"
-    const isBalanced = opts.profile === "balanced"
+    const isCheapest = opts.profile === "cheapest" || opts.profile === "cheapest2"
+    const isBalanced = opts.profile === "balanced" || opts.profile === "balanced2"
     const profileLabel = isCheapest ? "cheapest" : isCheap ? "cheap" : isBalanced ? "balanced" : "fast"
     const oracleDescriptor = isCheapest
       ? "GPT-6 Sol (200K/high)"
@@ -951,7 +951,7 @@ export function buildPeerAwarenessSummary(opts: {
    *  matching option on `buildPeerAwarenessSnippet`). Every other flag on
    *  this call is ignored in favor of a short fast-profile rendering. Same
    *  field name/values as `NativeAgentAvailability.profile`. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "max"
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
@@ -967,10 +967,10 @@ export function buildPeerAwarenessSummary(opts: {
       `Native roles can inspect the repository within their listed tools. Fresh-context peers see only the artifact and constraints supplied to them. Advisor is transcript-aware, optional, non-binding, and primary-lead-only; it can identify framing drift but is not independent verification or an approval gate.${searchSummary} Detailed routing lives in each role or tool description, and the full gated capability inventory lives in CLAUDE.md.`,
     ].join("\n")
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "cheapest2" || opts.profile === "balanced" || opts.profile === "balanced2") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
-    const isCheapest = opts.profile === "cheapest"
-    const isBalanced = opts.profile === "balanced"
+    const isCheapest = opts.profile === "cheapest" || opts.profile === "cheapest2"
+    const isBalanced = opts.profile === "balanced" || opts.profile === "balanced2"
     const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
     const oracleDescriptor = isCheapest
       ? "GPT-6 Sol (200K/high)"
@@ -1485,7 +1485,7 @@ export type WorkspaceSource = "argument" | "session" | "absent"
  *  changing standard/BYO behavior. */
 export interface McpToolCallContext {
   workspaceSource: WorkspaceSource
-  profileId?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
+  profileId?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "max"
 }
 
 const WEB_SEARCH_DESCRIPTION =

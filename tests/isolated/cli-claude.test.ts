@@ -279,7 +279,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   fastAstraModel: mock(() => undefined),
   // Cheap-profile resolvers (only exercised under `-m cheap`); stubbed so the
   // static import graph used by mcp/handler.ts resolves for every test here.
-  cheapOracleModel: mock(() => "grok-4.6"),
+  cheapOracleModel: mock(() => "grok-4.7"),
   cheapAdvisorModel: mock(() => "gpt-5.6-sol"),
   cheapReviewerModel: mock(() => "gpt-6-luna"),
   cheapAstraModel: mock(() => "gpt-6-astra"),
@@ -288,10 +288,15 @@ mock.module("~/lib/mcp-capabilities", () => ({
   cheapestOracleModel: mock(() => "gpt-5.6-sol"),
   cheapestAdvisorModel: mock(() => "gpt-5.6-sol"),
   cheapestReviewerModel: mock(() => "gpt-6-luna"),
+  cheapest2OracleModel: mock(() => "gpt-5.6-sol"),
+  cheapest2AdvisorModel: mock(() => "gpt-5.6-sol"),
+  cheapest2ReviewerModel: mock(() => "gpt-6-luna"),
   // Balanced-profile resolvers (only exercised under `-m balanced`); stubbed
   // for the same static-import-graph reason as the cheap entries above.
-  balancedOracleModel: mock(() => "grok-4.6"),
+  balancedOracleModel: mock(() => "grok-4.7"),
   balancedReviewerModel: mock(() => "gpt-5.6-sol"),
+  balanced2OracleModel: mock(() => "grok-4.7"),
+  balanced2ReviewerModel: mock(() => "gpt-5.6-sol"),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
   FAST_GENERAL_PURPOSE_EFFORT: "max",

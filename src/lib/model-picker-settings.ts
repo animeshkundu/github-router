@@ -197,9 +197,9 @@ export function selectableModelsInCatalog(
         ? CHEAP_PICKER_MODELS
         : profile === "cheap1m"
           ? CHEAP1M_PICKER_MODELS
-          : profile === "cheapest"
+          : profile === "cheapest" || profile === "cheapest2"
             ? CHEAPEST_PICKER_MODELS
-            : profile === "balanced"
+            : profile === "balanced" || profile === "balanced2"
               ? BALANCED_PICKER_MODELS
               : STANDARD_PICKER_MODELS
   return declared
@@ -269,7 +269,9 @@ function routerWinsPicker(profile: LaunchProfileId): boolean {
     || profile === "cheap"
     || profile === "cheap1m"
     || profile === "cheapest"
+    || profile === "cheapest2"
     || profile === "balanced"
+    || profile === "balanced2"
 }
 
 function modelIdsFromExistingPicker(value: unknown): string[] {

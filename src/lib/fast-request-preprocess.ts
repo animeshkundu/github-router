@@ -1,4 +1,5 @@
 import { BALANCED_PROFILE_LEAD_EFFORT } from "./balanced-profile-contract"
+import { BALANCED2_PROFILE_LEAD_EFFORT } from "./balanced2-profile-contract"
 import {
   canonicalizeAliasModel,
   isMaxModelAlias,
@@ -23,7 +24,7 @@ export interface FastRequestPreprocessResult {
 }
 
 const cheapFamily = (profileId?: string): boolean =>
-  profileId === "cheap" || profileId === "cheap1m" || profileId === "cheapest" || profileId === "balanced"
+  profileId === "cheap" || profileId === "cheap1m" || profileId === "cheapest" || profileId === "cheapest2" || profileId === "balanced" || profileId === "balanced2"
 
 const pinnedProfile = (profileId?: string): boolean =>
   profileId === "fast" || cheapFamily(profileId)
@@ -35,7 +36,7 @@ const pinnedProfile = (profileId?: string): boolean =>
  * the lead only (its subagents are bare-by-construction).
  */
 const bareEnforcedProfile = (profileId?: string): boolean =>
-  profileId === "cheap" || profileId === "cheapest" || profileId === "balanced"
+  profileId === "cheap" || profileId === "cheapest" || profileId === "cheapest2" || profileId === "balanced" || profileId === "balanced2"
 
 function explicitEffortOf(value: unknown): FastFixedEffort | undefined {
   return typeof value === "string" && value.trim() !== ""
@@ -105,13 +106,13 @@ export function preprocessFastRequest(
     parsed.model = canonicalizeAliasModel(originalModel)
   } else if (bare === "gpt-6-luna" || bare === "gpt-6-luna") {
     fixedEffort = "max"
-  } else if (bare === "gpt-5.6-sol" || bare === "gpt-6-sol") {
+  } else if (bare === "gpt-5.6-sol" || bare === "gpt-6-sol" || bare === "gpt-6.1-sol") {
     // Balanced leads at medium by contract (`BALANCED_PROFILE_LEAD_EFFORT`);
     // every other Sol caller stays high.
-    fixedEffort = profileId === "balanced" && !subagentRequest
-      ? BALANCED_PROFILE_LEAD_EFFORT
+    fixedEffort = (profileId === "balanced" || profileId === "balanced2") && !subagentRequest
+      ? (profileId === "balanced2" ? BALANCED2_PROFILE_LEAD_EFFORT : BALANCED_PROFILE_LEAD_EFFORT)
       : "high"
-  } else if (bare === "grok-4.6") {
+  } else if (bare === "grok-4.6" || bare === "grok-4.7") {
     fixedEffort = "medium"
   } else if (bare === "gemini-3.8-flash") {
     // The curated model picker exposes Gemini 3.8 Flash. Within an authenticated fast

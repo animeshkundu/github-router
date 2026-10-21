@@ -57,12 +57,28 @@ import {
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
 } from "./cheapest-profile-contract"
 import {
+  CHEAPEST2_PROFILE_ADVISOR_EFFORT,
+  CHEAPEST2_PROFILE_ADVISOR_MODEL,
+  CHEAPEST2_PROFILE_MODELS,
+  CHEAPEST2_PROFILE_NATIVE_EFFORTS,
+  CHEAPEST2_PROFILE_ORACLE_EFFORT,
+  CHEAPEST2_PROFILE_ORACLE_MODEL,
+  CHEAPEST2_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+} from "./cheapest2-profile-contract"
+import {
   BALANCED_PROFILE_MODELS,
   BALANCED_PROFILE_NATIVE_EFFORTS,
   BALANCED_PROFILE_ORACLE_EFFORT,
   BALANCED_PROFILE_ORACLE_MODEL,
   BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS,
 } from "./balanced-profile-contract"
+import {
+  BALANCED2_PROFILE_MODELS,
+  BALANCED2_PROFILE_NATIVE_EFFORTS,
+  BALANCED2_PROFILE_ORACLE_EFFORT,
+  BALANCED2_PROFILE_ORACLE_MODEL,
+  BALANCED2_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+} from "./balanced2-profile-contract"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -619,6 +635,42 @@ export function cheapestReviewerModel(): string | undefined {
   return CHEAPEST_PROFILE_MODELS.reviewer
 }
 
+/** Sol/high Advisor for the cheapest2 profile at the 200K default window. */
+export function cheapest2AdvisorModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === CHEAPEST2_PROFILE_ADVISOR_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAPEST2_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST2_PROFILE_ADVISOR_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return CHEAPEST2_PROFILE_ADVISOR_MODEL
+}
+
+/** Sol/high Oracle for the cheapest2 profile at the 200K default window. */
+export function cheapest2OracleModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === CHEAPEST2_PROFILE_ORACLE_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAPEST2_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) <= 0) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST2_PROFILE_ORACLE_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return CHEAPEST2_PROFILE_ORACLE_MODEL
+}
+
+/** Luna/max reviewer for the cheapest2 profile at the 200K default window. */
+export function cheapest2ReviewerModel(): string | undefined {
+  const reviewer = state.models?.data.find((m) => m.id === CHEAPEST2_PROFILE_MODELS.reviewer)
+  if (!reviewer) return undefined
+  if (reviewer.capabilities?.supports?.tool_calls !== true) return undefined
+  if ((reviewer.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAPEST2_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  const efforts = reviewer.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST2_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
+  if (fastEndpointForModel(reviewer) !== "responses") return undefined
+  return CHEAPEST2_PROFILE_MODELS.reviewer
+}
+
 /** Exact GPT-6 Astra only: cheap escalation consultant at 200K/medium. */
 export function cheapAstraModel(): string | undefined {
   const found = state.models?.data.find((m) => m.id === CHEAP_PROFILE_ASTRA_MODEL)
@@ -655,6 +707,30 @@ export function balancedReviewerModel(): string | undefined {
   if (!Array.isArray(efforts) || !efforts.includes(BALANCED_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
   return BALANCED_PROFILE_MODELS.reviewer
+}
+
+/** Exact Grok 4.7 only: the balanced2 Oracle at 200K/medium, like balanced. */
+export function balanced2OracleModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === BALANCED2_PROFILE_ORACLE_MODEL)
+  if (!found) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED2_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) <= 0) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(BALANCED2_PROFILE_ORACLE_EFFORT)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return BALANCED2_PROFILE_ORACLE_MODEL
+}
+
+/** Sol/high reviewer for the balanced2 profile at the 200K default window. */
+export function balanced2ReviewerModel(): string | undefined {
+  const found = state.models?.data.find((m) => m.id === BALANCED2_PROFILE_MODELS.reviewer)
+  if (!found) return undefined
+  if (found.capabilities?.supports?.tool_calls !== true) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED2_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  const efforts = found.capabilities?.supports?.reasoning_effort
+  if (!Array.isArray(efforts) || !efforts.includes(BALANCED2_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
+  if (fastEndpointForModel(found) !== "responses") return undefined
+  return BALANCED2_PROFILE_MODELS.reviewer
 }
 
 // Compatibility aliases for tests and callers on the first fast-profile commit.

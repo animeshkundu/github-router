@@ -5,10 +5,10 @@ import type { InjectedSkill } from "./index"
  * directly instead of dispatching a Plan subagent. Every other profile uses
  * the native Plan dispatch.
  */
-export type PlanSkillProfile = "cheapest" | "balanced"
+export type PlanSkillProfile = "cheapest" | "cheapest2" | "balanced" | "balanced2"
 
 export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
-  const leadPlansDirectly = profile === "cheapest" || profile === "balanced"
+  const leadPlansDirectly = profile === "cheapest" || profile === "cheapest2" || profile === "balanced" || profile === "balanced2"
   const planningMeans = leadPlansDirectly
     ? "the lead plans directly (no Plan subagent exists on the cheapest/balanced rosters)"
     : "dispatch the native Plan subagent (subagent_type Plan) present on the profile roster where provided; profile frontmatter pins its model and effort (Sol at the 200K default window)"
@@ -33,7 +33,7 @@ export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProf
    send ONE bounded follow-up to the same Plan dispatch naming the exact gaps
    (at most 2 follow-up rounds total). If still underspecified, checkpoint
    with the gaps as residual risk instead of pretending the plan is complete.`
-  const advisorStep = profile === "cheapest"
+  const advisorStep = profile === "cheapest" || profile === "cheapest2"
     ? `
 6. Review the final plan with the Advisor before presenting it to the user:
    consult \`advisor\` once for a framing check. It is non-binding counsel;
@@ -41,8 +41,8 @@ export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProf
 
 `
     : ""
-  const persistStepNumber = leadPlansDirectly ? (profile === "cheapest" ? 7 : 6) : 5
-  const checkpointStepNumber = leadPlansDirectly ? (profile === "cheapest" ? 8 : 7) : 6
+  const persistStepNumber = leadPlansDirectly ? (profile === "cheapest" || profile === "cheapest2" ? 7 : 6) : 5
+  const checkpointStepNumber = leadPlansDirectly ? (profile === "cheapest" || profile === "cheapest2" ? 8 : 7) : 6
   return {
   name: "gh-plan",
   md: `---

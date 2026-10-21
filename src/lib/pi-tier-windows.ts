@@ -22,7 +22,9 @@ export const PI_TIER_THRESHOLDS: Readonly<Record<string, number>> = Object.freez
   "gpt-6-luna": 272_000,
   "gpt-5.6-sol": 272_000,
   "gpt-6-sol": 272_000,
+  "gpt-6.1-sol": 272_000,
   "grok-4.6": 200_000,
+  "grok-4.7": 200_000,
 })
 
 /** Window for models with no pinned tier threshold. */
@@ -66,7 +68,9 @@ const EXPECTED_DEFAULT_INPUT_PER_1M: Readonly<Record<string, number>> =
     "gpt-6-luna": 10,
     "gpt-5.6-sol": 400,
     "gpt-6-sol": 200,
+    "gpt-6.1-sol": 200,
     "grok-4.6": 200,
+    "grok-4.7": 200,
   })
 
 /**

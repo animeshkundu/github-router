@@ -64,7 +64,9 @@ import {
   cheapOracleModel,
   cheapAstraModel,
   cheapestOracleModel,
+  cheapest2OracleModel,
   balancedOracleModel,
+  balanced2OracleModel,
   geminiAvailable,
   resolveGeminiReviewModel,
   standInToolEnabled,
@@ -84,6 +86,14 @@ import {
   CHEAPEST_PROFILE_ORACLE_EFFORT,
   CHEAPEST_PROFILE_ORACLE_MODEL,
 } from "~/lib/cheapest-profile-contract"
+import {
+  CHEAPEST2_PROFILE_ORACLE_EFFORT,
+  CHEAPEST2_PROFILE_ORACLE_MODEL,
+} from "~/lib/cheapest2-profile-contract"
+import {
+  BALANCED2_PROFILE_ORACLE_EFFORT,
+  BALANCED2_PROFILE_ORACLE_MODEL,
+} from "~/lib/balanced2-profile-contract"
 import {
   MAX_PROFILE_MODELS,
   maxCodexReviewerModel,
@@ -667,10 +677,10 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       })
     return [...personaEntries, ...nonPersonaEntries]
   }
-  if (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "balanced") {
-    const isCheap = launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "balanced"
-    const isCheapest = launch.profileId === "cheapest"
-    const isBalanced = launch.profileId === "balanced"
+  if (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "cheapest2" || launch.profileId === "balanced" || launch.profileId === "balanced2") {
+    const isCheap = launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "cheapest2" || launch.profileId === "balanced" || launch.profileId === "balanced2"
+    const isCheapest = launch.profileId === "cheapest" || launch.profileId === "cheapest2"
+    const isBalanced = launch.profileId === "balanced" || launch.profileId === "balanced2"
     // Astra is wired only for `fast` and the `-m cheap1m` successor; the new
     // `-m cheap` (200K lead, oracle-only allowlist), `-m cheapest`, and
     // `-m balanced` never expose it, even if a hypothetical test/mint granted
@@ -682,7 +692,17 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
     // fast/cheap1m when the Astra catalog gate fails (naming it would route
     // into a -32601).
     const astraAvailable = astraWired && (isCheap && !isCheapest ? cheapAstraModel() : isCheapest ? undefined : fastAstraModel()) != null
-    const oracleGate = isCheapest ? cheapestOracleModel() : isBalanced ? balancedOracleModel() : isCheap ? cheapOracleModel() : fastOracleModel()
+    const oracleGate = launch.profileId === "cheapest2"
+      ? cheapest2OracleModel()
+      : launch.profileId === "balanced2"
+        ? balanced2OracleModel()
+        : isCheapest
+          ? cheapestOracleModel()
+          : isBalanced
+            ? balancedOracleModel()
+            : isCheap
+              ? cheapOracleModel()
+              : fastOracleModel()
     const oracleDescriptor = isCheapest
       ? "GPT-6 Sol (200K context, high effort)"
       : undefined
@@ -1554,20 +1574,47 @@ async function handleToolsCall(
   }
 
   if (
-    (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "balanced")
+    (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "cheapest2" || launch.profileId === "balanced" || launch.profileId === "balanced2")
     && name === "oracle"
   ) {
-    const isCheapestOracle = launch.profileId === "cheapest"
-    const isBalancedOracle = launch.profileId === "balanced"
+    const isCheapestOracle = launch.profileId === "cheapest" || launch.profileId === "cheapest2"
+    const isBalancedOracle = launch.profileId === "balanced" || launch.profileId === "balanced2"
     const isCheapOracle = launch.profileId === "cheap" || launch.profileId === "cheap1m" || isCheapestOracle || isBalancedOracle
-    const oracleModel = isCheapestOracle ? CHEAPEST_PROFILE_ORACLE_MODEL : isCheapOracle ? CHEAP_PROFILE_ORACLE_MODEL : "claude-opus-5.5"
+    const oracleModel = launch.profileId === "cheapest2"
+      ? CHEAPEST2_PROFILE_ORACLE_MODEL
+      : launch.profileId === "balanced2"
+        ? BALANCED2_PROFILE_ORACLE_MODEL
+        : isCheapestOracle
+          ? CHEAPEST_PROFILE_ORACLE_MODEL
+          : isCheapOracle
+            ? CHEAP_PROFILE_ORACLE_MODEL
+            : "claude-opus-5.5"
     const oracleEndpoint = isCheapOracle ? "/v1/responses" : "/v1/messages"
-    const oracleEffort = isCheapestOracle ? CHEAPEST_PROFILE_ORACLE_EFFORT : isCheapOracle ? CHEAP_PROFILE_ORACLE_EFFORT : "high"
+    const oracleEffort = launch.profileId === "cheapest2"
+      ? CHEAPEST2_PROFILE_ORACLE_EFFORT
+      : launch.profileId === "balanced2"
+        ? BALANCED2_PROFILE_ORACLE_EFFORT
+        : isCheapestOracle
+          ? CHEAPEST_PROFILE_ORACLE_EFFORT
+          : isCheapOracle
+            ? CHEAP_PROFILE_ORACLE_EFFORT
+            : "high"
+    const oracleGateFn = launch.profileId === "cheapest2"
+      ? cheapest2OracleModel
+      : launch.profileId === "balanced2"
+        ? balanced2OracleModel
+        : isCheapestOracle
+          ? cheapestOracleModel
+          : isBalancedOracle
+            ? balancedOracleModel
+            : isCheapOracle
+              ? cheapOracleModel
+              : fastOracleModel
     if (
       (scope !== "all" && scope !== "peers")
       || !launch.allowedGroups?.has("peers")
       || !launch.allowedPersonas?.has("oracle")
-      || !(isCheapestOracle ? cheapestOracleModel() : isBalancedOracle ? balancedOracleModel() : isCheapOracle ? cheapOracleModel() : fastOracleModel())
+      || !oracleGateFn()
     ) {
       return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
     }

@@ -221,7 +221,7 @@ export interface NativeAgentAvailability {
    *  or `stand_in`, since none of those are registered in this profile
    *  regardless of catalog state.
    *  Absent/`"standard"` is today's catalog-driven full roster. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "max"
   /** False when a fast launch disabled or failed its MCP/native runtime wiring.
    *  The fallback directive must not advertise agents/tools that do not exist. */
   fastRuntimeAvailable?: boolean
@@ -276,8 +276,8 @@ function joinClauses(parts: ReadonlyArray<string>): string {
  *  there is no quality-for-cost trade being hidden by leading with the cheap
  *  tier; reserve `reviewer` for the higher-stakes assessment it is there for. */
 function buildNativeReachClauses(opts: NativeAgentAvailability): string {
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
-    if (opts.profile === "cheapest") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "cheapest2" || opts.profile === "balanced" || opts.profile === "balanced2") {
+    if (opts.profile === "cheapest" || opts.profile === "cheapest2") {
       return joinClauses([
         "`Explore` (Luna/high, cheap breadth) for discovery, dependency mapping, and convention tracking spanning more than a couple of files",
         "`General-Purpose` (Luna/max, the heavy execution tier) for mixed, iterative, or multi-step execution",
@@ -286,7 +286,7 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
     }
     // Balanced: lead owns planning, implementation, verification by default —
     // only the reviewer is gated behind genuine need.
-    if (opts.profile === "balanced") {
+    if (opts.profile === "balanced" || opts.profile === "balanced2") {
       return joinClauses([
         "`Explore` for broad repository discovery, dependency mapping, and convention tracking (launch in parallel)",
         "`General-Purpose` for mixed, iterative, or multi-step execution tasks (delegate freely)",
@@ -481,10 +481,10 @@ export function buildOperatingDefaultsDirective(
       + pipelineClause
     )
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "cheapest2" || opts.profile === "balanced" || opts.profile === "balanced2") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
-    const isCheapest = opts.profile === "cheapest"
-    const isBalanced = opts.profile === "balanced"
+    const isCheapest = opts.profile === "cheapest" || opts.profile === "cheapest2"
+    const isBalanced = opts.profile === "balanced" || opts.profile === "balanced2"
     const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
     const oracleDescriptor = isCheapest
       ? "GPT-6 Sol (200K/high)"
@@ -646,7 +646,7 @@ const STANDARD_OPERATING_DEFAULTS_DIGEST =
   + "without a lookup."
 
 export function buildOperatingDefaultsDigest(
-  opts: { profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "balanced" | "max"; astraAvailable?: boolean; sweEnabled?: boolean } = {},
+  opts: { profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "max"; astraAvailable?: boolean; sweEnabled?: boolean } = {},
 ): string {
   // --swe-gated pipeline sentence: without the flag the skill files are not
   // written, so the digest must not name them. Absent keeps the legacy text
@@ -654,7 +654,7 @@ export function buildOperatingDefaultsDigest(
   // so their sentence names lead-direct planning instead of a Plan dispatch.
   const digestPipelineSentence = opts.sweEnabled === false
     ? ""
-    : opts.profile === "cheapest" || opts.profile === "balanced"
+    : opts.profile === "cheapest" || opts.profile === "cheapest2" || opts.profile === "balanced" || opts.profile === "balanced2"
       ? "Pipeline skills (all 200K default, native subagents only): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (the lead plans directly on this profile; trivial exits planless, waits for user approval), `/gh-implement` after approval with parallel subagents and conditional reviewer. Skip for trivial work.\n\n"
       : "Pipeline skills (all 200K default, native subagents only): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (trivial exits planless, waits for user approval), `/gh-implement` after approval with parallel subagents and conditional reviewer. Skip for trivial work.\n\n"
   if (opts.profile === "max") {
@@ -667,10 +667,10 @@ export function buildOperatingDefaultsDigest(
       + "Synthesize and verify: run the code, inspect outputs, and check tests. Agent count and agreement are not evidence. Use a fresh-context peer only for consequential judgment that remains after direct checks, and use the coordinator only when several distinct lenses could change the decision. Advisor is optional, non-binding, primary-lead-only counsel for one focused consequential uncertainty; it is not an approval or completion gate."
     )
   }
-  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "balanced") {
+  if (opts.profile === "fast" || opts.profile === "cheap" || opts.profile === "cheap1m" || opts.profile === "cheapest" || opts.profile === "cheapest2" || opts.profile === "balanced" || opts.profile === "balanced2") {
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
-    const isCheapest = opts.profile === "cheapest"
-    const isBalanced = opts.profile === "balanced"
+    const isCheapest = opts.profile === "cheapest" || opts.profile === "cheapest2"
+    const isBalanced = opts.profile === "balanced" || opts.profile === "balanced2"
     const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
     const oracleDescriptor = isCheapest
       ? "(GPT-6 Sol 200K/high, lead-only)"
