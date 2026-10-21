@@ -4284,7 +4284,7 @@ describe("/mcp ado + kusto groups — scoping and gating", () => {
     })
     const namedResult = named.json.result as { isError?: boolean; content: Array<{ text: string }> }
     expect(namedResult.isError).toBe(true)
-    expect(namedResult.content[0]!.text).toContain("must name a Kusto endpoint")
+    expect(namedResult.content[0]!.text).toContain("standalone `kusto` DNS label")
   })
 
   test("ado tools/list is the upstream snapshot, and empty when the group is off", async () => {
