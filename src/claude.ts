@@ -219,6 +219,10 @@ import {
   cheapestAdvisorClientEnabled,
   withFixedCheapestAdvisorArg,
 } from "./lib/cheapest-advisor-client"
+import {
+  cheapest2AdvisorClientEnabled,
+  withFixedCheapest2AdvisorArg,
+} from "./lib/cheapest2-advisor-client"
 import { CHEAP_PROFILE_NATIVE_MODELS } from "./lib/cheap-profile-contract"
 import { CHEAPEST_PROFILE_NATIVE_MODELS } from "./lib/cheapest-profile-contract"
 import { CHEAPEST2_PROFILE_NATIVE_MODELS } from "./lib/cheapest2-profile-contract"
@@ -1008,9 +1012,9 @@ export const claude = defineCommand({
         cheapestAdvisorClientEnabled(process.env),
       )
     } else if (launchProfileId === "cheapest2") {
-      extraArgs = withFixedCheapestAdvisorArg(
+      extraArgs = withFixedCheapest2AdvisorArg(
         extraArgs,
-        cheapestAdvisorClientEnabled(process.env),
+        cheapest2AdvisorClientEnabled(process.env),
       )
     }
 

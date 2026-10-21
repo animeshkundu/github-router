@@ -3,7 +3,9 @@ import consola from "consola"
 import { ONE_M_TOKENS, withOneMSuffixForLead } from "./one-m-context"
 import { CHEAP_PROFILE_MODELS } from "./cheap-profile-contract"
 import { CHEAPEST_PROFILE_MODELS } from "./cheapest-profile-contract"
+import { CHEAPEST2_PROFILE_MODELS } from "./cheapest2-profile-contract"
 import { BALANCED_PROFILE_MODELS } from "./balanced-profile-contract"
+import { BALANCED2_PROFILE_MODELS } from "./balanced2-profile-contract"
 import { FAST_PROFILE_MODELS } from "./fast-profile-contract"
 import { MAX_PROFILE_LEAD_MODEL } from "./max-profile-contract"
 import { state } from "./state"
@@ -129,6 +131,9 @@ export const CHEAPEST_LEAD_MODEL = CHEAPEST_PROFILE_MODELS.lead
  */
 export const BALANCED_LEAD_MODEL = BALANCED_PROFILE_MODELS.lead
 
+export const CHEAPEST2_LEAD_MODEL = CHEAPEST2_PROFILE_MODELS.lead
+export const BALANCED2_LEAD_MODEL = BALANCED2_PROFILE_MODELS.lead
+
 /** Small/fast tier for a budget lead, in the two forms this codebase needs.
  *
  *  `SLUG` is the Anthropic-published DASHED form and is what goes into
@@ -204,6 +209,12 @@ export function resolveLeadSlugArg(modelArg: string | undefined): string {
   }
   if (arg.toLowerCase() === "balanced") {
     return BALANCED_LEAD_MODEL
+  }
+  if (arg.toLowerCase() === "cheapest2") {
+    return CHEAPEST2_LEAD_MODEL
+  }
+  if (arg.toLowerCase() === "balanced2") {
+    return BALANCED2_LEAD_MODEL
   }
   const opusFamilyShorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
   if (opusFamilyShorthand) return pickClaudeDefault(opusFamilyShorthand)
