@@ -130,37 +130,36 @@ describe("normalizeKustoClusterUri", () => {
 })
 
 describe("normalizeKustoCallClusterUri", () => {
-  test("accepts a Kusto-shaped host with or without a scheme", () => {
+  test("accepts a standalone kusto label at the start or inside a hostname, with any suffix", () => {
     expect(normalizeKustoCallClusterUri("https://example.kusto.windows.net")).toBe(CLUSTER)
     expect(normalizeKustoCallClusterUri("example.kusto.windows.net/")).toBe(CLUSTER)
-    // The other public clouds, so the rule cannot drift into "windows.net only".
-    for (const host of [
-      "example.kusto.usgovcloudapi.net",
-      "example.kusto.chinacloudapi.cn",
-      "example.kusto.azuresynapse.net",
-      "cluster.kusto.fabric.microsoft.com",
-    ]) {
-      // Concatenated, not a template literal: the isolation guard extracts
-      // every scheme-prefixed occurrence in this file textually, and a template
-      // would be read as the host `${host}`, which is not a reserved name.
-      expect(normalizeKustoCallClusterUri(host)).toBe("https://" + host)
-    }
+
+    // The suffix is unrestricted; the check is for a DNS label, not its owner.
+    expect(normalizeKustoCallClusterUri("kusto.example.com")).toBe("https://kusto.example.com")
+    expect(normalizeKustoCallClusterUri("cluster.kusto.example.com"))
+      .toBe("https://cluster.kusto.example.com")
+    expect(normalizeKustoCallClusterUri("Cluster.KuStO.Example.net"))
+      .toBe("https://cluster.kusto.example.net")
   })
 
-  test("rejects a well-formed host that carries no kusto service label", () => {
-    // The reason this function exists rather than reusing the permissive
-    // launch normalizer: the model names the host, so a typo or a hallucinated
-    // endpoint has to fail before a token is minted for it.
+  test("rejects hosts without a standalone kusto label followed by another label", () => {
+    // The check prevents a typo or substring near-match from passing, but does
+    // not establish that a host belongs to Kusto or protect the bearer token.
     for (const host of [
       "gateway.example.com",
       "example.windows.net",
-      // A bare suffix is a valid domain and would `az --resource` fine.
-      "kusto.windows.net",
-      // Begins with the word rather than carrying the label, so it is not an
-      // ADX endpoint shape. Pinned so the rule cannot widen by accident.
-      "kusto.fabric.microsoft.com",
+      "notkusto.example.com",
+      "cluster.notkusto.example.com",
+      // The label after `kusto` must exist and must be a valid DNS label.
+      "kusto..example.com",
+      "example.kusto..com",
+      "kusto.-example.com",
+      "example.kusto.a-.com",
+      "kusto." + "a".repeat(64) + ".com",
+      // A terminal `kusto` label has no following label and does not match.
+      "example.kusto",
     ]) {
-      expect(() => normalizeKustoCallClusterUri(host)).toThrow(/must name a Kusto endpoint/)
+      expect(() => normalizeKustoCallClusterUri(host)).toThrow(/standalone `kusto` DNS label/)
     }
   })
 

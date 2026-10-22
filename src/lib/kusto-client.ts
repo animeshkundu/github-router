@@ -151,23 +151,23 @@ export function normalizeKustoClusterUri(cluster: string): string {
  * than an option on it. The launch form stays permissive because an operator
  * may legitimately point `--kusto-cluster` at a reverse proxy in front of ADX,
  * and an options bag would let a future caller of the launch form omit the
- * strictness by accident. Here the REQUEST HOST is chosen by a model, so the
- * host must carry ADX's `.kusto.` service label, the shape every public cloud's
- * ADX endpoint has and one that nothing else carries.
+ * strictness by accident. For a per-call hostname, require an exact `kusto`
+ * DNS label at the beginning or after a dot, followed by another DNS label.
+ * The suffix is unrestricted.
  *
- * **This is a shape guard, not an access boundary.** What a call can reach is
- * bounded by AAD, which will not mint a token for a resource the identity
- * cannot use, plus that identity's RBAC at the cluster. The label rule is here
- * so a typo or a hallucinated host fails before a token mint and an outbound
- * request, with the expectation named, instead of as an opaque connect error.
+ * **This is only a hostname-shape check, not an ownership allowlist or access
+ * boundary.** The selected origin is both the Azure token audience and the
+ * request destination, so the selected host receives the bearer token. Callers
+ * must choose a trusted host; do not rely on this check or Entra rejecting a
+ * caller-selected host to protect the token. RBAC governs access to data at a
+ * genuine Kusto service, but it does not prevent disclosure of the bearer to an
+ * untrusted endpoint.
  *
- * The rule is `.kusto.` ANYWHERE but at the start of the host, which is what
- * every public cloud's ADX host has: `*.kusto.windows.net`,
- * `*.kusto.usgovcloudapi.net`, `*.kusto.chinacloudapi.cn`,
- * `*.kusto.azuresynapse.net`, `*.kusto.fabric.microsoft.com`. A host that
- * merely BEGINS with the word (`kusto.<domain>`) is not an ADX endpoint shape
- * and stays rejected; the cost of a false rejection is one actionable message,
- * while the cost of a widened rule is acceptance of hosts that are not ADX.
+ * The label check catches a missing or misspelled `kusto` DNS label, not
+ * whether the host belongs to Azure Data Explorer. For example,
+ * `kusto.example.com` and `cluster.kusto.example.com` pass the shape check,
+ * while `notkusto.example.com` does not. The requirement is intentionally
+ * narrow and easy to explain, not a proof that an endpoint is trustworthy.
  *
  * The refusal text avoids a literal `https://` example on purpose: every
  * `KustoError` message passes through `sanitizeRemoteDetail`, which rewrites a
@@ -176,11 +176,15 @@ export function normalizeKustoClusterUri(cluster: string): string {
  */
 export function normalizeKustoCallClusterUri(cluster: string): string {
   const origin = normalizeKustoClusterUri(cluster)
-  if (!/\.kusto\./i.test(new URL(origin).hostname)) {
+  const labels = new URL(origin).hostname.split(".")
+  const hasKustoLabel = labels.some((label, index) => label.toLowerCase() === "kusto" && index < labels.length - 1)
+  const isValidDnsLabel = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/
+  if (!hasKustoLabel || !labels.every((label) => isValidDnsLabel.test(label))) {
     throw new KustoError(
-      "`cluster` must name a Kusto endpoint, whose host carries a `kusto` label such as "
-        + "<name>.<region>.kusto.windows.net. Omit `cluster` to use the host set at "
-        + "launch with --kusto-cluster.",
+      "`cluster` hostname must contain a standalone `kusto` DNS label followed by another label "
+        + "(for example `kusto.example.com`). This is a shape check, not host-ownership verification; "
+        + "choose a trusted host because the bearer token is sent there. Omit `cluster` to use the "
+        + "host set at launch with --kusto-cluster.",
       { retriable: false },
     )
   }

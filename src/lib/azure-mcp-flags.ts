@@ -31,12 +31,13 @@
  *      that enabled it, so a session that suddenly carries three more servers is
  *      explainable rather than mysterious — and so a surface turned on by a
  *      flag is never miscredited to a remote.
- *   4. Kusto is the one surface whose reach extends past the repository, so its
- *      cluster is never discovered: discovery may turn the GROUP on, and a call
- *      names the cluster it reads, held to a Kusto-shaped https origin. What a
- *      session can actually read is therefore still bounded by the operator's
- *      own identity in each cluster, which the router neither widens nor
- *      substitutes for.
+ *   4. Kusto is the one surface whose requests extend past the repository, so
+ *      its cluster is never discovered: discovery may turn the GROUP on, and a
+ *      call names the cluster it reads. A per-call hostname is checked only for
+ *      a standalone `kusto` DNS label, with any suffix. That is not an ownership
+ *      allowlist: the selected host receives the Azure bearer token, so callers
+ *      must choose a trusted host. RBAC governs data access at a genuine Kusto
+ *      service; it does not protect the token from an untrusted endpoint.
  *
  * This is a deliberate difference from the deny-by-default
  * `GH_ROUTER_FM_SCAFFOLD_REPOS` precedent: that allowlist guards a tool that

@@ -73,12 +73,14 @@ the user did not type. Four properties bound it:
 - The banner names both what turned on and the remote that caused it, so a
   session that suddenly has three more servers is explainable rather than
   mysterious; a surface a flag enabled is never miscredited to the remote.
-- Kusto is the one surface whose reach extends past the repository, and
-  discovery does not extend it: discovery may turn the *group* on, never the
-  cluster, and the cluster a call names is held to a Kusto-shaped https origin.
-  What a call can actually read is bounded by the operator's own identity: the
-  router grants no cluster access the `az` session behind it did not already
-  have.
+- Kusto is the one surface whose requests extend past the repository, and
+  discovery does not choose the destination: it may turn the *group* on, never
+  the cluster. A caller-supplied cluster must have a standalone `kusto` DNS
+  label at the start or after a dot, followed by another label; the suffix is
+  unrestricted. This is a hostname-shape check, not an ownership allowlist.
+  The selected host receives the Azure bearer token, so callers must choose a
+  trusted host. RBAC governs data access at a genuine Kusto service, but does
+  not prevent token disclosure to an untrusted endpoint.
 
 The probe is one memoized, bounded (`5 s`) `git` read per process, and any
 failure resolves to "not an Azure DevOps workspace" rather than failing the
@@ -221,25 +223,27 @@ question spanning two of them is two calls with two `cluster` values.
 
 A call-named cluster goes through a **stricter** normalizer than the launch one:
 the same https / no-credentials / no-path rules, plus a requirement that the
-hostname carry a `kusto` label (`<name>.<region>.kusto.windows.net`,
-`*.kusto.usgovcloudapi.net`, `*.kusto.chinacloudapi.cn`,
-`*.kusto.azuresynapse.net`, `*.kusto.fabric.microsoft.com`). Three properties of
-that split are deliberate:
+normalized hostname contain a standalone `kusto` DNS label at its beginning or
+after a dot, followed by another label. The suffix is unrestricted. For example,
+`kusto.example.com`, `cluster.kusto.example.com`, and
+`example.kusto.windows.net` pass the hostname-shape check, while
+`notkusto.example.com` and `example.kusto` do not. Three properties of that
+split are deliberate:
 
-- **The label rule is a shape guard, not an allowlist.** Anything
-  Kusto-shaped is accepted; no list of pre-approved clusters exists, matching the
-  code-search model where a workspace is any path the process can read. What the
-  label buys is the audience namespace. AAD mints a token per cluster URI and
-  does not check that the cluster exists or that the identity can reach it:
-  measured on 2026-10-16, an invented host
-  (`https://gh-router-probe-xyz123.kusto.windows.net`) returned a token whose
-  audience is that exact URI, while `https://example.com` was refused with
-  AADSTS500011. So the shape rule is what keeps the audience inside the Kusto
-  family, and the data boundary is the cluster's own authorization of that token,
-  which is the identity's RBAC inside the cluster (a 403, see "Token refresh").
-  A host that does not resolve surfaces as the client's own transport error.
+- **The label rule is a shape check, not an ownership allowlist or security
+  boundary.** It does not prove that the selected host belongs to Microsoft,
+  Azure Data Explorer, or any Kusto service. The selected origin is both the
+  Azure token audience and the request destination, so the caller-selected host
+  receives the bearer token. Callers must choose a trusted host; neither this
+  hostname check nor an assumption about Entra token minting protects a token
+  sent to an untrusted endpoint. The observed token-mint test on 2026-10-16
+  returned a token for an invented `*.kusto.windows.net` URI, so do not infer
+  that a Kusto-looking suffix is an ownership or token-safety guarantee. RBAC is
+  the authorization boundary for data on a genuine Kusto cluster; it does not
+  prevent bearer-token disclosure to a different host. A host that does not
+  resolve surfaces as the client's own transport error.
 - **A launch cluster stays permissive.** An operator may legitimately point
-  `--kusto-cluster` at a reverse proxy or a private-DNS front end that carries no
+  `--kusto-cluster` at a reverse proxy or a private-DNS front end that has no
   `kusto` label, so that path keeps the other rules only. A call cannot name such
   a host, and the refusal says to omit `cluster`.
 - **Clusters cannot be enumerated.** `clusters_list` is absent (see below), so

@@ -135,11 +135,10 @@ describe("kusto tool boundary — relay cap", () => {
 // Different tables live in different clusters, so the cluster is a per-call
 // argument: `--kusto-cluster` is a default, not the whole capability.
 describe("kusto tool boundary — per-call cluster", () => {
-  // A second cluster on an IANA-reserved label, like the first: the isolation
-  // guard in `bluebird-test-isolation.test.ts` requires every host named by a
-  // client suite to be unresolvable, and a Kusto-shaped host that COULD resolve
-  // would be a fixture that can reach a real service.
-  const SECOND = "https://other.example.kusto.windows.net"
+  // A second cluster on the reserved `.example.com` domain. The `kusto` label
+  // is in the interior and the suffix is deliberately not an Azure domain: the
+  // per-call check is a hostname shape check, not an ownership allowlist.
+  const SECOND = "https://cluster.kusto.example.com"
 
   function configure(cluster: string | null): void {
     process.env[KUSTO_TOKEN_ENV] = SYNTHETIC_TOKEN
@@ -177,7 +176,7 @@ describe("kusto tool boundary — per-call cluster", () => {
 
     await tool("query").handler({ csl: "Events | count" })
     await tool("query").handler({ csl: "Events | count", cluster: SECOND })
-    await tool("query").handler({ csl: "Events | count", cluster: "other.example.kusto.windows.net" })
+    await tool("query").handler({ csl: "Events | count", cluster: "Cluster.KuStO.Example.com" })
     await tool("query").handler({ csl: "Events | count" })
 
     // Three spellings of the second cluster, two clusters, two clients.
@@ -203,13 +202,14 @@ describe("kusto tool boundary — per-call cluster", () => {
     expect(kustoClientCountForTesting()).toBe(1)
   })
 
-  test("a host without the kusto service label is refused before any request", async () => {
+  test("a host without a standalone kusto label is refused before any request", async () => {
     configure(CLUSTER)
     const { urls } = capturingFetch(envelope(1, 3))
 
-    await expect(
-      tool("query").handler({ csl: "Events | count", cluster: "https://gateway.example.com" }),
-    ).rejects.toThrow(/must name a Kusto endpoint/)
+    for (const cluster of ["https://gateway.example.com", "https://notkusto.example.com"]) {
+      await expect(tool("query").handler({ csl: "Events | count", cluster }))
+        .rejects.toThrow(/standalone `kusto` DNS label/)
+    }
 
     expect(urls).toHaveLength(0)
   })

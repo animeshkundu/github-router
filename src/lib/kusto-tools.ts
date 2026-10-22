@@ -14,10 +14,13 @@
  * is the DEFAULT for calls that do not name one; it is not what turns the
  * group on, because different tables live in different clusters and a single
  * pinned cluster made a cross-cluster question unanswerable. Every tool
- * therefore takes an optional `cluster`, held to a Kusto-shaped https origin
- * (`normalizeKustoCallClusterUri`), and a call reaches whatever the current
- * Azure identity can read there. Discovery never supplies a cluster: the model
- * picks one per call, and the operator's identity bounds the reach.
+ * therefore takes an optional `cluster`; a caller-supplied hostname must have
+ * an exact `kusto` DNS label at the beginning or after a dot, with any suffix.
+ * This is only a shape check, not an ownership allowlist: the selected origin
+ * is both the token audience and request destination, so the Azure bearer token
+ * is sent to that host. Callers must choose trusted hosts. RBAC limits data
+ * access at a genuine Kusto service, not token exposure to an untrusted host.
+ * Discovery never supplies a cluster: the model picks one per call.
  */
 
 import type { NonPersonaMcpTool } from "./peer-mcp-personas"
@@ -76,9 +79,7 @@ function resolveCluster(args: Record<string, unknown>): string {
   const launch = state.kustoCluster
   if (!launch) {
     throw new KustoError(
-      "No Kusto cluster selected. Pass `cluster` (a host such as "
-        + "<name>.<region>.kusto.windows.net, or a full https URI), or launch with "
-        + "`--kusto-cluster <uri>`.",
+      "No Kusto cluster selected. Pass `cluster` as an https URI whose hostname has a standalone `kusto` DNS label, or launch with `--kusto-cluster <uri>`. The bearer token is sent to the selected host, so choose a trusted host.",
       { retriable: false },
     )
   }
@@ -139,7 +140,7 @@ const CLUSTER_PROPERTY = {
   cluster: {
     type: "string",
     description:
-      "Kusto cluster to query, e.g. https://example.kusto.windows.net. Defaults to the launch's --kusto-cluster, and is required when that was not set.",
+      "Kusto cluster to query. A caller-supplied hostname must contain a standalone `kusto` DNS label (at the start or after a dot; any suffix, e.g. https://cluster.kusto.example.com). This is only a shape check, not host-ownership verification. The Azure bearer token is sent to the selected host, so use only a trusted host. Defaults to the launch's --kusto-cluster, and is required when that was not set.",
   },
 }
 
