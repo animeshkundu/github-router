@@ -218,7 +218,10 @@ import {
   cheapestAdvisorClientEnabled,
   withFixedCheapestAdvisorArg,
 } from "./lib/cheapest-advisor-client"
-import { CHEAP_PROFILE_NATIVE_MODELS } from "./lib/cheap-profile-contract"
+import {
+  CHEAP_PROFILE_MODELS,
+  CHEAP_PROFILE_NATIVE_MODELS,
+} from "./lib/cheap-profile-contract"
 
 export const claudeArgs = {
   ...sharedServerArgs,
@@ -1313,10 +1316,13 @@ export const claude = defineCommand({
             )
           }
           if (isCheapProfile) {
-            // Cheap oracle (grok-4.7) and advisor (gpt-5.6-sol) are fixed
-            // constants; the cheap drift surface is reviewer + oracle.
+            // The cheap roster is fixed by `CHEAP_PROFILE_MODELS`, and all
+            // three roles below are drift triggers (oracle + advisor are
+            // resolved separately; the reviewer comes from the native agent
+            // models). Derive the names so the message can never disagree
+            // with the contract it is reporting on.
             throw new Error(
-              "cheap profile prerequisite drift: exact reviewer or oracle (grok-4.7) model no longer resolves",
+              `cheap profile prerequisite drift: exact reviewer (${displayModelName(CHEAP_PROFILE_MODELS.reviewer)}), advisor (${displayModelName(CHEAP_PROFILE_MODELS.advisor)}), or oracle (${displayModelName(CHEAP_PROFILE_MODELS.oracle)}) model no longer resolves`,
             )
           }
           throw new Error("fast profile prerequisite drift: exact Oracle, Advisor, or reviewer model no longer resolves")

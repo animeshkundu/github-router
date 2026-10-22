@@ -166,6 +166,12 @@ mock.module("~/lib/port", () => ({
     if (arg.toLowerCase() === "fast") return leadOneMDecorateImpl("gemini-3.8-flash")
     if (arg.toLowerCase() === "cheap1m") return leadOneMDecorateImpl("gemini-3.8-flash")
     if (arg.toLowerCase() === "cheap") return "gemini-3.8-flash"
+    // The pinned families also return BARE leaders — `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`
+    // pins them to the 200K default window, so decoration would be a lie.
+    if (arg.toLowerCase() === "cheapest") return "gpt-6-luna"
+    if (arg.toLowerCase() === "balanced") return "gpt-5.6-sol"
+    if (arg.toLowerCase() === "cheapest2") return "gpt-6-luna"
+    if (arg.toLowerCase() === "balanced2") return "gpt-6.1-sol"
     const shorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
     if (shorthand) {
       pickClaudeDefaultCalls.push(shorthand)
@@ -229,6 +235,12 @@ const artifactToolsEnabledMock = mock(() => false)
 // enabled-group assertion would depend on where the repo was cloned.
 const adoToolsEnabledMock = mock(() => false)
 const kustoToolsEnabledMock = mock(() => false)
+// Cheap-profile resolvers. Named consts (rather than inline factories) so the
+// prerequisite-drift test can force one of them to miss and assert the
+// resulting message. Values mirror `CHEAP_PROFILE_MODELS`.
+const cheapOracleModelMock = mock((): string | undefined => "grok-4.6")
+const cheapAdvisorModelMock = mock(() => "gpt-5.6-sol")
+const cheapReviewerModelMock = mock(() => "gpt-6-luna")
 const geminiState: { current: { models?: { data?: Array<{ id?: unknown }> } } | undefined } = { current: undefined }
 const geminiAvailableMock = mock(() =>
   Boolean(geminiState.current?.models?.data?.some(
@@ -279,9 +291,9 @@ mock.module("~/lib/mcp-capabilities", () => ({
   fastAstraModel: mock(() => undefined),
   // Cheap-profile resolvers (only exercised under `-m cheap`); stubbed so the
   // static import graph used by mcp/handler.ts resolves for every test here.
-  cheapOracleModel: mock(() => "grok-4.7"),
-  cheapAdvisorModel: mock(() => "gpt-5.6-sol"),
-  cheapReviewerModel: mock(() => "gpt-6-luna"),
+  cheapOracleModel: cheapOracleModelMock,
+  cheapAdvisorModel: cheapAdvisorModelMock,
+  cheapReviewerModel: cheapReviewerModelMock,
   cheapAstraModel: mock(() => "gpt-6-astra"),
   // Cheapest-profile resolvers (only exercised under `-m cheapest`); stubbed
   // for the same static-import-graph reason as the cheap entries above.
@@ -442,6 +454,62 @@ function createFakeChild() {
   return child
 }
 
+/**
+ * A live-catalog stand-in that satisfies the launch prerequisites of every
+ * pinned family exercised by the alias tests: a `gpt-6-luna` lead with the
+ * full high/max/xhigh ladder (the cheapest/balanced `explore` floor and the
+ * cheap reviewer's `max`), the `gpt-6.1-sol` Sol tier used by cheapest2's
+ * Advisor/Oracle and balanced2's lead/reviewer, and BOTH Grok Oracles — 4.6
+ * for the cheap family and 4.7 for balanced2.
+ */
+function pinnedFamilyCatalog(): NonNullable<typeof state.models> {
+  return {
+    object: "list",
+    data: [
+      {
+        id: "gpt-6-luna",
+        capabilities: { limits: { max_context_window_tokens: 1_050_000 }, supports: { tool_calls: true, reasoning_effort: ["high", "max", "xhigh"] } },
+        supported_endpoints: ["/responses"],
+      },
+      {
+        id: "gpt-6.1-sol",
+        capabilities: { limits: { max_context_window_tokens: 1_050_000, max_prompt_tokens: 950_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high", "xhigh"] } },
+        supported_endpoints: ["/responses"],
+      },
+      {
+        id: "gpt-5.6-sol",
+        capabilities: { limits: { max_context_window_tokens: 1_050_000, max_prompt_tokens: 950_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
+        supported_endpoints: ["/responses"],
+      },
+      {
+        id: "grok-4.6",
+        capabilities: { limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+        supported_endpoints: ["/responses"],
+      },
+      {
+        id: "grok-4.7",
+        capabilities: { limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 }, supports: { tool_calls: true, reasoning_effort: ["medium"] } },
+        supported_endpoints: ["/responses"],
+      },
+      {
+        id: "claude-opus-5.5",
+        capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { adaptive_thinking: true, reasoning_effort: ["high"] } },
+        supported_endpoints: ["/v1/messages"],
+      },
+      {
+        id: "claude-sonnet-5",
+        capabilities: { limits: { max_context_window_tokens: 1_000_000, max_prompt_tokens: 872_000 }, supports: { tool_calls: true, adaptive_thinking: true, reasoning_effort: ["high", "xhigh", "max"] } },
+        supported_endpoints: ["/v1/messages"],
+      },
+      {
+        id: "gemini-3.8-flash",
+        capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high"] } },
+        supported_endpoints: ["/v1/chat/completions"],
+      },
+    ] as unknown as NonNullable<typeof state.models>["data"],
+  } as unknown as NonNullable<typeof state.models>
+}
+
 beforeEach(() => {
   exitMock.mockReset()
   exitMock.mockImplementation((code: number) => {
@@ -449,6 +517,14 @@ beforeEach(() => {
   })
   processOnMock.mockReset()
   stderrWriteMock.mockReset()
+  // Cheap-profile resolvers: restored per test so the drift case's
+  // `mockReturnValueOnce` override cannot leak into a later launch.
+  cheapOracleModelMock.mockReset()
+  cheapOracleModelMock.mockImplementation(() => "grok-4.6")
+  cheapAdvisorModelMock.mockReset()
+  cheapAdvisorModelMock.mockImplementation(() => "gpt-5.6-sol")
+  cheapReviewerModelMock.mockReset()
+  cheapReviewerModelMock.mockImplementation(() => "gpt-6-luna")
   isTTY = true
   semanticSearchOptedInImpl = false
 
@@ -818,6 +894,90 @@ describe("claude command", () => {
     )
     const [, , options] = spawnMock.mock.calls[0]
     expect(options.env.ANTHROPIC_MODEL).toBe("gemini-3.8-flash")
+  })
+
+  test("`-m cheapest2` selects the BARE Luna lead and pins the 6.1 Sol Advisor", async () => {
+    state.models = pinnedFamilyCatalog()
+    const run = getRunFn()
+
+    await run({
+      args: { model: "cheapest2" },
+      rawArgs: [
+        "-m", "cheapest2", "--advisor", "opus", "--advisor=sonnet",
+        "--", "--advisor", "haiku",
+      ],
+    })
+
+    expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345",
+      "gpt-6-luna",
+      "cheapest2",
+      [],
+    )
+    const [, args, options] = spawnMock.mock.calls[0]
+    expect(options.env.ANTHROPIC_MODEL).toBe("gpt-6-luna")
+    // The family contract's Advisor identity reaches the client flag, so a
+    // mirrored/caller-supplied value cannot make the launch show Sol 5.6.
+    const advisorAt = args.indexOf("--advisor")
+    expect(advisorAt).toBeGreaterThanOrEqual(0)
+    expect(args[advisorAt + 1]).toBe("gpt-6.1-sol")
+    expect(args.filter((arg: string) => arg === "--advisor")).toHaveLength(1)
+    expect(args.some((arg: string) => arg.startsWith("--advisor="))).toBe(false)
+    expect(args).not.toContain("opus")
+    expect(args).not.toContain("sonnet")
+    expect(args).not.toContain("haiku")
+    // 200K pin: no role carries [1m] accounting on this family.
+    expect(args.join(" ")).not.toContain("[1m]")
+  })
+
+  test("`-m balanced2` selects the BARE 6.1 Sol lead and inherits the balanced client Advisor pin", async () => {
+    state.models = pinnedFamilyCatalog()
+    const run = getRunFn()
+
+    await run({
+      args: { model: "balanced2" },
+      rawArgs: ["-m", "balanced2", "--advisor", "opus", "--", "--advisor", "haiku"],
+    })
+
+    expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:12345",
+      "gpt-6.1-sol",
+      "balanced2",
+      [],
+    )
+    const [, args, options] = spawnMock.mock.calls[0]
+    expect(options.env.ANTHROPIC_MODEL).toBe("gpt-6.1-sol")
+    // The balanced family reuses the cheap profile's CLIENT-side Advisor pin
+    // (`balanced` has no advisor on the server path; the flag only fixes the
+    // identity the client renders). balanced2's declared delta names the lead,
+    // reviewer and Oracle, so it inherits this pin verbatim — asserted here so
+    // a future divergence is a deliberate edit rather than an accident.
+    const advisorAt = args.indexOf("--advisor")
+    expect(advisorAt).toBeGreaterThanOrEqual(0)
+    expect(args[advisorAt + 1]).toBe("gpt-5.6-sol")
+    expect(args).not.toContain("opus")
+    expect(args).not.toContain("haiku")
+    expect(args.join(" ")).not.toContain("[1m]")
+  })
+
+  test("`-m cheap` prerequisite drift names the contract models, including the Advisor", async () => {
+    // The drift message is derived from `CHEAP_PROFILE_MODELS`; a hardcoded
+    // value here previously said `grok-4.7` while the cheap Oracle is 4.6, and
+    // the Advisor (one of the three drift triggers) was missing entirely.
+    state.models = pinnedFamilyCatalog()
+    cheapOracleModelMock.mockReturnValueOnce(undefined)
+    const run = getRunFn()
+
+    await expect(run({ args: { model: "cheap" } })).rejects.toThrow(ExitError)
+
+    expect(spawnMock).not.toHaveBeenCalled()
+    const message = stderrWriteMock.mock.calls
+      .map((call) => String(call[0]))
+      .join("\n")
+    expect(message).toContain("cheap profile prerequisite drift")
+    expect(message).toContain("Grok 4.6")
+    expect(message).toContain("GPT-5.6 Sol")
+    expect(message).not.toContain("Grok 4.7")
   })
 
   test("`-m cheap1m` selects the [1m]-decorated Gemini lead (catalog-gated) with the same bare-subagent roster", async () => {

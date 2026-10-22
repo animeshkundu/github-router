@@ -500,6 +500,202 @@ describe("cheap Advisor route matrix", () => {
   })
 })
 
+describe("cheapest2 Advisor route", () => {
+  const CHEAPEST2_SECRET = "q".repeat(64)
+
+  function cheapest2Request(advisorModel: string): string {
+    return JSON.stringify({
+      model: "gpt-6-luna",
+      max_tokens: 100,
+      stream: true,
+      messages: [{ role: "user", content: "Plan the change." }],
+      tools: [
+        {
+          type: "advisor_20260301",
+          name: "advisor",
+          model: advisorModel,
+          input_schema: { type: "object", properties: {} },
+        },
+      ],
+    })
+  }
+
+  function registerCheapest2() {
+    clearLaunchRegistry()
+    registerLaunch({
+      profileId: "cheapest2",
+      nonce: "q".repeat(64),
+      secret: CHEAPEST2_SECRET,
+    })
+    state.models = {
+      object: "list",
+      data: [catalogModel("gpt-6-luna"), catalogModel("gpt-6.1-sol")],
+    } as never
+  }
+
+  test("lead dispatches the 6.1 Sol Advisor at high effort", async () => {
+    registerCheapest2()
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = []
+    let leadCalls = 0
+
+    globalThis.fetch = mock((url: string | URL | Request, init?: RequestInit) => {
+      const requestUrl = String(url)
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>
+      calls.push({ url: requestUrl, body })
+      if (body.stream === false) return Promise.resolve(advisorResponsesResponse())
+      leadCalls++
+      return Promise.resolve(
+        leadCalls === 1 ? leadResponsesSse() : continuationResponsesSse(),
+      )
+    }) as unknown as typeof fetch
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+        [LAUNCH_SECRET_HEADER]: CHEAPEST2_SECRET,
+      },
+      body: cheapest2Request("gpt-6.1-sol"),
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain("advisor_tool_result")
+
+    // The family path is intact: the lead receives the injected internal tool.
+    const leadCall = calls.find((call) => call.body.stream !== false)
+    expect(leadCall).toBeDefined()
+    expect(JSON.stringify(leadCall!.body)).toContain(ADVISOR_INTERNAL_TOOL_NAME)
+
+    const advisorCall = calls.find((call) => call.body.stream === false)
+    expect(advisorCall).toBeDefined()
+    expect(advisorCall!.body.model).toBe("gpt-6.1-sol")
+    expect(advisorCall!.url).toContain("/responses")
+    // The family's Advisor effort delta: cheapest pins Sol 5.6 at medium,
+    // cheapest2 pins Sol 6.1 at high.
+    expect((advisorCall!.body as { reasoning?: { effort?: string } }).reasoning?.effort)
+      .toBe("high")
+    // The 5.6 tier must not appear anywhere on this profile's wire.
+    expect(calls.some((call) => call.body.model === "gpt-5.6-sol")).toBe(false)
+  })
+
+  test("a stale 5.6 client pin is rejected rather than silently re-pinned", async () => {
+    registerCheapest2()
+    const fetchMock = mock(() => Promise.resolve(simpleResponsesSseForLead()))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+        [LAUNCH_SECRET_HEADER]: CHEAPEST2_SECRET,
+      },
+      body: cheapest2Request("gpt-5.6-sol"),
+    })
+
+    expect(response.status).toBe(400)
+    const text = await response.text()
+    expect(text).toContain("Cheapest Advisor model mismatch")
+    expect(text).toContain("gpt-6.1-sol")
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("balanced2 Advisor route", () => {
+  const BALANCED2_SECRET = "b".repeat(64)
+
+  test("lead request is advisor-free: no injected tool, no Advisor dispatch", async () => {
+    clearLaunchRegistry()
+    registerLaunch({
+      profileId: "balanced2",
+      nonce: "b".repeat(64),
+      secret: BALANCED2_SECRET,
+    })
+    state.models = {
+      object: "list",
+      data: [
+        catalogModel("gpt-6-luna"),
+        catalogModel("gpt-6.1-sol"),
+        catalogModel("grok-4.7"),
+      ],
+    } as never
+
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = []
+    globalThis.fetch = mock((url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>
+      calls.push({ url: String(url), body })
+      return Promise.resolve(leadResponsesSseForBalanced2())
+    }) as unknown as typeof fetch
+
+    const response = await server.request("/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "anthropic-beta": "advisor-tool-2026-03-01",
+        [LAUNCH_SECRET_HEADER]: BALANCED2_SECRET,
+      },
+      body: JSON.stringify({
+        model: "gpt-6.1-sol",
+        max_tokens: 100,
+        stream: true,
+        messages: [{ role: "user", content: "Inspect the repository." }],
+        tools: [
+          {
+            type: "advisor_20260301",
+            name: "advisor",
+            model: "gpt-6.1-sol",
+            input_schema: { type: "object", properties: {} },
+          },
+        ],
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    await response.text()
+
+    // The balanced family is advisor-free by design — the beta is stripped and
+    // no server-side Advisor call is dispatched, even though the client asked.
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toContain("/responses")
+    expect(calls[0]!.body.model).toBe("gpt-6.1-sol")
+    expect(calls[0]!.body.stream).toBe(true)
+    const forwarded = JSON.stringify(calls[0]!.body)
+    expect(forwarded).not.toContain(ADVISOR_INTERNAL_TOOL_NAME)
+    // The client's own advisor tool type is stripped before the shim, so the
+    // non-Claude model never sees a tool with no server-side handler.
+    expect(forwarded).not.toContain("advisor_20260301")
+  })
+})
+
+function simpleResponsesSseForLead(): Response {
+  return responsesSse([
+    { type: "response.created", response: { status: "in_progress" } },
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { type: "message", id: "m0" },
+    },
+    { type: "response.output_text.delta", output_index: 0, delta: "ok" },
+    { type: "response.output_text.done", output_index: 0, text: "ok" },
+    { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+  ])
+}
+
+function leadResponsesSseForBalanced2(): Response {
+  return responsesSse([
+    { type: "response.created", response: { status: "in_progress" } },
+    {
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { type: "message", id: "m1" },
+    },
+    { type: "response.output_text.delta", output_index: 0, delta: "done" },
+    { type: "response.output_text.done", output_index: 0, text: "done" },
+    { type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } },
+  ])
+}
+
 function extractTranscriptText(body: Record<string, unknown>): string {
   const input = body.input
   if (!Array.isArray(input)) return ""

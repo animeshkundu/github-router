@@ -149,7 +149,8 @@ bun run probe:cache
 ### What it does
 
 For `claude-opus-5.5`, `claude-haiku-4.5`, every GPT-5.6 tier
-(`gpt-6-sol`, `gpt-5.6-terra`, `gpt-6-luna`), `gemini-3.8-flash`, and
+(`gpt-6-sol`, `gpt-6.1-sol`, `gpt-5.6-terra`, `gpt-6-luna`), `grok-4.7`,
+`gemini-3.8-flash`, and
 the highest-context `grok-4.6*` catalog sibling (resolved from the LIVE
 Copilot catalog, never hardcoded — see `selectCacheProbeTargets` in
 `src/lib/cache-probe.ts`), sequentially (concurrency 1, no automatic

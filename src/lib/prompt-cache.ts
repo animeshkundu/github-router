@@ -76,6 +76,15 @@ export interface ClaudeCachePolicyOptions {
 const MIN_CACHEABLE_PREFIX_BYTES = 4096
 const CACHE_KEY_NAMESPACE = "ghr-cache-v1"
 const CACHE_DIAGNOSTIC_LIMIT = 128
+/**
+ * Membership is an EVIDENCE claim, not a naming pattern: a model belongs here
+ * only if a live probe shows Copilot needs an explicit breakpoint to cache its
+ * prefix. `gpt-6.1-sol` is deliberately ABSENT — measured 2026-10-21 on a
+ * 29,809-char reusable prefix, an unmarked repeat request already reported
+ * `cached_tokens=5454/5457`, and adding the explicit fields changed that to
+ * 5443. Copilot's provider-managed caching already covers it, and explicit
+ * mode would only trade unmarked bytes out of the implicit cache.
+ */
 const GPT56_EXPLICIT_CACHE_MODELS = new Set([
   "gpt-6-sol",
   "gpt-5.6-sol",

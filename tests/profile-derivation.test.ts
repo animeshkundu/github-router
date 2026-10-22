@@ -92,6 +92,15 @@ describe("cheapest2 derives from cheapest", () => {
     expect(CHEAPEST2_PROFILE_MODELS.reviewer).toBe(CHEAPEST_PROFILE_MODELS.reviewer)
   })
 
+  test("the native roster is inherited verbatim", () => {
+    // cheapest2 keeps the Luna Explore/General-Purpose/reviewer trio. The
+    // aggregate assertion above already covers this field, but naming it here
+    // is what makes the "roster unchanged" claim checkable on its own.
+    expect(CHEAPEST2_PROFILE_CONTRACT.nativeModels).toEqual(
+      CHEAPEST_PROFILE_CONTRACT.nativeModels,
+    )
+  })
+
   test("the Advisor effort is the only non-model delta", () => {
     expect(CHEAPEST_PROFILE_CONTRACT.advisorEffort).toBe("medium")
     expect(CHEAPEST2_PROFILE_CONTRACT.advisorEffort).toBe("high")
@@ -175,6 +184,23 @@ describe("balanced2 derives from balanced", () => {
     expect(BALANCED2_PROFILE_MODELS["General-Purpose"]).toBe(
       BALANCED_PROFILE_MODELS["General-Purpose"],
     )
+  })
+
+  test("the native roster keeps the same roles and moves only the reviewer", () => {
+    // Unlike cheapest2 (whose native models are all inherited), balanced2's
+    // reviewer IS the Sol tier swap: the role set and the Luna entries are
+    // inherited, and `reviewer` is the one declared delta.
+    expect(Object.keys(BALANCED2_PROFILE_CONTRACT.nativeModels).sort()).toEqual(
+      Object.keys(BALANCED_PROFILE_CONTRACT.nativeModels).sort(),
+    )
+    expect(BALANCED2_PROFILE_CONTRACT.nativeModels.Explore).toBe(
+      BALANCED_PROFILE_CONTRACT.nativeModels.Explore,
+    )
+    expect(BALANCED2_PROFILE_CONTRACT.nativeModels["General-Purpose"]).toBe(
+      BALANCED_PROFILE_CONTRACT.nativeModels["General-Purpose"],
+    )
+    expect(BALANCED_PROFILE_CONTRACT.nativeModels.reviewer).toBe("gpt-5.6-sol")
+    expect(BALANCED2_PROFILE_CONTRACT.nativeModels.reviewer).toBe("gpt-6.1-sol")
   })
 
   test("astra is inherited untouched (declarative only on this family)", () => {
