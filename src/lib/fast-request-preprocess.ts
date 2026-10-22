@@ -1,4 +1,3 @@
-import { BALANCED_PROFILE_LEAD_EFFORT } from "./balanced-profile-contract"
 import {
   canonicalizeAliasModel,
   isMaxModelAlias,
@@ -7,6 +6,12 @@ import {
 } from "./launch-profile"
 import { preprocessMaxRequest } from "./max-request-preprocess"
 import { stripTrailingOneMSuffix } from "./model-suffix"
+import {
+  balancedContractFor,
+  isBalancedFamily,
+  isCheapestFamily,
+  isPinnedLaunchProfile,
+} from "./profile-family"
 import type { LaunchRegistryEntry } from "./state"
 
 export type FastFixedEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max"
@@ -22,11 +27,15 @@ export interface FastRequestPreprocessResult {
   rejectedModel?: string
 }
 
-const cheapFamily = (profileId?: string): boolean =>
-  profileId === "cheap" || profileId === "cheap1m" || profileId === "cheapest" || profileId === "balanced"
-
 const pinnedProfile = (profileId?: string): boolean =>
-  profileId === "fast" || cheapFamily(profileId)
+  isPinnedLaunchProfile(profileId)
+
+/**
+ * Pinned profiles that share this preprocess. `fast` has its own alias and
+ * effort semantics, so it is excluded; `max` never reaches here.
+ */
+const cheapFamily = (profileId?: string): boolean =>
+  isPinnedLaunchProfile(profileId) && profileId !== "fast"
 
 /**
  * Profiles whose every selectable `/model` row must stay at Claude Code's
@@ -35,7 +44,9 @@ const pinnedProfile = (profileId?: string): boolean =>
  * the lead only (its subagents are bare-by-construction).
  */
 const bareEnforcedProfile = (profileId?: string): boolean =>
-  profileId === "cheap" || profileId === "cheapest" || profileId === "balanced"
+  profileId === "cheap"
+  || isCheapestFamily(profileId)
+  || isBalancedFamily(profileId)
 
 function explicitEffortOf(value: unknown): FastFixedEffort | undefined {
   return typeof value === "string" && value.trim() !== ""
@@ -86,7 +97,7 @@ export function preprocessFastRequest(
   if (isRetiredFastModelAlias(originalModel)) {
     return { body: rawBody, originalModel, modified: false, retiredAlias: originalModel }
   }
-  const alias = resolveModelAlias(originalModel)
+  const alias = resolveModelAlias(originalModel, launch?.profileId)
   if (alias && (launch?.profileId !== "fast" && !cheapFamily(launch?.profileId) || isMaxModelAlias(originalModel))) {
     return { body: rawBody, originalModel, modified: false, rejectedAlias: originalModel }
   }
@@ -102,16 +113,16 @@ export function preprocessFastRequest(
   let fixedEffort: FastFixedEffort | undefined
   if (alias) {
     fixedEffort = alias.absentEffortDefault
-    parsed.model = canonicalizeAliasModel(originalModel)
+    parsed.model = canonicalizeAliasModel(originalModel, launch?.profileId)
   } else if (bare === "gpt-6-luna" || bare === "gpt-6-luna") {
     fixedEffort = "max"
-  } else if (bare === "gpt-5.6-sol" || bare === "gpt-6-sol") {
+  } else if (bare === "gpt-5.6-sol" || bare === "gpt-6-sol" || bare === "gpt-6.1-sol") {
     // Balanced leads at medium by contract (`BALANCED_PROFILE_LEAD_EFFORT`);
     // every other Sol caller stays high.
-    fixedEffort = profileId === "balanced" && !subagentRequest
-      ? BALANCED_PROFILE_LEAD_EFFORT
+    fixedEffort = isBalancedFamily(profileId) && !subagentRequest
+      ? balancedContractFor(profileId).leadEffort
       : "high"
-  } else if (bare === "grok-4.6") {
+  } else if (bare === "grok-4.6" || bare === "grok-4.7") {
     fixedEffort = "medium"
   } else if (bare === "gemini-3.8-flash") {
     // The curated model picker exposes Gemini 3.8 Flash. Within an authenticated fast

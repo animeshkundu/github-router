@@ -22,10 +22,12 @@ export const EXACT_CACHE_PROBE_TARGETS: ReadonlyArray<string> = [
   "claude-opus-5.5",
   "claude-haiku-4.5",
   "gpt-6-sol",
+  "gpt-6.1-sol",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-6-luna",
   "gpt-5.6-luna",
+  "grok-4.7",
   "gemini-3.8-flash",
 ]
 
@@ -63,10 +65,10 @@ function contextWindowOf(model: Model): number | undefined {
 }
 
 /**
- * Resolves the seven probe targets against a live (or fixture) model
- * catalog. Exact-id match for the six fixed targets; a highest-advertised-
- * context walk over every `grok-4.6*` sibling for the seventh. Deterministic given a
- * stable catalog: ties keep whichever candidate the catalog listed first.
+ * Resolves the probe targets against a live (or fixture) model catalog.
+ * Exact-id match for the fixed targets; a highest-advertised-context walk
+ * over every `grok-4.6*` sibling for the family wildcard. Deterministic given
+ * a stable catalog: ties keep whichever candidate the catalog listed first.
  */
 export function selectCacheProbeTargets(
   catalog: ReadonlyArray<Model>,

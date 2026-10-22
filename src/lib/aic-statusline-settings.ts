@@ -19,10 +19,12 @@
  * `statusLine` shape is left untouched (`reason: "unrecognized"`) rather
  * than risk breaking an exotic config.
  *
- * Pinned launches (fast/cheap/cheap1m/cheapest, `routerWins: true`) run
- * router-provided surfaces only: ANY pre-existing `statusLine` is backed
+ * Pinned launches (`isPinnedLaunchProfile(profileId)`, `routerWins: true`)
+ * run router-provided surfaces only: ANY pre-existing `statusLine` is backed
  * up to a mirror sidecar and replaced with ours (`mode: "forced"`), so the
- * native rich line always renders and the user command never executes.
+ * native rich line always renders and the user command never executes. The
+ * predicate — not an inline alias list — is the source of truth, so a newly
+ * pinned profile cannot silently keep wrap-don't-clobber behaviour.
  *
  * Failure model matches the sibling settings writers: a transient read error
  * or a non-object settings.json throws (never clobber a file we don't

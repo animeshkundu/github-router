@@ -56,7 +56,7 @@ const catalogOf = (data: Array<ReturnType<typeof model>>): ModelsResponse =>
   ({ object: "list", data }) as unknown as ModelsResponse
 
 describe("pi launch advertises only owned surfaces", () => {
-  for (const profileId of ["cheapest", "balanced"] as const) {
+  for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
     test(`${profileId}: peers skill only by default, no prompts`, () => {
       // Peers are default-ON (the --codex-mcp parity call), so the
       // oracle consult skill rides along; pipeline and search surfaces
@@ -101,6 +101,14 @@ describe("pi --no-peers shrinks the surface", () => {
     ])
     expect(piProfileModelIds("balanced", { peers: false })).toEqual([
       "gpt-5.6-sol",
+    ])
+    // The -2 aliases move only their contracted Sol slots, so the peerless
+    // surface collapses to the same shape with the 6.1 lead.
+    expect(piProfileModelIds("cheapest2", { peers: false })).toEqual([
+      "gpt-6-luna",
+    ])
+    expect(piProfileModelIds("balanced2", { peers: false })).toEqual([
+      "gpt-6.1-sol",
     ])
   })
 
@@ -264,24 +272,32 @@ describe("pi cheapest digest carries the shared consult contract", () => {
   })
 
   test("balanced stays floor-free and peerless cheapest carries no consults", () => {
-    // Balanced has no advisor, so it has no consult budget to describe.
-    expect(buildPiAppendSystem("balanced")).not.toContain(CHEAPEST_CONSULT_CONTRACT)
+    // The balanced family has no advisor, so it has no consult budget to
+    // describe — balanced2 derives that property rather than re-declaring it.
+    for (const profileId of ["balanced", "balanced2"] as const) {
+      expect(buildPiAppendSystem(profileId)).not.toContain(CHEAPEST_CONSULT_CONTRACT)
+    }
     // Peerless cheapest has no advisor either.
-    const peerless = buildPiAppendSystem("cheapest", { peers: false })
-    expect(peerless).not.toContain(CHEAPEST_CONSULT_CONTRACT)
+    for (const profileId of ["cheapest", "cheapest2"] as const) {
+      expect(buildPiAppendSystem(profileId, { peers: false })).not.toContain(
+        CHEAPEST_CONSULT_CONTRACT,
+      )
+    }
   })
 
-  test("the cheapest digest still names only tools the launch emits", () => {
-    const digest = buildPiAppendSystem("cheapest")
-    expect(digest).toContain("`advisor`")
-    expect(digest).toContain("`oracle`")
-    expect(digest).toContain("`reviewer`")
+  test("the cheapest family digest still names only tools the launch emits", () => {
+    for (const profileId of ["cheapest", "cheapest2"] as const) {
+      const digest = buildPiAppendSystem(profileId)
+      expect(digest).toContain("`advisor`")
+      expect(digest).toContain("`oracle`")
+      expect(digest).toContain("`reviewer`")
+    }
   })
 })
 
 describe("pi-subagents package loads extensions only", () => {
   test("object filter narrows skills and prompts", () => {
-    for (const profileId of ["cheapest", "balanced"] as const) {
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
       const settings = buildPiSettingsJson({
         profileId,
         searchEnabled: false,

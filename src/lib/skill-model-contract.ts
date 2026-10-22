@@ -107,7 +107,9 @@ export const PIPELINE_SKILL_PROFILES = [
   "cheap",
   "cheap1m",
   "cheapest",
+  "cheapest2",
   "balanced",
+  "balanced2",
 ] as const
 
 export type PipelineSkillProfile = (typeof PIPELINE_SKILL_PROFILES)[number]

@@ -1,9 +1,10 @@
 # `/gh-rebrief` — on-demand cheapest re-brief
 
-User-only escape hatch for `-m cheapest` sessions that have drifted past the
-first-prompt rewrite. Sol consults over the original ask, done-so-far digest,
-transcript tail, repo context, and the **current** user prompt — then hands
-Luna a `<course_correction>` framing it executes.
+User-only escape hatch for `cheapest`-family sessions (`-m cheapest` or
+`-m cheapest2`) that have drifted past the first-prompt rewrite. Sol consults
+over the original ask, done-so-far digest, transcript tail, repo context, and
+the **current** user prompt — then hands Luna a `<course_correction>` framing
+it executes.
 
 ## When to use
 
@@ -11,8 +12,11 @@ Luna a `<course_correction>` framing it executes.
 - You restated the ask and want a course-corrected, grounded next ask without restarting.
 - Post-review resume: prior-turn findings + fresh grounding in one block.
 
-Non-cheapest profiles: use `/gh-research` instead (the binary refuses and
-says so — rebrief reuses the cheapest Sol/medium identity).
+Profiles outside the `cheapest` family (`cheapest` or `cheapest2`): use
+`/gh-research` instead — the binary refuses and says so. Eligibility is
+`isCheapestFamily(profile)`, so both aliases are in and everything else is out.
+Rebrief reuses the family's Sol rewrite identity — `gpt-5.6-sol` on `cheapest`,
+`gpt-6.1-sol` on `cheapest2` — at the rewrite's fixed `medium` effort.
 
 ## What it does
 
@@ -23,8 +27,9 @@ User types /gh-rebrief <refined ask>            # --ask is REQUIRED, else refuse
    + done-so-far (deterministic digest + one concise Luna consult, <=2K)
    + 4K session context (extractive transcript tail, untrusted data)
    + grounding code search (lexical + semantic when enabled)
-  → same adaptive loop as the first-prompt rewrite: one gpt-5.6-sol/medium
-    inference, extended to a second ONLY when Sol flags needs_deep_grounding
+  → same adaptive loop as the first-prompt rewrite: one family-Sol/medium
+    inference (`gpt-5.6-sol` on cheapest, `gpt-6.1-sol` on cheapest2),
+    extended to a second ONLY when Sol flags needs_deep_grounding
     + names a follow-up query, <=30s wall-clock
   → <course_correction> framing for Luna (outcome, done_so_far, grounding,
     constraints, success_criteria, next_action, open_questions)
@@ -81,6 +86,9 @@ the ask verbatim.
 
 Per invoke: ≤2 Sol/medium calls (extension only on Sol's explicit
 `needs_deep_grounding` flag + named follow-up) + 1 concise Luna summary +
-grounding search, ≤30s wall-clock. No per-session cap; same model identity
-as the first-prompt rewrite and cheapest advisor.
+grounding search, ≤30s wall-clock. No per-session cap; same **model** identity
+as the first-prompt rewrite and the family Advisor (`gpt-5.6-sol` on
+`cheapest`, `gpt-6.1-sol` on `cheapest2`). The effort is the rewrite's fixed
+`medium` — on `cheapest2` the Advisor itself runs `high`, so only the model
+identity is shared, not the effort.
 Opt out entirely: `GH_ROUTER_DISABLE_CHEAPEST_REWRITE=1`.

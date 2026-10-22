@@ -233,7 +233,7 @@ describe("Pi → Claude rendering parity", () => {
 })
 
 describe("generated gh-router-pi extension footer", () => {
-  for (const profileId of ["cheapest", "balanced"] as const) {
+  for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
     test(`${profileId}: footer section present with shared runner wiring`, () => {
       const source = buildPiExtensionSource({
         profileId,

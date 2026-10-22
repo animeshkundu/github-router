@@ -1352,3 +1352,73 @@ describe("balanced profile rendering (no Advisor; reviewer delegates to Explore)
     expect(summary).not.toContain("`astra`")
   })
 })
+
+describe("derived -2 profile rendering", () => {
+  // Cross-lab opts + the cheapest/balanced bases so each -2 snippet can be
+  // compared against its sibling rather than against a hand-written string.
+  const OPTS = {
+    codexCli: false,
+    geminiAvailable: true,
+    workerToolsAvailable: false,
+    standInAvailable: false,
+    browseAvailable: false,
+    compoundBrowseAvailable: false,
+    semanticSearchAvailable: true,
+  } as const
+
+  test("cheapest2 renders exactly cheapest with the Sol identity swapped", () => {
+    const base = buildPeerAwarenessSnippet({ ...OPTS, profile: "cheapest" })
+    const derived = buildPeerAwarenessSnippet({ ...OPTS, profile: "cheapest2" })
+    expect(derived).toBe(
+      base
+        .replace("cheapest launch profile", "cheapest2 launch profile")
+        .replaceAll("GPT-5.6 Sol", "GPT-6.1 Sol"),
+    )
+    // The Oracle is the only place the Sol identity is spelled in prose.
+    expect(derived).toContain("`mcp__peers__oracle` is GPT-6.1 Sol (200K/high)")
+    expect(derived).not.toContain("GPT-5.6 Sol")
+    // No stray crumb from cheap1m/standard.
+    expect(derived).toContain("This is the cheapest2 launch profile")
+    expect(derived).not.toContain("GPT-6 Sol")
+  })
+
+  test("cheapest2 summary tracks the same substitution", () => {
+    const base = buildPeerAwarenessSummary({ ...OPTS, profile: "cheapest" })
+    const derived = buildPeerAwarenessSummary({ ...OPTS, profile: "cheapest2" })
+    expect(derived).toBe(
+      base
+        .replace("Cheapest launch profile", "Cheapest2 launch profile")
+        .replaceAll("GPT-5.6 Sol", "GPT-6.1 Sol"),
+    )
+    // Advisor semantics are inherited: lead-only, non-binding, still present.
+    expect(derived).toContain("Advisor is optional, non-binding")
+    expect(derived).not.toContain("`Plan`")
+  })
+
+  test("balanced2 renders exactly balanced with the Grok identity swapped", () => {
+    const base = buildPeerAwarenessSnippet({ ...OPTS, profile: "balanced" })
+    const derived = buildPeerAwarenessSnippet({ ...OPTS, profile: "balanced2" })
+    expect(derived).toBe(
+      base
+        .replace("balanced launch profile", "balanced2 launch profile")
+        .replaceAll("Grok 4.6", "Grok 4.7"),
+    )
+    expect(derived).toContain("`mcp__peers__oracle` is Grok 4.7 (200K/medium)")
+    expect(derived).not.toContain("Grok 4.6")
+    // Still advisor-free and still 4.6-free everywhere else.
+    expect(derived).not.toContain("Advisor")
+    expect(derived).not.toContain("`astra`")
+  })
+
+  test("balanced2 summary tracks the same substitution and stays advisor-free", () => {
+    const base = buildPeerAwarenessSummary({ ...OPTS, profile: "balanced" })
+    const derived = buildPeerAwarenessSummary({ ...OPTS, profile: "balanced2" })
+    expect(derived).toBe(
+      base
+        .replace("Balanced launch profile", "Balanced2 launch profile")
+        .replaceAll("Grok 4.6", "Grok 4.7"),
+    )
+    expect(derived).not.toContain("Advisor")
+    expect(derived).not.toContain("transcript-aware")
+  })
+})

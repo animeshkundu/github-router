@@ -28,6 +28,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { buildPiExtensionSource } from "~/lib/pi-extension"
+import type { PiProfileId } from "~/lib/pi-models-settings"
 
 /**
  * Inside `node_modules` so the generated file's `import { Type } from
@@ -72,7 +73,7 @@ function stubPi(): { pi: unknown; registered: Registered } {
 
 /** Emit one variant and import the freshly-written module. */
 async function loadExtension(
-  opts: { profileId: "cheapest" | "balanced"; name: string },
+  opts: { profileId: PiProfileId; name: string },
 ): Promise<Registered> {
   const source = buildPiExtensionSource({
     profileId: opts.profileId,
@@ -149,23 +150,20 @@ const mcpError = (message: string) =>
 const EMPTY_BRIEF = 'EXECUTION BRIEF (advisory): Try the cache first.'
 
 describe("pi prompt brief: emission gate", () => {
-  test("cheapest emits the handler, balanced does not", () => {
-    const cheapest = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: false,
-      browseEnabled: false,
-    })
-    const balanced = buildPiExtensionSource({
-      profileId: "balanced",
-      searchEnabled: false,
-      browseEnabled: false,
-    })
-    expect(cheapest).toContain('pi.on("before_agent_start"')
-    expect(cheapest).toContain('callMcp("search", "prompt_brief"')
-    // Balanced is floor-free by design, exactly like the advisor: the digest
-    // and the front-end brief are the same surface and gate together.
-    expect(balanced).not.toContain("before_agent_start")
-    expect(balanced).not.toContain("prompt_brief")
+  test("cheapest family emits the handler, balanced family does not", () => {
+    const emit = (profileId: PiProfileId): string =>
+      buildPiExtensionSource({ profileId, searchEnabled: false, browseEnabled: false })
+    for (const profileId of ["cheapest", "cheapest2"] as const) {
+      expect(emit(profileId)).toContain('pi.on("before_agent_start"')
+      expect(emit(profileId)).toContain('callMcp("search", "prompt_brief"')
+    }
+    // The balanced family is floor-free by design, exactly like the advisor:
+    // the digest and the front-end brief are the same surface and gate
+    // together, so balanced2 derives the omission rather than re-declaring it.
+    for (const profileId of ["balanced", "balanced2"] as const) {
+      expect(emit(profileId)).not.toContain("before_agent_start")
+      expect(emit(profileId)).not.toContain("prompt_brief")
+    }
   })
 })
 
@@ -177,6 +175,10 @@ describe("pi prompt brief: generated module runs", () => {
     const registered = await loadExtension({ profileId: "cheapest", name: "cheapest-registers" })
     expect(registered.handlers.has("before_agent_start")).toBe(true)
     expect(registered.handlers.has("session_before_compact")).toBe(true)
+    // The derived alias must execute too, not merely string-match.
+    const derived = await loadExtension({ profileId: "cheapest2", name: "cheapest2-registers" })
+    expect(derived.handlers.has("before_agent_start")).toBe(true)
+    expect(derived.handlers.has("session_before_compact")).toBe(true)
   })
 
   test("a successful call returns the brief as a custom message above the turn", async () => {

@@ -1,17 +1,27 @@
 # Pi launch (`github-router pi`)
 
 Launches the [Pi coding agent](https://pi.dev) against the proxy with a
-fixed, cost-controlled profile. Only two `-m` aliases are supported:
+fixed, cost-controlled profile. Four `-m` aliases are supported; the two
+`-2` variants are derived from their base profile and move only the model
+identities named below:
 
 | Profile | Lead | Roster | Consultants |
 |---|---|---|---|
-| `cheapest` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol/medium Advisor (plan review + capped reviewer rounds), Sol/high Oracle |
-| `balanced` | `gpt-5.6-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol/high, may delegate Explore); no Plan | Grok/medium Oracle only — **advisor-free by design** |
+| `cheapest` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol 5.6/medium Advisor (plan review + capped reviewer rounds), Sol 5.6/high Oracle |
+| `cheapest2` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol 6.1/high Advisor (plan review + capped reviewer rounds), Sol 6.1/high Oracle |
+| `balanced` | `gpt-5.6-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 5.6/high, may delegate Explore); no Plan | Grok 4.6/medium Oracle only — **advisor-free by design** |
+| `balanced2` | `gpt-6.1-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 6.1/high, may delegate Explore); no Plan | Grok 4.7/medium Oracle only — **advisor-free by design** |
+
+Both `-2` profiles inherit everything else from their base: the delegation
+graph, the peer set, the prompt-rewrite brief (`cheapest` family only), the
+compaction reserves, and the bare-200K accounting. `balanced2` keeps the
+declarative `astra` slot (`gpt-6-astra`, not callable on this family).
 
 No role runs above its Copilot **Default-tier** window (Luna/Sol 272K, Grok
 200K, anything else 200K) — that is the whole cost lever here, the Pi
-counterpart of the bare-200K default window the Claude `cheap`/`cheapest`/
-`balanced` family relies on. There is no `[1m]` accounting anywhere; see
+counterpart of the bare-200K default window the Claude `cheap` family
+(`cheap`, `cheap1m`) and the `cheapest`/`balanced` families (each including
+its `-2` sibling) rely on. There is no `[1m]` accounting anywhere; see
 [Tier-priced context windows](#tier-priced-context-windows).
 
 Roster notes: our `reviewer`/`oracle` agent files intentionally shadow the
@@ -192,7 +202,9 @@ tokens. Each Pi model row carries its cheap-tier window, so Long-tier
 | `gpt-6-luna` | ≤ 272K ($0.10/1M in) | 272000 |
 | `gpt-5.6-sol` | ≤ 272K ($4.00/1M in) | 272000 |
 | `gpt-6-sol` | ≤ 272K ($2.00/1M in) | 272000 |
+| `gpt-6.1-sol` | ≤ 272K ($2.00/1M in) | 272000 |
 | `grok-4.6` | ≤ 200K ($2.00/1M in) | 200000 |
+| `grok-4.7` | ≤ 200K ($2.00/1M in) | 200000 |
 | anything else | — | 200000 (fallback) |
 
 Pinned in `src/lib/pi-tier-windows.ts` (sourced to the billing doc;

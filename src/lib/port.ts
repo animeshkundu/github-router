@@ -3,7 +3,9 @@ import consola from "consola"
 import { ONE_M_TOKENS, withOneMSuffixForLead } from "./one-m-context"
 import { CHEAP_PROFILE_MODELS } from "./cheap-profile-contract"
 import { CHEAPEST_PROFILE_MODELS } from "./cheapest-profile-contract"
+import { CHEAPEST2_PROFILE_MODELS } from "./cheapest2-profile-contract"
 import { BALANCED_PROFILE_MODELS } from "./balanced-profile-contract"
+import { BALANCED2_PROFILE_MODELS } from "./balanced2-profile-contract"
 import { FAST_PROFILE_MODELS } from "./fast-profile-contract"
 import { MAX_PROFILE_LEAD_MODEL } from "./max-profile-contract"
 import { state } from "./state"
@@ -129,6 +131,17 @@ export const CHEAPEST_LEAD_MODEL = CHEAPEST_PROFILE_MODELS.lead
  */
 export const BALANCED_LEAD_MODEL = BALANCED_PROFILE_MODELS.lead
 
+/**
+ * The lead `-m cheapest2` / `-m balanced2` select. Both are family siblings,
+ * so the lead is inherited unchanged from the base contract (Luna for
+ * `cheapest2`, which itself swaps only the Sol identities; Sol for
+ * `balanced2`, whose lead IS the 6.1 upgrade). Kept as named exports so the
+ * resolver below reads one binding per alias and a future lead change only
+ * edits the contract.
+ */
+export const CHEAPEST2_LEAD_MODEL = CHEAPEST2_PROFILE_MODELS.lead
+export const BALANCED2_LEAD_MODEL = BALANCED2_PROFILE_MODELS.lead
+
 /** Small/fast tier for a budget lead, in the two forms this codebase needs.
  *
  *  `SLUG` is the Anthropic-published DASHED form and is what goes into
@@ -155,15 +168,20 @@ export const BUDGET_SMALL_FAST_CATALOG_ID = "claude-haiku-4.5"
  *   - `balanced`  → `BALANCED_LEAD_MODEL` BARE (the most-complex-tasks
  *                   launch: Sol leader at the 200K DEFAULT window, Grok
  *                   Oracle, no astra peer)
+ *   - `cheapest2` → `CHEAPEST2_LEAD_MODEL` BARE (the `cheapest` sibling with
+ *                   the Sol Advisor/Oracle at `gpt-6.1-sol`; same Luna lead)
+ *   - `balanced2` → `BALANCED2_LEAD_MODEL` BARE (the `balanced` sibling with
+ *                   the lead/reviewer at `gpt-6.1-sol` and the Grok-4.7 Oracle)
  *   - `N.M`       → the best variant of that Opus family, via `pickClaudeDefault`
  *   - a full slug → unchanged, including Copilot slugs a power user pins
  *   - absent      → the ordinary default
  *
- * Every branch except `cheap`/`cheapest`/`balanced` is `[1m]`-decorated against the
- * live catalog, by `pickClaudeDefault` on the two Opus-family branches and
- * by `withOneMSuffixForLead` on the rest — the decoration is catalog-gated
- * per model, so a genuinely 200K model (`claude-haiku-4-5`) still comes back
- * bare. `cheap`/`cheapest`/`balanced` deliberately skip the decoration entirely because
+ * Every branch except the 200K aliases (`cheap`/`cheapest`/`cheapest2`/
+ * `balanced`/`balanced2`) is `[1m]`-decorated against the live catalog, by
+ * `pickClaudeDefault` on the two Opus-family branches and by
+ * `withOneMSuffixForLead` on the rest — the decoration is catalog-gated per
+ * model, so a genuinely 200K model (`claude-haiku-4-5`) still comes back
+ * bare. The pinned aliases deliberately skip the decoration entirely because
  * their whole cost lever is the 200K default lead window.
  *
  * `fast` resolves to an ordinary slug rather than setting a mode flag —
@@ -204,6 +222,12 @@ export function resolveLeadSlugArg(modelArg: string | undefined): string {
   }
   if (arg.toLowerCase() === "balanced") {
     return BALANCED_LEAD_MODEL
+  }
+  if (arg.toLowerCase() === "cheapest2") {
+    return CHEAPEST2_LEAD_MODEL
+  }
+  if (arg.toLowerCase() === "balanced2") {
+    return BALANCED2_LEAD_MODEL
   }
   const opusFamilyShorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
   if (opusFamilyShorthand) return pickClaudeDefault(opusFamilyShorthand)

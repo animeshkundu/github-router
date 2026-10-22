@@ -83,7 +83,7 @@ describe("pi bridge NUL sanitization", () => {
 })
 
 describe("pi native agent files (pi-subagents contract)", () => {
-  for (const profileId of ["cheapest", "balanced"] as const) {
+  for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
     test(`${profileId}: every agent advertises, pins context, drops dead keys`, () => {
       const files = buildPiAgentFiles(profileId)
       for (const content of Object.values(files)) {
@@ -117,6 +117,13 @@ describe("pi native agent files (pi-subagents contract)", () => {
     expect(cheapest["agents/reviewer.md"]!).not.toContain("allowedAgents")
     expect(cheapest["agents/reviewer.md"]!).not.toContain("subagent]")
     expect(cheapest["agents/explore.md"]!).not.toContain("allowedAgents")
+    // The -2 aliases derive their graph from the same contract: balanced2
+    // keeps the reviewer→Explore edge on the 6.1 reviewer, cheapest2 stays
+    // a leaf.
+    const balanced2 = buildPiAgentFiles("balanced2")
+    expect(balanced2["agents/reviewer.md"]!).toContain("allowedAgents: Explore")
+    expect(balanced2["agents/reviewer.md"]!).toContain("model: gh-router/gpt-6.1-sol")
+    expect(buildPiAgentFiles("cheapest2")["agents/reviewer.md"]!).not.toContain("allowedAgents")
   })
 
   test("aliases/allowedAgents use bare comma form, never YAML flow lists", () => {
@@ -124,7 +131,7 @@ describe("pi native agent files (pi-subagents contract)", () => {
     // `[reviewer, oracle]` parses as `'[reviewer'` and fails the run.
     // (`tools:` is parsed by a different, bracket-tolerant parser —
     // proven live — so it keeps flow-list form.)
-    for (const profileId of ["cheapest", "balanced"] as const) {
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
       for (const content of Object.values(buildPiAgentFiles(profileId))) {
         expect(content).not.toContain("allowedAgents: [")
         expect(content).not.toContain("aliases: [")
@@ -158,7 +165,7 @@ describe("pi native agent files (pi-subagents contract)", () => {
     // missing files silently — a lead-mediated file handoff never fires.
     // `defaultProgress` additionally defaults into the repo cwd (litter).
     // So no emitted agent carries output:/defaultReads:/defaultProgress:.
-    for (const profileId of ["cheapest", "balanced"] as const) {
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
       const files = buildPiAgentFiles(profileId)
       for (const content of Object.values(files)) {
         expect(content).not.toContain("output:")
@@ -194,11 +201,13 @@ describe("pi native agent files (pi-subagents contract)", () => {
   })
 
   test("balanced delegate omits the nonexistent advisor", () => {
-    const delegate = buildPiSkills({ profileId: "balanced", peers: true, swe: true }).find(
-      (s) => s.dir === "gh-delegate",
-    )!
-    expect(delegate.content).toContain("`oracle` for consults")
-    expect(delegate.content).not.toContain("advisor")
+    for (const profileId of ["balanced", "balanced2"] as const) {
+      const delegate = buildPiSkills({ profileId, peers: true, swe: true }).find(
+        (s) => s.dir === "gh-delegate",
+      )!
+      expect(delegate.content).toContain("`oracle` for consults")
+      expect(delegate.content).not.toContain("advisor")
+    }
   })
 
   test("peerless+swe emits no pipeline skills", () => {
@@ -215,7 +224,7 @@ describe("pi native agent files (pi-subagents contract)", () => {
 
 describe("pi settings builtin disables", () => {
   test("peers launches disable shadowed/confusable builtins, keep delegate", () => {
-    for (const profileId of ["cheapest", "balanced"] as const) {
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
       const settings = buildPiSettingsJson({ profileId, searchEnabled: false, browseEnabled: false })
       const overrides = settings.subagents?.agentOverrides
       expect(overrides?.["scout"]).toEqual({ disabled: true })

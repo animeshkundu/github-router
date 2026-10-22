@@ -91,7 +91,7 @@ describe("INJECTED_SKILLS", () => {
       "gh-swe-pipeline",
     ])
 
-    for (const profileId of ["cheap", "cheap1m", "balanced"] as const) {
+    for (const profileId of ["cheap", "cheap1m", "balanced", "balanced2"] as const) {
       expect(injectedSkillsForLaunch({
         profileId,
         workerSkillsActive: false,
@@ -120,7 +120,7 @@ describe("INJECTED_SKILLS", () => {
 
     // --swe absent (or explicitly false): no pipeline slash commands.
     // Exception: cheapest keeps its user-only /gh-rebrief escape hatch.
-    for (const profileId of ["fast", "cheap", "cheap1m", "balanced"] as const) {
+    for (const profileId of ["fast", "cheap", "cheap1m", "balanced", "balanced2"] as const) {
       expect(injectedSkillsForLaunch({
         profileId,
         workerSkillsActive: false,
@@ -357,7 +357,7 @@ describe("search-gated skill text (--search)", () => {
   })
 
   test("cheapest/balanced pipeline skills plan lead-direct with no Plan dispatch", () => {
-    for (const profileId of ["cheapest", "balanced"] as const) {
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
       const skills = injectedSkillsForLaunch({
         profileId,
         workerSkillsActive: false,
@@ -373,23 +373,27 @@ describe("search-gated skill text (--search)", () => {
       expect(pipeline.md).not.toContain("Plan subagents")
       expect(pipeline.md).not.toContain("native Plan subagent")
     }
-    // Cheapest reviews the final plan with the Advisor; balanced has no
-    // Advisor surface, so it must not name one.
-    const cheapestPlan = injectedSkillsForLaunch({
-      profileId: "cheapest",
-      workerSkillsActive: false,
-      firstMateEnabled: false,
-      sweEnabled: true,
-    }).find((s) => s.name === "gh-plan")!
-    expect(cheapestPlan.md).toContain("Review the final plan with the Advisor")
-    const balancedPlan = injectedSkillsForLaunch({
-      profileId: "balanced",
-      workerSkillsActive: false,
-      firstMateEnabled: false,
-      sweEnabled: true,
-    }).find((s) => s.name === "gh-plan")!
-    expect(balancedPlan.md).not.toContain("`advisor`")
-    expect(balancedPlan.md).not.toContain("Review the final plan")
+    // Cheapest family reviews the final plan with the Advisor; the balanced
+    // family has no Advisor surface, so it must not name one.
+    for (const profileId of ["cheapest", "cheapest2"] as const) {
+      const plan = injectedSkillsForLaunch({
+        profileId,
+        workerSkillsActive: false,
+        firstMateEnabled: false,
+        sweEnabled: true,
+      }).find((s) => s.name === "gh-plan")!
+      expect(plan.md).toContain("Review the final plan with the Advisor")
+    }
+    for (const profileId of ["balanced", "balanced2"] as const) {
+      const plan = injectedSkillsForLaunch({
+        profileId,
+        workerSkillsActive: false,
+        firstMateEnabled: false,
+        sweEnabled: true,
+      }).find((s) => s.name === "gh-plan")!
+      expect(plan.md).not.toContain("`advisor`")
+      expect(plan.md).not.toContain("Review the final plan")
+    }
     // Fast keeps the native Plan dispatch.
     const fastPlan = injectedSkillsForLaunch({
       profileId: "fast",

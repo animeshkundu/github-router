@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 
 import { state } from "../src/lib/state"
 import {
+  BALANCED2_LEAD_MODEL,
+  CHEAPEST2_LEAD_MODEL,
   FAST_LEAD_MODEL,
   isBudgetClaudeLead,
   resolveLeadSlugArg,
@@ -440,6 +442,30 @@ describe("review regressions", () => {
     expect(resolveLeadSlugArg("")).not.toBe("")
     expect(resolveLeadSlugArg("   ")).not.toBe("   ")
     expect(resolveLeadSlugArg("  claude-opus-5.5  ")).toBe("claude-opus-5.5")
+  })
+
+  test("`-m` pinned family aliases resolve to BARE slugs (the 200K pin)", () => {
+    // The pinned families all seed `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` and rely
+    // on a bare lead slug for 200K accounting. Routing any of these through
+    // `withOneMSuffixForLead` would silently lift that pin by decorating the
+    // slug with `[1m]`, so assert the literal wire values rather than only the
+    // exported constants.
+    expect(resolveLeadSlugArg("cheapest")).toBe("gpt-6-luna")
+    expect(resolveLeadSlugArg("balanced")).toBe("gpt-5.6-sol")
+    expect(resolveLeadSlugArg("cheapest2")).toBe("gpt-6-luna")
+    expect(resolveLeadSlugArg("balanced2")).toBe("gpt-6.1-sol")
+
+    expect(CHEAPEST2_LEAD_MODEL).toBe("gpt-6-luna")
+    expect(BALANCED2_LEAD_MODEL).toBe("gpt-6.1-sol")
+
+    // Trim/case normalization applies to the derived aliases too — they go
+    // through the same lowercase/trim path as the base aliases.
+    for (const arg of ["  cheapest2  ", "CHEAPEST2", "Balanced2"]) {
+      expect(resolveLeadSlugArg(arg)).not.toContain("[1m]")
+    }
+    expect(resolveLeadSlugArg("  cheapest2  ")).toBe("gpt-6-luna")
+    expect(resolveLeadSlugArg("CHEAPEST2")).toBe("gpt-6-luna")
+    expect(resolveLeadSlugArg("Balanced2")).toBe("gpt-6.1-sol")
   })
 
   test("isBudgetClaudeLead's contract: it takes a resolved slug, not a raw -m arg", () => {

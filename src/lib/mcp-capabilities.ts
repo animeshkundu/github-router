@@ -48,21 +48,9 @@ import {
   CHEAP_PROFILE_SUBAGENT_CONTEXT_TOKENS,
 } from "./cheap-profile-contract"
 import {
-  CHEAPEST_PROFILE_ADVISOR_EFFORT,
-  CHEAPEST_PROFILE_ADVISOR_MODEL,
-  CHEAPEST_PROFILE_MODELS,
-  CHEAPEST_PROFILE_NATIVE_EFFORTS,
-  CHEAPEST_PROFILE_ORACLE_EFFORT,
-  CHEAPEST_PROFILE_ORACLE_MODEL,
-  CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
-} from "./cheapest-profile-contract"
-import {
-  BALANCED_PROFILE_MODELS,
-  BALANCED_PROFILE_NATIVE_EFFORTS,
-  BALANCED_PROFILE_ORACLE_EFFORT,
-  BALANCED_PROFILE_ORACLE_MODEL,
-  BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS,
-} from "./balanced-profile-contract"
+  balancedContractFor,
+  cheapestContractFor,
+} from "./profile-family"
 import { state, type State } from "./state"
 import {
   BROWSE_DEFAULT_MODEL,
@@ -583,40 +571,45 @@ export function cheapReviewerModel(): string | undefined {
   return CHEAP_PROFILE_MODELS.reviewer
 }
 
-/** Sol/medium Advisor for the cheapest profile at the 200K default window. */
-export function cheapestAdvisorModel(): string | undefined {
-  const found = state.models?.data.find((m) => m.id === CHEAPEST_PROFILE_ADVISOR_MODEL)
+/** Sol Advisor for the cheapest family at the 200K default window. The
+ *  `profileId` selects the family contract: `cheapest` gates
+ *  `gpt-5.6-sol`/medium, `cheapest2` gates `gpt-6.1-sol`/high. */
+export function cheapestAdvisorModel(profileId?: string): string | undefined {
+  const contract = cheapestContractFor(profileId)
+  const found = state.models?.data.find((m) => m.id === contract.advisorModel)
   if (!found) return undefined
-  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < contract.subagentContextTokens) return undefined
   if (found.capabilities?.supports?.tool_calls !== true) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
-  if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST_PROFILE_ADVISOR_EFFORT)) return undefined
+  if (!Array.isArray(efforts) || !efforts.includes(contract.advisorEffort)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
-  return CHEAPEST_PROFILE_ADVISOR_MODEL
+  return contract.advisorModel
 }
 
-/** Sol/high Oracle for the cheapest profile at the 200K default window. */
-export function cheapestOracleModel(): string | undefined {
-  const found = state.models?.data.find((m) => m.id === CHEAPEST_PROFILE_ORACLE_MODEL)
+/** Sol Oracle for the cheapest family at the 200K default window. */
+export function cheapestOracleModel(profileId?: string): string | undefined {
+  const contract = cheapestContractFor(profileId)
+  const found = state.models?.data.find((m) => m.id === contract.oracleModel)
   if (!found) return undefined
-  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < contract.subagentContextTokens) return undefined
   if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) <= 0) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
-  if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST_PROFILE_ORACLE_EFFORT)) return undefined
+  if (!Array.isArray(efforts) || !efforts.includes(contract.oracleEffort)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
-  return CHEAPEST_PROFILE_ORACLE_MODEL
+  return contract.oracleModel
 }
 
-/** Luna/max reviewer for the cheapest profile at the 200K default window. */
-export function cheapestReviewerModel(): string | undefined {
-  const reviewer = state.models?.data.find((m) => m.id === CHEAPEST_PROFILE_MODELS.reviewer)
+/** Luna/max reviewer for the cheapest family at the 200K default window. */
+export function cheapestReviewerModel(profileId?: string): string | undefined {
+  const contract = cheapestContractFor(profileId)
+  const reviewer = state.models?.data.find((m) => m.id === contract.nativeModels.reviewer)
   if (!reviewer) return undefined
   if (reviewer.capabilities?.supports?.tool_calls !== true) return undefined
-  if ((reviewer.capabilities?.limits?.max_context_window_tokens ?? 0) < CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if ((reviewer.capabilities?.limits?.max_context_window_tokens ?? 0) < contract.subagentContextTokens) return undefined
   const efforts = reviewer.capabilities?.supports?.reasoning_effort
-  if (!Array.isArray(efforts) || !efforts.includes(CHEAPEST_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
+  if (!Array.isArray(efforts) || !efforts.includes(contract.nativeEfforts.reviewer)) return undefined
   if (fastEndpointForModel(reviewer) !== "responses") return undefined
-  return CHEAPEST_PROFILE_MODELS.reviewer
+  return contract.nativeModels.reviewer
 }
 
 /** Exact GPT-6 Astra only: cheap escalation consultant at 200K/medium. */
@@ -633,28 +626,31 @@ export function cheapAstraModel(): string | undefined {
   return CHEAP_PROFILE_ASTRA_MODEL
 }
 
-/** Exact Grok 4.6 only: the balanced Oracle at 200K/medium, like cheap. */
-export function balancedOracleModel(): string | undefined {
-  const found = state.models?.data.find((m) => m.id === BALANCED_PROFILE_ORACLE_MODEL)
+/** Exact Grok only: the balanced-family Oracle at 200K/medium, like cheap.
+ *  `balanced` gates `grok-4.6`, `balanced2` gates `grok-4.7`. */
+export function balancedOracleModel(profileId?: string): string | undefined {
+  const contract = balancedContractFor(profileId)
+  const found = state.models?.data.find((m) => m.id === contract.oracleModel)
   if (!found) return undefined
-  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < contract.subagentContextTokens) return undefined
   if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) <= 0) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
-  if (!Array.isArray(efforts) || !efforts.includes(BALANCED_PROFILE_ORACLE_EFFORT)) return undefined
+  if (!Array.isArray(efforts) || !efforts.includes(contract.oracleEffort)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
-  return BALANCED_PROFILE_ORACLE_MODEL
+  return contract.oracleModel
 }
 
-/** Sol/high reviewer for the balanced profile at the 200K default window. */
-export function balancedReviewerModel(): string | undefined {
-  const found = state.models?.data.find((m) => m.id === BALANCED_PROFILE_MODELS.reviewer)
+/** Sol reviewer for the balanced family at the 200K default window. */
+export function balancedReviewerModel(profileId?: string): string | undefined {
+  const contract = balancedContractFor(profileId)
+  const found = state.models?.data.find((m) => m.id === contract.nativeModels.reviewer)
   if (!found) return undefined
   if (found.capabilities?.supports?.tool_calls !== true) return undefined
-  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < BALANCED_PROFILE_SUBAGENT_CONTEXT_TOKENS) return undefined
+  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < contract.subagentContextTokens) return undefined
   const efforts = found.capabilities?.supports?.reasoning_effort
-  if (!Array.isArray(efforts) || !efforts.includes(BALANCED_PROFILE_NATIVE_EFFORTS.reviewer)) return undefined
+  if (!Array.isArray(efforts) || !efforts.includes(contract.nativeEfforts.reviewer)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
-  return BALANCED_PROFILE_MODELS.reviewer
+  return contract.nativeModels.reviewer
 }
 
 // Compatibility aliases for tests and callers on the first fast-profile commit.

@@ -81,9 +81,13 @@ import {
   CHEAP_PROFILE_ORACLE_MODEL,
 } from "~/lib/cheap-profile-contract"
 import {
-  CHEAPEST_PROFILE_ORACLE_EFFORT,
-  CHEAPEST_PROFILE_ORACLE_MODEL,
-} from "~/lib/cheapest-profile-contract"
+  balancedContractFor,
+  cheapestContractFor,
+  displayModelName,
+  isBalancedFamily,
+  isCheapestFamily,
+  isPinnedLaunchProfile,
+} from "~/lib/profile-family"
 import {
   MAX_PROFILE_MODELS,
   maxCodexReviewerModel,
@@ -437,6 +441,20 @@ function activePersonas(launch?: LaunchRegistryEntry): Array<PersonaSpec> {
   })
 }
 
+/** Oracle descriptor derived from the family contract, so a model swap in the
+ *  contract renames itself here instead of leaving stale prose behind. */
+function familyOracleDescriptor(profileId: string): string | undefined {
+  if (isCheapestFamily(profileId)) {
+    const contract = cheapestContractFor(profileId)
+    return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
+  }
+  if (isBalancedFamily(profileId)) {
+    const contract = balancedContractFor(profileId)
+    return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
+  }
+  return undefined
+}
+
 function oracleToolEntry(isCheap = false, astraAvailable = true, oracleDescriptor?: string): ToolEntry {
   const descriptor = oracleDescriptor
     ?? (isCheap
@@ -621,13 +639,7 @@ function fastAllowsTool(
   launch: LaunchRegistryEntry,
   item: ProfileProjectionItem,
 ): boolean {
-  if (
-    launch.profileId !== "fast"
-    && launch.profileId !== "cheap"
-    && launch.profileId !== "cheap1m"
-    && launch.profileId !== "cheapest"
-    && launch.profileId !== "balanced"
-  ) return true
+  if (!isPinnedLaunchProfile(launch.profileId)) return true
   if (scope !== "all" && item.group !== scope) return false
   if (!launch.allowedGroups?.has(item.group)) return false
   if (item.persona) return false
@@ -667,10 +679,10 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       })
     return [...personaEntries, ...nonPersonaEntries]
   }
-  if (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "balanced") {
-    const isCheap = launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "balanced"
-    const isCheapest = launch.profileId === "cheapest"
-    const isBalanced = launch.profileId === "balanced"
+  if (isPinnedLaunchProfile(launch.profileId)) {
+    const isCheapest = isCheapestFamily(launch.profileId)
+    const isBalanced = isBalancedFamily(launch.profileId)
+    const isCheap = launch.profileId === "cheap" || launch.profileId === "cheap1m" || isCheapest || isBalanced
     // Astra is wired only for `fast` and the `-m cheap1m` successor; the new
     // `-m cheap` (200K lead, oracle-only allowlist), `-m cheapest`, and
     // `-m balanced` never expose it, even if a hypothetical test/mint granted
@@ -682,10 +694,14 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
     // fast/cheap1m when the Astra catalog gate fails (naming it would route
     // into a -32601).
     const astraAvailable = astraWired && (isCheap && !isCheapest ? cheapAstraModel() : isCheapest ? undefined : fastAstraModel()) != null
-    const oracleGate = isCheapest ? cheapestOracleModel() : isBalanced ? balancedOracleModel() : isCheap ? cheapOracleModel() : fastOracleModel()
-    const oracleDescriptor = isCheapest
-      ? "GPT-6 Sol (200K context, high effort)"
-      : undefined
+    const oracleGate = isCheapest
+      ? cheapestOracleModel(launch.profileId)
+      : isBalanced
+        ? balancedOracleModel(launch.profileId)
+        : isCheap
+          ? cheapOracleModel()
+          : fastOracleModel()
+    const oracleDescriptor = familyOracleDescriptor(launch.profileId)
     const entries: Array<ToolEntry> = []
     if (
       (scope === "all" || scope === "peers")
@@ -1467,7 +1483,7 @@ async function handleToolsCall(
     }
   }
 
-  if ((launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "balanced") && name !== "oracle" && name !== "astra") {
+  if (isPinnedLaunchProfile(launch.profileId) && name !== "oracle" && name !== "astra") {
     const fastPersona = activePersonas(launch).find((persona) => persona.toolNameHttp === name)
     const fastTool = allNonPersonaTools().find((tool) => tool.toolNameHttp === name)
     const fastAllowed = fastPersona
@@ -1553,21 +1569,37 @@ async function handleToolsCall(
     }
   }
 
-  if (
-    (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "balanced")
-    && name === "oracle"
-  ) {
-    const isCheapestOracle = launch.profileId === "cheapest"
-    const isBalancedOracle = launch.profileId === "balanced"
+  if (isPinnedLaunchProfile(launch.profileId) && name === "oracle") {
+    const isCheapestOracle = isCheapestFamily(launch.profileId)
+    const isBalancedOracle = isBalancedFamily(launch.profileId)
     const isCheapOracle = launch.profileId === "cheap" || launch.profileId === "cheap1m" || isCheapestOracle || isBalancedOracle
-    const oracleModel = isCheapestOracle ? CHEAPEST_PROFILE_ORACLE_MODEL : isCheapOracle ? CHEAP_PROFILE_ORACLE_MODEL : "claude-opus-5.5"
+    const oracleModel = isCheapestOracle
+      ? cheapestContractFor(launch.profileId).oracleModel
+      : isBalancedOracle
+        ? balancedContractFor(launch.profileId).oracleModel
+        : isCheapOracle
+          ? CHEAP_PROFILE_ORACLE_MODEL
+          : "claude-opus-5.5"
     const oracleEndpoint = isCheapOracle ? "/v1/responses" : "/v1/messages"
-    const oracleEffort = isCheapestOracle ? CHEAPEST_PROFILE_ORACLE_EFFORT : isCheapOracle ? CHEAP_PROFILE_ORACLE_EFFORT : "high"
+    const oracleEffort = isCheapestOracle
+      ? cheapestContractFor(launch.profileId).oracleEffort
+      : isBalancedOracle
+        ? balancedContractFor(launch.profileId).oracleEffort
+        : isCheapOracle
+          ? CHEAP_PROFILE_ORACLE_EFFORT
+          : "high"
+    const oracleGateFn = isCheapestOracle
+      ? () => cheapestOracleModel(launch.profileId)
+      : isBalancedOracle
+        ? () => balancedOracleModel(launch.profileId)
+        : isCheapOracle
+          ? cheapOracleModel
+          : fastOracleModel
     if (
       (scope !== "all" && scope !== "peers")
       || !launch.allowedGroups?.has("peers")
       || !launch.allowedPersonas?.has("oracle")
-      || !(isCheapestOracle ? cheapestOracleModel() : isBalancedOracle ? balancedOracleModel() : isCheapOracle ? cheapOracleModel() : fastOracleModel())
+      || !oracleGateFn()
     ) {
       return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)
     }
@@ -1588,12 +1620,7 @@ async function handleToolsCall(
       model: oracleModel,
       endpoint: oracleEndpoint,
       description: "Fast/cheap-profile Oracle",
-      baseInstructions:
-        isCheapestOracle
-          ? "You are Oracle, an expert architectural and technical consultant running on GPT-6 Sol. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action."
-          : isCheapOracle
-            ? "You are Oracle, an expert architectural and technical consultant running on Grok 4.6. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action."
-            : "You are Oracle, an expert architectural and technical consultant running on Opus 5. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.",
+      baseInstructions: `You are Oracle, an expert architectural and technical consultant running on ${displayModelName(oracleModel)}. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.`,
       agentPrompt: "",
       writeCapable: false,
       requiresHttp: true,
@@ -1639,7 +1666,7 @@ async function handleToolsCall(
   // hard-coded tool name cannot bypass tools/list (including through the
   // unscoped union).
   if (
-    (launch.profileId === "fast" || launch.profileId === "cheap" || launch.profileId === "cheap1m" || launch.profileId === "cheapest" || launch.profileId === "balanced")
+    isPinnedLaunchProfile(launch.profileId)
     && PERSONAS_READ.some((p) => p.toolNameHttp === name)
   ) {
     return rpcError(body.id, RPC_METHOD_NOT_FOUND, `tools/call: unknown tool "${name}"`)

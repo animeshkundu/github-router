@@ -26,7 +26,12 @@ import {
   type LaunchProfileId,
 } from "./launch-profile"
 import { MAX_PROFILE_MODELS, maxOpusModel } from "./max-profile-contract"
-import { BALANCED_PROFILE_LEAD_EFFORT } from "./balanced-profile-contract"
+import {
+  balancedContractFor,
+  cheapestContractFor,
+  isBalancedFamily,
+  isCheapestFamily,
+} from "./profile-family"
 import { catalogAdvertises1M, oneMContextDisabled, withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
 import {
   BUDGET_SMALL_FAST_CATALOG_ID,
@@ -1080,7 +1085,7 @@ export function getClaudeCodeEnvVars(
   const isCheapProfile =
     launchProfileId === "cheap"
     || launchProfileId === "cheap1m"
-    || launchProfileId === "cheapest"
+    || isCheapestFamily(launchProfileId)
   // Pinned sessions run router-provided surfaces only: tier rows are
   // force-seeded even when the parent env sets them, so a shell export
   // cannot smuggle a foreign model into the pinned `/model` UI. Standard
@@ -1108,9 +1113,10 @@ export function getClaudeCodeEnvVars(
   // gate is a raw truthiness read, so an inherited empty string is falsy on
   // both sides (i.e. 1M stays live) and must not suppress the seed. Any other
   // operator-set value (including "0", which IS truthy client-side) wins.
-  const pinStrict200K = launchProfileId === "cheap"
-    || launchProfileId === "cheapest"
-    || launchProfileId === "balanced"
+  const pinStrict200K =
+    launchProfileId === "cheap"
+    || isCheapestFamily(launchProfileId)
+    || isBalancedFamily(launchProfileId)
   if (pinStrict200K) {
     if (
       process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === undefined
@@ -1141,10 +1147,10 @@ export function getClaudeCodeEnvVars(
   // here: `cheap`'s de-facto lead effort is `high` (contract constant
   // reconciled in `cheap-profile-contract.ts`), so it must NOT receive this.
   // Guarded on trim-empty-or-unset; any other operator-set value wins.
-  const pinLeadEffort = launchProfileId === "cheapest"
-    ? "max"
-    : launchProfileId === "balanced"
-      ? BALANCED_PROFILE_LEAD_EFFORT
+  const pinLeadEffort = isCheapestFamily(launchProfileId)
+    ? cheapestContractFor(launchProfileId).leadEffort
+    : isBalancedFamily(launchProfileId)
+      ? balancedContractFor(launchProfileId).leadEffort
       : undefined
   if (pinLeadEffort !== undefined) {
     if ((process.env.CLAUDE_CODE_EFFORT_LEVEL ?? "").trim() === "") {

@@ -415,7 +415,15 @@ describe("getClaudeCodeEnvVars", () => {
 
   test("seeds the 1M-context disable flag only on pinned-200K profiles", () => {
     const catalog = [catalogModel("gpt-6-luna", 1_050_000, 922_000)]
-    for (const profile of ["cheap", "cheapest", "balanced"] as const) {
+    for (
+      const profile of [
+        "cheap",
+        "cheapest",
+        "cheapest2",
+        "balanced",
+        "balanced2",
+      ] as const
+    ) {
       const vars = withCatalog(catalog, () =>
         withoutCompactionEnv(() =>
           getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-6-luna", profile),
@@ -488,7 +496,9 @@ describe("getClaudeCodeEnvVars", () => {
     for (
       const [model, profile, expected] of [
         ["gpt-6-luna", "cheapest", "max"],
+        ["gpt-6-luna", "cheapest2", "max"],
         ["gpt-5.6-sol", "balanced", "medium"],
+        ["gpt-6.1-sol", "balanced2", "medium"],
       ] as const
     ) {
       const vars = withCatalog(catalog, () =>

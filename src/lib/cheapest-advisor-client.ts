@@ -17,14 +17,16 @@ export function cheapestAdvisorClientEnabled(
 
 /**
  * Remove every caller-supplied Advisor option and insert the fixed cheapest
- * value (the BARE `gpt-5.6-sol` — 200K default window — see
- * `CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL`). Same parser semantics as the
- * cheap variant: keeps scanning after `--`, and the fixed option is inserted
- * before the first separator so Claude Code parses it as an option.
+ * family value — the BARE slug (200K default window) from the profile
+ * contract, so `cheapest` pins `gpt-5.6-sol` and `cheapest2` pins
+ * `gpt-6.1-sol` through this one function. Same parser semantics as the cheap
+ * variant: keeps scanning after `--`, and the fixed option is inserted before
+ * the first separator so Claude Code parses it as an option.
  */
 export function withFixedCheapestAdvisorArg(
   args: ReadonlyArray<string>,
   enabled = cheapestAdvisorClientEnabled(),
+  model: string = CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL,
 ): string[] {
   const sanitized: string[] = []
   for (let index = 0; index < args.length; index++) {
@@ -39,7 +41,7 @@ export function withFixedCheapestAdvisorArg(
   }
   if (!enabled) return sanitized
   const separator = sanitized.indexOf("--")
-  const fixed = [ADVISOR_FLAG, CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL]
+  const fixed = [ADVISOR_FLAG, model]
   if (separator < 0) return [...sanitized, ...fixed]
   return [
     ...sanitized.slice(0, separator),

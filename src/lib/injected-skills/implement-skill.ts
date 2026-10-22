@@ -1,10 +1,11 @@
+import { isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
 import type { PlanSkillProfile } from "./plan-skill"
 
 export function buildImplementSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
   // Profiles without a Plan role (cheapest, balanced): the lead plans
   // directly, so close-out wording names planning work, not Plan dispatches.
-  const planDispatches = profile === "cheapest" || profile === "balanced"
+  const planDispatches = isCheapestFamily(profile) || isBalancedFamily(profile)
     ? "planning work"
     : "Plan dispatches"
   return {

@@ -193,6 +193,14 @@ import {
   validateCheapProfilePrerequisites,
   validateCheapestProfilePrerequisites,
 } from "./lib/launch-profile"
+import {
+  balancedContractFor,
+  cheapestContractFor,
+  displayModelName,
+  isBalancedFamily,
+  isCheapestFamily,
+  isPinnedLaunchProfile,
+} from "./lib/profile-family"
 import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
 import { LAUNCH_SECRET_HEADER } from "./lib/messages-identity-preflight"
 import { state } from "./lib/state"
@@ -210,9 +218,10 @@ import {
   cheapestAdvisorClientEnabled,
   withFixedCheapestAdvisorArg,
 } from "./lib/cheapest-advisor-client"
-import { CHEAP_PROFILE_NATIVE_MODELS } from "./lib/cheap-profile-contract"
-import { CHEAPEST_PROFILE_NATIVE_MODELS } from "./lib/cheapest-profile-contract"
-import { BALANCED_PROFILE_LEAD_EFFORT, BALANCED_PROFILE_NATIVE_MODELS } from "./lib/balanced-profile-contract"
+import {
+  CHEAP_PROFILE_MODELS,
+  CHEAP_PROFILE_NATIVE_MODELS,
+} from "./lib/cheap-profile-contract"
 
 export const claudeArgs = {
   ...sharedServerArgs,
@@ -220,7 +229,7 @@ export const claudeArgs = {
     alias: "m",
     type: "string",
     description:
-      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, cheapest, balanced, max), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
+      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, cheapest, cheapest2, balanced, balanced2, max), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
   },
   "codex-mcp": {
     type: "boolean" as const,
@@ -410,28 +419,12 @@ export const claude = defineCommand({
       process.exit(1)
     }
     if (
-      (requestedLaunchProfileId === "fast"
-        || requestedLaunchProfileId === "max"
-        || requestedLaunchProfileId === "cheap"
-        || requestedLaunchProfileId === "cheap1m"
-        || requestedLaunchProfileId === "cheapest"
-        || requestedLaunchProfileId === "balanced")
+      (isPinnedLaunchProfile(requestedLaunchProfileId)
+        || requestedLaunchProfileId === "max")
       && !codexMcpEnabled
     ) {
-      const profileName =
-        requestedLaunchProfileId === "fast"
-          ? "fast"
-          : requestedLaunchProfileId === "cheap"
-            ? "cheap"
-            : requestedLaunchProfileId === "cheap1m"
-              ? "cheap1m"
-              : requestedLaunchProfileId === "cheapest"
-                ? "cheapest"
-                : requestedLaunchProfileId === "balanced"
-                  ? "balanced"
-                  : "max"
       const message =
-        `github-router claude -m ${profileName} requires codex MCP wiring for its native roster and dispatch ACL; remove --no-codex-mcp or choose a standard model.`
+        `github-router claude -m ${requestedLaunchProfileId} requires codex MCP wiring for its native roster and dispatch ACL; remove --no-codex-mcp or choose a standard model.`
       process.stderr.write(`${message}\n`)
       process.exit(1)
     }
@@ -675,21 +668,33 @@ export const claude = defineCommand({
             : formatCheapPrerequisiteFailure(prereqCheck.missing)
         await fastFatal(message)
       }
-    } else if (launchProfileId === "cheapest") {
-      // The cheapest tier runs the Luna lead and every subagent at the 200K
-      // default window with fixed efforts/endpoints (see
-      // `validateCheapestProfilePrerequisites`).
-      const prereqCheck = validateCheapestProfilePrerequisites(state.models)
+    } else if (isCheapestFamily(launchProfileId)) {
+      // `cheapest` and `cheapest2` validate the same roster against their own
+      // family contract (the `-2` sibling swaps the Sol identities and the
+      // Advisor effort).
+      const prereqCheck = validateCheapestProfilePrerequisites(
+        state.models,
+        {},
+        launchProfileId,
+      )
       if (!prereqCheck.ok) {
-        await fastFatal(formatCheapestPrerequisiteFailure(prereqCheck.missing))
+        await fastFatal(
+          formatCheapestPrerequisiteFailure(prereqCheck.missing, launchProfileId),
+        )
       }
-    } else if (launchProfileId === "balanced") {
+    } else if (isBalancedFamily(launchProfileId)) {
       // The balanced tier runs the Sol lead and every subagent at the 200K
       // default window with fixed efforts/endpoints (see
       // `validateBalancedProfilePrerequisites`).
-      const prereqCheck = validateBalancedProfilePrerequisites(state.models)
+      const prereqCheck = validateBalancedProfilePrerequisites(
+        state.models,
+        {},
+        launchProfileId,
+      )
       if (!prereqCheck.ok) {
-        await fastFatal(formatBalancedPrerequisiteFailure(prereqCheck.missing))
+        await fastFatal(
+          formatBalancedPrerequisiteFailure(prereqCheck.missing, launchProfileId),
+        )
       }
     } else {
       // Standard profile behavior is unchanged. This branch intentionally keeps
@@ -763,13 +768,7 @@ export const claude = defineCommand({
     // every profile whose picker the router overwrites gets its mirror
     // purged too, so a stale `[1m]`-frontmatter custom agent cannot survive
     // into a strict-200K session.)
-    if (
-      launchProfileId === "fast"
-      || launchProfileId === "cheap"
-      || launchProfileId === "cheap1m"
-      || launchProfileId === "cheapest"
-      || launchProfileId === "balanced"
-    ) {
+    if (isPinnedLaunchProfile(launchProfileId)) {
       try {
         const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
         const purgedHooks = await purgeNonRouterHooksForPinnedProfile(settingsPath)
@@ -833,7 +832,7 @@ export const claude = defineCommand({
     // `[1m]` unlock entirely — so a decorated row here would be doubly wrong
     // (a "(1M)" label that still budgets 200K). No exemptions: every picker
     // row in these profiles is bare.
-    if (launchProfileId === "cheap" || launchProfileId === "cheapest" || launchProfileId === "balanced") {
+    if (launchProfileId === "cheap" || isCheapestFamily(launchProfileId) || isBalancedFamily(launchProfileId)) {
       const suspectKeys = [
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -866,13 +865,7 @@ export const claude = defineCommand({
         )
       }
     }
-    if (
-      launchProfileId === "fast"
-      || launchProfileId === "cheap"
-      || launchProfileId === "cheap1m"
-      || launchProfileId === "cheapest"
-      || launchProfileId === "balanced"
-    ) {
+    if (isPinnedLaunchProfile(launchProfileId)) {
       consola.info(
         `Pinned launch: profile=${launchProfileId} lead=${chosenSlug} pickerRows=${pickerModels?.length ?? 0}.`,
       )
@@ -888,7 +881,7 @@ export const claude = defineCommand({
       // decorated env value, a missing flag, or an unrecognized effort value
       // would make Claude Code default the session to ~1M accounting or
       // off-contract effort; surface that loudly instead of silently.
-      if (launchProfileId === "cheapest" || launchProfileId === "balanced") {
+      if (isCheapestFamily(launchProfileId) || isBalancedFamily(launchProfileId)) {
         const rows = pickerModels ?? []
         const firstLuna = rows.find((id) => id.replace(/(?:\[1m\])+$/i, "") === "gpt-6-luna")
         // When picker injection was skipped (pickerModels undefined) the
@@ -917,9 +910,9 @@ export const claude = defineCommand({
         // level is an operator override (presence guard respected it), so it
         // gets an info note, not the regression warn; only an unrecognized or
         // empty value means the contract is actually broken.
-        const contractedEffort = launchProfileId === "cheapest"
-          ? "max"
-          : BALANCED_PROFILE_LEAD_EFFORT
+        const contractedEffort = isCheapestFamily(launchProfileId)
+          ? cheapestContractFor(launchProfileId).leadEffort
+          : balancedContractFor(launchProfileId).leadEffort
         const effortOk = effectiveEffort === contractedEffort
         const effortRecognized = ["low", "medium", "high", "xhigh", "max"].includes(
           effectiveEffort.toLowerCase(),
@@ -964,7 +957,7 @@ export const claude = defineCommand({
         extraArgs,
         fastAdvisorClientEnabled(process.env),
       )
-    } else if (launchProfileId === "cheap" || launchProfileId === "cheap1m" || launchProfileId === "balanced") {
+    } else if (launchProfileId === "cheap" || launchProfileId === "cheap1m" || isBalancedFamily(launchProfileId)) {
       // Same pinning discipline as fast, but to the BARE 200K Advisor slug
       // (see `CHEAP_PROFILE_ADVISOR_CLIENT_MODEL`). Balanced shares cheap's
       // Sol Advisor identity, so it reuses the same pin.
@@ -972,12 +965,13 @@ export const claude = defineCommand({
         extraArgs,
         cheapAdvisorClientEnabled(process.env),
       )
-    } else if (launchProfileId === "cheapest") {
-      // Same pinning discipline as cheap, but to the BARE Sol Advisor slug
-      // (see `CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL`).
+    } else if (isCheapestFamily(launchProfileId)) {
+      // The family's own Advisor identity: `cheapest` pins `gpt-5.6-sol`,
+      // `cheapest2` pins `gpt-6.1-sol`, both BARE (200K default window).
       extraArgs = withFixedCheapestAdvisorArg(
         extraArgs,
         cheapestAdvisorClientEnabled(process.env),
+        cheapestContractFor(launchProfileId).advisorClientModel,
       )
     }
 
@@ -1087,8 +1081,8 @@ export const claude = defineCommand({
     const isCheapLaunch =
       launchProfileId === "cheap"
       || launchProfileId === "cheap1m"
-      || launchProfileId === "cheapest"
-      || launchProfileId === "balanced"
+      || isCheapestFamily(launchProfileId)
+      || isBalancedFamily(launchProfileId)
     let fastWiringComplete = launchProfileId !== "fast" && !isCheapLaunch
     const astraAvailable = (launchProfileId === "fast" || launchProfileId === "cheap1m")
       && Boolean(fastAstraModel())
@@ -1122,17 +1116,19 @@ export const claude = defineCommand({
               "General-Purpose": CHEAP_PROFILE_NATIVE_MODELS["General-Purpose"],
               reviewer: cheapReviewerModel(),
             }
-        : launchProfileId === "cheapest"
+        : isCheapestFamily(launchProfileId)
           ? {
-              Explore: CHEAPEST_PROFILE_NATIVE_MODELS.Explore,
-              "General-Purpose": CHEAPEST_PROFILE_NATIVE_MODELS["General-Purpose"],
-              reviewer: cheapestReviewerModel(),
+              Explore: cheapestContractFor(launchProfileId).nativeModels.Explore,
+              "General-Purpose":
+                cheapestContractFor(launchProfileId).nativeModels["General-Purpose"],
+              reviewer: cheapestReviewerModel(launchProfileId),
             }
-        : launchProfileId === "balanced"
+        : isBalancedFamily(launchProfileId)
           ? {
-              Explore: BALANCED_PROFILE_NATIVE_MODELS.Explore,
-              "General-Purpose": BALANCED_PROFILE_NATIVE_MODELS["General-Purpose"],
-              reviewer: balancedReviewerModel(),
+              Explore: balancedContractFor(launchProfileId).nativeModels.Explore,
+              "General-Purpose":
+                balancedContractFor(launchProfileId).nativeModels["General-Purpose"],
+              reviewer: balancedReviewerModel(launchProfileId),
             }
         : launchProfileId === "max"
           ? {
@@ -1158,8 +1154,8 @@ export const claude = defineCommand({
         (launchProfileId === "fast"
           || launchProfileId === "cheap"
           || launchProfileId === "cheap1m"
-          || launchProfileId === "cheapest"
-          || launchProfileId === "balanced"
+          || isCheapestFamily(launchProfileId)
+          || isBalancedFamily(launchProfileId)
           ? nativeAgentModels.Explore
           : nativeAgentModels.scout)
         != null,
@@ -1196,8 +1192,8 @@ export const claude = defineCommand({
         const isCheapProfile =
           launchProfileId === "cheap"
           || launchProfileId === "cheap1m"
-          || launchProfileId === "cheapest"
-          || launchProfileId === "balanced"
+          || isCheapestFamily(launchProfileId)
+          || isBalancedFamily(launchProfileId)
         // Fast and the cheap family share the exact fixed HTTP surface; max has its own.
         const isPinnedProfile = isFastProfile || isMaxProfile || isCheapProfile
         if ((isFastProfile || isCheapProfile) && requestedCli) {
@@ -1291,37 +1287,42 @@ export const claude = defineCommand({
         // restriction even if the catalog gate would otherwise pass.
         if (
           isPinnedProfile
-          && ((launchProfileId === "cheapest"
-            ? cheapestOracleModel()
-            : launchProfileId === "balanced"
-              ? balancedOracleModel()
+          && ((isCheapestFamily(launchProfileId)
+            ? cheapestOracleModel(launchProfileId)
+            : isBalancedFamily(launchProfileId)
+              ? balancedOracleModel(launchProfileId)
               : isCheapProfile
                 ? cheapOracleModel()
                 : fastOracleModel()) == null
-            || (launchProfileId === "balanced"
+            || (isBalancedFamily(launchProfileId)
               ? false
-              : (launchProfileId === "cheapest"
-                ? cheapestAdvisorModel()
+              : (isCheapestFamily(launchProfileId)
+                ? cheapestAdvisorModel(launchProfileId)
                 : isCheapProfile
                   ? cheapAdvisorModel()
                   : fastAdvisorModel()) == null)
             || nativeAgentModels.reviewer == null)
         ) {
-          if (launchProfileId === "cheapest") {
+          if (isCheapestFamily(launchProfileId)) {
+            const contract = cheapestContractFor(launchProfileId)
             throw new Error(
-              "cheapest profile prerequisite drift: exact reviewer (gpt-6-luna), oracle (gpt-5.6-sol), or advisor (gpt-5.6-sol) model no longer resolves",
+              `${launchProfileId} profile prerequisite drift: exact reviewer (${displayModelName(contract.nativeModels.reviewer)}), oracle (${displayModelName(contract.oracleModel)}), or advisor (${displayModelName(contract.advisorModel)}) model no longer resolves`,
             )
           }
-          if (launchProfileId === "balanced") {
+          if (isBalancedFamily(launchProfileId)) {
+            const contract = balancedContractFor(launchProfileId)
             throw new Error(
-              "balanced profile prerequisite drift: exact reviewer (gpt-5.6-sol) or oracle (grok-4.6) model no longer resolves",
+              `${launchProfileId} profile prerequisite drift: exact reviewer (${displayModelName(contract.nativeModels.reviewer)}) or oracle (${displayModelName(contract.oracleModel)}) model no longer resolves`,
             )
           }
           if (isCheapProfile) {
-            // Cheap oracle (grok-4.6) and advisor (gpt-5.6-sol) are fixed
-            // constants; the cheap drift surface is reviewer + oracle.
+            // The cheap roster is fixed by `CHEAP_PROFILE_MODELS`, and all
+            // three roles below are drift triggers (oracle + advisor are
+            // resolved separately; the reviewer comes from the native agent
+            // models). Derive the names so the message can never disagree
+            // with the contract it is reporting on.
             throw new Error(
-              "cheap profile prerequisite drift: exact reviewer or oracle (grok-4.6) model no longer resolves",
+              `cheap profile prerequisite drift: exact reviewer (${displayModelName(CHEAP_PROFILE_MODELS.reviewer)}), advisor (${displayModelName(CHEAP_PROFILE_MODELS.advisor)}), or oracle (${displayModelName(CHEAP_PROFILE_MODELS.oracle)}) model no longer resolves`,
             )
           }
           throw new Error("fast profile prerequisite drift: exact Oracle, Advisor, or reviewer model no longer resolves")
@@ -1366,14 +1367,14 @@ export const claude = defineCommand({
                 fastGeneralPurposeModel: nativeAgentModels["General-Purpose"],
                 fastReviewerModel: nativeAgentModels.reviewer,
               }
-            : launchProfileId === "cheapest"
+            : isCheapestFamily(launchProfileId)
               ? {
                   cheapestProfile: true,
                   cheapestExploreModel: nativeAgentModels.Explore,
                   cheapestGeneralPurposeModel: nativeAgentModels["General-Purpose"],
                   cheapestReviewerModel: nativeAgentModels.reviewer,
                 }
-            : launchProfileId === "balanced"
+            : isBalancedFamily(launchProfileId)
               ? {
                   balancedProfile: true,
                   balancedExploreModel: nativeAgentModels.Explore,
@@ -1552,7 +1553,7 @@ export const claude = defineCommand({
               // The flag adds no privilege: this command is persisted into the
               // per-launch isolated mirror, and anyone able to rewrite it can
               // already remove the hook entirely.
-              graph: launchProfileId === "balanced" ? "balanced" : undefined,
+              graph: isBalancedFamily(launchProfileId) ? "balanced" : undefined,
             })
             await injectStopHookIntoSettingsFile(
               settingsPath,
@@ -1653,7 +1654,7 @@ export const claude = defineCommand({
         // The UserPromptSubmit hook serves standard (budget reset + V2 steer)
         // and cheapest (same, plus the cheapest-only Sol → Luna rewrite branch
         // gated inside decidePromptSubmitV2). Other pinned profiles omit it.
-        const promptSubmitHookActive = workerSkillsActive || launchProfileId === "cheapest"
+        const promptSubmitHookActive = workerSkillsActive || isCheapestFamily(launchProfileId)
         if (promptSubmitHookActive) {
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
@@ -2143,19 +2144,14 @@ export const claude = defineCommand({
           )
         }
       } catch (err) {
-        if (launchProfileId === "fast" || launchProfileId === "max" || launchProfileId === "cheap" || launchProfileId === "cheap1m" || launchProfileId === "cheapest" || launchProfileId === "balanced") {
+        if (isPinnedLaunchProfile(launchProfileId) || launchProfileId === "max") {
           if (fastLaunchId) unregisterLaunch(fastLaunchId)
           await disposeFastRuntime().catch(() => {})
           await server.close(true).catch(() => {})
           await baseShutdown().catch(() => {})
           resetFastRuntimeOwnership()
           const profileLabel =
-            launchProfileId === "fast" ? "Fast"
-            : launchProfileId === "cheap" ? "Cheap"
-            : launchProfileId === "cheap1m" ? "Cheap1m"
-            : launchProfileId === "cheapest" ? "Cheapest"
-            : launchProfileId === "balanced" ? "Balanced"
-            : "Max"
+            launchProfileId.charAt(0).toUpperCase() + launchProfileId.slice(1)
           const message = `${profileLabel} profile wiring failed; refusing to launch an unguarded session: ${err instanceof Error ? err.message : String(err)}`
           consola.error(message)
           process.stderr.write(`${message}\n`)
@@ -2255,11 +2251,7 @@ export const claude = defineCommand({
         void sweepStaleAicLedgerFiles()
         const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
         const statusCommand = buildAicStatusHookCommand(selfInvocation)
-        const routerWinsStatusLine = launchProfileId === "fast"
-          || launchProfileId === "cheap"
-          || launchProfileId === "cheap1m"
-          || launchProfileId === "cheapest"
-          || launchProfileId === "balanced"
+        const routerWinsStatusLine = isPinnedLaunchProfile(launchProfileId)
         const injected = await injectAicStatusLineIntoSettingsFile(
           settingsPath,
           statusCommand,

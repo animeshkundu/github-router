@@ -793,10 +793,17 @@ describe("/mcp prompt_brief (hook channel)", () => {
   const WORKSPACE = mkdtempSync(join(tmpdir(), "gh-router-brief-ws-"))
   writeFileSync(join(WORKSPACE, "render.ts"), "export const render = () => 1" + String.fromCharCode(10))
 
-  function mockBriefUpstream(text: string): { calls: number } {
-    const captured = { calls: 0 }
-    globalThis.fetch = mock(async () => {
+  function mockBriefUpstream(text: string): { calls: number; models: string[] } {
+    const captured: { calls: number; models: string[] } = { calls: 0, models: [] }
+    globalThis.fetch = mock(async (_url: unknown, init?: RequestInit) => {
       captured.calls++
+      try {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { model?: unknown }
+        if (typeof body.model === "string") captured.models.push(body.model)
+      } catch {
+        // A non-JSON body is itself a bug, but the call-count assertions still
+        // carry the signal; the model assertion below fails loudly.
+      }
       return new Response(
         JSON.stringify({
           id: "resp_brief",
@@ -857,6 +864,38 @@ describe("/mcp prompt_brief (hook channel)", () => {
       expect(text).toContain("EXECUTION BRIEF")
       expect(text).toContain("Memoize render")
       expect(upstream.calls).toBe(1)
+      // The rewrite model is the FAMILY's Sol, resolved per call from the
+      // launch profile rather than a module-level constant. Base cheapest
+      // stays on Sol 5.6.
+      expect(upstream.models).toEqual(["gpt-5.6-sol"])
+    } finally {
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
+  test("a cheapest2 launch rewrites with gpt-6.1-sol, not Sol 5.6", async () => {
+    // Derivation regression: cheapest2 differs from cheapest only in the Sol
+    // ids it declares, and the prompt brief is one of the surfaces that has
+    // to follow. A hardcoded CHEAPEST_REWRITE_MODEL here would silently keep
+    // rewriting cheapest2 prompts on Sol 5.6 while every other surface moved.
+    const BRIEF_NONCE = "f".repeat(64)
+    const launch = registerLaunch({
+      profileId: "cheapest2",
+      nonce: BRIEF_NONCE,
+      secret: "brief-secret-2",
+      allowedGroups: new Set(["peers", "search"]),
+    })
+    const upstream = mockBriefUpstream("1. Read render.ts" + String.fromCharCode(10) + "2. Memoize render")
+    try {
+      const { status, result, text } = await callBrief(
+        `Bearer ${BRIEF_NONCE}`,
+        `sess-${Date.now()}-cheapest2`,
+      )
+      expect(status).toBe(200)
+      expect(result.isError).toBeFalsy()
+      expect(text).toContain("EXECUTION BRIEF")
+      expect(upstream.calls).toBe(1)
+      expect(upstream.models).toEqual(["gpt-6.1-sol"])
     } finally {
       unregisterLaunch(launch.launchId)
     }
@@ -3994,6 +4033,164 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
     } finally {
       state.models = saved
       unregisterLaunch(cheapLaunch.launchId)
+    }
+  })
+
+  // The `-2` aliases dispatch through the same Oracle path as their bases; the
+  // only moving parts are the contract's model id and effort. These tests pin
+  // the wire model AND the prose identity (descriptor + instructions), because
+  // a stale name there routes the model at a capability it does not have.
+  test("cheapest2 Oracle-only: gpt-6.1-sol at high, named GPT-6.1 Sol in prose", async () => {
+    const NONCE = "e".repeat(64)
+    const launch = registerLaunch({
+      profileId: "cheapest2",
+      nonce: NONCE,
+      secret: "cheapest2-oracle-secret",
+      allowedGroups: new Set(["peers", "search"]),
+      allowedPersonas: new Set(["oracle"]),
+    })
+    const saved = state.models
+    try {
+      state.models = {
+        object: "list",
+        data: [{
+          id: "gpt-6.1-sol",
+          name: "gpt-6.1-sol",
+          object: "model",
+          vendor: "openai",
+          version: "1",
+          preview: false,
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: {
+            family: "gpt-6.1-sol",
+            object: "model_capabilities",
+            tokenizer: "o200k_base",
+            type: "chat",
+            limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 },
+            supports: { reasoning_effort: ["medium", "high"] },
+          },
+        }],
+      } as never
+
+      const { json: listJson } = await rpc(
+        { jsonrpc: "2.0", id: 40, method: "tools/list" },
+        { auth: `Bearer ${NONCE}` },
+      )
+      const tools = (listJson.result as { tools: Array<{ name: string; description?: string }> }).tools
+      expect(tools.map((t) => t.name)).toContain("oracle")
+      expect(tools.map((t) => t.name)).not.toContain("astra")
+      const oracleDesc = tools.find((t) => t.name === "oracle")?.description ?? ""
+      expect(oracleDesc).toContain("GPT-6.1 Sol (200K context, high effort)")
+      expect(oracleDesc).not.toContain("GPT-5.6 Sol")
+
+      let oracleUrl = ""
+      const oracleCapture: { body?: { model?: string; reasoning?: { effort?: string }; instructions?: string } } = {}
+      globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+        oracleUrl = input.toString()
+        if (init?.body) {
+          oracleCapture.body = JSON.parse(init.body.toString()) as typeof oracleCapture.body
+        }
+        return Response.json({
+          id: "resp-oracle",
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Approach B." }] }],
+        })
+      }) as unknown as typeof fetch
+
+      const oracleCall = await rpc(
+        {
+          jsonrpc: "2.0",
+          id: 41,
+          method: "tools/call",
+          params: { name: "oracle", arguments: { query: "A or B?", context: "Evidence E." } },
+        },
+        { auth: `Bearer ${NONCE}` },
+      )
+      expect(oracleCall.status).toBe(200)
+      expect(oracleUrl).toContain("/responses")
+      expect(oracleCapture.body?.model).toBe("gpt-6.1-sol")
+      expect(oracleCapture.body?.reasoning).toEqual({ effort: "high" })
+      expect(oracleCapture.body?.instructions).toContain("running on GPT-6.1 Sol")
+    } finally {
+      state.models = saved
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
+  test("balanced2 Oracle-only: grok-4.7 at the inherited medium, named Grok 4.7 in prose", async () => {
+    const NONCE = "e".repeat(64)
+    const launch = registerLaunch({
+      profileId: "balanced2",
+      nonce: NONCE,
+      secret: "balanced2-oracle-secret",
+      allowedGroups: new Set(["peers", "search"]),
+      allowedPersonas: new Set(["oracle"]),
+    })
+    const saved = state.models
+    try {
+      state.models = {
+        object: "list",
+        data: [{
+          id: "grok-4.7",
+          name: "grok-4.7",
+          object: "model",
+          vendor: "xai",
+          version: "1",
+          preview: false,
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: {
+            family: "grok-4.7",
+            object: "model_capabilities",
+            tokenizer: "o200k_base",
+            type: "chat",
+            limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 },
+            supports: { reasoning_effort: ["low", "medium", "high", "xhigh"] },
+          },
+        }],
+      } as never
+
+      const { json: listJson } = await rpc(
+        { jsonrpc: "2.0", id: 42, method: "tools/list" },
+        { auth: `Bearer ${NONCE}` },
+      )
+      const tools = (listJson.result as { tools: Array<{ name: string; description?: string }> }).tools
+      expect(tools.map((t) => t.name)).toContain("oracle")
+      expect(tools.map((t) => t.name)).not.toContain("astra")
+      const oracleDesc = tools.find((t) => t.name === "oracle")?.description ?? ""
+      expect(oracleDesc).toContain("Grok 4.7 (200K context, medium effort)")
+      expect(oracleDesc).not.toContain("Grok 4.6")
+
+      let oracleUrl = ""
+      const oracleCapture: { body?: { model?: string; reasoning?: { effort?: string }; instructions?: string } } = {}
+      globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+        oracleUrl = input.toString()
+        if (init?.body) {
+          oracleCapture.body = JSON.parse(init.body.toString()) as typeof oracleCapture.body
+        }
+        return Response.json({
+          id: "resp-oracle",
+          output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Approach B." }] }],
+        })
+      }) as unknown as typeof fetch
+
+      const oracleCall = await rpc(
+        {
+          jsonrpc: "2.0",
+          id: 43,
+          method: "tools/call",
+          params: { name: "oracle", arguments: { query: "A or B?", context: "Evidence E." } },
+        },
+        { auth: `Bearer ${NONCE}` },
+      )
+      expect(oracleCall.status).toBe(200)
+      expect(oracleUrl).toContain("/responses")
+      expect(oracleCapture.body?.model).toBe("grok-4.7")
+      expect(oracleCapture.body?.reasoning).toEqual({ effort: "medium" })
+      expect(oracleCapture.body?.instructions).toContain("running on Grok 4.7")
+    } finally {
+      state.models = saved
+      unregisterLaunch(launch.launchId)
     }
   })
 })

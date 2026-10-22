@@ -4,6 +4,13 @@ import path from "node:path"
 import type { LaunchProfileId } from "./launch-profile"
 import { MAX_PROFILE_MODELS } from "./max-profile-contract"
 import { withOneMSuffix } from "./one-m-context"
+import {
+  balancedContractFor,
+  cheapestContractFor,
+  displayModelName,
+  isBalancedFamily,
+  isCheapestFamily,
+} from "./profile-family"
 import { state } from "./state"
 
 export interface ModelPickerOption {
@@ -115,60 +122,64 @@ const CHEAP_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
   },
 ])
 
-const CHEAPEST_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
-  // Cheapest roster is Luna (lead/GP/reviewer) + Sol (Advisor/Oracle) —
-  // rows are Sol and Luna only, ALL bare 200K (`neverOneM`). There is
-  // deliberately no decorated `gpt-6-luna[1m]` opt-in row: these launches
-  // seed CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (see server-setup), which gates the
-  // client's `[1m]` unlock entirely — a row labelled "(1M)" that still
-  // budgets 200K would be a lie. Verified against Claude Code 2.1.288: with
-  // the flag, the bare lead reports contextWindow 200000 while every
-  // `behavesAs` target in the client's catalog is native-1M, so the flag is
-  // the only lever that delivers the 200K default. Luna at a real 1M stays
-  // available via `-m fast`.
-  // The upstream `[1m]` bracket (when present on other profiles' rows) is
-  // stripped by `resolveModel` at request time; it exists solely to unlock
-  // Claude Code's 1M local accounting when a user deliberately selects the
-  // opt-in row — which cheapest no longer offers.
-  {
-    id: "gpt-5.6-sol",
-    label: "GPT-5.6 Sol",
-    behavesAs: "claude-opus-5.5",
-    neverOneM: true,
-  },
-  {
-    id: "gpt-6-luna",
-    label: "GPT-6 Luna",
-    behavesAs: "claude-opus-5.5",
-    neverOneM: true,
-  },
-])
+/**
+ * Shared builder for the two cheapest-family and two balanced-family rosters.
+ * Both families pin every row to the 200K default window (`neverOneM`): those
+ * launches seed CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (see server-setup), which
+ * gates the client's `[1m]` unlock entirely, so a row labelled "(1M)" that
+ * still budgets 200K would be a lie. Luna at a real 1M stays available via
+ * `-m fast` / `-m cheap1m`. The upstream `[1m]` bracket (when present on other
+ * profiles' rows) is stripped by `resolveModel` at request time.
+ */
+function pinnedRows(
+  sol: string,
+  oracle?: string,
+): ReadonlyArray<DeclaredPickerModel> {
+  const rows: Array<DeclaredPickerModel> = [
+    {
+      id: sol,
+      label: displayModelName(sol),
+      behavesAs: "claude-opus-5.5",
+      neverOneM: true,
+    },
+    {
+      id: "gpt-6-luna",
+      label: "GPT-6 Luna",
+      behavesAs: "claude-opus-5.5",
+      neverOneM: true,
+    },
+  ]
+  if (oracle !== undefined) {
+    rows.push({
+      id: oracle,
+      label: displayModelName(oracle),
+      behavesAs: "claude-sonnet-5",
+      neverOneM: true,
+    })
+  }
+  return Object.freeze(rows)
+}
 
-const BALANCED_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
-  // Balanced pins every row to the 200K default window (`neverOneM`) with Sol
-  // leading: rows are Sol (lead/reviewer), Luna (Explore/General-Purpose), and
-  // Grok 4.6 (Oracle). There is deliberately no decorated opt-in row: these
-  // launches seed CLAUDE_CODE_DISABLE_1M_CONTEXT=1 (see server-setup), which
-  // gates the client's `[1m]` unlock entirely.
-  {
-    id: "gpt-5.6-sol",
-    label: "GPT-5.6 Sol",
-    behavesAs: "claude-opus-5.5",
-    neverOneM: true,
-  },
-  {
-    id: "gpt-6-luna",
-    label: "GPT-6 Luna",
-    behavesAs: "claude-opus-5.5",
-    neverOneM: true,
-  },
-  {
-    id: "grok-4.6",
-    label: "Grok 4.6",
-    behavesAs: "claude-sonnet-5",
-    neverOneM: true,
-  },
-])
+// Cheapest roster is Luna (lead/GP/reviewer) + Sol (Advisor/Oracle): rows are
+// Sol and Luna only. Each sibling's Sol row follows its own contract, so
+// `cheapest2` shows GPT-6.1 Sol without a second literal list.
+const CHEAPEST_PICKER_MODELS = pinnedRows(
+  cheapestContractFor("cheapest").advisorModel,
+)
+const CHEAPEST2_PICKER_MODELS = pinnedRows(
+  cheapestContractFor("cheapest2").advisorModel,
+)
+
+// Balanced roster adds the Oracle row. `balanced2` differs only in the Sol
+// lead/reviewer id and the Grok Oracle id, both read from its contract.
+const BALANCED_PICKER_MODELS = pinnedRows(
+  balancedContractFor("balanced").models.lead,
+  balancedContractFor("balanced").oracleModel,
+)
+const BALANCED2_PICKER_MODELS = pinnedRows(
+  balancedContractFor("balanced2").models.lead,
+  balancedContractFor("balanced2").oracleModel,
+)
 
 /**
  * Return the ordered, profile-specific `/model` rows supported by the live
@@ -197,10 +208,14 @@ export function selectableModelsInCatalog(
         ? CHEAP_PICKER_MODELS
         : profile === "cheap1m"
           ? CHEAP1M_PICKER_MODELS
-          : profile === "cheapest"
-            ? CHEAPEST_PICKER_MODELS
-            : profile === "balanced"
-              ? BALANCED_PICKER_MODELS
+          : isCheapestFamily(profile)
+            ? profile === "cheapest2"
+              ? CHEAPEST2_PICKER_MODELS
+              : CHEAPEST_PICKER_MODELS
+            : isBalancedFamily(profile)
+              ? profile === "balanced2"
+                ? BALANCED2_PICKER_MODELS
+                : BALANCED_PICKER_MODELS
               : STANDARD_PICKER_MODELS
   return declared
     .filter((entry) => present.has(entry.id))
@@ -268,8 +283,8 @@ function routerWinsPicker(profile: LaunchProfileId): boolean {
   return profile === "fast"
     || profile === "cheap"
     || profile === "cheap1m"
-    || profile === "cheapest"
-    || profile === "balanced"
+    || isCheapestFamily(profile)
+    || isBalancedFamily(profile)
 }
 
 function modelIdsFromExistingPicker(value: unknown): string[] {

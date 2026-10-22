@@ -15,8 +15,9 @@
  *   - static context pack first (user prompt + AGENTS.md/CLAUDE.md + repo
  *     structure + search snippets), all capped for cache-friendliness EXCEPT
  *     the user prompt, which is passed through in full.
- *   - rewriter is `gpt-5.6-sol` bare 200K at medium effort (the existing
- *     cheapest Advisor identity), via the caller's `inferSol`.
+ *   - rewriter is the family's Advisor-tier Sol (`gpt-5.6-sol` on `cheapest`,
+ *     `gpt-6.1-sol` on `cheapest2`) bare 200K at medium effort, via the
+ *     caller's `inferSol`.
  *   - the contract leads with grounding + constraints (small models' documented
  *     weak spot) and explicitly avoids prescribing step-by-step procedure or
  *     CoT, which measurably degrade instruction-following; the ordered plan is
@@ -31,6 +32,10 @@
  *     `{ brief: null, timedOut: true }` and is TERMINAL for the prompt.
  */
 
+import { isCheapestFamily } from "./profile-family"
+
+/** Base-family rewriter identity. `cheapest2` rewrites with `gpt-6.1-sol`;
+ *  callers resolve the family model through `cheapestRewriteModelFor`. */
 export const CHEAPEST_REWRITE_MODEL = "gpt-5.6-sol" as const
 export const CHEAPEST_REWRITE_EFFORT = "medium" as const
 
@@ -58,7 +63,7 @@ export const DEEP_GROUNDING_FLAG = "needs_deep_grounding=true" as const
 export const NEED_MORE_PREFIX = "NEED_MORE:" as const
 
 export interface CheapestRewriteEligibility {
-  /** Launch profile id (only `"cheapest"` is eligible). */
+  /** Launch profile id (only the cheapest family is eligible). */
   profile?: string
   /** Caller-computed `isNonTrivialPrompt(prompt)` verdict (regex, zero cost). */
   promptIsNonTrivial: boolean
@@ -76,7 +81,7 @@ export function isCheapestRewriteDisabledEnv(env: NodeJS.ProcessEnv = process.en
 export function isCheapestRewriteEligible(input: CheapestRewriteEligibility): boolean {
   if (!input.steerEnabled) return false
   if (input.rewriteDisabled) return false
-  if (input.profile !== "cheapest") return false
+  if (!isCheapestFamily(input.profile)) return false
   return input.promptIsNonTrivial
 }
 

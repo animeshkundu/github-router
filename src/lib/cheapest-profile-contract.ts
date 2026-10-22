@@ -103,6 +103,15 @@ export const CHEAPEST_PROFILE_ORACLE_MODEL = CHEAPEST_PROFILE_MODELS.oracle
 export const CHEAPEST_PROFILE_ORACLE_EFFORT = "high" as const
 
 /**
+ * Lead reasoning effort for `-m cheapest`. The launcher seeds it as
+ * `CLAUDE_CODE_EFFORT_LEVEL` (the client stamps it on lead requests instead of
+ * its own `high` default), the request preprocessor applies it to bare-Luna
+ * lead traffic that carries no explicit effort, and the Pi runtime writes the
+ * same level into its `settings.json`.
+ */
+export const CHEAPEST_PROFILE_LEAD_EFFORT = "max" as const
+
+/**
  * Synthesized MCP consultant tools for `-m cheapest`: Oracle only, like
  * `-m cheap` (never `astra`).
  */
@@ -123,3 +132,35 @@ export const CHEAPEST_PROFILE_DELEGATION_GRAPH = Object.freeze({
   CheapestProfileNativeAgentName,
   ReadonlyArray<CheapestProfileNativeAgentName>
 >)
+
+/**
+ * Every fixed identity for `-m cheapest` in one frozen aggregate.
+ *
+ * `cheapest2-profile-contract.ts` derives from this by spread, overriding only
+ * the Sol identities and the Advisor effort. Keeping the aggregate here means a
+ * field added to the family later is inherited by BOTH siblings automatically
+ * instead of being silently absent from the copy nobody remembered to edit.
+ */
+export const CHEAPEST_PROFILE_CONTRACT = Object.freeze({
+  models: CHEAPEST_PROFILE_MODELS,
+  nativeAgentNames: CHEAPEST_PROFILE_NATIVE_AGENT_NAMES,
+  nativeModels: CHEAPEST_PROFILE_NATIVE_MODELS,
+  nativeEfforts: CHEAPEST_PROFILE_NATIVE_EFFORTS,
+  leadContextTokens: CHEAPEST_PROFILE_LEAD_CONTEXT_TOKENS,
+  subagentContextTokens: CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
+  leadEffort: CHEAPEST_PROFILE_LEAD_EFFORT,
+  advisorModel: CHEAPEST_PROFILE_ADVISOR_MODEL,
+  advisorClientModel: CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL,
+  advisorContextTokens: CHEAPEST_PROFILE_ADVISOR_CONTEXT_TOKENS,
+  advisorTranscriptTokensDefault:
+    CHEAPEST_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_DEFAULT,
+  advisorTranscriptTokensMin: CHEAPEST_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_MIN,
+  advisorTranscriptTokensMax: CHEAPEST_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_MAX,
+  advisorEffort: CHEAPEST_PROFILE_ADVISOR_EFFORT,
+  oracleModel: CHEAPEST_PROFILE_ORACLE_MODEL,
+  oracleEffort: CHEAPEST_PROFILE_ORACLE_EFFORT,
+  synthesizedPeers: CHEAPEST_PROFILE_SYNTHESIZED_PEERS,
+  delegationGraph: CHEAPEST_PROFILE_DELEGATION_GRAPH,
+})
+
+export type CheapestProfileContract = typeof CHEAPEST_PROFILE_CONTRACT

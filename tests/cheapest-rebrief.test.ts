@@ -38,11 +38,16 @@ describe("fileRebriefBindingStore", () => {
 })
 
 describe("rebrief profile gate", () => {
-  test("cheapest-only (case-insensitive, trimmed)", () => {
+  test("cheapest family only (case-insensitive, trimmed)", () => {
     expect(isRebriefProfileEligible("cheapest")).toBe(true)
     expect(isRebriefProfileEligible("  Cheapest ")).toBe(true)
+    // The derived alias rides the same family gate.
+    expect(isRebriefProfileEligible("cheapest2")).toBe(true)
+    expect(isRebriefProfileEligible(" Cheapest2 ")).toBe(true)
     expect(isRebriefProfileEligible("standard")).toBe(false)
     expect(isRebriefProfileEligible("cheap")).toBe(false)
+    expect(isRebriefProfileEligible("balanced")).toBe(false)
+    expect(isRebriefProfileEligible("balanced2")).toBe(false)
     expect(isRebriefProfileEligible(undefined)).toBe(false)
     expect(isRebriefProfileEligible("")).toBe(false)
   })
@@ -120,28 +125,32 @@ describe("gh-rebrief skill", () => {
     expect(bluebird).toContain("Bluebird")
   })
 
-  test("cheapest launch materializes rebrief without --swe", () => {
-    const skills = injectedSkillsForLaunch({
-      profileId: "cheapest",
-      workerSkillsActive: false,
-      firstMateEnabled: false,
-    })
-    expect(skills.map((s) => s.name)).toEqual(["gh-rebrief"])
+  test("cheapest family materializes rebrief without --swe", () => {
+    for (const profileId of ["cheapest", "cheapest2"] as const) {
+      const skills = injectedSkillsForLaunch({
+        profileId,
+        workerSkillsActive: false,
+        firstMateEnabled: false,
+      })
+      expect(skills.map((s) => s.name)).toEqual(["gh-rebrief"])
+    }
   })
 
-  test("cheapest launch with --swe keeps pipeline + rebrief", () => {
-    const skills = injectedSkillsForLaunch({
-      profileId: "cheapest",
-      workerSkillsActive: false,
-      firstMateEnabled: false,
-      sweEnabled: true,
-    })
-    expect(skills.map((s) => s.name)).toContain("gh-rebrief")
-    expect(skills.map((s) => s.name)).toContain("gh-gather-context")
+  test("cheapest family with --swe keeps pipeline + rebrief", () => {
+    for (const profileId of ["cheapest", "cheapest2"] as const) {
+      const skills = injectedSkillsForLaunch({
+        profileId,
+        workerSkillsActive: false,
+        firstMateEnabled: false,
+        sweEnabled: true,
+      })
+      expect(skills.map((s) => s.name)).toContain("gh-rebrief")
+      expect(skills.map((s) => s.name)).toContain("gh-gather-context")
+    }
   })
 
   test("other pinned profiles without --swe still get nothing", () => {
-    for (const profileId of ["fast", "cheap", "cheap1m", "balanced"] as const) {
+    for (const profileId of ["fast", "cheap", "cheap1m", "balanced", "balanced2"] as const) {
       expect(injectedSkillsForLaunch({
         profileId,
         workerSkillsActive: false,

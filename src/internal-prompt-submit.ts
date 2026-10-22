@@ -36,9 +36,9 @@ import path from "node:path"
 
 import {
   CHEAPEST_REWRITE_EFFORT,
-  CHEAPEST_REWRITE_MODEL,
   isCheapestRewriteDisabledEnv,
 } from "./lib/cheapest-prompt-rewrite"
+import { cheapestRewriteModelFor } from "./lib/profile-family"
 import { parseBoolEnv } from "./lib/exec"
 // The verify-command ladder moved to `lib/static-context-pack` so the
 // server-side `prompt_brief` tool shares one implementation with this hook.
@@ -134,9 +134,10 @@ export const internalPromptSubmit = defineCommand({
       let decision: PromptSubmitDecision
       if (runtime) {
         const workspace = workspaceFromStdin(stdin)
-        // Cheapest-only Sol rewrite identity: the launcher exports
-        // GH_ROUTER_PROFILE; only the literal "cheapest" alias enables the
-        // rewrite branch (checked again inside decidePromptSubmitV2).
+        // Cheapest-family Sol rewrite identity: the launcher exports
+        // GH_ROUTER_PROFILE; either family alias enables the rewrite branch
+        // (checked again inside decidePromptSubmitV2), and each sibling
+        // rewrites with its own advisor-tier Sol.
         const profile = (process.env.GH_ROUTER_PROFILE ?? "").trim().toLowerCase()
         const rewriteDisabled = isCheapestRewriteDisabledEnv()
         decision = await decidePromptSubmitV2({
@@ -161,7 +162,7 @@ export const internalPromptSubmit = defineCommand({
             inferSol: (system, user, signal) =>
               callInference({
                 serverUrl: runtime.serverUrl,
-                model: CHEAPEST_REWRITE_MODEL,
+                model: cheapestRewriteModelFor(profile),
                 instructions: system,
                 input: user,
                 effort: CHEAPEST_REWRITE_EFFORT,

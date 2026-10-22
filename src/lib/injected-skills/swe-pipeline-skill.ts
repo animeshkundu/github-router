@@ -1,10 +1,11 @@
+import { isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
 import type { PlanSkillProfile } from "./plan-skill"
 
 export function buildSwePipelineSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
   // Profiles without a Plan role (cheapest, balanced): the lead plans
   // directly, so stage wording names lead planning, not Plan dispatches.
-  const leadPlansDirectly = profile === "cheapest" || profile === "balanced"
+  const leadPlansDirectly = isCheapestFamily(profile) || isBalancedFamily(profile)
   const roster = leadPlansDirectly
     ? "Explore, General-Purpose, reviewer"
     : "Explore, Plan, General-Purpose, reviewer, implementer where provided"

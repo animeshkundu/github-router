@@ -55,9 +55,11 @@ function setCatalog(entries: Record<string, number>): void {
 
 const WINDOWS: Record<string, number> = {
   "gpt-5.6-sol": 1_050_000,
+  "gpt-6.1-sol": 1_050_000,
   "gpt-6-luna": 1_050_000,
   "gemini-3.8-flash": 1_000_000,
   "grok-4.6": 500_000,
+  "grok-4.7": 500_000,
   "claude-opus-5.5": 1_000_000,
 }
 
@@ -190,10 +192,48 @@ describe("selectableModelsInCatalog", () => {
     // unlock entirely, so a "(1M)" label would lie about the actual budget.
     // (Bare ids alone do NOT deliver 200K — every row's `behavesAs` target is
     // native-1M in the client catalog — which is why the flag exists.)
-    for (const profile of ["cheap", "cheapest", "balanced"] as const) {
+    const bareProfiles = [
+      "cheap",
+      "cheapest",
+      "cheapest2",
+      "balanced",
+      "balanced2",
+    ] as const
+    for (const profile of bareProfiles) {
       expect(ids(profile).some((id) => /\[1m\]/i.test(id))).toBe(false)
     }
     expect(ids("balanced")).toEqual(["gpt-5.6-sol", "gpt-6-luna", "grok-4.6"])
+  })
+
+  test("the -2 rows are the base rows with only the declared identities swapped", () => {
+    setCatalog(WINDOWS)
+    expect(ids("cheapest2")).toEqual(["gpt-6.1-sol", "gpt-6-luna"])
+    expect(ids("balanced2")).toEqual(["gpt-6.1-sol", "gpt-6-luna", "grok-4.7"])
+    // Labels follow the id, never a literal list.
+    expect(selectableModelsInCatalog("cheapest2").map((row) => row.label)).toEqual([
+      "GPT-6.1 Sol",
+      "GPT-6 Luna",
+    ])
+    expect(selectableModelsInCatalog("balanced2").map((row) => row.label)).toEqual([
+      "GPT-6.1 Sol",
+      "GPT-6 Luna",
+      "Grok 4.7",
+    ])
+    // The base rows are unmoved by the presence of the 6.1 entries.
+    expect(ids("cheapest")).toEqual(["gpt-5.6-sol", "gpt-6-luna"])
+    expect(ids("balanced")).toEqual(["gpt-5.6-sol", "gpt-6-luna", "grok-4.6"])
+  })
+
+  test("-2 rows are catalog-gated like every other pinned row", () => {
+    setCatalog({
+      "gpt-5.6-sol": 1_050_000,
+      "gpt-6-luna": 1_050_000,
+      "grok-4.6": 500_000,
+    })
+    // Neither the 6.1 Sol tier nor Grok 4.7 is served: the affected rows are
+    // dropped, not substituted with the base identities.
+    expect(ids("cheapest2")).toEqual(["gpt-6-luna"])
+    expect(ids("balanced2")).toEqual(["gpt-6-luna"])
   })
 
   test("cheapest never decorates Luna regardless of the catalog gate", () => {
@@ -231,7 +271,9 @@ describe("selectableModelsInCatalog", () => {
       const [profile, expected] of [
         ["cheap", ["gpt-5.6-sol", "gpt-6-luna", "gemini-3.8-flash", "grok-4.6"]],
         ["cheapest", ["gpt-5.6-sol", "gpt-6-luna"]],
+        ["cheapest2", ["gpt-6.1-sol", "gpt-6-luna"]],
         ["balanced", ["gpt-5.6-sol", "gpt-6-luna", "grok-4.6"]],
+        ["balanced2", ["gpt-6.1-sol", "gpt-6-luna", "grok-4.7"]],
       ] as const
     ) {
       const result = await injectModelPickerSettingsFile(settingsPath, profile)
