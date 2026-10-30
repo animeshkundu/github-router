@@ -1110,6 +1110,195 @@ describe("list_agents", () => {
     use([() => jsonResponse({ value: [], totalCount: 0 })])
     expect(textOf(await call("list_agents"))).toContain("No agents matched.")
   })
+
+  test("an empty page still reports the service's reason", async () => {
+    // Measured live: a scope whose marketplace does not exist answers 200 with
+    // an empty page and the explanation in `errors`. Rendering only "No agents
+    // matched." made "nothing exists" and "it looked somewhere else"
+    // indistinguishable, and the second one is actionable.
+    use([() => jsonResponse({
+      value: [],
+      totalCount: 0,
+      errors: ["No organization plugin marketplace found. Searched: https://dev.azure.com/contoso/AzureDevOps/_git/ado-private"],
+    })])
+    const text = textOf(await call("list_agents"))
+    expect(text).toContain("No agents matched.")
+    expect(text).toContain("reason: No organization plugin marketplace found. Searched: https://dev.azure.com/contoso/AzureDevOps/_git/ado-private")
+  })
+
+  test("errors alongside rows are labelled as qualifying them", async () => {
+    use([() => jsonResponse({ ...AGENTS, errors: ["One marketplace could not be read."] })])
+    const text = textOf(await call("list_agents"))
+    expect(text).toContain("echo [Repo]")
+    expect(text).toContain("partial results: One marketplace could not be read.")
+    expect(text).not.toContain("reason:")
+  })
+})
+
+/**
+ * The measured catalog scope behavior, 2026-10-30, prod.
+ *
+ * The two scopes do not want the same context. `Repo` rejects the query with
+ * "Azure DevOps context is required" until the full organization/project/
+ * repository triple rides on it, and a partial set earns a component-specific
+ * 400 ("ProjectName ... is required", "RepositoryName ... is required",
+ * "Project is required when Repository is specified"). `Organization` answers
+ * identically with the organization alone or with the full triple, so the tool
+ * asks for one name there. Company, Spec and untyped calls read no context at
+ * all, so a `Company` call on a machine with no Azure DevOps checkout still
+ * works.
+ */
+describe("catalog scopes and the repository context", () => {
+  test("a Repo scope sends the checkout's repository and says it inferred it", async () => {
+    const h = use([() => jsonResponse({ value: [] })])
+    const text = textOf(await call(
+      "list_plugins",
+      { type: "Repo", workspace: repoDir },
+      { workspaceSource: "argument" },
+    ))
+    const url = new URL(h.calls[0]!.url)
+    expect(url.searchParams.get("type")).toBe("Repo")
+    expect(url.searchParams.get("organization")).toBe("contoso")
+    expect(url.searchParams.get("project")).toBe("platform")
+    expect(url.searchParams.get("repository")).toBe("web")
+    expect(text).toContain("[repository: contoso/platform/web (inferred from the workspace you passed)]")
+  })
+
+  test("an Organization scope attributes the lookup to the session", async () => {
+    const h = use([() => jsonResponse({ value: [] })])
+    const text = textOf(await call(
+      "list_agents",
+      { type: "Organization", workspace: repoDir },
+      { workspaceSource: "session" },
+    ))
+    expect(new URL(h.calls[0]!.url).searchParams.get("repository")).toBe("web")
+    expect(text).toContain("[repository: contoso/platform/web (inferred from this session's workspace)]")
+  })
+
+  test("a Repo scope with no checkout refuses before any request", async () => {
+    const h = use()
+    await expect(call("list_plugins", { type: "Repo" }, { workspaceSource: "absent" }))
+      .rejects.toThrow(/No repository: pass `organization`, `project` and `repository`, or `workspace`/)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  test("an untyped or Company call needs no repository and never probes a checkout", async () => {
+    // `plainDir` is not a git repository at all. If the handler inferred a
+    // context eagerly, naming a plain workspace on a Company call would turn a
+    // perfectly good question into a git failure — the `list_jobs` lesson.
+    const h = use([() => jsonResponse({ value: [] }), () => jsonResponse({ value: [] })])
+    const company = textOf(await call(
+      "list_plugins",
+      { type: "Company", workspace: plainDir },
+      { workspaceSource: "session" },
+    ))
+    const untyped = textOf(await call("list_plugins", {}, { workspaceSource: "absent" }))
+    for (const request of h.calls) {
+      expect(new URL(request.url).searchParams.has("organization")).toBe(false)
+    }
+    expect(company).not.toContain("[repository:")
+    expect(untyped).not.toContain("[repository:")
+  })
+
+  test("an explicit triple is forwarded without a provenance line", async () => {
+    const h = use([() => jsonResponse({ value: [] })])
+    const text = textOf(await call("list_plugins", { type: "Repo", ...REPOSITORY }))
+    const url = new URL(h.calls[0]!.url)
+    expect(url.searchParams.get("organization")).toBe("contoso")
+    expect(url.searchParams.get("project")).toBe("platform")
+    expect(url.searchParams.get("repository")).toBe("web")
+    expect(text).not.toContain("[repository:")
+  })
+
+  test("a partial triple is refused rather than guessed", async () => {
+    const h = use()
+    await expect(call("list_plugins", { type: "Repo", organization: "contoso" }))
+      .rejects.toThrow(/so it reads all of `organization`, `project` and `repository`/)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  test("an Organization scope needs only the organization", async () => {
+    // Measured: org-only, org+project, org+repository and the full triple all
+    // answer an Organization query identically, so demanding the other two
+    // names would make a caller with no checkout invent what is never read.
+    const h = use([() => jsonResponse({ value: [] })])
+    textOf(await call("list_plugins", { type: "Organization", organization: "contoso" }, { workspaceSource: "absent" }))
+    const url = new URL(h.calls[0]!.url)
+    expect(url.searchParams.get("type")).toBe("Organization")
+    expect(url.searchParams.get("organization")).toBe("contoso")
+    expect(url.searchParams.has("project")).toBe(false)
+    expect(url.searchParams.has("repository")).toBe(false)
+  })
+
+  test("an Organization scope forwards the names it was given alongside the organization", async () => {
+    const h = use([() => jsonResponse({ value: [] })])
+    const text = textOf(await call("list_agents", { type: "Organization", ...REPOSITORY }))
+    const url = new URL(h.calls[0]!.url)
+    expect(url.searchParams.get("organization")).toBe("contoso")
+    expect(url.searchParams.get("project")).toBe("platform")
+    expect(url.searchParams.get("repository")).toBe("web")
+    expect(text).not.toContain("[repository:")
+  })
+
+  test("an Organization scope without an organization refuses rather than guessing one", async () => {
+    const h = use()
+    await expect(call("list_plugins", { type: "Organization", project: "platform" }, { workspaceSource: "absent" }))
+      .rejects.toThrow(/needs `organization`/)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  test("an Organization scope with no context at all names the one name it needs", async () => {
+    const h = use()
+    await expect(call("list_agents", { type: "Organization" }, { workspaceSource: "absent" }))
+      .rejects.toThrow(/No repository: pass `organization`, or `workspace`/)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  test("a Company call ignores context it cannot read instead of refusing one", async () => {
+    // The service ignores the triple on a Company query (measured: same 233
+    // plugins as an untyped call), so forwarding it would claim a filter that
+    // does nothing. Dropping it is not an error either: the caller supplied
+    // context the scope does not consume, and the answer is complete without it.
+    const h = use([() => jsonResponse({ value: [] })])
+    textOf(await call("list_plugins", { type: "Company", ...REPOSITORY }, { workspaceSource: "absent" }))
+    for (const request of h.calls) {
+      expect(new URL(request.url).searchParams.has("organization")).toBe(false)
+    }
+  })
+
+  test("type is canonicalized, and an unknown scope is refused locally", async () => {
+    const h = use([() => jsonResponse({ value: [] })])
+    await call("list_plugins", { type: "company" })
+    expect(new URL(h.calls[0]!.url).searchParams.get("type")).toBe("Company")
+
+    const before = h.calls.length
+    await expect(call("list_agents", { type: "Nonsense" }))
+      .rejects.toThrow(/`type` must be one of Repo, Organization, Company, Spec/)
+    // Measured: the service answers an unknown scope with a generic ASP.NET
+    // validation 400 that names nothing actionable, so the tool has to say it.
+    expect(h.calls).toHaveLength(before)
+  })
+
+  test("a name search carries the context onto every page it reads", async () => {
+    const first = {
+      totalCount: 102,
+      value: Array.from({ length: 100 }, (_, index) => ({ name: `plugin-${index}` })),
+    }
+    const second = { totalCount: 102, value: [{ name: "repo-tool" }] }
+    const h = use([() => jsonResponse(first), () => jsonResponse(second)])
+    textOf(await call(
+      "list_plugins",
+      { type: "Repo", name_contains: "repo", workspace: repoDir },
+      { workspaceSource: "argument" },
+    ))
+    expect(h.calls).toHaveLength(2)
+    for (const request of h.calls) {
+      const url = new URL(request.url)
+      expect(url.searchParams.get("organization")).toBe("contoso")
+      expect(url.searchParams.get("project")).toBe("platform")
+      expect(url.searchParams.get("repository")).toBe("web")
+    }
+  })
 })
 
 // --- Token handling --------------------------------------------------------

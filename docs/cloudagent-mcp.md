@@ -86,6 +86,23 @@ the commit that probed them:
   changed" is derived from the trace (`edit`/`create`/`write` call arguments),
   never from that field.
 
+### The write path, measured (2026-10-30)
+
+One approved probe job: created, then cancelled as soon as it was seen running.
+
+- `POST /v2/jobs/validate` succeeds but returns a **projected bare UUID**, not the
+  id `create_job` returns (`<org>-<uuid>`), and that projected id 404s on
+  `GET /jobs/{id}`. A second, independent reason `validate_job` is not exposed:
+  its answer is not a handle to anything.
+- **Dispatch happens about a second after create.** The probe left `Queued` for
+  `InProgress` in ~0.9 s, so a "cancel while it is still queued" plan has no
+  window to aim at. `wait_for_job` reporting "still `Queued` after N s" is the
+  stuck case, not the normal one.
+- **Cancel to terminal took about 2 minutes 14 seconds**, with zero agent
+  messages in the trace. `cancel_job` stops the run, not the compute already
+  allocated: it is not a refund and not an instant stop, so a caller should not
+  poll in a tight loop after it.
+
 ## Tool surface
 
 | Tool | Capability | Contract |
@@ -97,7 +114,7 @@ the commit that probed them:
 | `wait_for_job` | `cloudagent` | Short bounded wait: "did it start?" |
 | `get_job_logs` | `cloudagent` | `digest` (default) or `full` |
 | `list_plugins` | `cloudagent` | The real capability selector; `name_contains` searches the whole catalog |
-| `list_agents` | `cloudagent` | Today it returns one agent; still the only source of `customAgent.inputs` |
+| `list_agents` | `cloudagent` | The only source of `customAgent.inputs`; `Repo` scope lists a repository's own agents |
 
 `create_job` arguments: `prompt` (or `agent`), the repository triple
 (`organization`/`project`/`repository`) or a `workspace` checkout, `branch`,
@@ -118,7 +135,7 @@ description names that default and what overrides it:
 
 | Argument | Default |
 |---|---|
-| repository triple / `workspace` | read from the session workspace's git remote; `list_jobs` drops the filter when neither is available |
+| repository triple / `workspace` | read from the session workspace's git remote; `list_jobs` drops the filter when neither is available, and the catalog tools only use it for their `Repo`/`Organization` scopes |
 | `branch` | the repository's default branch |
 | `agent` | the service's standard agent |
 | `plugins` | none beyond what the service enables by default |
@@ -162,6 +179,50 @@ a miss is trustworthy:
 With `name_contains`, `top` and `skip` window the **matches**, not the catalog.
 Paging stops at 1000 entries, and the header says so if it ever does, so a
 truncated search is never read as an empty one.
+
+### Catalog scopes need a repository, and the tool supplies one
+
+`list_plugins` and `list_agents` take the same `Repo`/`Organization`/`Company`/`Spec`
+vocabulary `create_job` does, and `Repo`/`Organization` need an Azure DevOps
+context. The two scopes do **not** need the same one. Measured live
+(2026-10-30, prod):
+
+- `type=Repo` needs the full `organization`/`project`/`repository` triple. Without
+  one the service answers **HTTP 400** ("Azure DevOps context is required for
+  'Repo' agents/plugins"), and a partial set earns a component-specific 400:
+  organization alone says "ProjectName in Azure DevOps context is required",
+  organization+project says "RepositoryName in Azure DevOps context is required",
+  and organization+repository says "Project is required when Repository is
+  specified."
+- `type=Organization` needs **only `organization`**. Org-only, org+project,
+  org+repository and the full triple all answer identically, so requiring three
+  names here was asking for two the service never reads.
+- `type=Company`, `type=Spec` and an untyped call read no context. Measured:
+  `Company` plus the triple answers exactly as `Company` alone does, so the
+  context is harmless there and is neither inferred nor forwarded.
+
+So each scope is held only to what it reads: `Repo` resolves the triple the way
+`create_job` does (the caller's three names, else the session workspace's git
+remote), `Organization` resolves the organization the same way, and an explicit
+`organization` is enough there. `Company`, `Spec` and untyped calls never probe a
+checkout, so a `list_plugins` on a machine that is not in an Azure DevOps
+checkout keeps working. This is the `list_jobs` lesson: inferring eagerly turned
+unrelated calls into errors for a filter they did not need. A `Repo` or
+`Organization` scope with no checkout and no explicit names fails locally, with
+both ways forward, before any request is sent. The inferred case carries the same
+provenance line `create_job` uses.
+
+**What those scopes read** (measured): `Repo` reads the repository's marketplace
+manifest, `.github/plugin/marketplace.json` or `.claude-plugin/marketplace.json`,
+and `Organization` looks for the `ado-private` marketplace in the organization's
+`AzureDevOps` project. A repository without a manifest answers **200 with an empty
+page and the search path in `errors`**, which the renderer now prints as
+`reason:`. Before, the empty page rendered as "No plugins matched." and the
+explanation was dropped, so "nothing exists" and "it looked somewhere else" were
+indistinguishable. `Repo` is also where a repository's own custom agents appear:
+measured 74 on one repository, against the single `echo` agent of the company
+catalog, which makes `list_agents` with a `Repo` scope the place to look for the
+agent that needs `agentInputs`.
 
 ### Selectors that are deliberately absent
 

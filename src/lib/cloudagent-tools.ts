@@ -55,6 +55,7 @@ import {
   renderPollHint,
   renderTrace,
   type CloudAgentAgentType,
+  type CloudAgentCatalogPage,
   type CloudAgentCatalogQuery,
   MAX_CATALOG_TOP,
 } from "./cloudagent-client"
@@ -220,9 +221,16 @@ interface ResolvedRepository {
   inferredFrom?: string
 }
 
-function provenanceLine(repository: ResolvedRepository): string | undefined {
+function provenanceLine(repository: {
+  organization: string
+  project?: string
+  repository?: string
+  inferredFrom?: string
+}): string | undefined {
   if (!repository.inferredFrom) return undefined
-  const name = `${repository.organization}/${repository.project}/${repository.repository}`
+  const name = [repository.organization, repository.project, repository.repository]
+    .filter((part) => part !== undefined)
+    .join("/")
   return `[repository: ${name} (inferred from ${repository.inferredFrom})]`
 }
 
@@ -287,13 +295,14 @@ interface WorkspaceRepositoryResolution {
 async function repositoryFromWorkspace(
   args: Record<string, unknown>,
   ctx: McpToolCallContext | undefined,
-  opts: { required: boolean; signal?: AbortSignal },
+  opts: { required: boolean; signal?: AbortSignal; requiredHint?: string },
 ): Promise<WorkspaceRepositoryResolution> {
   const workspace = optionalString(args, "workspace")
+  const hint = opts.requiredHint ?? "`organization`, `project` and `repository`"
   if (!workspace) {
     if (!opts.required) return {}
     throw new CloudAgentError(
-      "No repository: pass `organization`, `project` and `repository`, or `workspace` pointing at a checkout whose git remote is an Azure DevOps repository.",
+      `No repository: pass ${hint}, or \`workspace\` pointing at a checkout whose git remote is an Azure DevOps repository.`,
       { retriable: false },
     )
   }
@@ -397,17 +406,24 @@ async function resolveRepositoryFilter(
 
 const AGENT_TYPES: ReadonlyArray<CloudAgentAgentType> = ["Repo", "Organization", "Company", "Spec"]
 
-function agentTypeArg(args: Record<string, unknown>): CloudAgentAgentType | undefined {
-  const value = optionalString(args, "agentType")
+function agentTypeValue(
+  args: Record<string, unknown>,
+  key: string,
+): CloudAgentAgentType | undefined {
+  const value = optionalString(args, key)
   if (!value) return undefined
   const match = AGENT_TYPES.find((type) => type.toLowerCase() === value.toLowerCase())
   if (!match) {
     throw new CloudAgentError(
-      `\`agentType\` must be one of ${AGENT_TYPES.join(", ")}.`,
+      `\`${key}\` must be one of ${AGENT_TYPES.join(", ")}.`,
       { retriable: false },
     )
   }
   return match
+}
+
+function agentTypeArg(args: Record<string, unknown>): CloudAgentAgentType | undefined {
+  return agentTypeValue(args, "agentType")
 }
 
 function agentInputsArg(args: Record<string, unknown>): Record<string, string | number | boolean> | undefined {
@@ -595,6 +611,44 @@ const FILTER_REPOSITORY_PROPERTIES = {
     type: "string",
     description:
       "Repository name within `project`. Default: the repository read from `workspace`'s git remote. Requires `organization` and `project`.",
+  },
+} as const
+
+/**
+ * The same three names again, as the Azure DevOps CONTEXT a catalog scope reads.
+ *
+ * Measured live (2026-10-30), and the scopes do NOT want the same thing:
+ *
+ *  - `Repo` reads one repository, so it needs all three. Organization alone earns
+ *    "ProjectName in Azure DevOps context is required for Repo agents/plugins",
+ *    organization+project earns "RepositoryName ... is required", and
+ *    organization+repository earns "Project is required when Repository is
+ *    specified."
+ *  - `Organization` reads an organization's own marketplace, so the organization
+ *    alone is enough: org-only, org+project, org+repository and the full triple
+ *    all answer identically. Demanding the other two here would make a caller
+ *    with no checkout invent names the service never reads.
+ *  - Company, Spec and untyped calls read no context at all.
+ *
+ * So the descriptions state per scope which names are required rather than
+ * borrowing create_job's all-or-none job-target wording, which would read as if a
+ * plain `list_plugins` call needed a repository.
+ */
+const CATALOG_REPOSITORY_PROPERTIES = {
+  organization: {
+    type: "string",
+    description:
+      "Azure DevOps organization the Repo and Organization scopes read. Required for both; the other scopes do not read it. Default: read from `workspace`'s git remote, or from the session workspace's checkout.",
+  },
+  project: {
+    type: "string",
+    description:
+      "Azure DevOps project, for the Repo scope. Required there with `organization` and `repository`; the Organization scope and the others do not read it. Default: read from the checkout.",
+  },
+  repository: {
+    type: "string",
+    description:
+      "Repository name inside `project`, for the Repo scope. Required there with `organization` and `project`; the Organization scope and the others do not read it. Default: read from the checkout.",
   },
 } as const
 
@@ -1039,8 +1093,11 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
         type: {
           type: "string",
           description:
-            "Plugin scope to filter on. The known choices are Repo, Organization, Company and Spec, the same vocabulary create_job's `agentType` accepts. Default: every scope.",
+            "Plugin scope to filter on. The known choices are Repo, Organization, Company and Spec, the same vocabulary create_job's `agentType` accepts. Default: every scope. "
+            + "Repo and Organization read a repository's or an organization's own catalog: Repo needs `organization`, `project` and `repository`, Organization needs only `organization`, and by default both are read from the checkout this session is in.",
         },
+        ...CATALOG_REPOSITORY_PROPERTIES,
+        ...WORKSPACE_PROPERTY,
         name_contains: {
           type: "string",
           description:
@@ -1058,12 +1115,19 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
         },
       },
     },
-    async handler(args, signal) {
-      const query = catalogQuery(args)
+    async handler(args, signal, ctx) {
+      const { query, context } = await catalogQuery(args, ctx, signal)
+      // The context is only present when the scopes needed it, and when it was
+      // inferred the answer is about a repository the caller did not name, so
+      // the provenance line leads — same rule as create_job.
+      const provenance = context ? provenanceLine(context) : undefined
+      const withProvenance = (body: string) => (provenance ? `${provenance}\n${body}` : body)
       const needle = optionalString(args, "name_contains")?.toLowerCase()
-      if (!needle) return text(renderPluginPage(await cloudAgentClient().listPlugins(query, signal)))
+      if (!needle) {
+        return text(withProvenance(renderPluginPage(await cloudAgentClient().listPlugins(query, signal))))
+      }
 
-      const scan = await scanPluginCatalog(query.type, signal)
+      const scan = await scanPluginCatalog(query, signal)
       const matches = scan.value.filter((plugin) => plugin.name.toLowerCase().includes(needle))
       const skip = query.skip ?? 0
       const limit = query.top ?? DEFAULT_PLUGIN_MATCH_LIMIT
@@ -1082,7 +1146,11 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
         : `[name_contains "${needle}": ${matches.length} match(es) in ${scanned}${
             window.length < matches.length ? `, showing ${skip + 1}-${skip + window.length}` : ""
           }]`
-      return text([header, renderPluginPage({ value: window })].join("\n"))
+      const page: CloudAgentCatalogPage<CloudAgentPluginInfo> = {
+        value: window,
+        ...(scan.errors ? { errors: scan.errors } : {}),
+      }
+      return text(withProvenance([header, renderPluginPage(page)].join("\n")))
     },
   },
   {
@@ -1099,8 +1167,11 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
         type: {
           type: "string",
           description:
-            "Agent scope to filter on. The known choices are Repo, Organization, Company and Spec, the same vocabulary create_job's `agentType` accepts. Default: every scope.",
+            "Agent scope to filter on. The known choices are Repo, Organization, Company and Spec, the same vocabulary create_job's `agentType` accepts. Default: every scope. "
+            + "Repo lists the agents a repository defines, which is where custom agents that need `agentInputs` usually live; it needs `organization`, `project` and `repository`, or a checkout to read them from. Organization lists an organization's agents and needs only `organization`.",
         },
+        ...CATALOG_REPOSITORY_PROPERTIES,
+        ...WORKSPACE_PROPERTY,
         top: {
           type: "number",
           description: "Page size, 1-100. Default: the service's own page size.",
@@ -1111,9 +1182,11 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
         },
       },
     },
-    async handler(args, signal) {
-      const page = await cloudAgentClient().listAgents(catalogQuery(args), signal)
-      return text(renderAgentPage(page))
+    async handler(args, signal, ctx) {
+      const { query, context } = await catalogQuery(args, ctx, signal)
+      const page = await cloudAgentClient().listAgents(query, signal)
+      const provenance = context ? provenanceLine(context) : undefined
+      return text(provenance ? `${provenance}\n${renderAgentPage(page)}` : renderAgentPage(page))
     },
   },
 ])
@@ -1136,22 +1209,113 @@ function modelConfiguration(args: Record<string, unknown>): CloudAgentJobInput["
 }
 
 /**
- * The paging arguments shared by `list_plugins` and `list_agents`.
+ * The arguments shared by `list_plugins` and `list_agents`.
  *
  * `top` is omitted when the caller did not ask for it, and that is load-bearing:
  * `GET /plugins` returns 50 of 233 by default and rejects `top > 100` with a 400
  * unless `marketplace` is set, so a default page size here would either shrink
  * what the service gives an unprompted call or provoke that 400.
+ *
+ * The Azure DevOps context is resolved separately (`catalogContext`) because
+ * only the Repo and Organization scopes require one.
  */
-function catalogQuery(args: Record<string, unknown>): CloudAgentCatalogQuery {
+async function catalogQuery(
+  args: Record<string, unknown>,
+  ctx: McpToolCallContext | undefined,
+  signal?: AbortSignal,
+): Promise<{ query: CloudAgentCatalogQuery; context?: CatalogContext }> {
+  const type = agentTypeValue(args, "type")
   const top = optionalInt(args, "top", 1, MAX_CATALOG_TOP)
   const skip = optionalInt(args, "skip", 0, Number.MAX_SAFE_INTEGER)
-  const type = optionalString(args, "type")
+  const context = await catalogContext(args, ctx, type, signal)
   return {
-    ...(type ? { type } : {}),
-    ...(top !== undefined ? { top } : {}),
-    ...(skip !== undefined ? { skip } : {}),
+    query: {
+      ...(type ? { type } : {}),
+      ...(context
+        ? {
+            organization: context.organization,
+            ...(context.project ? { project: context.project } : {}),
+            ...(context.repository ? { repository: context.repository } : {}),
+          }
+        : {}),
+      ...(top !== undefined ? { top } : {}),
+      ...(skip !== undefined ? { skip } : {}),
+    },
+    ...(context ? { context } : {}),
   }
+}
+
+/**
+ * The Azure DevOps context a catalog call reads: the organization always, and
+ * the project/repository only when the caller supplied them.
+ */
+interface CatalogContext {
+  organization: string
+  project?: string
+  repository?: string
+  inferredFrom?: string
+}
+
+/**
+ * The context a catalog scope reads, from the caller's arguments or a checkout.
+ *
+ * Each scope is held only to what it actually reads (measured live 2026-10-30;
+ * see `CATALOG_REPOSITORY_PROPERTIES`): `Repo` needs the triple, `Organization`
+ * needs the organization alone, and the rest read no context, so a partial set
+ * supplied to those is not an error — the call simply does not use it. Requiring
+ * more than the service does is its own failure mode: it turns a working
+ * question into a refusal.
+ *
+ * The context is only resolved when the call can use it. An untyped, Company or
+ * Spec call costs no git probe and cannot fail on a machine that is not in an
+ * Azure DevOps checkout — the `list_jobs` lesson, where inferring eagerly turned
+ * every call in an unrelated repository into an error for a filter it did not
+ * need.
+ */
+async function catalogContext(
+  args: Record<string, unknown>,
+  ctx: McpToolCallContext | undefined,
+  type: CloudAgentAgentType | undefined,
+  signal?: AbortSignal,
+): Promise<CatalogContext | undefined> {
+  if (type !== "Repo" && type !== "Organization") return undefined
+
+  const organization = optionalString(args, "organization")
+  const project = optionalString(args, "project")
+  const repository = optionalString(args, "repository")
+
+  if (type === "Repo") {
+    const given = [organization, project, repository].filter((part) => part !== undefined).length
+    if (given > 0 && given < 3) {
+      throw new CloudAgentError(
+        "The Repo scope lists one repository's catalog, so it reads all of `organization`, `project` and `repository`; pass all three, or none of them and let them be read from a checkout. A partial set would either be guessed or silently ignored.",
+        { retriable: false },
+      )
+    }
+    if (given === 3) {
+      return { organization: organization!, project: project!, repository: repository! }
+    }
+  } else {
+    if (organization) {
+      // Project and repository are not read here, but forwarding them is
+      // measured harmless, so what the caller gave is what the service receives.
+      return { organization, ...(project ? { project } : {}), ...(repository ? { repository } : {}) }
+    }
+    if (project || repository) {
+      throw new CloudAgentError(
+        "The Organization scope reads an organization's catalog, so it needs `organization`; `project` and `repository` do not identify it. Pass `organization`, or none of the three and let them be read from a checkout.",
+        { retriable: false },
+      )
+    }
+  }
+
+  const hint = type === "Repo" ? "`organization`, `project` and `repository`" : "`organization`"
+  const { repository: inferred } = await repositoryFromWorkspace(args, ctx, {
+    required: true,
+    requiredHint: hint,
+    ...(signal ? { signal } : {}),
+  })
+  return inferred!
 }
 
 /** Matches returned by a filtered `list_plugins` when the caller gave no `top`. */
@@ -1176,18 +1340,24 @@ const PLUGIN_SCAN_CAP = 1000
  * three pages, no overlap.
  */
 async function scanPluginCatalog(
-  type: string | undefined,
+  base: CloudAgentCatalogQuery,
   signal?: AbortSignal,
 ): Promise<{
   value: Array<CloudAgentPluginInfo>
   scanned: number
   totalCount?: number
   capped: boolean
+  errors?: Array<string>
 }> {
-  const base = { ...(type ? { type } : {}) }
   const seen = new Set<string>()
   const value: Array<CloudAgentPluginInfo> = []
-  const add = (page: { value: Array<CloudAgentPluginInfo> }): number => {
+  // A Repo or Organization scope answers 200 with an empty page and the reason
+  // in `errors` (measured: "Marketplace manifest not found at
+  // .github/plugin/marketplace.json"). Across a scan those reasons repeat on
+  // every page, so they are deduped and reported once.
+  const serviceErrors = new Set<string>()
+  const add = (page: CloudAgentCatalogPage<CloudAgentPluginInfo>): number => {
+    for (const error of page.errors ?? []) serviceErrors.add(error)
     for (const plugin of page.value) {
       // The catalog is live, so a page boundary can shift between requests; a
       // duplicate name would otherwise render twice and count as two matches.
@@ -1202,6 +1372,7 @@ async function scanPluginCatalog(
     scanned,
     ...(totalCount !== undefined ? { totalCount } : {}),
     capped,
+    ...(serviceErrors.size > 0 ? { errors: [...serviceErrors] } : {}),
   })
 
   // Measured 2026-10-29: one `GET /plugins` costs 2-11 s regardless of page

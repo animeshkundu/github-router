@@ -1322,7 +1322,7 @@ export function renderJobPage(page: CloudAgentJobPage): string {
  */
 export function renderAgentPage(page: CloudAgentCatalogPage<CloudAgentAgentInfo>): string {
   const header = catalogHeader("agent", page)
-  if (page.value.length === 0) return [header, "No agents matched."].join("\n")
+  if (page.value.length === 0) return finishCatalog(header, [], page, "No agents matched.")
   const rows = page.value.slice(0, MAX_RENDERED_ROWS).map((agent) => {
     const head = `  ${agent.name}${agent.type ? ` [${agent.type}]` : ""}${agent.engine ? ` (engine: ${agent.engine})` : ""}`
     const lines = [head]
@@ -1343,7 +1343,7 @@ export function renderAgentPage(page: CloudAgentCatalogPage<CloudAgentAgentInfo>
 
 export function renderPluginPage(page: CloudAgentCatalogPage<CloudAgentPluginInfo>): string {
   const header = catalogHeader("plugin", page)
-  if (page.value.length === 0) return [header, "No plugins matched."].join("\n")
+  if (page.value.length === 0) return finishCatalog(header, [], page, "No plugins matched.")
   const rows = page.value.slice(0, MAX_RENDERED_ROWS).map((plugin) => {
     const flags = [
       plugin.type ? `[${plugin.type}]` : "",
@@ -1364,13 +1364,31 @@ function catalogHeader(kind: string, page: CloudAgentCatalogPage<unknown>): stri
   return `${page.value.length}${total} ${kind}(s)${window ? ` (${window})` : ""}:`
 }
 
-function finishCatalog(header: string, rows: Array<string>, page: CloudAgentCatalogPage<unknown>): string {
+/**
+ * Render a page and, when the service explained itself, say so.
+ *
+ * A Repo or Organization scope answers HTTP 200 with an empty page and the
+ * reason in `errors` ("Marketplace manifest not found at …"), so an empty
+ * result is usually not "nothing exists" but "the thing this scope reads
+ * looked elsewhere". Dropping the reason made those two indistinguishable.
+ * On a non-empty page the errors classify the rows instead, hence the
+ * different label: `reason:` explains an emptiness, `partial results:`
+ * qualifies a list.
+ */
+function finishCatalog(
+  header: string,
+  rows: Array<string>,
+  page: CloudAgentCatalogPage<unknown>,
+  empty?: string,
+): string {
   const lines = [header, ...rows]
+  if (rows.length === 0 && empty) lines.push(`  ${empty}`)
   if (page.value.length > MAX_RENDERED_ROWS) {
     lines.push(`  … ${page.value.length - MAX_RENDERED_ROWS} more not rendered; raise \`skip\` to page.`)
   }
   if (page.errors && page.errors.length > 0) {
-    lines.push(`partial results: ${page.errors.map((error) => truncate(error, 200)).join("; ")}`)
+    const label = rows.length === 0 ? "reason" : "partial results"
+    lines.push(`${label}: ${page.errors.map((error) => truncate(error, 300)).join("; ")}`)
   }
   return lines.join("\n")
 }
