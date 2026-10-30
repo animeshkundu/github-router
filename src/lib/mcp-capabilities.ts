@@ -907,3 +907,32 @@ export function adoToolsEnabled(): boolean {
 export function kustoToolsEnabled(): boolean {
   return state.kustoEnabled
 }
+
+/**
+ * Gate for the Cloud Agent MCP group's SIX READ tools (`mcp__cloudagent__*`).
+ *
+ * Returns true iff `setupAndServe` resolved the read half ON: `--cloudagent`,
+ * `GH_ROUTER_ENABLE_CLOUDAGENT=1`, or an Azure DevOps git remote in this session's
+ * workspace. There is no separate availability probe for the same reason
+ * `adoToolsEnabled()` has none — the tools reach a remote service whose
+ * reachability cannot be established without a token, and minting one during
+ * `tools/list` would make listing tools cost an `az` process.
+ */
+export function cloudAgentToolsEnabled(): boolean {
+  return state.cloudAgentEnabled
+}
+
+/**
+ * Gate for `create_job` / `cancel_job`, which are split out because they are
+ * the only two tools in this repo whose ordinary use spends money: a job runs
+ * a cloud agent for hours (measured median 221 min).
+ *
+ * Deliberately NOT `cloudAgentToolsEnabled() && something`: the two booleans come
+ * from one resolution in `resolveCloudAgentFlags()`, and `cloudAgentWriteEnabled` can
+ * only be set by an explicit `--cloudagent` / `GH_ROUTER_ENABLE_CLOUDAGENT=1`. Reading
+ * it alone keeps the asymmetry in one place instead of re-deriving "was this
+ * discovered?" at the boundary and getting it wrong later.
+ */
+export function cloudAgentWriteToolsEnabled(): boolean {
+  return state.cloudAgentEnabled && state.cloudAgentWriteEnabled
+}

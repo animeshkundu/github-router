@@ -76,7 +76,7 @@ import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
-import { browserToolsEnabled, adoToolsEnabled, kustoToolsEnabled } from "./lib/mcp-capabilities"
+import { browserToolsEnabled, adoToolsEnabled, cloudAgentToolsEnabled, kustoToolsEnabled } from "./lib/mcp-capabilities"
 import { resolvePiSurfaces, writePiMcpJson } from "./lib/pi-mcp-config"
 import {
   formatBalancedPrerequisiteFailure,
@@ -368,6 +368,7 @@ export const pi = defineCommand({
       bluebirdEnabled: state.bluebirdEnabled === true,
       adoEnabled: adoToolsEnabled(),
       kustoEnabled: kustoToolsEnabled(),
+      cloudAgentEnabled: cloudAgentToolsEnabled(),
       helpersEnabled,
       peersEnabled,
     })

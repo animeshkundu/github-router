@@ -49,6 +49,7 @@ describe("resolvePiSurfaces", () => {
     bluebirdEnabled: false,
     adoEnabled: false,
     kustoEnabled: false,
+    cloudAgentEnabled: false,
     helpersEnabled: true,
     peersEnabled: true,
   }
@@ -283,6 +284,7 @@ describe("the seam does not move the other consumers", () => {
     bluebirdEnabled: true,
     adoEnabled: false,
     kustoEnabled: false,
+    cloudAgentEnabled: false,
     helpersEnabled: true,
     peersEnabled: true,
   })

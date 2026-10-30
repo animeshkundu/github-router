@@ -52,8 +52,10 @@ const REQUIRED_MARKERS: ReadonlyArray<{ needles: Array<string>; why: string }> =
 /**
  * Minified identifiers change between client builds even when the parser's
  * behavior does not. Keep each known contract as a coherent pair: one marker
- * proves the 100K/1M constants, the other proves those same bindings feed the
- * env parser and that its effective value is raised to the 100K floor.
+ * proves the 100K/1M bounds, the other proves how a parsed value resolves
+ * against them. Through 2.1.311 that was the `parseInt` call site plus its
+ * `Math.max` floor; from 2.1.312 it is the suffix parser plus the bound-clamp,
+ * whose identifiers roll between builds while the clamp itself does not.
  */
 const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
   [
@@ -98,6 +100,25 @@ const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
   [
     "oI=1e5,dU=1e6",
     'Kje("CLAUDE_CODE_AUTO_COMPACT_WINDOW",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,oI,dU);if(y.status!=="invalid"){let S=Math.max(oI,y.effective)',
+  ],
+  // 2.1.312 REPLACED the parser rather than rolling its identifiers. The env
+  // value is no longer read inline with `parseInt` and clamped by `Math.max`:
+  // `rke(e,{bareThousands:false})` now accepts a `k`/`m` suffix (so "1m" is
+  // 1,000,000, not 1), and `B9t` clamps an out-of-range value to the same
+  // bounds by returning `rx` below the floor and `fN` above the cap. The two
+  // facts we depend on are unchanged and are what this group pins: the suffix
+  // parser exists, and below/above the range resolves to the bound instead of
+  // being dropped. Our own emitted value stays a decimal integer, which is
+  // `in_range` on both the old and the new parser.
+  [
+    ',h=s==="m"?1e6:s==="k"?1000:void 0,',
+    'case"below_minimum":return rx;case"above_maximum":return fN',
+  ],
+  // 2.1.314 kept the suffix parser byte-identical and rolled only the two
+  // bound identifiers the clamp returns (rx/fN became xx/VN, still 1e5/1e6).
+  [
+    ',h=s==="m"?1e6:s==="k"?1000:void 0,',
+    'case"below_minimum":return xx;case"above_maximum":return VN',
   ],
 ]
 

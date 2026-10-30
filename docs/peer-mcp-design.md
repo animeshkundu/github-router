@@ -6,7 +6,7 @@ Expose five peer-model review tools - `gpt-6-sol` (codex_critic), `gpt-5.3-codex
 
 ### Intent-scoped server split
 
-The original single `gh-router-peers` MCP server is split into **ten intent-named MCP groups**. Each enabled group is a distinct `mcpServers` entry pointing at `/mcp/<group>`; the single `/mcp` union path remains for BYO clients.
+The original single `gh-router-peers` MCP server is split into **eleven intent-named MCP groups**. Each enabled group is a distinct `mcpServers` entry pointing at `/mcp/<group>`; the single `/mcp` union path remains for BYO clients.
 
 The groups are:
 - `peers` → `/mcp/peers` (model critics/reviewers and profile-specific peer tools)
@@ -19,8 +19,9 @@ The groups are:
 - `first-mate` → `/mcp/first-mate` (gated cloud-agent control)
 - `ado` → `/mcp/ado` (the Azure DevOps remote MCP surface, read-only by default; loaded only when the group is enabled)
 - `kusto` → `/mcp/kusto` (Azure Data Explorer, five read-only tools, the cluster named per call or defaulted at launch; loaded only when the group is enabled)
+- `cloudagent` → `/mcp/cloudagent` (Microsoft Cloud Agent Job API v2, eight tools; read tools only from repository discovery, `create_job`/`cancel_job` only with the explicit `--cloudagent` — see [`docs/cloudagent-mcp.md`](cloudagent-mcp.md))
 
-A launch profile projects only the groups it allows; not every session registers all ten.
+A launch profile projects only the groups it allows; not every session registers all eleven.
 
 Under this new topology, the lead model sees names prefixed as `mcp__<group>__<newname>`, e.g., `mcp__search__code`, `mcp__browser__navigate`, `mcp__peers__codex_critic`, `mcp__workers__explore`, `mcp__decide__stand_in`.
 
@@ -30,7 +31,7 @@ Config keys are bare by default (`peers`, `search`, etc.). To prevent a user's o
 
 ## Current Architecture
 
-The proxy at `src/routes/mcp/` exposes ten intent-scoped MCP groups on loopback endpoints. Core groups are `peers`, `search`, `workers`, `orchestrate`, `browser`, and `decide`; `fleet` and `first-mate` are optional control-plane groups, and `ado` and `kusto` are opt-in Azure surfaces that are off unless the launch enables them (see [`docs/azure-mcp.md`](azure-mcp.md)). A launch profile projects only the groups its policy permits.
+The proxy at `src/routes/mcp/` exposes eleven intent-scoped MCP groups on loopback endpoints. Core groups are `peers`, `search`, `workers`, `orchestrate`, `browser`, and `decide`; `fleet` and `first-mate` are optional control-plane groups; `ado` and `kusto` are opt-in Azure surfaces that are off unless the launch enables them (see [`docs/azure-mcp.md`](azure-mcp.md)); and `cloudagent` is a Microsoft-service surface whose read tools follow the same git-remote discovery while its write tools require an explicit flag (see [`docs/cloudagent-mcp.md`](cloudagent-mcp.md)). A launch profile projects only the groups its policy permits.
 
 Auto-injection: `github-router claude` registers these servers by **merging them into the per-launch mirrored `<CLAUDE_CONFIG_DIR>/.claude.json`'s `mcpServers` map** (`injectPeerMcpIntoMirror` in `src/lib/codex-mcp-config.ts`). This is the load-bearing fix for subagent MCP visibility - subagents (Agent-tool, forks, agent-teams subprocesses) discover MCP servers from `CLAUDE_CONFIG_DIR/.claude.json` user-scope, NOT from a parent-process-only CLI flag, so the mirror approach makes the peer tools visible to every spawned tier. The merge is non-destructive (the user's pre-existing user-scope MCPs are preserved). On collision, we dynamically resolve the server keys using a fallback name (`gh-router-<group>`) as described above; subagents inherit the fallback keys identically. Subagent persona prompts are written to `<CLAUDE_CONFIG_DIR>/agents/peer-<pid>-<rand>-<name>.md` and pass an `--agents`-style discovery path; the frontmatter has **no `tools:` field** so the subagent inherits the parent's full toolset (built-ins + every MCP visible to the parent, incl. our injected tools). Per-launch mirror dir (`<pid>-<rand>` under `~/.local/share/github-router/claude-config/`) means two concurrent launches never race on the `.claude.json` write or share an MCP nonce; orphan dirs from SIGKILL'd proxies are reclaimed by a boot-time PID-alive sweep. Project-scope MCPs (`<workspace>/.mcp.json`) are untouched - the spawned `claude` inherits the parent's cwd via `launchChild`'s no-`cwd:` spawn, so Claude Code reads them directly from the workspace; the proxy never mirrors or sanitizes project-scope. Auth: per-launch random 32-byte nonce as Bearer token + Host header check (loopback only); the proxy validates against the launch nonce regardless of which channel - mirror or `--mcp-config` fallback - the request came through.
 

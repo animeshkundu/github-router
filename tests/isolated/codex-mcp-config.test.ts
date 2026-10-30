@@ -2449,6 +2449,7 @@ describe("resolveGroupKeysFromMirror", () => {
         "first-mate": "first-mate",
         ado: "ado",
         kusto: "kusto",
+        cloudagent: "cloudagent",
       })
     })
   })

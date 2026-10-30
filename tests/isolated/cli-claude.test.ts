@@ -235,6 +235,7 @@ const artifactToolsEnabledMock = mock(() => false)
 // enabled-group assertion would depend on where the repo was cloned.
 const adoToolsEnabledMock = mock(() => false)
 const kustoToolsEnabledMock = mock(() => false)
+const cloudAgentToolsEnabledMock = mock(() => false)
 // Cheap-profile resolvers. Named consts (rather than inline factories) so the
 // prerequisite-drift test can force one of them to miss and assert the
 // resulting message. Values mirror `CHEAP_PROFILE_MODELS`.
@@ -251,6 +252,8 @@ mock.module("~/lib/mcp-capabilities", () => ({
   workerToolsEnabled: workerToolsEnabledMock,
   adoToolsEnabled: adoToolsEnabledMock,
   kustoToolsEnabled: kustoToolsEnabledMock,
+  cloudAgentToolsEnabled: cloudAgentToolsEnabledMock,
+  cloudAgentWriteToolsEnabled: mock(() => false),
   standInToolEnabled: standInToolEnabledMock,
   browserToolsEnabled: browserToolsEnabledMock,
   browserCompoundToolsEnabled: browserCompoundToolsEnabledMock,

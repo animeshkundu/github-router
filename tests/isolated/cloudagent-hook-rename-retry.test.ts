@@ -23,8 +23,8 @@ mock.module("node:fs/promises", () => {
   return { ...patched, default: patched }
 })
 
-const { sanitizeAgencyHooksInSettingsFile } = await import(
-  "~/lib/agency-hook-settings"
+const { sanitizeCloudAgentHooksInSettingsFile } = await import(
+  "~/lib/cloudagent-hook-settings"
 )
 
 const dirs: string[] = []
@@ -45,7 +45,7 @@ const HTTP_EVENTS = [
   "SessionEnd",
 ]
 
-function agencySettings(): Record<string, unknown> {
+function cloudAgentSettings(): Record<string, unknown> {
   const url = "http://127.0.0.1:7824/hook/a4617907-0b9e-4bcf-b4ef-b10d7c5a31be"
   const hooks: Record<string, unknown[]> = {}
   for (const event of HTTP_EVENTS) {
@@ -62,10 +62,10 @@ function agencySettings(): Record<string, unknown> {
 }
 
 async function target(): Promise<string> {
-  const dir = await fsSync.promises.mkdtemp(path.join(os.tmpdir(), "agency-retry-"))
+  const dir = await fsSync.promises.mkdtemp(path.join(os.tmpdir(), "cloudagent-retry-"))
   dirs.push(dir)
   const settingsPath = path.join(dir, "settings.json")
-  await fsSync.promises.writeFile(settingsPath, JSON.stringify(agencySettings()))
+  await fsSync.promises.writeFile(settingsPath, JSON.stringify(cloudAgentSettings()))
   return settingsPath
 }
 
@@ -79,12 +79,12 @@ afterEach(async () => {
   }
 })
 
-describe("Agency hook settings rename retries", () => {
+describe("Cloud Agent hook settings rename retries", () => {
   test("recovers from transient Windows EPERM contention", async () => {
     const settingsPath = await target()
     failuresRemaining = 2
 
-    await sanitizeAgencyHooksInSettingsFile(settingsPath)
+    await sanitizeCloudAgentHooksInSettingsFile(settingsPath)
 
     expect(renameAttempts).toBe(3)
     const settings = JSON.parse(await fsSync.promises.readFile(settingsPath, "utf8"))
@@ -95,10 +95,10 @@ describe("Agency hook settings rename retries", () => {
     const settingsPath = await target()
     failuresRemaining = Number.MAX_SAFE_INTEGER
 
-    await expect(sanitizeAgencyHooksInSettingsFile(settingsPath)).rejects.toThrow(/EPERM/)
+    await expect(sanitizeCloudAgentHooksInSettingsFile(settingsPath)).rejects.toThrow(/EPERM/)
     expect(renameAttempts).toBe(4)
     const leftovers = (await fsSync.promises.readdir(path.dirname(settingsPath)))
-      .filter((name) => name.includes(".agency.tmp"))
+      .filter((name) => name.includes(".cloudagent.tmp"))
     expect(leftovers).toEqual([])
   })
 
@@ -107,8 +107,8 @@ describe("Agency hook settings rename retries", () => {
     failuresRemaining = Number.MAX_SAFE_INTEGER
 
     // The sanitizer's caller must fail the launch rather than leave a known
-    // Agency cohort in the mirror to become a 404 storm after nonce rotation.
-    await expect(sanitizeAgencyHooksInSettingsFile(settingsPath)).rejects.toThrow(/EPERM/)
+    // Cloud Agent cohort in the mirror to become a 404 storm after nonce rotation.
+    await expect(sanitizeCloudAgentHooksInSettingsFile(settingsPath)).rejects.toThrow(/EPERM/)
     const unchanged = JSON.parse(await fsSync.promises.readFile(settingsPath, "utf8"))
     expect(unchanged.hooks.PreToolUse).toHaveLength(1)
   })

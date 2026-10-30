@@ -5,7 +5,7 @@ import path from "node:path"
 
 import consola from "consola"
 
-import { sanitizeAgencyHooksInSettingsFile } from "./agency-hook-settings"
+import { sanitizeCloudAgentHooksInSettingsFile } from "./cloudagent-hook-settings"
 
 function appDir(): string {
   return path.join(os.homedir(), ".local", "share", "github-router")
@@ -632,21 +632,21 @@ async function runClaudeConfigMirror(
     await mirrorDirRecursive(sourceDir, targetDir, "")
   }
 
-  // Agency Hub installs localhost hooks with a UUID that changes whenever its
+  // Cloud Agent Hub installs localhost hooks with a UUID that changes whenever its
   // daemon restarts. A per-launch settings snapshot cannot follow that rotation,
   // so inherited URLs begin returning 404 on every prompt/tool/stop event. Strip
-  // only Agency's generated cohort from this disposable mirror before adding any
+  // only Cloud Agent's generated cohort from this disposable mirror before adding any
   // router-owned hooks below. The operator's real settings remain untouched.
-  const agencyHooks = await sanitizeAgencyHooksInSettingsFile(
+  const cloudAgentHooks = await sanitizeCloudAgentHooksInSettingsFile(
     path.join(targetDir, "settings.json"),
   )
-  if (agencyHooks.invalid) {
+  if (cloudAgentHooks.invalid) {
     consola.warn(
-      `Could not inspect the isolated settings mirror for Agency Hub hooks (${agencyHooks.invalid}); the file was preserved unchanged and Claude Code may ignore it as invalid.`,
+      `Could not inspect the isolated settings mirror for Cloud Agent Hub hooks (${cloudAgentHooks.invalid}); the file was preserved unchanged and Claude Code may ignore it as invalid.`,
     )
-  } else if (agencyHooks.removed > 0) {
+  } else if (cloudAgentHooks.removed > 0) {
     consola.info(
-      `Excluded ${agencyHooks.removed} Agency Hub hooks from this isolated launch; Agency session tracking and remote approvals remain available to non-proxied Claude sessions.`,
+      `Excluded ${cloudAgentHooks.removed} Cloud Agent Hub hooks from this isolated launch; Cloud Agent session tracking and remote approvals remain available to non-proxied Claude sessions.`,
     )
   }
 

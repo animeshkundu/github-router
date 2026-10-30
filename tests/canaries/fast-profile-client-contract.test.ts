@@ -29,6 +29,18 @@ import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
  * and its `.replace(/\d+$/,"")` are intact, the push still carries
  * `type`/`name`/`model` plus the conditional `defer_loading`, and the
  * PreToolUse check string is byte-identical to 2.1.301.
+ *
+ * 2.1.312 rolled every identifier in all three seams at once and moved none of
+ * the behavior: the tag literal and its suffix-strip survive as `nXt`/`oXt`,
+ * the tool is still pushed with `type`/`name`/`model` plus a conditional
+ * `defer_loading`, and the PreToolUse check still admits a string `model` with
+ * the same `?? deny(...)` shape. The spawn's identity-pinning explanation was
+ * reworded ("the identity of the spawn and its parent is pinned; a rewrite
+ * keeps ..."), which is why the old wording marker is only an alternative.
+ *
+ * 2.1.314 rolled the three identifier sets once more with no shape change, so
+ * the new byte sequences are appended beside 2.1.312's rather than replacing
+ * them.
  */
 const REQUIRED_MARKERS = [
   "--advisor <model>",
@@ -40,6 +52,11 @@ const REQUIRED_MARKERS = [
     // 2.1.302 rolled the identifiers again; the tag literal and the
     // suffix-strip that makes the model-facing name are unchanged.
     'var CKt="advisor_20260301",xKt="advisor_20260301".replace(/\\d+$/,"");',
+    // 2.1.312 rolled them once more; the tag literal and its suffix-strip are
+    // still the whole mechanism.
+    'var nXt="advisor_20260301",oXt="advisor_20260301".replace(/\\d+$/,"");',
+    // 2.1.314: same two bindings, rolled names.
+    'var f7t="advisor_20260301",p7t="advisor_20260301".replace(/\\d+$/,"");',
   ],
   [
     'type:"advisor_20260301",name:"advisor",model:',
@@ -48,6 +65,10 @@ const REQUIRED_MARKERS = [
     // Same seam in 2.1.302: the tool is still pushed with the advisor tag,
     // a name, the resolved model, and a conditional `defer_loading`.
     "push({type:CKt,name:PPe,model:_u,...Ta&&{defer_loading:!0}})",
+    // And in 2.1.312, where the tag binding is `nXt` (the entry above).
+    "push({type:nXt,name:vNe,model:Dd,...Ua&&{defer_loading:!0}})",
+    // And in 2.1.314.
+    "push({type:f7t,name:oFe,model:Ld,...Vl&&{defer_loading:!0}})",
   ],
   "Advising",
   " using ",
@@ -60,6 +81,11 @@ const REQUIRED_MARKERS = [
     'check:_((e)=>Et(e,"{ model }",(t)=>typeof t.model==="string"))',
     'check:A((e)=>it(e,"{ model }",(t)=>typeof t.model==="string"))',
     'check:_((e)=>ut(e,"{ model }",(t)=>typeof t.model==="string"))',
+    // 2.1.312: identifiers rolled; still "allow the rewrite when `model` is a
+    // string, deny otherwise", reached through the same `?? deny(...)`.
+    'check:N((e,o,r)=>nt(e,"{ model }",(n)=>typeof n.model==="string")??Ot("deny",e,r))',
+    // 2.1.314: same predicate and the same `?? deny(...)` fallback.
+    'check:M((e,o,r)=>st(e,"{ model }",(n)=>typeof n.model==="string")??Ot("deny",e,r))',
     "a rewrite changes model alone",
   ],
   'agentType:"Explore"',

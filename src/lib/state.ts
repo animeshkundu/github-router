@@ -248,6 +248,24 @@ export interface State {
   kustoDatabase: string | null
 
   /**
+   * Cloud Agent Job API v2 MCP group (`mcp__cloudagent__*`): hand work to a cloud
+   * coding agent running against an Azure DevOps repository.
+   *
+   * Enabled by `--cloudagent`, by `GH_ROUTER_ENABLE_CLOUDAGENT=1`, or automatically
+   * when the workspace's git remotes resolve to an Azure DevOps repository.
+   * The automatic path turns on READS only; see `cloudAgentWriteEnabled`.
+   */
+  cloudAgentEnabled: boolean
+  /**
+   * `create_job` / `cancel_job`. Set by the explicit flag and nothing else:
+   * a job spends real cloud compute for hours, and a cloned repository's
+   * `origin` (which is what discovery reads) is attacker-controllable.
+   */
+  cloudAgentWriteEnabled: boolean
+  /** `prod` or `ppe`, normalized by `resolveCloudAgentFlags()` at launch. */
+  cloudAgentEnvironment: string
+
+  /**
    * Humanlike pacing override:
    *   "on"   - --humanlike CLI flag or GH_ROUTER_HUMANLIKE=1 env;
    *            inject Beta-distributed inter-action delays, Bezier
@@ -333,6 +351,9 @@ export const state: State = {
   kustoEnabled: false,
   kustoCluster: null,
   kustoDatabase: null,
+  cloudAgentEnabled: false,
+  cloudAgentWriteEnabled: false,
+  cloudAgentEnvironment: "prod",
   humanlikeForce: "auto",
   sessionId: randomUUID(),
   machineId: randomBytes(32).toString("hex"),

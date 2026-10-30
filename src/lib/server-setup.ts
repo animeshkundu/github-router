@@ -9,6 +9,11 @@ import {
   resolveAzureMcpFlags,
   type AzureMcpInputs,
 } from "./azure-mcp-flags"
+import {
+  cloudAgentDiscoveryNeeded,
+  resolveCloudAgentFlags,
+  type CloudAgentInputs,
+} from "./cloudagent-flags"
 import { provisionAdoTools } from "./ado-tools"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
@@ -275,6 +280,14 @@ export interface ServerSetupOptions {
   kustoEnabled?: boolean | undefined
   kustoCluster?: string | undefined
   kustoDatabase?: string | undefined
+  /**
+   * Tri-state, as `bluebirdEnabled`. `true` enables all eight Cloud Agent tools;
+   * `undefined` leaves the read half to Azure DevOps repository discovery and
+   * the write half OFF. There is no path by which discovery enables a write.
+   */
+  cloudAgentEnabled?: boolean | undefined
+  /** `prod` or `ppe`, already falling back to GH_ROUTER_CLOUDAGENT_ENV. */
+  cloudAgentEnvironment?: string | undefined
   silent: boolean
 }
 
@@ -420,10 +433,19 @@ export async function setupAndServe(
     kustoCluster: options.kustoCluster,
     kustoDatabase: options.kustoDatabase,
   }
-  const discovered = azureDiscoveryNeeded(azureInputs)
+  // Cloud Agent joins the same discovery probe. It is a SEPARATE services surface
+  // with its own flags (`./cloudagent-flags`), but the signal is the same `git
+  // remote -v`, and `discoverAzureRepo` memoizes, so the second consumer is
+  // free. Either consumer needing the answer pays for the one probe.
+  const cloudAgentInputs: CloudAgentInputs = {
+    cloudAgentFlag: options.cloudAgentEnabled,
+    cloudAgentEnvironment: options.cloudAgentEnvironment,
+  }
+  const discovered = azureDiscoveryNeeded(azureInputs) || cloudAgentDiscoveryNeeded(cloudAgentInputs)
     ? await discoverAzureRepo({})
     : null
   const azureFlags = resolveAzureMcpFlags(azureInputs, discovered)
+  const cloudAgentFlags = resolveCloudAgentFlags(cloudAgentInputs, discovered)
   state.bluebirdEnabled = azureFlags.bluebird
   state.adoEnabled = azureFlags.ado
   state.adoOrganization = azureFlags.adoOrganization
@@ -432,6 +454,9 @@ export async function setupAndServe(
   state.kustoEnabled = azureFlags.kusto
   state.kustoCluster = azureFlags.kustoCluster
   state.kustoDatabase = azureFlags.kustoDatabase
+  state.cloudAgentEnabled = cloudAgentFlags.enabled
+  state.cloudAgentWriteEnabled = cloudAgentFlags.writeEnabled
+  state.cloudAgentEnvironment = cloudAgentFlags.environment
   // Said here rather than at the first tool call: a `--kusto` that was meant as
   // `--kusto-cluster` would otherwise stay silent until a model spent a turn
   // discovering the group needs a cluster per call. This now also fires for an
@@ -453,6 +478,21 @@ export async function setupAndServe(
     )
   }
   for (const warning of azureFlags.warnings) consola.warn(`Azure MCP: ${warning}`)
+  // One line per enabled Cloud Agent half, because the two halves are gated
+  // differently and "the group is on but create_job is missing" is otherwise
+  // indistinguishable from a bug. `cloudAgentDiscoveryNeeded` consults
+  // `azureMcpsSuppressed` too, but a computed `enabled` is what the caller
+  // needs explained, not the route it took to get there.
+  if (state.cloudAgentEnabled) {
+    const half = state.cloudAgentWriteEnabled ? "read + write" : "read-only"
+    const source = cloudAgentFlags.discovered
+      ? "Azure DevOps remote"
+      : options.cloudAgentEnabled === true
+        ? "--cloudagent"
+        : "GH_ROUTER_ENABLE_CLOUDAGENT"
+    consola.info(`Cloud Agent MCP (${state.cloudAgentEnvironment}): ${half}, enabled by ${source}.`)
+  }
+  for (const warning of cloudAgentFlags.warnings) consola.warn(`Cloud Agent MCP: ${warning}`)
   if (state.adoEnabled && options.adoWriteEnabled === true) {
     consola.warn(
       "Azure DevOps MCP is running WITHOUT X-MCP-Readonly (--ado-write). "
@@ -793,6 +833,19 @@ export const sharedServerArgs = {
     description:
       "Default Kusto database for calls that do not name one, applied to whichever cluster the call resolves. Falls back to GH_ROUTER_KUSTO_DATABASE.",
   },
+  cloudagent: {
+    type: "boolean" as const,
+    default: undefined,
+    description:
+      "Expose the Cloud Agent Job API v2 MCP group (mcp__cloudagent__*), including create_job and cancel_job. The six read tools are enabled automatically in a checkout whose git remote is an Azure DevOps repository; those two WRITE tools are not, because a job runs a cloud agent for hours (measured median 221 min) and spends compute, and a cloned repository's git remote is not an operator. GH_ROUTER_ENABLE_CLOUDAGENT=1 is the env equivalent. Authentication is automatic via `az account get-access-token`; no token to supply.",
+    negativeDescription:
+      "Never expose the Cloud Agent MCP group, even when the env equivalent is set or the repository is an Azure DevOps checkout.",
+  },
+  "cloudagent-env": {
+    type: "string" as const,
+    description:
+      "Cloud Agent service environment: prod (default) or ppe. Naming one does NOT enable the group; it selects which service --cloudagent talks to, and which Entra audience the token is minted for. Falls back to GH_ROUTER_CLOUDAGENT_ENV.",
+  },
 } as const
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
@@ -847,6 +900,8 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   kustoEnabled?: boolean | undefined
   kustoCluster?: string | undefined
   kustoDatabase?: string | undefined
+  cloudAgentEnabled?: boolean | undefined
+  cloudAgentEnvironment?: string | undefined
 } {
   const portRaw = args.port as string | undefined
   let port: number | undefined
@@ -910,6 +965,8 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     kustoEnabled: args.kusto as boolean | undefined,
     kustoCluster: args["kusto-cluster"] as string | undefined,
     kustoDatabase: args["kusto-database"] as string | undefined,
+    cloudAgentEnabled: args.cloudagent as boolean | undefined,
+    cloudAgentEnvironment: args["cloudagent-env"] as string | undefined,
   }
 }
 

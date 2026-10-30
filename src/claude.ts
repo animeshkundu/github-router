@@ -139,6 +139,7 @@ import {
   agentToolsEnabled,
   artifactToolsEnabled,
   kustoToolsEnabled,
+  cloudAgentToolsEnabled,
   browseAgentEnabled,
   browserCompoundToolsEnabled,
   browserToolsEnabled,
@@ -1266,6 +1267,10 @@ export const claude = defineCommand({
           !fastDescriptor.allowedGroups || fastDescriptor.allowedGroups.has(group)
         if (adoToolsEnabled() && allowsGroup("ado")) enabledGroups.push("ado")
         if (kustoToolsEnabled() && allowsGroup("kusto")) enabledGroups.push("kusto")
+        // Registered as soon as either half is on. `cloudagent_write` being off
+        // does not make the group absent — the six read tools still serve, and
+        // the `tools/list` / `tools/call` gates hide the two write tools.
+        if (cloudAgentToolsEnabled() && allowsGroup("cloudagent")) enabledGroups.push("cloudagent")
         if (!isPinnedProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
         if (!isPinnedProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
         if (isMaxProfile && fleetToolsEnabled()) enabledGroups.push("fleet")

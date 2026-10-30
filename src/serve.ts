@@ -211,6 +211,11 @@ export const serve = defineCommand({
       default: false,
       description: "Expose the Azure DevOps MCP group (reads organization data with your az identity) even when tunnel-exposed (only with fully-trusted tunnel access)",
     },
+    "cloudagent-over-tunnel": {
+      type: "boolean",
+      default: false,
+      description: "Expose the Cloud Agent Job API MCP group (mints an az token; create_job spends compute) even when tunnel-exposed (only with fully-trusted tunnel access)",
+    },
     "kusto-over-tunnel": {
       type: "boolean",
       default: false,
@@ -389,6 +394,11 @@ export const serve = defineCommand({
         "Azure DevOps MCP is disabled over the tunnel (it reads organization data with your az identity). Pass --ado-over-tunnel to enable it for fully-trusted access.",
       )
     }
+    if (tunnelExposed && state.cloudAgentEnabled && args["cloudagent-over-tunnel"] !== true) {
+      consola.info(
+        "Cloud Agent MCP is disabled over the tunnel (it acts with your az identity and create_job spends compute). Pass --cloudagent-over-tunnel to enable it for fully-trusted access.",
+      )
+    }
     if (tunnelExposed && state.kustoEnabled && args["kusto-over-tunnel"] !== true) {
       consola.info(
         "Kusto MCP is disabled over the tunnel (it reads any cluster your az identity can reach). Pass --kusto-over-tunnel to enable it for fully-trusted access.",
@@ -414,6 +424,7 @@ export const serve = defineCommand({
       fleetOverTunnel: args["fleet-over-tunnel"] === true,
       adoOverTunnel: args["ado-over-tunnel"] === true,
       kustoOverTunnel: args["kusto-over-tunnel"] === true,
+      cloudAgentOverTunnel: args["cloudagent-over-tunnel"] === true,
     })
 
     // 3. filtered child env: the vetted secret-stripping allowlist (buildEnv,

@@ -3,7 +3,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 
-import { sanitizeAgencyHooksInSettingsFile } from "~/lib/agency-hook-settings"
+import { sanitizeCloudAgentHooksInSettingsFile } from "~/lib/cloudagent-hook-settings"
 
 const HTTP_EVENTS = [
   "PreToolUse",
@@ -43,7 +43,7 @@ function posixCommand(url: string): string {
   return `curl -q -sS --noproxy '*' --connect-timeout 2 --max-time 5 -H 'Content-Type: application/json' --data-binary @- '${url}' >/dev/null 2>&1 || true`
 }
 
-function agencySettings(
+function cloudAgentSettings(
   url: string,
   command: (value: string) => string = windowsCommand,
 ): Record<string, unknown> {
@@ -59,7 +59,7 @@ let dir: string
 let settingsPath: string
 
 beforeEach(async () => {
-  dir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-router-agency-hooks-"))
+  dir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-router-cloudagent-hooks-"))
   settingsPath = path.join(dir, "settings.json")
 })
 
@@ -75,15 +75,15 @@ async function read(): Promise<Record<string, unknown>> {
   return JSON.parse(await fs.readFile(settingsPath, "utf8")) as Record<string, unknown>
 }
 
-describe("sanitizeAgencyHooksInSettingsFile", () => {
-  test("removes the Agency cohort and mixed-nonce residue while preserving unrelated settings", async () => {
+describe("sanitizeCloudAgentHooksInSettingsFile", () => {
+  test("removes the Cloud Agent cohort and mixed-nonce residue while preserving unrelated settings", async () => {
     const current = endpoint()
     const stale = endpoint(7824, OTHER_NONCE)
-    const settings = agencySettings(current)
+    const settings = cloudAgentSettings(current)
     const hooks = settings.hooks as Record<string, Array<Record<string, unknown>>>
     hooks.PreToolUse!.push(httpEntry(stale))
-    // Once Agency ownership of the singleton port is proven, a hook event added
-    // by a newer Agency release must be removed without changing this table.
+    // Once Cloud Agent ownership of the singleton port is proven, a hook event added
+    // by a newer Cloud Agent release must be removed without changing this table.
     hooks.ConfigChange = [httpEntry(stale)]
     hooks.PreToolUse!.push({
       matcher: "Bash",
@@ -93,7 +93,7 @@ describe("sanitizeAgencyHooksInSettingsFile", () => {
     settings.permissions = { allow: ["Read"] }
     await write(settings)
 
-    expect(await sanitizeAgencyHooksInSettingsFile(settingsPath)).toEqual({
+    expect(await sanitizeCloudAgentHooksInSettingsFile(settingsPath)).toEqual({
       written: true,
       removed: HTTP_EVENTS.length + 3,
       endpointCount: 2,
@@ -119,20 +119,20 @@ describe("sanitizeAgencyHooksInSettingsFile", () => {
 
   test("recognizes the POSIX SessionStart signature on a non-default port and uppercase UUID", async () => {
     const url = endpoint(49152, NONCE.toUpperCase())
-    await write(agencySettings(url, posixCommand))
+    await write(cloudAgentSettings(url, posixCommand))
 
-    const result = await sanitizeAgencyHooksInSettingsFile(settingsPath)
+    const result = await sanitizeCloudAgentHooksInSettingsFile(settingsPath)
     expect(result.written).toBe(true)
     expect(result.removed).toBe(HTTP_EVENTS.length + 1)
     expect(result.endpointCount).toBe(1)
   })
 
   test("uses the complete HTTP cohort when SessionStart is absent", async () => {
-    const settings = agencySettings(endpoint())
+    const settings = cloudAgentSettings(endpoint())
     delete (settings.hooks as Record<string, unknown>).SessionStart
     await write(settings)
 
-    expect(await sanitizeAgencyHooksInSettingsFile(settingsPath)).toEqual({
+    expect(await sanitizeCloudAgentHooksInSettingsFile(settingsPath)).toEqual({
       written: true,
       removed: HTTP_EVENTS.length,
       endpointCount: 1,
@@ -163,7 +163,7 @@ describe("sanitizeAgencyHooksInSettingsFile", () => {
     const before = await fs.readFile(settingsPath, "utf8")
     const beforeStat = await fs.stat(settingsPath)
 
-    expect(await sanitizeAgencyHooksInSettingsFile(settingsPath)).toEqual({
+    expect(await sanitizeCloudAgentHooksInSettingsFile(settingsPath)).toEqual({
       written: false,
       removed: 0,
       endpointCount: 0,
@@ -172,8 +172,8 @@ describe("sanitizeAgencyHooksInSettingsFile", () => {
     expect((await fs.stat(settingsPath)).mtimeMs).toBe(beforeStat.mtimeMs)
   })
 
-  test("does not treat a custom multi-hook group as Agency", async () => {
-    const settings = agencySettings(endpoint())
+  test("does not treat a custom multi-hook group as Cloud Agent", async () => {
+    const settings = cloudAgentSettings(endpoint())
     const hooks = settings.hooks as Record<string, Array<Record<string, unknown>>>
     hooks.SessionStart = []
     hooks.PreToolUse = [
@@ -187,25 +187,25 @@ describe("sanitizeAgencyHooksInSettingsFile", () => {
     ]
     await write(settings)
 
-    expect((await sanitizeAgencyHooksInSettingsFile(settingsPath)).written).toBe(false)
+    expect((await sanitizeCloudAgentHooksInSettingsFile(settingsPath)).written).toBe(false)
     expect((await read()).hooks).toEqual(hooks)
   })
 
-  test("accepts a UTF-8 BOM without weakening Agency provenance checks", async () => {
+  test("accepts a UTF-8 BOM without weakening Cloud Agent provenance checks", async () => {
     const bom = String.fromCharCode(0xfeff)
     await fs.writeFile(
       settingsPath,
-      `${bom}${JSON.stringify(agencySettings(endpoint()), null, 2)}\r\n`,
+      `${bom}${JSON.stringify(cloudAgentSettings(endpoint()), null, 2)}\r\n`,
     )
 
-    const result = await sanitizeAgencyHooksInSettingsFile(settingsPath)
+    const result = await sanitizeCloudAgentHooksInSettingsFile(settingsPath)
     expect(result.written).toBe(true)
     expect(result.removed).toBe(HTTP_EVENTS.length + 1)
     expect((await fs.readFile(settingsPath, "utf8")).startsWith(bom)).toBe(false)
   })
 
   test("leaves missing, malformed, and non-object settings unchanged", async () => {
-    expect(await sanitizeAgencyHooksInSettingsFile(settingsPath)).toEqual({
+    expect(await sanitizeCloudAgentHooksInSettingsFile(settingsPath)).toEqual({
       written: false,
       removed: 0,
       endpointCount: 0,
@@ -216,7 +216,7 @@ describe("sanitizeAgencyHooksInSettingsFile", () => {
       ["[1,2,3]", "non-object"],
     ] as const) {
       await fs.writeFile(settingsPath, raw)
-      expect(await sanitizeAgencyHooksInSettingsFile(settingsPath)).toEqual({
+      expect(await sanitizeCloudAgentHooksInSettingsFile(settingsPath)).toEqual({
         written: false,
         removed: 0,
         endpointCount: 0,

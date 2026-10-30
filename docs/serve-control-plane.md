@@ -212,6 +212,8 @@ whenever the control plane is tunnel-exposed** (`tunnelExposed = --tunnel || --p
 - **Azure DevOps / Kusto MCP** — both read with the operator's `az` identity, and Kusto can name any
   cluster that identity reaches on each call. Enable over a tunnel only with `--ado-over-tunnel` /
   `--kusto-over-tunnel`.
+- **Cloud Agent MCP** — acts with the operator's `az` identity and `create_job` spends hours of cloud
+  compute from a web-reachable surface. Enable over a tunnel only with `--cloudagent-over-tunnel`.
 
 Local (loopback-only) serve is unaffected — both are gated purely on the tunnel-exposed condition, and
 `serve` prints a one-line hint when it withholds a capability.
@@ -230,8 +232,8 @@ command rather than half-starting.
 `--no-install`, `--cloudcli-version <v>`, `-m/--model <slug>` (accepts the `4.7`/`4.8` Opus-family
 shorthand + default fallback-cache walk, like `github-router claude`), `--no-open`, `--tunnel`,
 `--public-url <url>`, `--codex-cli`, `--browse-over-tunnel`, `--agents-over-tunnel`,
-`--fleet-over-tunnel`, `--ado-over-tunnel`, `--kusto-over-tunnel`, plus the shared
-server args (including `--browse` / `--fleet` / `--agents`). `--browse` enables the **server-side**
+`--fleet-over-tunnel`, `--ado-over-tunnel`, `--kusto-over-tunnel`, `--cloudagent-over-tunnel`, plus the
+shared server args (including `--browse` / `--fleet` / `--agents` / `--cloudagent` / `--cloudagent-env`). `--browse` enables the **server-side**
 browser MCP (it drives the machine running `serve`).
 
 ## Remote access via an authenticated dev tunnel

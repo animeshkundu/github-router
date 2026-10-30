@@ -14,6 +14,9 @@ const ROOT = path.join(HERE, "..")
  */
 const AZURE_TEST_FILES = [
   "ado-client.test.ts",
+  "cloudagent-client.test.ts",
+  "cloudagent-flags.test.ts",
+  "cloudagent-tools.test.ts",
   "azure-cli-token.test.ts",
   "azure-mcp-flags.test.ts",
   "bluebird-azure-repo.test.ts",
@@ -26,7 +29,14 @@ const AZURE_TEST_FILES = [
   "kusto-tools.test.ts",
 ]
 
-/** The suites whose ENTIRE job is protocol traffic against a client. */
+/**
+ * The suites whose ENTIRE job is protocol traffic against a client.
+ *
+ * The Cloud Agent suites are deliberately NOT here. Their destination is a
+ * two-value enum in the client, not something a test chooses, so the empty-host
+ * non-vacuity assertion below would fail for the wrong reason: there is no host
+ * for a fixture to pick correctly or incorrectly.
+ */
 const CLIENT_TEST_FILES = ["ado-client.test.ts", "kusto-client.test.ts", "kusto-tools.test.ts"]
 
 /** Names that are not derivable from source: the manually validated workspace. */
@@ -57,7 +67,28 @@ function liveEndpoints(): Array<{ label: string; value: string }> {
       if (match[1] && match[2]) found.push({ label: `${file}:${match[1]}`, value: match[2] })
     }
   }
+  // `cloudagent-client.ts` keeps no bare URL constant: its two origins are values
+  // in an environment table, because the token's audience and its destination
+  // have to move together. That shape needs its own matcher, or the newest
+  // client would be the one outside the guard.
+  const clientSource = read("src/lib/cloudagent-client.ts")
+  for (const match of clientSource.matchAll(/\b(prod|ppe): \{\s*baseUrl: "(https:[^"]+)"/g)) {
+    if (match[1] && match[2]) found.push({ label: `src/lib/cloudagent-client.ts:${match[1]}.baseUrl`, value: match[2] })
+  }
   return found
+}
+
+/**
+ * The one place in the test corpus that transcribes a live origin, and the one
+ * file whose job is to hold them. The Cloud Agent mapping is not "some host": prod
+ * and ppe are different services with different token audiences, so a swapped
+ * or edited entry half-works and would be very hard to notice from a passing
+ * test. The Cloud Agent suites themselves derive the value from `cloudAgentBaseUrl()`;
+ * only this pin can tell if the table moved.
+ */
+const CLOUDAGENT_DOCUMENTED_ORIGINS: Record<string, string> = {
+  prod: "https://copilotswe.app.prod.gitops.startclean.microsoft.com/api/agency",
+  ppe: "https://copilotswe.app.ppe.gitops.startclean.microsoft.com/api/agency",
 }
 
 function hostLiterals(text: string): Array<string> {
@@ -94,6 +125,18 @@ describe("Azure automated-test isolation", () => {
       }
     }
     expect(violations).toEqual([])
+  })
+
+  test("the cloudagent environment table still points at its documented origins", () => {
+    const endpoints = liveEndpoints()
+    for (const [environment, origin] of Object.entries(CLOUDAGENT_DOCUMENTED_ORIGINS)) {
+      const endpoint = endpoints.find(
+        (entry) => entry.label === `src/lib/cloudagent-client.ts:${environment}.baseUrl`,
+      )
+      // Absence and drift both fail here, so a matcher that stopped seeing the
+      // table cannot pass by checking nothing.
+      expect(`${environment}: ${endpoint?.value ?? "(absent)"}`).toBe(`${environment}: ${origin}`)
+    }
   })
 
   test("fixtures never name the manually validated workspace", () => {
