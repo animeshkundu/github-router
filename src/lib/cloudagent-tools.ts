@@ -58,7 +58,12 @@ import {
   type CloudAgentCatalogQuery,
   MAX_CATALOG_TOP,
 } from "./cloudagent-client"
-import { getAzureRepoFromGit } from "./azure-repo"
+import {
+  getAzureRepoFromGit,
+  resolveAzureRepoIds,
+  type AzureRepoIdQuery,
+  type AzureRepoIds,
+} from "./azure-repo"
 import { state } from "./state"
 import { relaySafeText } from "./worker-agent/relay-cap"
 
@@ -96,6 +101,27 @@ export function resetCloudAgentClientForTesting(): void {
 /** Test seam: install a client (with an injected fetch/token) for one environment. */
 export function setCloudAgentClientForTesting(client: CloudAgentClient): void {
   clients.set(client.environment, client)
+}
+
+/**
+ * The name-to-id lookup behind the `list_jobs` repository filter.
+ *
+ * It reaches Azure DevOps REST and mints its own Entra token through `az`, so
+ * a unit test replaces it here instead of spawning a real subprocess or
+ * reaching the network. `null` restores the production resolver.
+ */
+type RepoIdResolver = (
+  query: AzureRepoIdQuery,
+  signal?: AbortSignal,
+) => Promise<AzureRepoIds>
+
+const defaultRepoIdResolver: RepoIdResolver = resolveAzureRepoIds
+let repoIdResolver: RepoIdResolver = defaultRepoIdResolver
+
+export function setCloudAgentRepoIdResolverForTesting(
+  resolver: RepoIdResolver | null,
+): void {
+  repoIdResolver = resolver ?? defaultRepoIdResolver
 }
 
 /**
@@ -217,7 +243,7 @@ function repositoryFromArgs(args: Record<string, unknown>): ResolvedRepository |
 }
 
 /**
- * The repository a call runs against: the explicit triple, else whatever the
+ * The repository a job runs against: the explicit triple, else whatever the
  * `workspace` checkout's git remote says.
  *
  * The workspace is resolved by the MCP boundary (`X-GH-Workspace`, or the
@@ -227,37 +253,42 @@ function repositoryFromArgs(args: Record<string, unknown>): ResolvedRepository |
  * `create_job`: the proxy is started once from wherever the operator was, so a
  * stale cwd would spend real compute filing a job against the wrong repository.
  *
- * An OPTIONAL repository is only ever a filter (`list_jobs`), so a lookup that
- * fails there is reported as the reason the filter was dropped, never as a
- * failed call. Treating it as an error was tried and is wrong in practice: a
- * model that names its checkout on every call (Claude Code fills optional
- * properties rather than omitting them) turned every `list_jobs` in a
- * non-Azure-DevOps repository into an error, for a filter it did not need.
+ * A FILTER is a different question with its own resolver
+ * (`resolveRepositoryFilter`): it may name only the organization, and a
+ * checkout it cannot read is reported as the reason the filter was dropped
+ * rather than failing the call. Treating that as an error was tried and is
+ * wrong in practice: a model that names its checkout on every call (Claude
+ * Code fills optional properties rather than omitting them) turned every
+ * `list_jobs` in a non-Azure-DevOps repository into an error, for a filter it
+ * did not need.
  */
-interface OptionalRepositoryResolution {
+async function resolveRepository(
+  args: Record<string, unknown>,
+  ctx: McpToolCallContext | undefined,
+  opts: { signal?: AbortSignal },
+): Promise<ResolvedRepository> {
+  const explicit = repositoryFromArgs(args)
+  if (explicit) return explicit
+  const { repository } = await repositoryFromWorkspace(args, ctx, { required: true, ...opts })
+  return repository!
+}
+
+interface WorkspaceRepositoryResolution {
   repository?: ResolvedRepository
   /** Set when a workspace was named but could not be read as an Azure DevOps checkout. */
   unresolvedDetail?: string
 }
 
-async function resolveRepository(
-  args: Record<string, unknown>,
-  ctx: McpToolCallContext | undefined,
-  opts: { required: true; signal?: AbortSignal },
-): Promise<ResolvedRepository>
-async function resolveRepository(
-  args: Record<string, unknown>,
-  ctx: McpToolCallContext | undefined,
-  opts: { required: false; signal?: AbortSignal },
-): Promise<OptionalRepositoryResolution>
-async function resolveRepository(
+/**
+ * Read the repository off the named `workspace`'s git remote. `required`
+ * decides whether a missing or unreadable checkout fails the call or is
+ * reported back as the reason the repository was not used.
+ */
+async function repositoryFromWorkspace(
   args: Record<string, unknown>,
   ctx: McpToolCallContext | undefined,
   opts: { required: boolean; signal?: AbortSignal },
-): Promise<ResolvedRepository | OptionalRepositoryResolution> {
-  const explicit = repositoryFromArgs(args)
-  if (explicit) return opts.required ? explicit : { repository: explicit }
-
+): Promise<WorkspaceRepositoryResolution> {
   const workspace = optionalString(args, "workspace")
   if (!workspace) {
     if (!opts.required) return {}
@@ -286,7 +317,7 @@ async function resolveRepository(
           ? "this session's workspace"
           : "the workspace you passed",
     }
-    return opts.required ? repository : { repository }
+    return { repository }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err)
     if (opts.required) {
@@ -299,6 +330,66 @@ async function resolveRepository(
     return {
       unresolvedDetail: `Could not read an Azure DevOps repository from "${workspace}": ${detail}`,
     }
+  }
+}
+
+/**
+ * The `list_jobs` filter, which is shallower than a job target: each deeper
+ * component narrows within the one above it, and naming only the organization
+ * is a valid, useful filter. Names are what the caller has; the service
+ * matches the project and repository by ID, so the handler resolves those two
+ * before the request is sent.
+ */
+interface RepositoryFilter {
+  organization: string
+  project?: string
+  repository?: string
+  /** Present only when the filter was read off a checkout rather than passed. */
+  inferredFrom?: string
+}
+
+function repositoryFilterFromArgs(
+  args: Record<string, unknown>,
+): RepositoryFilter | undefined {
+  const organization = optionalString(args, "organization")
+  const project = optionalString(args, "project")
+  const repository = optionalString(args, "repository")
+  if (organization === undefined) {
+    if (project !== undefined || repository !== undefined) {
+      throw new CloudAgentError(
+        "`project` and `repository` narrow within an `organization`, so pass `organization` with them. Omit all three to list every job this account can see, or to fall back to the workspace's repository.",
+        { retriable: false },
+      )
+    }
+    return undefined
+  }
+  if (project === undefined && repository !== undefined) {
+    throw new CloudAgentError(
+      "`repository` narrows within a `project`, so pass `organization` and `project` with it, or omit it to list every job in the project.",
+      { retriable: false },
+    )
+  }
+  return { organization, project, repository }
+}
+
+async function resolveRepositoryFilter(
+  args: Record<string, unknown>,
+  ctx: McpToolCallContext | undefined,
+  signal?: AbortSignal,
+): Promise<{ filter?: RepositoryFilter; unresolvedDetail?: string }> {
+  const explicit = repositoryFilterFromArgs(args)
+  if (explicit) return { filter: explicit }
+
+  const resolution = await repositoryFromWorkspace(args, ctx, { required: false, signal })
+  const inferred = resolution.repository
+  if (!inferred) return { unresolvedDetail: resolution.unresolvedDetail }
+  return {
+    filter: {
+      organization: inferred.organization,
+      project: inferred.project,
+      repository: inferred.repository,
+      inferredFrom: inferred.inferredFrom,
+    },
   }
 }
 
@@ -479,6 +570,34 @@ const REPOSITORY_PROPERTIES = {
   },
 } as const
 
+/**
+ * The same three names, as a FILTER rather than a job target.
+ *
+ * The shapes differ on purpose. A job needs one exact repository, so its three
+ * fields are all-or-none. A filter is a narrowing, and the service matches the
+ * organization by name, so naming only the organization is both legal and
+ * useful; the project and repository then narrow within it. Each description
+ * says what its default is and what it overlays, because a model that cannot
+ * see the handler will otherwise fill in a guess.
+ */
+const FILTER_REPOSITORY_PROPERTIES = {
+  organization: {
+    type: "string",
+    description:
+      "Azure DevOps organization to narrow to. Default: read from `workspace`'s git remote. Pass it alone to list every job in the organization.",
+  },
+  project: {
+    type: "string",
+    description:
+      "Azure DevOps project name, within `organization`. Default: the project read from `workspace`'s git remote. Requires `organization`.",
+  },
+  repository: {
+    type: "string",
+    description:
+      "Repository name within `project`. Default: the repository read from `workspace`'s git remote. Requires `organization` and `project`.",
+  },
+} as const
+
 const JOB_ID_PROPERTY = {
   jobId: { type: "string", description: "The job id returned by create_job or listed by list_jobs." },
 } as const
@@ -566,7 +685,7 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
       // passed to `createJob`: aborting a POST after the service accepted it
       // would leave a running job with no id to report, and there is no
       // idempotency key to retry against.
-      const repository = await resolveRepository(args, ctx, { required: true, signal })
+      const repository = await resolveRepository(args, ctx, { signal })
       const branch = optionalString(args, "branch")
       const agent = optionalString(args, "agent")
       const prompt = optionalString(args, "prompt")
@@ -700,12 +819,14 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
     description:
       "Lists the Cloud Agent jobs this account can see, newest first, as one line each with state, outcome, repository and prompt. "
       + "This is the durable ledger of dispatched work: every job carries its prompt, its labels and its outcome, so a chain of jobs can be reconstructed in a later session or after a compaction. "
-      + "Call it with no arguments in the common case: it defaults to the workspace's Azure DevOps repository and the first page of 25 jobs. There is no state filter: the service silently ignores one, so filter the returned lines yourself.",
+      + "Call it with no arguments in the common case: it narrows to the workspace's Azure DevOps repository and returns the first page of 25 jobs. "
+      + "Narrowing is optional and additive — `organization` alone lists every job in that organization, `organization` plus `project` lists a project, and all three list one repository; names you pass override the ones read from a checkout. "
+      + "There is no state filter: the service silently ignores one, so filter the returned lines yourself.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        ...REPOSITORY_PROPERTIES,
+        ...FILTER_REPOSITORY_PROPERTIES,
         ...WORKSPACE_PROPERTY,
         pullRequestId: {
           type: "number",
@@ -723,15 +844,50 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
       },
     },
     async handler(args, signal, ctx) {
-      const resolution = await resolveRepository(args, ctx, { required: false, signal })
-      const repository = resolution.repository
+      const resolution = await resolveRepositoryFilter(args, ctx, signal)
+      const filter = resolution.filter
       const pageSize = optionalInt(args, "pageSize", 1, 100)
       const pullRequestId = optionalInt(args, "pullRequestId", 1, Number.MAX_SAFE_INTEGER)
+
+      const notes: Array<string> = []
+      let projectId: string | undefined
+      let repositoryId: string | undefined
+      if (filter?.project) {
+        try {
+          const ids = await repoIdResolver(
+            {
+              organization: filter.organization,
+              project: filter.project,
+              ...(filter.repository ? { repository: filter.repository } : {}),
+            },
+            signal,
+          )
+          projectId = ids.projectId
+          repositoryId = ids.repositoryId
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err)
+          if (!filter.inferredFrom) {
+            // The caller asked for this narrowing. A ledger that looks filtered
+            // and is not is the exact failure the argument exists to prevent,
+            // so refuse and name the two ways out.
+            throw new CloudAgentError(
+              `${detail} Pass only \`organization\` to narrow by organization, or omit all three to list every job this account can see.`,
+              { retriable: false },
+            )
+          }
+          // A filter read off a checkout rather than asked for: keep the
+          // organization (which needs no lookup), drop the rest, and say so.
+          notes.push(
+            `[filter: organization "${filter.organization}" only — ${detail} The project and repository read from ${filter.inferredFrom} were dropped.]`,
+          )
+        }
+      }
+
       const page = await cloudAgentClient().listJobs(
         {
-          organization: repository?.organization,
-          project: repository?.project,
-          repository: repository?.repository,
+          organization: filter?.organization,
+          project: projectId,
+          repository: repositoryId,
           pullRequestId,
           pageSize,
           continuationToken: optionalString(args, "continuationToken"),
@@ -739,10 +895,12 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
         signal,
       )
 
-      const notes: Array<string> = []
-      const provenance = repository ? provenanceLine(repository) : undefined
-      if (provenance) notes.push(provenance)
-      if (!repository) {
+      const inferred =
+        filter?.inferredFrom && filter.project && filter.repository && projectId !== undefined
+      if (inferred) {
+        notes.push(provenanceLine({ ...filter, project: filter.project!, repository: filter.repository! })!)
+      }
+      if (!filter) {
         notes.push(
           resolution.unresolvedDetail
             ? `[repository: not filtered — ${resolution.unresolvedDetail} Pass organization, project and repository explicitly to filter by one repository.]`

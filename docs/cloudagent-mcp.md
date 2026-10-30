@@ -201,6 +201,55 @@ from wherever the operator was, and a stale cwd spending real compute against
 the wrong repository is not a recoverable mistake. A partial triple is an error
 for the same reason: it would either be guessed or silently ignored.
 
+### `list_jobs`: the filter is a prefix, and the service wants ids
+
+`list_jobs` takes the same three names `create_job` takes, but they behave as an
+**additive prefix**, not the all-or-none repository a job needs:
+
+| Arguments | What it lists |
+|---|---|
+| none | every job this account can see, first page |
+| `organization` | every job in that organization |
+| `organization` + `project` | one project |
+| `organization` + `project` + `repository` | one repository |
+
+Anything else is a typo the tool refuses rather than a filter it silently
+ignores: `project` without `organization` and `repository` without `project`
+both throw with the two ways out. `pullRequestId` narrows on its own.
+
+Names given by the caller override names read from the checkout, so a session
+working in repository A can still ask about repository B. When nothing is given
+and none can be read from a checkout, the call is not an error — it lists the
+whole account and says so.
+
+**Measured live (2026-10-30), and the reason the tool does a second lookup:**
+`GET /jobs` matches `organization` by **name** but `project` and `repository` by
+**GUID**. Passed a name, those two filters match nothing and the service returns
+an empty ledger rather than an error, so a model that trusted the result would
+report "no jobs" about a repository with dozens. The tool therefore resolves
+names to ids itself, through the same Azure DevOps REST API the `ado` group
+already talks to (`/_apis/projects/{project}` and
+`/_apis/git/repositories/{repo}`, `api-version=7.1`, ADO resource
+`499b84ac-1321-427f-aa17-267ca6975798`), and caches the answer per process keyed
+by the lowercased triple, dropping rejected entries. A caller who has already
+run `list_jobs` against the same repository pays nothing for the lookup.
+
+Two failure modes, deliberately different:
+
+- **A caller-named filter that cannot be resolved is an error.** A ledger that
+  looks filtered and is not is the exact failure the argument exists to prevent,
+  so the call fails with the upstream detail and the two ways out, rather than
+  quietly widening.
+- **A filter read off a checkout that cannot be resolved degrades to the
+  organization**, which needs no lookup (it matches by name), plus a line saying
+  the project and repository were dropped and why. A workspace whose remote
+  points at a repository the caller's ADO identity cannot see should not break a
+  question about what else is running.
+
+The resolved ids are not echoed back; they are an implementation detail of
+matching names the caller actually typed. What the caller sees is the
+provenance line when the filter was inferred, and the jobs.
+
 ### `wait_for_job`
 
 `wait_for_job(jobId, max_wait_s = 25, hard max 50)` polls every ~3 s and returns

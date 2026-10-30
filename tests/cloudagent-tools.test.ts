@@ -8,7 +8,9 @@ import {
   CLOUDAGENT_TOOLS,
   resetCloudAgentClientForTesting,
   setCloudAgentClientForTesting,
+  setCloudAgentRepoIdResolverForTesting,
 } from "../src/lib/cloudagent-tools"
+import type { AzureRepoIdQuery, AzureRepoIds } from "../src/lib/azure-repo"
 import { firstText, type McpToolResult } from "../src/lib/attachments"
 import type { McpToolCallContext, NonPersonaMcpTool } from "../src/lib/peer-mcp-personas"
 import { state } from "../src/lib/state"
@@ -99,6 +101,25 @@ function use(script: Array<() => Response> = []): Harness {
   return h
 }
 
+/**
+ * The Azure DevOps GUIDs `list_jobs` sends for the human names above.
+ *
+ * The service matches `project` and `repository` by ID only: a name narrows to
+ * zero rows and reports no error, which is measured against prod. So the
+ * handler resolves names through Azure DevOps REST first, and this is what a
+ * test gets instead of a real lookup (which would spawn `az` and hit the
+ * network).
+ */
+const PROJECT_ID = "11ac29bc-5a99-400b-b225-01839ab0c9df"
+const REPO_ID = "1b255d6e-1545-42ab-9e75-1fb3f0202dfa"
+
+function fakeRepoIds(query: AzureRepoIdQuery): Promise<AzureRepoIds> {
+  return Promise.resolve({
+    projectId: PROJECT_ID,
+    ...(query.repository ? { repositoryId: REPO_ID } : {}),
+  })
+}
+
 beforeEach(() => {
   state.cloudAgentEnvironment = "prod"
   resetCloudAgentClientForTesting()
@@ -106,6 +127,7 @@ beforeEach(() => {
   // on an exhausted queue instead of constructing a real one that would try to
   // mint an Entra token through `az`.
   use()
+  setCloudAgentRepoIdResolverForTesting(fakeRepoIds)
 })
 
 function toolNamed(name: string): NonPersonaMcpTool {
@@ -666,14 +688,24 @@ describe("list_jobs", () => {
   }
 
   test("filters by the explicit repository and renders one line per job", async () => {
+    const seen: Array<AzureRepoIdQuery> = []
+    setCloudAgentRepoIdResolverForTesting((query) => {
+      seen.push(query)
+      return fakeRepoIds(query)
+    })
     const h = use([() => jsonResponse(PAGE)])
     const text = textOf(await call("list_jobs", REPOSITORY))
     const url = new URL(h.calls[0]!.url)
 
     expect(url.pathname).toBe("/api/agency/jobs")
     expect(url.searchParams.get("organization")).toBe("contoso")
-    expect(url.searchParams.get("project")).toBe("platform")
-    expect(url.searchParams.get("repository")).toBe("web")
+    // Names go to Azure DevOps; the service only understands ids. Measured
+    // against prod: project=platform narrowed to zero rows, silently.
+    expect(url.searchParams.get("project")).toBe(PROJECT_ID)
+    expect(url.searchParams.get("repository")).toBe(REPO_ID)
+    expect(seen).toEqual([
+      { organization: "contoso", project: "platform", repository: "web" },
+    ])
     // pageSize is only sent when asked, so the service default is never
     // narrowed behind the caller's back.
     expect(url.searchParams.has("pageSize")).toBe(false)
@@ -742,11 +774,91 @@ describe("list_jobs", () => {
     )
   })
 
-  test("a partial repository triple is still a typo, not a filter", async () => {
+  test("an organization alone is a valid narrowing, and costs no lookup", async () => {
+    // Unlike a job's repository (one exact triple or nothing), a FILTER is a
+    // prefix: the organization is matched by name, so it needs no resolution
+    // and is useful on its own.
+    let lookups = 0
+    setCloudAgentRepoIdResolverForTesting((query) => {
+      lookups += 1
+      return fakeRepoIds(query)
+    })
+    const h = use([() => jsonResponse(PAGE)])
+    textOf(await call("list_jobs", { organization: "contoso" }))
+    const url = new URL(h.calls[0]!.url)
+    expect(url.searchParams.get("organization")).toBe("contoso")
+    expect(url.searchParams.has("project")).toBe(false)
+    expect(url.searchParams.has("repository")).toBe(false)
+    expect(lookups).toBe(0)
+  })
+
+  test("a project with no organization is a typo, not a filter", async () => {
     const h = use()
-    await expect(call("list_jobs", { organization: "contoso" }))
-      .rejects.toThrow(/Pass all of `organization`, `project` and `repository`, or none/)
+    await expect(call("list_jobs", { project: "platform" }))
+      .rejects.toThrow(/`project` and `repository` narrow within an `organization`/)
     expect(h.calls).toHaveLength(0)
+  })
+
+  test("a repository with no project is a typo, not a filter", async () => {
+    const h = use()
+    await expect(call("list_jobs", { organization: "contoso", repository: "web" }))
+      .rejects.toThrow(/`repository` narrows within a `project`/)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  test("a caller-named filter that cannot be resolved fails instead of lying", async () => {
+    // The whole point of the argument: a ledger that LOOKS filtered and is not
+    // is worse than an error. So a name the caller supplied, which Azure DevOps
+    // cannot resolve, refuses the call and names both ways out.
+    const h = use()
+    setCloudAgentRepoIdResolverForTesting(() =>
+      Promise.reject(new Error('Azure DevOps has no repository "nope" (HTTP 404).')),
+    )
+    await expect(call("list_jobs", REPOSITORY))
+      .rejects.toThrow(/Pass only `organization` to narrow by organization, or omit all three/)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  test("an inferred filter resolves the same way and says where it came from", async () => {
+    const seen: Array<AzureRepoIdQuery> = []
+    setCloudAgentRepoIdResolverForTesting((query) => {
+      seen.push(query)
+      return fakeRepoIds(query)
+    })
+    const h = use([() => jsonResponse(PAGE)])
+    const text = textOf(
+      await call("list_jobs", { workspace: repoDir }, { workspaceSource: "session" }),
+    )
+    const url = new URL(h.calls[0]!.url)
+    expect(url.searchParams.get("organization")).toBe("contoso")
+    expect(url.searchParams.get("project")).toBe(PROJECT_ID)
+    expect(url.searchParams.get("repository")).toBe(REPO_ID)
+    expect(seen).toEqual([
+      { organization: "contoso", project: "platform", repository: "web" },
+    ])
+    expect(text).toContain(
+      "[repository: contoso/platform/web (inferred from this session's workspace)]",
+    )
+  })
+
+  test("a filter read off a checkout that cannot be resolved drops to the organization", async () => {
+    // An inferred filter is a convenience, not a request: when the checkout's
+    // names cannot be resolved, keep the part that needs no lookup (the
+    // organization, matched by name) and say what happened. Failing here would
+    // turn "list the ledger from inside this repo" into an error.
+    setCloudAgentRepoIdResolverForTesting(() =>
+      Promise.reject(new Error("Azure DevOps lookup for project \"web\" was refused with HTTP 403.")),
+    )
+    const h = use([() => jsonResponse(PAGE)])
+    const text = textOf(
+      await call("list_jobs", { workspace: repoDir }, { workspaceSource: "session" }),
+    )
+    const url = new URL(h.calls[0]!.url)
+    expect(url.searchParams.get("organization")).toBe("contoso")
+    expect(url.searchParams.has("project")).toBe(false)
+    expect(url.searchParams.has("repository")).toBe(false)
+    expect(text).toContain('[filter: organization "contoso" only')
+    expect(text).toContain("were dropped.")
   })
 
   test("a page that has more says how to continue", async () => {

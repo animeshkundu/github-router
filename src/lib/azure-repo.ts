@@ -19,6 +19,7 @@
  * falls back to the repo default branch.
  */
 
+import { AzCliAccessTokenCache, describeAzFailure } from "./azure-cli-token"
 import { resolveExecutable, runCommandCapture } from "./exec"
 
 export interface AzureRepoInfo {
@@ -262,10 +263,13 @@ export function resolveAzureRepoFromRemotes(
   const distinct = distinctAzureRepos(entries)
   if (distinct.length === 0) {
     throw new Error(
+      // Shared by four consumers (Bluebird code search, ado, kusto, cloudagent),
+      // so the text says only what is true for all of them. The code-search
+      // advice about local modes belongs in that caller's own notice, not here:
+      // read verbatim in a list_jobs result it is advice about the wrong tool.
       "No supported Azure DevOps repository remote was found for this workspace. "
-      + "Git remotes are authoritative for Bluebird scope discovery; add a "
-      + "dev.azure.com or visualstudio.com remote. Exact/regex/ast modes still "
-      + "use the local engine.",
+      + "Add a dev.azure.com or visualstudio.com remote, or pass the repository "
+      + "explicitly.",
     )
   }
   if (distinct.length === 1) return distinct[0].info
@@ -473,4 +477,182 @@ export async function getDefaultBranch(
     throw new Error("Azure CLI returned an empty default branch.")
   }
   return branch
+}
+
+// --- Azure DevOps identifiers ---------------------------------------------
+
+/**
+ * Cloud Agent's job filter takes the organization by NAME but the project and
+ * repository by ID, both measured against prod: an organization name narrows,
+ * while a project or repository name matches zero rows and reports no error at
+ * all. Those are the worst kind of filter, because an empty ledger
+ * looks like an answer. Every human-facing surface names them, so the two ids
+ * are resolved here, once per process, before a filtered request is sent.
+ *
+ * The token is minted for the Azure DevOps resource, not the Cloud Agent one:
+ * two audiences, two origins, exactly like the Bluebird pair above. It is
+ * silent (`allowInteractiveLogin: false`) because this lookup runs inside a
+ * tool call, where a device-code prompt the user cannot see is
+ * indistinguishable from a hang.
+ */
+export interface AzureRepoIdQuery {
+  organization: string
+  project: string
+  /** Omit to resolve only the project id. */
+  repository?: string
+}
+
+export interface AzureRepoIds {
+  projectId: string
+  /** Present only when the query named a repository. */
+  repositoryId?: string
+}
+
+const ADO_REST_RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"
+const ADO_REST_TIMEOUT_MS = 15_000
+const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const REPO_ID_CACHE_MAX = 128
+
+const adoRestTokenCache = new AzCliAccessTokenCache()
+const repoIdCache = new Map<string, Promise<AzureRepoIds>>()
+
+async function getAzureDevOpsRestToken(signal?: AbortSignal): Promise<string> {
+  try {
+    return await adoRestTokenCache.get(ADO_REST_RESOURCE, {
+      ...(signal ? { signal } : {}),
+      allowInteractiveLogin: false,
+    })
+  } catch (err) {
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted")
+    throw new Error(describeAzFailure("Azure DevOps", err), { cause: err })
+  }
+}
+
+/** Test seam: the ids are cached for the process lifetime. */
+export function __resetAzureRepoIdCacheForTests(): void {
+  repoIdCache.clear()
+}
+
+/**
+ * Project and repository ids for one named repository, cached per process.
+ *
+ * A rejected lookup is dropped from the cache: the failure may be a lapsed
+ * `az` session or a transient network error, and caching it would turn one bad
+ * minute into a permanently broken filter. Concurrent callers share one
+ * in-flight lookup, so two tools that resolve the same repository spawn one
+ * `az` process and two REST requests, not four.
+ */
+export async function resolveAzureRepoIds(
+  query: AzureRepoIdQuery,
+  signal?: AbortSignal,
+): Promise<AzureRepoIds> {
+  const key = [query.organization, query.project, query.repository ?? ""]
+    .join("/")
+    .toLowerCase()
+  const cached = repoIdCache.get(key)
+  if (cached) return cached
+
+  const pending = lookupAzureRepoIds(query, signal)
+  repoIdCache.set(key, pending)
+  if (repoIdCache.size > REPO_ID_CACHE_MAX) {
+    const oldest = repoIdCache.keys().next()
+    if (!oldest.done && oldest.value !== key) repoIdCache.delete(oldest.value)
+  }
+  try {
+    return await pending
+  } catch (err) {
+    repoIdCache.delete(key)
+    throw err
+  }
+}
+
+async function lookupAzureRepoIds(
+  query: AzureRepoIdQuery,
+  signal?: AbortSignal,
+): Promise<AzureRepoIds> {
+  const token = await getAzureDevOpsRestToken(signal)
+  const org = encodeURIComponent(query.organization)
+  const project = encodeURIComponent(query.project)
+
+  const projectId = adoIdField(
+    await adoRestGet(
+      `https://dev.azure.com/${org}/_apis/projects/${project}?api-version=7.1`,
+      `project "${query.project}" in organization "${query.organization}"`,
+      token,
+      signal,
+    ),
+    `project "${query.project}" in organization "${query.organization}"`,
+  )
+  if (!query.repository) return { projectId }
+
+  const repositoryId = adoIdField(
+    await adoRestGet(
+      `https://dev.azure.com/${org}/${project}/_apis/git/repositories/${encodeURIComponent(query.repository)}?api-version=7.1`,
+      `repository "${query.repository}" in project "${query.project}" of organization "${query.organization}"`,
+      token,
+      signal,
+    ),
+    `repository "${query.repository}" in project "${query.project}" of organization "${query.organization}"`,
+  )
+  return { projectId, repositoryId }
+}
+
+async function adoRestGet(
+  url: string,
+  what: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const timeoutSignal = AbortSignal.timeout(ADO_REST_TIMEOUT_MS)
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutSignal])
+    : timeoutSignal
+
+  let response: Response
+  try {
+    response = await fetch(url, {
+      headers: { Accept: "application/json", Authorization: `Bearer ${token}` },
+      signal: requestSignal,
+    })
+  } catch (err) {
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted")
+    throw new Error(
+      `Azure DevOps lookup for ${what} failed: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
+    )
+  }
+
+  // No response body is ever quoted: the failure is a name the caller can fix
+  // or a session it can renew, and the body adds neither (same rule as
+  // `checkBranchIndexStatus`).
+  if (response.status === 401 || response.status === 403) {
+    throw new Error(
+      `Azure DevOps lookup for ${what} was refused with HTTP ${response.status}. `
+        + "The Azure CLI session cannot see it; run `az login` and retry.",
+    )
+  }
+  if (response.status === 404) {
+    throw new Error(
+      `Azure DevOps has no ${what} (HTTP 404). Check the name: it is matched case-insensitively, but it must exist and be visible to this account.`,
+    )
+  }
+  if (!response.ok) {
+    throw new Error(`Azure DevOps lookup for ${what} failed with HTTP ${response.status}.`)
+  }
+  try {
+    return (await response.json()) as unknown
+  } catch {
+    throw new Error(`Azure DevOps lookup for ${what} returned malformed JSON.`)
+  }
+}
+
+function adoIdField(body: unknown, what: string): string {
+  const id =
+    typeof body === "object" && body !== null && typeof (body as { id?: unknown }).id === "string"
+      ? (body as { id: string }).id
+      : ""
+  if (!GUID_PATTERN.test(id)) {
+    throw new Error(`Azure DevOps returned no usable id for ${what}.`)
+  }
+  return id
 }

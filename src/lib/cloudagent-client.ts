@@ -1540,6 +1540,22 @@ export class CloudAgentClient {
       }
       const text = await readBoundedBody(res, opts.cap, opts.what)
       if (!res.ok) {
+        if (res.status === 404) {
+          // A job id is the composite "<org>-<uuid>" string the service prints,
+          // not the UUID inside it, so the most likely cause of a 404 here is a
+          // truncated id rather than a deleted job. "HTTP 404: Not Found" gives
+          // the model nothing to change; naming the format turns a dead end
+          // into the next call.
+          const jobId = jobIdFromPath(path)
+          if (jobId) {
+            throw new CloudAgentError(
+              `No job with id "${jobId}" exists in the ${this.environment} environment (HTTP 404). `
+                + "A job id is the full \"<org>-<uuid>\" string that create_job and list_jobs return; "
+                + "a bare UUID does not resolve. list_jobs shows the ids this account can see.",
+              { retriable: false, status: 404 },
+            )
+          }
+        }
         throw new CloudAgentError(
           `Cloud Agent responded with HTTP ${res.status}: ${cloudAgentErrorDetail(text)}`,
           { retriable: false, status: res.status },
@@ -1756,6 +1772,12 @@ function catalogQueryParams(query: CloudAgentCatalogQuery): Record<string, strin
  * `..` would silently address a different endpoint. The service's ids are
  * GUID-shaped; this accepts that plus a conservative superset.
  */
+/** `"/jobs/<id>"` or `"/jobs/<id>/logs"` → `<id>`; any other path → `null`. */
+function jobIdFromPath(path: string): string | null {
+  const match = /^\/jobs\/([^/]+)/.exec(path)
+  return match?.[1] ? decodeURIComponent(match[1]) : null
+}
+
 function assertJobId(jobId: string): string {
   const trimmed = jobId.trim()
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(trimmed)) {

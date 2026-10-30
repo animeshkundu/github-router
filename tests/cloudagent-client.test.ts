@@ -292,6 +292,38 @@ describe("the bearer never reaches a message", () => {
   })
 })
 
+describe("a job-path 404", () => {
+  // Live probe: a bare UUID (the tail of a composite job id) 404s, and the
+  // generic status text told the caller nothing it could act on.
+  test("names the id and its format instead of passing through the status", async () => {
+    const h = harness([() => jsonResponse({ message: "Not Found" }, { status: 404 })])
+    const err = await h.client.getJob("af5bec4e-68ad-4814-b0b2-eedda039ad3c")
+      .catch((caught: unknown) => caught)
+    expect(err).toBeInstanceOf(CloudAgentError)
+    const message = String((err as Error).message)
+    expect(message).toContain("af5bec4e-68ad-4814-b0b2-eedda039ad3c")
+    expect(message).toContain("<org>-<uuid>")
+    expect(message).toContain("list_jobs")
+    expect((err as CloudAgentError).status).toBe(404)
+    expect((err as CloudAgentError).retriable).toBe(false)
+    expect(h.calls).toHaveLength(1)
+  })
+
+  test("applies to the log endpoint too, not only get_job", async () => {
+    const h = harness([() => jsonResponse({ message: "Not Found" }, { status: 404 })])
+    const err = await h.client.getJobLogs("contoso-af5bec4e-68ad-4814-b0b2-eedda039ad3c")
+      .catch((caught: unknown) => caught)
+    expect(String((err as Error).message)).toContain("contoso-af5bec4e-68ad-4814-b0b2-eedda039ad3c")
+  })
+
+  test("a 404 outside a job path keeps the generic detail", async () => {
+    const h = harness([() => jsonResponse({ message: "Not Found" }, { status: 404 })])
+    const err = await h.client.listPlugins().catch((caught: unknown) => caught)
+    expect(String((err as Error).message)).toContain("HTTP 404")
+    expect(String((err as Error).message)).not.toContain("<org>-<uuid>")
+  })
+})
+
 describe("listPlugins / listAgents", () => {
   test("sends no `top` unless asked, because the default page is what the UI shows", async () => {
     const h = harness([() => jsonResponse({ value: [], totalCount: 233 })])
