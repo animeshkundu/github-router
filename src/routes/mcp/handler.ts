@@ -572,9 +572,10 @@ function maxToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   //
   // Cloud Agent splits read from write, and the split is not a profile concern: a
   // discovered Azure DevOps remote turns the seven read tools on and leaves
-  // `create_job`/`cancel_job` off, because a job spends compute. Gating both
-  // halves through `cloudAgentToolsEnabled()` alone would put "launch a cloud
-  // agent" in front of a model on a launch no operator opted into.
+  // `create_job`/`create_pr_job`/`cancel_job` off, because a job spends
+  // compute. Gating both halves through `cloudAgentToolsEnabled()` alone would
+  // put "launch a cloud agent" in front of a model on a launch no operator
+  // opted into.
   if (tool.group === "ado") return adoToolsEnabled()
   if (tool.group === "kusto") return kustoToolsEnabled()
   if (tool.capability === "cloudagent") return cloudAgentToolsEnabled()
@@ -1438,13 +1439,15 @@ function toolAcceptsWorkspace(tool: NonPersonaMcpTool): boolean {
     // refuse every call.
     || tool.toolNameHttp === "prompt_brief"
     // Cloud Agent resolves its repository from the workspace's git remote when the
-    // caller names no `organization`/`project`/`repository`. Without these two
+    // caller names no `organization`/`project`/`repository`. Without these three
     // the header never reaches the handler, so the default silently degrades to
-    // "no repository" — for `create_job` a required-argument error, and for
-    // `list_jobs` an unfiltered listing of every job the account can see.
+    // "no repository": a required-argument error for `create_job` and
+    // `create_pr_job`, and an unfiltered listing of every job the account can
+    // see for `list_jobs`.
     // `get_job_logs` could use a workspace too and deliberately does not: a job
     // id already identifies its repository.
     || tool.toolNameHttp === "create_job"
+    || tool.toolNameHttp === "create_pr_job"
     || tool.toolNameHttp === "list_jobs"
 }
 

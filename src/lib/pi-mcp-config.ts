@@ -72,7 +72,7 @@ export function readMcpServerKeys(raw: string): Array<string> | null {
 const GROUP_DESCRIPTIONS: Record<string, string> = {
   ado: "Azure DevOps for the open repository: repositories, work items, pipelines and wikis.",
   kusto: "Azure Data Explorer: query and management commands against the cluster named on each call, or the launch default.",
-  cloudagent: "Microsoft Cloud Agent jobs: hand a prompt plus an Azure DevOps repository to a cloud coding agent, then poll it for hours and collect the answer. create_job/cancel_job only exist when the operator opted in; they spend compute.",
+  cloudagent: "Microsoft Cloud Agent jobs: hand a prompt plus an Azure DevOps repository to a cloud coding agent, then poll it for hours and collect the answer. The write tools (create_job, create_pr_job, cancel_job) only exist when the operator opted in; they spend compute.",
 }
 
 export interface PiSurfaceDecision {

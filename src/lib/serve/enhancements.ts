@@ -107,7 +107,8 @@ export interface ServeEnhancementOpts {
   kustoOverTunnel?: boolean
   /** Operator opt-in to expose the Cloud Agent MCP group over the tunnel. Stricter
    *  than its neighbours for the reason the group is split: the READ tools
-   *  spend the operator's identity, and `create_job`/`cancel_job` spend the
+   *  spend the operator's identity, and the write tools (create_job,
+   *  create_pr_job, cancel_job) spend the
    *  operator's compute budget. A tunnel client is not the operator, so both
    *  halves stay local unless this is passed. */
   cloudAgentOverTunnel?: boolean

@@ -1,6 +1,6 @@
 # Cloud Agent MCP group: `cloudagent`
 
-The `cloudagent` group exposes Microsoft's **Cloud Agent Job API v2** as nine MCP tools
+The `cloudagent` group exposes Microsoft's **Cloud Agent Job API v2** as ten MCP tools
 (`mcp__cloudagent__*`). Cloud Agent runs an autonomous coding agent in the cloud against
 an Azure DevOps repository: you hand it a prompt, it clones the repository,
 works for hours, and finishes with a written summary and (usually) a pull
@@ -30,7 +30,7 @@ tracked locally; there is no state to lose.
 
 | Surface | Effect |
 |---|---|
-| `--cloudagent` / `GH_ROUTER_ENABLE_CLOUDAGENT=1` | All nine tools, including `create_job` and `cancel_job` |
+| `--cloudagent` / `GH_ROUTER_ENABLE_CLOUDAGENT=1` | All ten tools, including `create_job`, `create_pr_job` and `cancel_job` |
 | Azure DevOps git remote discovered | The **seven read tools only** |
 | `--no-cloudagent` / `GH_ROUTER_DISABLE_CLOUDAGENT=1` | Never |
 | `GH_ROUTER_AZURE_MCPS=off` | The shared wholesale kill switch; suppresses the discovery enable too |
@@ -43,8 +43,8 @@ always say no.
 
 ### The read/write split is the load-bearing part
 
-`create_job` and `cancel_job` carry the `cloudagent_write` capability and require
-the explicit flag. Discovery never enables them.
+`create_job`, `create_pr_job` and `cancel_job` carry the `cloudagent_write`
+capability and require the explicit flag. Discovery never enables them.
 
 `src/lib/azure-mcp-flags.ts` states the invariant for the Azure groups: a
 git remote that turned a group on can never produce a write surface. A clone's
@@ -108,6 +108,7 @@ One approved probe job: created, then cancelled as soon as it was seen running.
 | Tool | Capability | Contract |
 |---|---|---|
 | `create_job` | `cloudagent_write` | Returns immediately with the job id and the normalized request |
+| `create_pr_job` | `cloudagent_write` | `create_job` with the `agency-coding` plugin, the `complex` tier, and a fixed request-to-pull-request workflow prepended to the prompt |
 | `cancel_job` | `cloudagent_write` | `POST /jobs/{id}/cancel` (not under `/v2/`); irreversible |
 | `get_job` | `cloudagent` | The poll. The summary leads on a terminal job |
 | `list_jobs` | `cloudagent` | The durable ledger; defaults to the workspace's repository |
@@ -158,6 +159,43 @@ Overrides, in precedence order:
 block as a `tier:` line, since `GET /jobs/{id}` never returns
 `modelConfiguration` and the echo is the only record of what was sent.
 
+### `create_pr_job`: one request in, one review-ready pull request out
+
+`create_job` requires the caller to know three things beyond the task: which
+plugin provides the Azure DevOps write tools, which model suits long-horizon
+work, and which engineering process the job should follow. `create_pr_job`
+takes only the task and fixes all three:
+
+- **Plugin.** `agency-coding`, measured live on 2026-10-31 (`Company` scope,
+  not enabled by default; the whole 235-entry catalog has no default-enabled
+  plugin). It provides branch, commit, push, pull request, pipeline and work
+  item tools.
+- **Model.** The `complex` tier: `claude-opus-5.5` at `max` effort. `tier`,
+  `model`, `reasoningEffort` and `context` are still accepted and behave
+  exactly as they do on `create_job`.
+- **Workflow.** A fixed directive is prepended to `prompt`: read the request,
+  plan, have the plan independently reviewed, implement with tests, have the
+  implementation independently reviewed, open the pull request, get its
+  required checks green, and link or create a work item (`MSTeams` when the
+  task named none). The job leaves the pull request open; it never merges.
+
+The Job API has no system-prompt field. A validate probe sent one on
+2026-10-31, got a 200, and the field was ignored and not echoed, so the
+directive is folded into the single `prompt` string the API does accept. The
+caller's task is wrapped in `<user_task>` tags at the end of that string, which
+keeps "how to work" and "what to build" distinguishable. No validate preflight
+is used, for the reason recorded under [Selectors that are deliberately
+absent](#selectors-that-are-deliberately-absent): its answer is a projected id,
+not a job handle.
+
+The directive was written against Anthropic's current prompting guidance for
+Claude Opus 5.5:
+[prompt engineering best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)
+and
+[prompting Claude Opus 5.5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5).
+Treat a directive edit as a product change: bump its version marker, and keep
+the structural assertions in `tests/cloudagent-tools.test.ts` green.
+
 ### `list_models`: the catalog behind the tiers
 
 `GET /models` is live but undocumented, so the parser was written from a
@@ -200,7 +238,7 @@ description names that default and what overrides it:
 | `branch` | the repository's default branch |
 | `agent` | the service's standard agent |
 | `plugins` | none beyond what the service enables by default |
-| `tier` | `normal` (`gpt-6-astra` at `max` effort); `easy` and `complex` are `claude-opus-4.8-fast` and `claude-opus-5.5`, both at `max` |
+| `tier` | `normal` on `create_job` (`gpt-6-astra` at `max` effort), `complex` on `create_pr_job`; `easy` and `complex` are `claude-opus-4.8-fast` and `claude-opus-5.5`, both at `max` |
 | `model` | the `tier`'s model; naming one replaces the preset model and drops its effort |
 | `reasoningEffort` | the `tier`'s effort; always wins when given |
 | `context` | `default` |

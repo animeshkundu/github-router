@@ -923,9 +923,9 @@ export function cloudAgentToolsEnabled(): boolean {
 }
 
 /**
- * Gate for `create_job` / `cancel_job`, which are split out because they are
- * the only two tools in this repo whose ordinary use spends money: a job runs
- * a cloud agent for hours (measured median 221 min).
+ * Gate for `create_job` / `create_pr_job` / `cancel_job`, which are split out
+ * because they are the tools in this repo whose ordinary use spends money: a
+ * job runs a cloud agent for hours (measured median 221 min).
  *
  * Deliberately NOT `cloudAgentToolsEnabled() && something`: the two booleans come
  * from one resolution in `resolveCloudAgentFlags()`, and `cloudAgentWriteEnabled` can

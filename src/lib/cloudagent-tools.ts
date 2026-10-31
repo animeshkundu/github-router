@@ -1,5 +1,5 @@
 /**
- * The `cloudagent` MCP group: nine tools over the Microsoft Cloud Agent Job API v2.
+ * The `cloudagent` MCP group: ten tools over the Microsoft Cloud Agent Job API v2.
  *
  * Cloud Agent runs an autonomous coding agent in the cloud against an Azure DevOps
  * repository. A job is created with a prompt, runs unattended for hours, and
@@ -33,9 +33,9 @@
  *
  * Read/write split: the seven read tools are enabled by `--cloudagent`,
  * `GH_ROUTER_ENABLE_CLOUDAGENT=1`, or discovery of an Azure DevOps git remote;
- * `create_job` / `cancel_job` carry the `cloudagent_write` capability and require
- * the explicit flag (see `./cloudagent-flags`). A cloned repository's `origin` must
- * never be able to hand a model a "spend compute" tool.
+ * `create_job` / `create_pr_job` / `cancel_job` carry the `cloudagent_write`
+ * capability and require the explicit flag (see `./cloudagent-flags`). A cloned
+ * repository's `origin` must never be able to hand a model a "spend compute" tool.
  *
  * Every result text goes through `relaySafeText` last, so an oversized raw
  * trace spills to a durable file instead of being clipped at the relay.
@@ -107,6 +107,24 @@ export const CLOUDAGENT_TIER_MODELS: Readonly<
   normal: { model: "gpt-6-astra", reasoningEffort: "max" },
   complex: { model: "claude-opus-5.5", reasoningEffort: "max" },
 })
+
+/**
+ * The plugin that makes a pull-request job possible: branch, commit, push,
+ * open and validate a pull request, watch checks, and edit work items.
+ *
+ * Measured live on 2026-10-31: `Company` scope, `enabledByDefault: false`, and
+ * the whole 235-entry catalog has no default-enabled plugin at all. So the
+ * capability is requested explicitly rather than inherited, and a rename shows
+ * up as a synchronous 400 naming the plugin (`list_plugins` is the check).
+ */
+const AGENCY_CODING_PLUGIN = "agency-coding"
+
+/**
+ * `create_pr_job` runs on the `complex` preset. Turning a ticket into a
+ * review-ready pull request is long-horizon work by definition, which is what
+ * that preset is for; `create_job` keeps its own `normal` default.
+ */
+const PR_JOB_DEFAULT_TIER: CloudAgentTier = "complex"
 
 // --- Client plumbing -------------------------------------------------------
 
@@ -694,6 +712,138 @@ const JOB_ID_PROPERTY = {
   jobId: { type: "string", description: "The job id returned by create_job or listed by list_jobs." },
 } as const
 
+// --- create_pr_job workflow ------------------------------------------------
+
+/**
+ * The engineering process `create_pr_job` prepends to every task.
+ *
+ * The Job API has no system-prompt field (a live validate probe on 2026-10-31
+ * sent one, got a 200, and the field was ignored and not echoed), so the only
+ * instruction surface is `prompt`. The directive is therefore literal text in
+ * front of the caller's task, and the task is wrapped in <user_task> tags so
+ * "how to work" and "what to build" stay distinguishable inside one string.
+ *
+ * The wording follows the frontier-model guidance current on 2026-10-31:
+ * Anthropic's general prompting guide and its Claude Opus 5.5 guide. The
+ * choices worth knowing before editing it:
+ *
+ *   - Name the early stops an unattended run tends to take (a status summary,
+ *     an offer to continue, a decision list for a user who is not there) and
+ *     say what to do instead. The Opus 5.5 guide is explicit about these.
+ *   - Give delegation rules, not just permission: the same guide warns that
+ *     models both over-spawn and under-spawn subagents.
+ *   - Point at the actual request. A long procedural prompt otherwise invites
+ *     the model to optimize the process rather than answer the task.
+ *   - State outcomes and exit criteria rather than reasoning steps, and use
+ *     plain phrasing instead of stacked emphasis.
+ *
+ * Keep the version marker, and bump it when the workflow changes: the tests
+ * pin the structure, and the marker is what makes a job's behavior traceable
+ * to the directive that produced it.
+ */
+const PR_JOB_WORKFLOW = `[github-router PR workflow v3]
+
+# Role
+
+You are an autonomous software engineer responsible for one repository and one request. Carry the request in <user_task> from understanding to a review-ready pull request whose required checks pass.
+
+# The request
+
+The text inside <user_task> at the end of this prompt is the actual request. Everything else in this prompt is process: how to work, not what to build. Read <user_task> before you plan or edit, restate it in your own words in your first status note, and check your work against it in every phase. If it is ambiguous, resolve the ambiguity in the way that best serves what it asks for and record the assumption. Do not substitute a different improvement for the one it asks for.
+
+# Operating context
+
+- This is a one-shot job. It cannot be resumed, and no one will answer questions while it runs.
+- You start from a fresh clone of the repository and see only this prompt.
+- Repository guidance (AGENTS.md, CLAUDE.md, CONTRIBUTING, build and test docs) is authoritative. Read it first. Where it conflicts with this prompt, follow the repository and note the conflict in your final report.
+- Your tools include the checkout, a shell, and the coding plugin's Azure DevOps write tools for branches, commits, pushes, pull requests, pipelines, and work items.
+
+# Definition of done
+
+1. A pull request is open from a new branch against the repository's base branch.
+2. Every required check for that pull request has passed, or each one that cannot pass has a precise written explanation.
+3. The pull request links a work item.
+4. Your final report contains the evidence described under Reporting.
+
+# Staying in motion
+
+This run is unattended. Nobody will reply while you work, so a turn that ends with a status report has nowhere to go.
+
+- Put status notes in the same message as your next tool call, then continue.
+- Keep a checklist of the request's parts, update it as you go, and keep working until every item is done or blocked.
+- When something you started is still running, such as a background command or a subagent, wait for its result and continue.
+- Stop only when the definition of done is met, or when a blocker genuinely needs a human, and then report the exact blocker.
+
+# Working style
+
+**Delegation.** Use subagents when work can run in parallel, needs isolated context, or splits into independent workstreams that do not share state: exploring separate areas, running independent checks, or reviewing work you produced. Do the sequential work, single-file edits, and steps that need accumulated context yourself. When your tooling supports it, use a separate subagent for the plan review and the implementation review, so the reviewer is independent of the author.
+
+**Parallel calls.** When several tool calls are independent, issue them together rather than one at a time. Keep dependent calls sequential.
+
+**Scope.** Make the changes the request needs and the changes they require to be correct. Do not add features, refactor surrounding code, or make improvements the request did not ask for. Every change in the plan and the diff should trace to the request or to the correctness of that change.
+
+**Grounding.** Base claims on files you opened and command output you saw. Do not speculate about code you have not read.
+
+**Quality.** Tests verify correctness; they do not define the solution. Implement the general behavior for all valid inputs rather than the values the tests happen to use. Do not hard-code results or add workarounds that only satisfy the checks.
+
+**Reversibility.** Take local, reversible actions freely. Avoid destructive shortcuts: no force-push, no rewriting published history, no deleting branches, files, or data you do not understand.
+
+# Process
+
+Work through these phases in order. Parallelize only independent work.
+
+## 1. Understand
+Read the repository guidance, then the code, tests, history, and any named work item that the request touches. Confirm what the request actually asks for before proposing a solution. Be able to state the current behavior, the constraints, and the acceptance criteria.
+
+## 2. Plan
+Write one plan a reviewer could execute: the change surface, the smallest set of edits that satisfies the request, tests to add or update, the exact build and test commands, rollout and rollback, and the risks. Reuse existing utilities and patterns rather than adding new ones.
+
+## 3. Review the plan
+Give the plan and your evidence to an independent adversarial reviewer, a separate subagent when one is available. Ask it to attack the plan: wrong assumptions, missing surfaces, over-scoping, untested paths. Resolve each finding or record why it does not apply. Start implementation only after this review.
+
+## 4. Implement
+Make the change the reviewed plan describes. Add or update tests that would fail without it. Run the repository's documented format, build, analyzer, and test commands as you go. When something fails, fix the cause and keep tests, analyzers, and linters enabled as the repository configures them. Remove any temporary scripts or files you created before you finish.
+
+## 5. Verify
+Collect real evidence for every claim: command lines and their outcomes, build and test results, and any validation the repository requires. Empirical output beats assumption. If something cannot be verified from your environment, say so explicitly instead of implying it passed.
+
+## 6. Review the implementation
+Give the diff, the plan, and the verification output to an independent adversarial reviewer, a separate subagent when one is available. It looks for correctness bugs, edge cases, error handling, concurrency, security, and gaps between the diff and the plan. Fix real findings and re-run verification. Repeat until the review is clean or every remaining finding is recorded with a reason.
+
+## 7. Open the pull request
+Create a new branch from the base branch, commit in the repository's existing message style, push, and open a pull request. Write the title and description in a human voice: what changed, why, how it was validated, and what a reviewer should look at. Use plain prose without em dashes and without attribution trailers such as Co-Authored-By or generated-with footers, because the team's convention is that those read as machine output. When the request names a work item, link it to the pull request.
+
+## 8. Get the build green
+Watch the pull request's required checks and fix failures on the branch until they pass. While a check is queued or running, wait for it rather than guessing its outcome. If a check cannot pass because of permissions, credentials, an outage, or missing configuration, record its name, its state, and the exact step a human must take. When the repository has no pull request pipeline, run the documented local build and test commands and use their output as the green evidence.
+
+## 9. Handle the work item
+If the request named a work item, the pull request links that one and this phase is done. Otherwise, once the pull request exists and its required checks pass, create one in the Azure DevOps organization that hosts the repository, in the MSTeams project, not the Teamspace project. Look up recent work items assigned to you (System.AssignedTo = @Me) and reuse their area path, current sprint iteration, priority, and tags where they fit. Write the title and description in a human voice with no em dashes: what changed, why it matters, risk, and the validation evidence. Link the new work item to the pull request. If permissions or a missing project block creation, record the exact error, note it in the pull request description, and continue to Reporting rather than stopping the run.
+
+# Reporting
+
+Your final message is the handoff. Include:
+- a one-line restatement of what was asked,
+- the pull request id and link,
+- the work item id and link,
+- each check you observed with its final state,
+- the commands you ran and their results,
+- decisions you made without confirmation and why,
+- anything open, unverified, or blocked, with the exact blocker.
+
+# Working rules
+
+- Keep secrets out of everything you emit or commit. Reference sensitive files such as .env, *.pem, and *.key by path only, and do not read their contents into output.
+- Work on a new branch and open a pull request. The default branch stays untouched so a human can gate the change.
+- Keep one logical change per pull request; unrelated fixes belong on their own branch.
+- If the request is already satisfied, or cannot be done with the access you have, stop and report exactly what you found and what a human needs to do next.
+- Leave the pull request open for review. Merging stays with a human.
+
+# Task`
+
+function composePrJobPrompt(task: string): string {
+  return `${PR_JOB_WORKFLOW}\n\n<user_task>\n${task.trim()}\n</user_task>`
+}
+
 export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
   {
     toolNameHttp: "create_job",
@@ -840,6 +990,112 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
       lines.push("")
       lines.push(
         `next: the job is ${job.state ?? "created"}. Report the job id to the user and check with get_job jobId=${job.jobId} in about 10 minutes — a typical job runs for hours, so there is nothing to learn before then. wait_for_job tells you whether the handoff took (it leaves Queued) without waiting for the work.`,
+      )
+      return text(lines.join("\n"))
+    },
+  },
+  {
+    toolNameHttp: "create_pr_job",
+    group: CLOUDAGENT_GROUP,
+    capability: "cloudagent_write",
+    description:
+      "Runs an autonomous coding agent in the Microsoft cloud that takes one request from understanding to a review-ready pull request, and returns immediately with a job id. "
+      + "It is create_job with three decisions already made: the `agency-coding` plugin is loaded (branch, commit, push, pull request, pipeline and work item tools), the model defaults to claude-opus-5.5 at max reasoning effort (the `complex` tier), and a fixed engineering workflow is prepended to `prompt`: research, a reviewed plan, implementation with tests, an independent adversarial review of the change, the pull request, a green build, and a work item that links it. "
+      + "You supply the task in `prompt`; the workflow and its conventions are added automatically, so do not restate them. "
+      + "A job is ONE-SHOT: it runs unattended for hours (median 221 minutes), cannot be messaged, and cannot be resumed. "
+      + "The job leaves its pull request open for a human to review and never merges. "
+      + "Confirm with the user before creating a job they did not explicitly ask for: it spends real compute for hours. "
+      + "After it returns, poll with get_job, or use wait_for_job once to confirm the job left the queue.",
+    inputSchema: {
+      type: "object",
+      required: ["prompt"],
+      additionalProperties: false,
+      properties: {
+        prompt: {
+          type: "string",
+          description:
+            "The task, written as a brief rather than a one-liner: the outcome wanted, how the caller will know it is done, constraints, relevant links, and the work item id if one already exists. This is the request the job answers; the workflow, plugin and model come from the tool, so do not restate them. The agent starts from a fresh clone and sees nothing else.",
+        },
+        ...REPOSITORY_PROPERTIES,
+        branch: {
+          type: "string",
+          description:
+            "Branch to start from. Default: the repository's default branch.",
+        },
+        ...WORKSPACE_PROPERTY,
+        tier: {
+          type: "string",
+          enum: ["easy", "normal", "complex"],
+          description:
+            "Preset for model and reasoning effort. Default \"complex\": claude-opus-5.5 at max effort, because this workflow is long-horizon work. "
+            + "easy = claude-opus-4.8-fast (a preview model) at max effort, for small well-specified changes; "
+            + "normal = gpt-6-astra at max effort, the everyday coding tier. "
+            + "Naming `model` replaces the preset's model AND discards its effort; `context` is independent of the tier. list_models shows the live catalog and each model's effort values.",
+        },
+        model: {
+          type: "string",
+          description:
+            "Model the agent runs on. Default: claude-opus-5.5, the model of the `complex` tier. Overriding it drops the tier's `max` reasoning effort as well, leaving the model's own default unless `reasoningEffort` is also passed; the effort ladder differs per model. list_models lists the ids and each model's effort values.",
+        },
+        reasoningEffort: {
+          type: "string",
+          description:
+            "Reasoning effort for the job's model. Default: `max`, supplied by `tier`. The values are low, medium, high, xhigh and max, but each model accepts only a subset; list_models prints the ladder per model. Passing an effort without `model` keeps the tier's model.",
+        },
+        context: {
+          type: "string",
+          enum: ["default", "long_context"],
+          description:
+            "Context tier: \"default\" or \"long_context\". Default \"default\"; override with \"long_context\" for a job over a large repository.",
+        },
+        metadata: {
+          type: "object",
+          description:
+            "Short string labels stored on the job and echoed by list_jobs, e.g. {\"chain\": \"research\", \"step\": \"1\"}. Default: none. Labels are how a later session finds this job, not a place to store content.",
+        },
+      },
+    },
+    async handler(args, signal, ctx) {
+      // Same split as create_job: the signal reaches the LOCAL git probe only.
+      // Aborting the POST after the service accepted it would leave a running
+      // job with no id to report, and there is no idempotency key to retry on.
+      const repository = await resolveRepository(args, ctx, { signal })
+      const branch = optionalString(args, "branch")
+      const task = optionalString(args, "prompt")
+      if (!task) {
+        // The schema marks `prompt` required, but a raw JSON caller can omit
+        // it, and an empty task would spend hours of compute on nothing.
+        throw new CloudAgentError(
+          "`prompt` is required: it is the task the job works on, and the fixed workflow cannot supply one.",
+          { retriable: false },
+        )
+      }
+      const model = resolveModelConfiguration(args, PR_JOB_DEFAULT_TIER)
+      const metadata = metadataArg(args)
+
+      const request = buildGenericJobRequest({
+        prompt: composePrJobPrompt(task),
+        repository: {
+          organization: repository.organization,
+          project: repository.project,
+          repository: repository.repository,
+          ...(branch ? { branch } : {}),
+        },
+        plugins: [{ name: AGENCY_CODING_PLUGIN }],
+        modelConfiguration: model.modelConfiguration,
+        ...(metadata ? { metadata } : {}),
+      })
+      const job = await cloudAgentClient().createJob(request)
+
+      const provenance = provenanceLine(repository)
+      const lines = [renderJob(job, provenance ? { note: provenance } : {})]
+      lines.push("")
+      lines.push("effective request (the normalized body the service received):")
+      lines.push(renderEffectiveRequest(request))
+      lines.push(`  ${model.tierNote}`)
+      lines.push("")
+      lines.push(
+        `next: the job is ${job.state ?? "created"}. Report the job id to the user and poll with get_job jobId=${job.jobId}; a typical run takes hours. wait_for_job tells you whether the handoff took without waiting for the work.`,
       )
       return text(lines.join("\n"))
     },
@@ -1265,9 +1521,12 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
 
 // --- Shared handler helpers ------------------------------------------------
 
-function tierArg(args: Record<string, unknown>): CloudAgentTier {
+function tierArg(
+  args: Record<string, unknown>,
+  defaultTier: CloudAgentTier = CLOUDAGENT_DEFAULT_TIER,
+): CloudAgentTier {
   const raw = optionalString(args, "tier")
-  if (raw === undefined) return CLOUDAGENT_DEFAULT_TIER
+  if (raw === undefined) return defaultTier
   const normalized = raw.toLowerCase()
   const match = CLOUDAGENT_TIERS.find((tier) => tier === normalized)
   if (match) return match
@@ -1296,11 +1555,14 @@ function tierArg(args: Record<string, unknown>): CloudAgentTier {
  * SEE were used, and "effort: max" without saying it came from the tier reads
  * like something the caller chose.
  */
-function resolveModelConfiguration(args: Record<string, unknown>): {
+function resolveModelConfiguration(
+  args: Record<string, unknown>,
+  defaultTier: CloudAgentTier = CLOUDAGENT_DEFAULT_TIER,
+): {
   modelConfiguration: NonNullable<CloudAgentJobInput["modelConfiguration"]>
   tierNote: string
 } {
-  const tier = tierArg(args)
+  const tier = tierArg(args, defaultTier)
   const preset = CLOUDAGENT_TIER_MODELS[tier]
   const explicitModel = optionalString(args, "model")
   const explicitEffort = optionalString(args, "reasoningEffort")
@@ -1315,16 +1577,16 @@ function resolveModelConfiguration(args: Record<string, unknown>): {
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(context ? { context } : {}),
   }
-  const defaultTier = tier === CLOUDAGENT_DEFAULT_TIER ? ", the default" : ""
+  const defaultLabel = tier === defaultTier ? ", the default" : ""
   let tierNote: string
   if (!explicitModel) {
     tierNote = explicitEffort
-      ? `tier: ${tier}${defaultTier} — its model ${model}; the effort you passed replaced its ${preset.reasoningEffort}.`
-      : `tier: ${tier}${defaultTier} — supplied model ${model} and effort ${preset.reasoningEffort}.`
+      ? `tier: ${tier}${defaultLabel} — its model ${model}; the effort you passed replaced its ${preset.reasoningEffort}.`
+      : `tier: ${tier}${defaultLabel} — supplied model ${model} and effort ${preset.reasoningEffort}.`
   } else if (explicitEffort) {
-    tierNote = `tier: ${tier}${defaultTier} — replaced by model ${model}; the effort you passed replaced its ${preset.reasoningEffort}.`
+    tierNote = `tier: ${tier}${defaultLabel} — replaced by model ${model}; the effort you passed replaced its ${preset.reasoningEffort}.`
   } else {
-    tierNote = `tier: ${tier}${defaultTier} — replaced by model ${model}, so its ${preset.reasoningEffort} effort was dropped and the model's own default applies.`
+    tierNote = `tier: ${tier}${defaultLabel} — replaced by model ${model}, so its ${preset.reasoningEffort} effort was dropped and the model's own default applies.`
   }
   return { modelConfiguration, tierNote }
 }

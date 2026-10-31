@@ -10,8 +10,9 @@
  *     exists for the same reason the ADO and Kusto groups have one: an ADO
  *     checkout is already proof the operator works in the ecosystem, and a
  *     group nobody remembers to enable is a group nobody uses.
- *   - WRITING (`create_job`, `cancel_job`) requires the explicit flag, never
- *     discovery. This is the load-bearing asymmetry: a job spends real compute
+ *   - WRITING (`create_job`, `create_pr_job`, `cancel_job`) requires the
+ *     explicit flag, never discovery. This is the load-bearing asymmetry: a job
+ *     spends real compute
  *     against a cloud service, and a cloned repository's `origin` is
  *     attacker-controllable, so a remote must never be able to put a
  *     "launch a cloud agent" tool in front of a model. The same rule the Azure
@@ -52,7 +53,7 @@ export interface CloudAgentInputs {
 export interface CloudAgentFlags {
   /** The seven read tools. */
   enabled: boolean
-  /** `create_job` / `cancel_job`, which is never true from discovery. */
+  /** `create_job` / `create_pr_job` / `cancel_job`, never true from discovery. */
   writeEnabled: boolean
   environment: CloudAgentEnvironment
   /** True when `enabled` came from the git remote rather than from the operator. */
@@ -132,7 +133,7 @@ export function resolveCloudAgentFlags(
   // that is missing and call it a bug.
   if (enabled && fromDiscovery) {
     warnings.push(
-      "cloudagent: read tools enabled by the git remote; create_job/cancel_job stay off until `--cloudagent` is passed (they spend compute).",
+      "cloudagent: read tools enabled by the git remote; the write tools stay off until `--cloudagent` is passed (they spend compute).",
     )
   }
 

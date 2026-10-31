@@ -4582,12 +4582,12 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
     expect(names).toEqual(READ_TOOLS)
   })
 
-  test("the explicit flag adds the two write tools", async () => {
+  test("the explicit flag adds the three write tools", async () => {
     state.cloudAgentEnabled = true
     state.cloudAgentWriteEnabled = true
     const { json } = await scopedRpc("cloudagent", { jsonrpc: "2.0", id: 952, method: "tools/list" })
     const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name).sort()
-    expect(names).toEqual(["cancel_job", "create_job", ...READ_TOOLS])
+    expect(names).toEqual(["cancel_job", "create_job", "create_pr_job", ...READ_TOOLS])
   })
 
   test("a hard-coded create_job call under discovery alone is -32601", async () => {
@@ -4600,6 +4600,20 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
       id: 953,
       method: "tools/call",
       params: { name: "create_job", arguments: { prompt: "do something expensive" } },
+    })
+    expect((json.error as { code: number }).code).toBe(-32601)
+  })
+
+  test("a hard-coded create_pr_job call under discovery alone is -32601", async () => {
+    // The composite tool spends compute the same way, so it sits behind the
+    // same gate rather than inheriting create_job's name-based exemption.
+    state.cloudAgentEnabled = true
+    state.cloudAgentWriteEnabled = false
+    const { json } = await scopedRpc("cloudagent", {
+      jsonrpc: "2.0",
+      id: 955,
+      method: "tools/call",
+      params: { name: "create_pr_job", arguments: { prompt: "do something expensive" } },
     })
     expect((json.error as { code: number }).code).toBe(-32601)
   })

@@ -88,8 +88,8 @@ failure resolves to "not an Azure DevOps workspace" rather than failing the
 launch. Tests inject a synthetic probe; see "Testing" below.
 
 The same probe also feeds the `cloudagent` group, which applies this rule one level
-up: a discovered remote enables its six **read** tools, never
-`create_job`/`cancel_job`. Cloud Agent is a separate service with its own flags
+up: a discovered remote enables its seven **read** tools, never the write tools
+(`create_job`, `create_pr_job`, `cancel_job`). Cloud Agent is a separate service with its own flags
 (`src/lib/cloudagent-flags.ts`) and its own doc — see
 [`docs/cloudagent-mcp.md`](cloudagent-mcp.md).
 

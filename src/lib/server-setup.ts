@@ -281,7 +281,7 @@ export interface ServerSetupOptions {
   kustoCluster?: string | undefined
   kustoDatabase?: string | undefined
   /**
-   * Tri-state, as `bluebirdEnabled`. `true` enables all nine Cloud Agent tools;
+   * Tri-state, as `bluebirdEnabled`. `true` enables all ten Cloud Agent tools;
    * `undefined` leaves the read half to Azure DevOps repository discovery and
    * the write half OFF. There is no path by which discovery enables a write.
    */
@@ -837,7 +837,7 @@ export const sharedServerArgs = {
     type: "boolean" as const,
     default: undefined,
     description:
-      "Expose the Cloud Agent Job API v2 MCP group (mcp__cloudagent__*), including create_job and cancel_job. The seven read tools are enabled automatically in a checkout whose git remote is an Azure DevOps repository; those two WRITE tools are not, because a job runs a cloud agent for hours (measured median 221 min) and spends compute, and a cloned repository's git remote is not an operator. GH_ROUTER_ENABLE_CLOUDAGENT=1 is the env equivalent. Authentication is automatic via `az account get-access-token`; no token to supply.",
+      "Expose the Cloud Agent Job API v2 MCP group (mcp__cloudagent__*), including create_job, create_pr_job and cancel_job. The seven read tools are enabled automatically in a checkout whose git remote is an Azure DevOps repository; the WRITE tools are not, because a job runs a cloud agent for hours (measured median 221 min) and spends compute, and a cloned repository's git remote is not an operator. GH_ROUTER_ENABLE_CLOUDAGENT=1 is the env equivalent. Authentication is automatic via `az account get-access-token`; no token to supply.",
     negativeDescription:
       "Never expose the Cloud Agent MCP group, even when the env equivalent is set or the repository is an Azure DevOps checkout.",
   },

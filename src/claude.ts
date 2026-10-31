@@ -1269,7 +1269,7 @@ export const claude = defineCommand({
         if (kustoToolsEnabled() && allowsGroup("kusto")) enabledGroups.push("kusto")
         // Registered as soon as either half is on. `cloudagent_write` being off
         // does not make the group absent — the seven read tools still serve, and
-        // the `tools/list` / `tools/call` gates hide the two write tools.
+        // the `tools/list` / `tools/call` gates hide the three write tools.
         if (cloudAgentToolsEnabled() && allowsGroup("cloudagent")) enabledGroups.push("cloudagent")
         if (!isPinnedProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
         if (!isPinnedProfile && agentToolsEnabled()) enabledGroups.push("first-mate")

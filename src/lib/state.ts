@@ -257,7 +257,7 @@ export interface State {
    */
   cloudAgentEnabled: boolean
   /**
-   * `create_job` / `cancel_job`. Set by the explicit flag and nothing else:
+   * `create_job` / `create_pr_job` / `cancel_job`. Set by the explicit flag and nothing else:
    * a job spends real cloud compute for hours, and a cloned repository's
    * `origin` (which is what discovery reads) is attacker-controllable.
    */

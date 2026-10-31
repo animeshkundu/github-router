@@ -1455,11 +1455,12 @@ export interface NonPersonaMcpTool {
    *   the ai-or-die tab-scoped env trio (`AIORDIE_BASE_URL`,
    *   `AIORDIE_TOKEN`, `AIORDIE_SESSION_ID`; see `artifactToolsEnabled()`
    *   in `lib/mcp-capabilities.ts`).
-   * - `"cloudagent"` (the six Cloud Agent Job API read tools) requires
+   * - `"cloudagent"` (the seven Cloud Agent Job API read tools) requires
    *   `state.cloudAgentEnabled` — `--cloudagent`, `GH_ROUTER_ENABLE_CLOUDAGENT=1`, OR
    *   discovery of an Azure DevOps git remote (see `resolveCloudAgentFlags()` in
    *   `lib/cloudagent-flags.ts`).
-   * - `"cloudagent_write"` (create_job / cancel_job) additionally requires
+   * - `"cloudagent_write"` (create_job / create_pr_job / cancel_job)
+   *   additionally requires
    *   `state.cloudAgentWriteEnabled`, which is set by the EXPLICIT flag only:
    *   discovery never enables a tool that spends cloud compute.
    *
