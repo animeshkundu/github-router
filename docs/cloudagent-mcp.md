@@ -201,8 +201,17 @@ the structural assertions in `tests/cloudagent-tools.test.ts` green.
 `GET /models` is live but undocumented, so the parser was written from a
 measured response (2026-10-31, prod): an envelope `{ "models": [...] }` of 25
 rows, global across every repository and organization, which is why the tool
-takes no arguments. A row can omit almost every member; the ones the renderer
-uses are
+takes no arguments.
+
+**These are the Cloud Agent service's models, not the proxy's.** The two
+catalogs are independent: they may share an id by name, but nothing in the
+Cloud Agent request path resolves, translates or validates against
+`github-router`'s own model catalog, and no model configuration is sent to the
+proxy. A `model` argument is forwarded to the Job API verbatim, so an id that
+exists only in the proxy's catalog fails at the service. That is why the tier
+presets are checked against `list_models` and not against `/v1/models`.
+
+A row can omit almost every member; the ones the renderer uses are
 
 ```
 { id, vendor?, preview?,

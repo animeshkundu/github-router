@@ -912,7 +912,7 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
         model: {
           type: "string",
           description:
-            "Model the agent runs on. Default: the model of `tier` (normal = gpt-6-astra). Overriding it drops the tier's `max` reasoning effort as well, leaving the model's own default unless `reasoningEffort` is also passed — the effort ladder differs per model, so the tier value is not valid everywhere. list_models lists the ids and each model's effort values.",
+            "Model the agent runs on, from the Cloud Agent catalog (list_models) — a Cloud Agent model id, not one of this proxy's model ids. Default: the model of `tier` (normal = gpt-6-astra). Overriding it drops the tier's `max` reasoning effort as well, leaving the model's own default unless `reasoningEffort` is also passed — the effort ladder differs per model, so the tier value is not valid everywhere. list_models lists the ids and each model's effort values.",
         },
         reasoningEffort: {
           type: "string",
@@ -1035,7 +1035,7 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
         model: {
           type: "string",
           description:
-            "Model the agent runs on. Default: claude-opus-5.5, the model of the `complex` tier. Overriding it drops the tier's `max` reasoning effort as well, leaving the model's own default unless `reasoningEffort` is also passed; the effort ladder differs per model. list_models lists the ids and each model's effort values.",
+            "Model the agent runs on, from the Cloud Agent catalog (list_models) — a Cloud Agent model id, not one of this proxy's model ids. Default: claude-opus-5.5, the model of the `complex` tier. Overriding it drops the tier's `max` reasoning effort as well, leaving the model's own default unless `reasoningEffort` is also passed; the effort ladder differs per model. list_models lists the ids and each model's effort values.",
         },
         reasoningEffort: {
           type: "string",
@@ -1500,6 +1500,7 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
     capability: "cloudagent",
     description:
       "Lists the models a Cloud Agent job can run on, from the service's live catalog, with each model's context window, output limit, reasoning-effort values and any notice the service attaches (for example a scheduled deprecation). "
+      + "These are the Cloud Agent service's own models, a catalog entirely separate from the models this proxy serves; an id from the proxy's catalog is not valid here, and only an id from this list is. "
       + "This is the vocabulary create_job's `model` draws from, and the check to run before relying on a tier in an unfamiliar environment: create_job's presets name specific ids — easy = claude-opus-4.8-fast at max effort, normal = gpt-6-astra at max effort (the default), complex = claude-opus-5.5 at max effort — and a preset whose id is gone fails at the service. "
       + "The list is global: it is identical for every repository and organization, which is why it takes no arguments.",
     inputSchema: {
