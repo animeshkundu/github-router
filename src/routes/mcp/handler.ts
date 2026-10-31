@@ -571,7 +571,7 @@ function maxToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   // capability gate is the same predicate the standard projection applies.
   //
   // Cloud Agent splits read from write, and the split is not a profile concern: a
-  // discovered Azure DevOps remote turns the six read tools on and leaves
+  // discovered Azure DevOps remote turns the seven read tools on and leaves
   // `create_job`/`cancel_job` off, because a job spends compute. Gating both
   // halves through `cloudAgentToolsEnabled()` alone would put "launch a cloud
   // agent" in front of a model on a launch no operator opted into.

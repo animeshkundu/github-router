@@ -50,7 +50,7 @@ export interface CloudAgentInputs {
 }
 
 export interface CloudAgentFlags {
-  /** The six read tools. */
+  /** The seven read tools. */
   enabled: boolean
   /** `create_job` / `cancel_job`, which is never true from discovery. */
   writeEnabled: boolean

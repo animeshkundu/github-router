@@ -300,7 +300,7 @@ afterAll(async () => {
 // --- Schemas ---------------------------------------------------------------
 
 describe("the tool surface", () => {
-  test("is the eight tools the plan specifies, in the cloudagent group", () => {
+  test("is the nine tools the plan specifies, in the cloudagent group", () => {
     expect(CLOUDAGENT_TOOLS.map((tool) => tool.toolNameHttp).sort()).toEqual([
       "cancel_job",
       "create_job",
@@ -308,6 +308,7 @@ describe("the tool surface", () => {
       "get_job_logs",
       "list_agents",
       "list_jobs",
+      "list_models",
       "list_plugins",
       "wait_for_job",
     ])
@@ -327,6 +328,7 @@ describe("the tool surface", () => {
       get_job_logs: "cloudagent",
       list_plugins: "cloudagent",
       list_agents: "cloudagent",
+      list_models: "cloudagent",
     })
   })
 
@@ -552,6 +554,64 @@ describe("create_job", () => {
     const h = use()
     await expect(call("create_job", { prompt: "x", ...REPOSITORY, context: "huge" }))
       .rejects.toThrow(/`context` must be "default" or "long_context"/)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  test("defaults to the normal tier, so no job runs on an unstated model choice", async () => {
+    const h = use([() => jsonResponse(CREATED_JOB, { status: 201 })])
+    const text = textOf(await call("create_job", { prompt: "Fix it", ...REPOSITORY }))
+    expect(createJobBody(h).modelConfiguration).toEqual({
+      model: "gpt-6-astra",
+      reasoningEffort: "max",
+    })
+    // The echo has to say the tier supplied them: GET /jobs/{id} never returns
+    // modelConfiguration, so "effort: max" alone would read as a caller choice.
+    expect(text).toContain("tier: normal, the default — supplied model gpt-6-astra and effort max.")
+  })
+
+  test("each tier maps to its measured model at max effort", async () => {
+    const expected = {
+      easy: "claude-opus-4.8-fast",
+      normal: "gpt-6-astra",
+      complex: "claude-opus-5.5",
+    } as const
+    for (const [tier, model] of Object.entries(expected)) {
+      const h = use([() => jsonResponse(CREATED_JOB, { status: 201 })])
+      await call("create_job", { prompt: "Fix it", ...REPOSITORY, tier })
+      expect({ tier, modelConfiguration: createJobBody(h).modelConfiguration }).toEqual({
+        tier,
+        modelConfiguration: { model, reasoningEffort: "max" },
+      })
+    }
+  })
+
+  test("an explicit model replaces the preset and drops its effort", async () => {
+    // Not a partial override: measured live, 8 of 25 models reject `max`, so
+    // carrying the preset's effort onto a caller-named model would send a value
+    // nobody asked for that the service may reject.
+    const h = use([() => jsonResponse(CREATED_JOB, { status: 201 })])
+    const text = textOf(
+      await call("create_job", { prompt: "Fix it", ...REPOSITORY, model: "gpt-5.6-sol" }),
+    )
+    expect(createJobBody(h).modelConfiguration).toEqual({ model: "gpt-5.6-sol" })
+    expect(text).toContain(
+      "tier: normal, the default — replaced by model gpt-5.6-sol, so its max effort was dropped",
+    )
+  })
+
+  test("an explicit effort keeps the tier's model", async () => {
+    const h = use([() => jsonResponse(CREATED_JOB, { status: 201 })])
+    await call("create_job", { prompt: "Fix it", ...REPOSITORY, tier: "easy", reasoningEffort: "high" })
+    expect(createJobBody(h).modelConfiguration).toEqual({
+      model: "claude-opus-4.8-fast",
+      reasoningEffort: "high",
+    })
+  })
+
+  test("an unknown tier is rejected before the request, naming the presets", async () => {
+    const h = use()
+    await expect(call("create_job", { prompt: "x", ...REPOSITORY, tier: "extreme" }))
+      .rejects.toThrow(/`tier` must be easy, normal or complex \(got "extreme"\).*gpt-6-astra/)
     expect(h.calls).toHaveLength(0)
   })
 })
@@ -1132,6 +1192,65 @@ describe("list_agents", () => {
     expect(text).toContain("echo [Repo]")
     expect(text).toContain("partial results: One marketplace could not be read.")
     expect(text).not.toContain("reason:")
+  })
+})
+
+describe("list_models", () => {
+  const MODELS = {
+    models: [
+      {
+        id: "gpt-6-astra",
+        name: "GPT-6 Astra",
+        vendor: "OpenAI",
+        preview: false,
+        modelPickerEnabled: true,
+        modelPickerCategory: "powerful",
+        capabilities: {
+          type: "chat",
+          supports: { toolCalls: true, vision: true, reasoningEffort: ["low", "medium", "high", "xhigh", "max"] },
+          limits: { maxContextWindowTokens: 400_000, maxOutputTokens: 128_000 },
+        },
+        billing: { isPremium: true, multiplier: 1 },
+      },
+      {
+        id: "claude-opus-4.8-fast",
+        name: "Claude Opus 4.8 Fast",
+        vendor: "Anthropic",
+        preview: true,
+        capabilities: {
+          type: "chat",
+          supports: { toolCalls: true, reasoningEffort: ["low", "high"] },
+          limits: { maxContextWindowTokens: 264_000, maxOutputTokens: 64_000 },
+        },
+        billing: { isPremium: true, multiplier: 1 },
+        infoMessages: [{ code: "model_pending_deprecation", message: "Retires on 2027-01-01." }],
+      },
+    ],
+  }
+
+  test("leads with the tier presets, then the live catalog", async () => {
+    const h = use([() => jsonResponse(MODELS)])
+    const text = textOf(await call("list_models", {}))
+    // Measured: GET /models is global, so no organization/project/repository
+    // filter is sent even when a session has an Azure DevOps checkout.
+    const url = new URL(h.calls[0]!.url)
+    expect(url.pathname).toBe("/api/agency/models")
+    expect([...url.searchParams.keys()]).toEqual([])
+    const lines = text.split("\n")
+    expect(lines[0]).toBe(
+      "create_job tier presets: easy = claude-opus-4.8-fast at max effort; "
+      + "normal = gpt-6-astra at max effort (default); complex = claude-opus-5.5 at max effort.",
+    )
+    expect(text).toContain("gpt-6-astra [OpenAI] — context 400K; max output 128K; effort low/medium/high/xhigh/max")
+    // Preview is stated, and the per-model effort ladder is printed because it
+    // is not uniform: a caller assuming every model takes `max` gets a 400.
+    expect(text).toContain("claude-opus-4.8-fast [Anthropic, preview] — context 264K; max output 64K; effort low/high")
+    expect(text).toContain("    note: Retires on 2027-01-01.")
+  })
+
+  test("an empty catalog says so", async () => {
+    use([() => jsonResponse({ models: [] })])
+    expect(textOf(await call("list_models", {}))).toContain("No models were returned.")
   })
 })
 

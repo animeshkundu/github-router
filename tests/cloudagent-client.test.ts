@@ -10,9 +10,11 @@ import {
   isTerminalJob,
   readJob,
   readJobLogs,
+  readModelList,
   renderJob,
   renderJobPage,
   renderMetadataBrief,
+  renderModelPage,
   renderPluginPage,
   renderPollHint,
   renderTrace,
@@ -355,6 +357,88 @@ describe("listPlugins / listAgents", () => {
     expect(rendered).toContain("2 of 233 plugin(s)")
     expect(rendered).toContain("repo-search [Repo] (enabled by default)")
     expect(rendered).toContain("docs")
+  })
+})
+
+describe("listModels", () => {
+  // The envelope and per-row shape below are transcribed from a live
+  // `GET /models` response (2026-10-31): the service is undocumented, so the
+  // parser has to tolerate every optional member being absent.
+  const MODELS_BODY = {
+    models: [
+      {
+        id: "gpt-6-astra",
+        name: "GPT-6 Astra",
+        vendor: "OpenAI",
+        preview: false,
+        capabilities: {
+          type: "chat",
+          supports: { toolCalls: true, reasoningEffort: ["low", "medium", "high", "xhigh", "max"] },
+          limits: { maxContextWindowTokens: 400000, maxOutputTokens: 128000 },
+        },
+        billing: { isPremium: true, multiplier: 1 },
+      },
+      {
+        id: "claude-opus-4.8-fast",
+        vendor: "Anthropic",
+        preview: true,
+        capabilities: {
+          supports: { reasoningEffort: ["low", "high"] },
+          limits: { maxContextWindowTokens: 264000, maxOutputTokens: 64000 },
+        },
+        billing: { isPremium: true, multiplier: 2 },
+        infoMessages: [{ code: "preview", message: "Retires on 2027-01-01." }],
+      },
+    ],
+  }
+
+  test("reads the live envelope from the fixed /models path with no query", async () => {
+    const h = harness([() => jsonResponse(MODELS_BODY)])
+    const models = await h.client.listModels()
+    const url = new URL(h.calls[0]!.url)
+    expect(url.pathname.endsWith("/api/agency/models")).toBe(true)
+    expect(url.search).toBe("")
+    expect(models.map((model) => model.id)).toEqual(["gpt-6-astra", "claude-opus-4.8-fast"])
+  })
+
+  test("flattens capabilities, billing and notices into the row the renderer uses", () => {
+    const models = readModelList(MODELS_BODY)
+    expect(models[0]).toEqual({
+      id: "gpt-6-astra",
+      vendor: "OpenAI",
+      preview: false,
+      maxContextWindowTokens: 400000,
+      maxOutputTokens: 128000,
+      reasoningEffort: ["low", "medium", "high", "xhigh", "max"],
+      billingMultiplier: 1,
+    })
+    expect(models[1]?.preview).toBe(true)
+    expect(models[1]?.reasoningEffort).toEqual(["low", "high"])
+    expect(models[1]?.notices).toEqual(["Retires on 2027-01-01."])
+  })
+
+  test("a row missing every optional member still parses, because the shape is undocumented", () => {
+    const models = readModelList({ models: [{ id: "mystery-model" }] })
+    expect(models).toEqual([{ id: "mystery-model" }])
+    expect(renderModelPage(models)).toContain("  mystery-model")
+  })
+
+  test("a body without a models array is a retriable error, not an empty catalog", () => {
+    expect(() => readModelList({ value: [] })).toThrow(/without a `models` array/)
+    expect(() => readModelList({ models: [] })).not.toThrow()
+  })
+
+  test("renders vendor, preview, limits, effort and notices", () => {
+    const rendered = renderModelPage(readModelList(MODELS_BODY))
+    const lines = rendered.split("\n")
+    expect(lines[0]).toBe("2 model(s):")
+    expect(lines[1]).toBe("  gpt-6-astra [OpenAI] — context 400K; max output 128K; effort low/medium/high/xhigh/max")
+    expect(lines[2]).toBe("  claude-opus-4.8-fast [Anthropic, preview] — context 264K; max output 64K; effort low/high; cost ×2")
+    expect(lines[3]).toBe("    note: Retires on 2027-01-01.")
+  })
+
+  test("an empty catalog says so rather than printing a bare header", () => {
+    expect(renderModelPage([])).toBe("No models were returned.")
   })
 })
 

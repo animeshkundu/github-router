@@ -1,6 +1,6 @@
 # Cloud Agent MCP group: `cloudagent`
 
-The `cloudagent` group exposes Microsoft's **Cloud Agent Job API v2** as eight MCP tools
+The `cloudagent` group exposes Microsoft's **Cloud Agent Job API v2** as nine MCP tools
 (`mcp__cloudagent__*`). Cloud Agent runs an autonomous coding agent in the cloud against
 an Azure DevOps repository: you hand it a prompt, it clones the repository,
 works for hours, and finishes with a written summary and (usually) a pull
@@ -30,8 +30,8 @@ tracked locally; there is no state to lose.
 
 | Surface | Effect |
 |---|---|
-| `--cloudagent` / `GH_ROUTER_ENABLE_CLOUDAGENT=1` | All eight tools, including `create_job` and `cancel_job` |
-| Azure DevOps git remote discovered | The **six read tools only** |
+| `--cloudagent` / `GH_ROUTER_ENABLE_CLOUDAGENT=1` | All nine tools, including `create_job` and `cancel_job` |
+| Azure DevOps git remote discovered | The **seven read tools only** |
 | `--no-cloudagent` / `GH_ROUTER_DISABLE_CLOUDAGENT=1` | Never |
 | `GH_ROUTER_AZURE_MCPS=off` | The shared wholesale kill switch; suppresses the discovery enable too |
 | `--cloudagent-env prod\|ppe` / `GH_ROUTER_CLOUDAGENT_ENV` | Selects the service; does **not** enable the group |
@@ -50,7 +50,7 @@ the explicit flag. Discovery never enables them.
 git remote that turned a group on can never produce a write surface. A clone's
 `origin` is attacker-controllable, and the read tools are the whole reason the
 auto-enable exists; a job, by contrast, spends hours of real compute. So the
-discovered half is the six read tools, and the launcher banner says so
+discovered half is the seven read tools, and the launcher banner says so
 explicitly (`Cloud Agent MCP (prod): read-only, enabled by the git remote.`) — a
 model that can see `list_jobs` and not `create_job` will otherwise look for the
 missing tool and call it a bug.
@@ -115,12 +115,73 @@ One approved probe job: created, then cancelled as soon as it was seen running.
 | `get_job_logs` | `cloudagent` | `digest` (default) or `full` |
 | `list_plugins` | `cloudagent` | The real capability selector; `name_contains` searches the whole catalog |
 | `list_agents` | `cloudagent` | The only source of `customAgent.inputs`; `Repo` scope lists a repository's own agents |
+| `list_models` | `cloudagent` | The live model catalog behind `create_job`'s `tier` presets |
 
-`create_job` arguments: `prompt` (or `agent`), the repository triple
-(`organization`/`project`/`repository`) or a `workspace` checkout, `branch`,
-`agent` + `agentType` + `agentInputs`, `plugins[]` + `includeDefaultPlugins`,
-`model`, `reasoningEffort`, `context` (`default` | `long_context`), and
-`metadata` (short string labels such as `{"chain": "research", "step": "1"}`).
+`create_job` arguments: `prompt` (or `agent`), `tier` (`easy` | `normal` |
+`complex`), the repository triple (`organization`/`project`/`repository`) or a
+`workspace` checkout, `branch`, `agent` + `agentType` + `agentInputs`,
+`plugins[]` + `includeDefaultPlugins`, `model`, `reasoningEffort`, `context`
+(`default` | `long_context`), and `metadata` (short string labels such as
+`{"chain": "research", "step": "1"}`).
+
+### Tiers: one word instead of a model id and an effort
+
+Left to itself, `create_job` would either send no `modelConfiguration` and let
+the service pick, or make every caller guess ids from a catalog the service does
+not document. So `create_job` takes `tier`, and each tier is a preset of model
+**and** effort, all three measured present in the live catalog and accepting
+`max` (2026-10-31):
+
+| `tier` | Model | Effort |
+|---|---|---|
+| `easy` | `claude-opus-4.8-fast` (preview model) | `max` |
+| `normal` (default) | `gpt-6-astra` | `max` |
+| `complex` | `claude-opus-5.5` | `max` |
+
+The presets are constants, not catalog queries: a tier that silently changed
+model because the catalog shifted would make two identical calls bill
+differently. `claude-opus-4.8-fast` is flagged `preview: true` upstream, so
+`list_models` is the check to run in an unfamiliar environment, and its row
+says so.
+
+Overrides, in precedence order:
+
+- **`model`** replaces the tier's model **and discards its effort**, because
+  8 of the 25 catalog models do not accept `max`; inheriting the preset effort
+  would turn a valid model choice into a 400. The model's own default effort
+  applies unless `reasoningEffort` is also given.
+- **`reasoningEffort`** always wins, and given without `model` it keeps the
+  tier's model.
+- **`context`** (`default` | `long_context`) is independent of the tier.
+
+`create_job`'s result echoes the resolved choice in the `effective request:`
+block as a `tier:` line, since `GET /jobs/{id}` never returns
+`modelConfiguration` and the echo is the only record of what was sent.
+
+### `list_models`: the catalog behind the tiers
+
+`GET /models` is live but undocumented, so the parser was written from a
+measured response (2026-10-31, prod): an envelope `{ "models": [...] }` of 25
+rows, global across every repository and organization, which is why the tool
+takes no arguments. A row can omit almost every member; the ones the renderer
+uses are
+
+```
+{ id, vendor?, preview?,
+  capabilities: { supports: { reasoningEffort?: string[] },
+                  limits: { maxContextWindowTokens?, maxOutputTokens? } },
+  billing: { multiplier? },
+  infoMessages?: [{ message }] }
+```
+
+`list_models` flattens those into `id`, vendor, preview, context window, output
+limit, the effort ladder, the billing multiplier when above 1, and any
+`infoMessages` as `note:` lines (for example the scheduled deprecation notice
+on `claude-opus-4.6`). The result opens with the tier presets, so the model sees
+the ids `create_job` will use and what else exists in one place. Measured:
+every row is `isPremium: true` with `multiplier: 1` today, but the field is
+carried rather than assumed, and the effort ladder is per model — a preset is
+the only place where `max` is guaranteed.
 
 ### Optional arguments are defaults, not questions
 
@@ -139,7 +200,9 @@ description names that default and what overrides it:
 | `branch` | the repository's default branch |
 | `agent` | the service's standard agent |
 | `plugins` | none beyond what the service enables by default |
-| `model`, `reasoningEffort` | the service's and the model's own defaults |
+| `tier` | `normal` (`gpt-6-astra` at `max` effort); `easy` and `complex` are `claude-opus-4.8-fast` and `claude-opus-5.5`, both at `max` |
+| `model` | the `tier`'s model; naming one replaces the preset model and drops its effort |
+| `reasoningEffort` | the `tier`'s effort; always wins when given |
 | `context` | `default` |
 | `pageSize` (jobs) | 25 |
 | `top` (catalog) | 50 |
@@ -153,7 +216,8 @@ guess: `context` is `default` or `long_context`, `agentType` and the catalog
 `digest` or `full`. The two values that genuinely belong to the service —
 `model` and `reasoningEffort` — stay free strings, because enumerating a
 vocabulary the service owns would rot the moment it adds a model, and the
-service's rejection is already actionable.
+service's rejection is already actionable. `list_models` reports that vocabulary
+live instead of freezing it in a schema.
 
 Empty expressions of absence are treated as absent: `optionalString` maps `""`
 to unset and `optionalInt` maps `0` to unset wherever `0` is not a legal value.

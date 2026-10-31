@@ -19,7 +19,7 @@ The groups are:
 - `first-mate` → `/mcp/first-mate` (gated cloud-agent control)
 - `ado` → `/mcp/ado` (the Azure DevOps remote MCP surface, read-only by default; loaded only when the group is enabled)
 - `kusto` → `/mcp/kusto` (Azure Data Explorer, five read-only tools, the cluster named per call or defaulted at launch; loaded only when the group is enabled)
-- `cloudagent` → `/mcp/cloudagent` (Microsoft Cloud Agent Job API v2, eight tools; read tools only from repository discovery, `create_job`/`cancel_job` only with the explicit `--cloudagent` — see [`docs/cloudagent-mcp.md`](cloudagent-mcp.md))
+- `cloudagent` → `/mcp/cloudagent` (Microsoft Cloud Agent Job API v2, nine tools; read tools only from repository discovery, `create_job`/`cancel_job` only with the explicit `--cloudagent` — see [`docs/cloudagent-mcp.md`](cloudagent-mcp.md))
 
 A launch profile projects only the groups it allows; not every session registers all eleven.
 

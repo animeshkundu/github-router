@@ -397,6 +397,31 @@ export interface CloudAgentPluginInfo {
   enabledByDefault?: boolean
 }
 
+/**
+ * One model a job may name in `model`, from the undocumented but live
+ * `GET /models` catalog (measured 2026-10-31: 25 entries).
+ *
+ * Flattened from the wire's `capabilities.supports` / `capabilities.limits`
+ * nesting because no renderer needs the wrapper levels, and optional
+ * throughout: the endpoint is undocumented, so a field that stops being sent
+ * must degrade to "not stated" rather than fail the call.
+ */
+export interface CloudAgentModelInfo {
+  id: string
+  vendor?: string
+  preview?: boolean
+  /** The ceiling the service advertises. There is no tier dimension here:
+   *  `context: "long_context"` is accepted on every model but published nowhere. */
+  maxContextWindowTokens?: number
+  maxOutputTokens?: number
+  /** Effort values this model accepts, in the service's own order (low … max). */
+  reasoningEffort?: Array<string>
+  /** Advisory text, e.g. a planned deprecation. */
+  notices?: Array<string>
+  /** Premium-request multiplier; 1 is the ordinary rate. */
+  billingMultiplier?: number
+}
+
 export interface CloudAgentCatalogPage<T> {
   value: Array<T>
   totalCount?: number
@@ -680,6 +705,22 @@ export function readPluginPage(value: unknown): CloudAgentCatalogPage<CloudAgent
   return readCatalogPage(value, "plugins", readPlugin)
 }
 
+/**
+ * `GET /models` answers `{ "models": [...] }` (measured live 2026-10-31), not
+ * the `value`/`totalCount` page shape the plugin and agent catalogs use, and
+ * it takes no filters: the service ignores repository and organization here.
+ */
+export function readModelList(value: unknown): Array<CloudAgentModelInfo> {
+  if (!isRecord(value)) {
+    throw new CloudAgentError("Cloud Agent returned a model list that was not an object.", { retriable: true })
+  }
+  const raw = value.models
+  if (!Array.isArray(raw)) {
+    throw new CloudAgentError("Cloud Agent returned a model list without a `models` array.", { retriable: true })
+  }
+  return raw.filter(isRecord).map(readModel)
+}
+
 function readCatalogPage<T>(
   value: unknown,
   what: string,
@@ -742,6 +783,37 @@ function readPlugin(entry: Record<string, unknown>): CloudAgentPluginInfo {
   const enabled = booleanField(entry, "enabledByDefault")
   if (enabled !== undefined) plugin.enabledByDefault = enabled
   return plugin
+}
+
+function readModel(entry: Record<string, unknown>): CloudAgentModelInfo {
+  const model: CloudAgentModelInfo = { id: stringField(entry, "id") ?? "?" }
+  const vendor = stringField(entry, "vendor")
+  if (vendor) model.vendor = vendor
+  const preview = booleanField(entry, "preview")
+  if (preview !== undefined) model.preview = preview
+  const capabilities = isRecord(entry.capabilities) ? entry.capabilities : undefined
+  const supports = capabilities && isRecord(capabilities.supports) ? capabilities.supports : undefined
+  const limits = capabilities && isRecord(capabilities.limits) ? capabilities.limits : undefined
+  const efforts = supports?.reasoningEffort
+  if (Array.isArray(efforts)) {
+    const known = efforts.filter((effort): effort is string => typeof effort === "string" && effort.trim().length > 0)
+    if (known.length > 0) model.reasoningEffort = known
+  }
+  const context = limits ? numberField(limits, "maxContextWindowTokens") : undefined
+  if (context !== undefined) model.maxContextWindowTokens = context
+  const output = limits ? numberField(limits, "maxOutputTokens") : undefined
+  if (output !== undefined) model.maxOutputTokens = output
+  const billing = isRecord(entry.billing) ? entry.billing : undefined
+  const multiplier = billing ? numberField(billing, "multiplier") : undefined
+  if (multiplier !== undefined) model.billingMultiplier = multiplier
+  const info = entry.infoMessages
+  if (Array.isArray(info)) {
+    const notices = info
+      .map((message) => (isRecord(message) ? stringField(message, "message") : undefined))
+      .filter((message): message is string => message !== undefined)
+    if (notices.length > 0) model.notices = notices
+  }
+  return model
 }
 
 // --- Logs ------------------------------------------------------------------
@@ -1355,6 +1427,42 @@ export function renderPluginPage(page: CloudAgentCatalogPage<CloudAgentPluginInf
   return finishCatalog(header, rows, page)
 }
 
+/**
+ * Render the model catalog.
+ *
+ * Effort values are printed per row because the ladder is not uniform: measured
+ * live, 8 of 25 models do not accept `max`, so a caller that assumes every
+ * model takes the tier default would get a 400 it could have avoided by
+ * reading the row. `modelPickerCategory` and `modelPickerEnabled` are
+ * deliberately dropped — they describe a UI grouping, not a capability.
+ */
+export function renderModelPage(models: ReadonlyArray<CloudAgentModelInfo>): string {
+  if (models.length === 0) return "No models were returned."
+  const rows = models.slice(0, MAX_RENDERED_ROWS).map((model) => {
+    const tags = [model.vendor, model.preview === true ? "preview" : undefined]
+      .filter((part): part is string => part !== undefined && part.length > 0)
+    const details = [
+      model.maxContextWindowTokens !== undefined ? `context ${formatTokenCount(model.maxContextWindowTokens)}` : "",
+      model.maxOutputTokens !== undefined ? `max output ${formatTokenCount(model.maxOutputTokens)}` : "",
+      model.reasoningEffort && model.reasoningEffort.length > 0 ? `effort ${model.reasoningEffort.join("/")}` : "",
+      model.billingMultiplier !== undefined && model.billingMultiplier > 1 ? `cost ×${model.billingMultiplier}` : "",
+    ].filter((part) => part.length > 0)
+    const lines = [`  ${model.id}${tags.length > 0 ? ` [${tags.join(", ")}]` : ""}${details.length > 0 ? ` — ${details.join("; ")}` : ""}`]
+    for (const notice of model.notices ?? []) lines.push(`    note: ${truncate(notice, 240)}`)
+    return lines.join("\n")
+  })
+  const header = models.length > MAX_RENDERED_ROWS
+    ? `${models.length} model(s) (first ${MAX_RENDERED_ROWS} shown):`
+    : `${models.length} model(s):`
+  return [header, ...rows].join("\n")
+}
+
+function formatTokenCount(value: number): string {
+  if (value >= 1_000_000) return `${Math.round((value / 1_000_000) * 100) / 100}M`
+  if (value >= 1_000) return `${Math.round(value / 1_000)}K`
+  return String(value)
+}
+
 function catalogHeader(kind: string, page: CloudAgentCatalogPage<unknown>): string {
   const total = page.totalCount !== undefined ? ` of ${page.totalCount}` : ""
   const window = [
@@ -1741,6 +1849,22 @@ export class CloudAgentClient {
       ...(signal ? { signal } : {}),
     })
     return readAgentPage(value)
+  }
+
+  /**
+   * `GET /models` — what a job's `modelConfiguration.model` may name.
+   *
+   * Undocumented but live (measured 2026-10-31): the response is global, so
+   * repository and organization filters are not accepted here at all.
+   */
+  async listModels(signal?: AbortSignal): Promise<Array<CloudAgentModelInfo>> {
+    const { value } = await this.request("GET", "/models", {
+      retry: true,
+      cap: MAX_RESPONSE_BYTES,
+      what: "model list",
+      ...(signal ? { signal } : {}),
+    })
+    return readModelList(value)
   }
 }
 

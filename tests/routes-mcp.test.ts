@@ -4552,6 +4552,7 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
     "get_job_logs",
     "list_agents",
     "list_jobs",
+    "list_models",
     "list_plugins",
     "wait_for_job",
   ]
@@ -4570,7 +4571,7 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
     expect((json.result as { tools: Array<unknown> }).tools).toEqual([])
   })
 
-  test("discovery enables the SIX read tools and never a tool that spends compute", async () => {
+  test("discovery enables the SEVEN read tools and never a tool that spends compute", async () => {
     // The load-bearing asymmetry of this group: a checkout cloned from a remote
     // the operator did not choose turns the ledger on, and create_job stays out
     // of reach until `--cloudagent` is passed explicitly.

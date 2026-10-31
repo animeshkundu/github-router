@@ -1,5 +1,5 @@
 /**
- * The `cloudagent` MCP group: eight tools over the Microsoft Cloud Agent Job API v2.
+ * The `cloudagent` MCP group: nine tools over the Microsoft Cloud Agent Job API v2.
  *
  * Cloud Agent runs an autonomous coding agent in the cloud against an Azure DevOps
  * repository. A job is created with a prompt, runs unattended for hours, and
@@ -25,7 +25,13 @@
  *   - `toolDiffs` was `[]` on every sampled job, so "what changed" is derived
  *     from the trace (`./cloudagent-client` `readJobLogs`), never from that field.
  *
- * Read/write split: the six read tools are enabled by `--cloudagent`,
+ * - `create_job` never runs on the service's unstated choice of model: a `tier`
+ *   (easy / normal / complex) maps to a measured model at `max` effort, so the
+ *   same prompt lands on the same model every session, and `list_models` exposes
+ *   the live catalog so a caller can see what else exists and which effort
+ *   values each model actually accepts (the ladder is not uniform).
+ *
+ * Read/write split: the seven read tools are enabled by `--cloudagent`,
  * `GH_ROUTER_ENABLE_CLOUDAGENT=1`, or discovery of an Azure DevOps git remote;
  * `create_job` / `cancel_job` carry the `cloudagent_write` capability and require
  * the explicit flag (see `./cloudagent-flags`). A cloned repository's `origin` must
@@ -51,6 +57,7 @@ import {
   renderAgentPage,
   renderJob,
   renderJobPage,
+  renderModelPage,
   renderPluginPage,
   renderPollHint,
   renderTrace,
@@ -69,6 +76,37 @@ import { state } from "./state"
 import { relaySafeText } from "./worker-agent/relay-cap"
 
 const CLOUDAGENT_GROUP = "cloudagent" as const
+
+// --- Model tiers -----------------------------------------------------------
+
+export type CloudAgentTier = "easy" | "normal" | "complex"
+
+export const CLOUDAGENT_DEFAULT_TIER: CloudAgentTier = "normal"
+
+const CLOUDAGENT_TIERS: ReadonlyArray<CloudAgentTier> = ["easy", "normal", "complex"]
+
+/**
+ * The model and reasoning effort each `create_job` tier runs on.
+ *
+ * Measured against the live `GET /models` catalog on 2026-10-31: all three ids
+ * exist and all three accept `max`. `claude-opus-4.8-fast` is flagged
+ * `preview: true` there, which the tool description says out loud rather than
+ * hiding — a preview model can change under the same id.
+ *
+ * Deliberately NOT derived from the catalog at call time. The catalog has 25
+ * entries and no quality ordering, so no default can be computed from it;
+ * picking one and stating it is the only honest option. A preset whose id has
+ * disappeared fails loudly at the service (a 400 naming the model) instead of
+ * silently drifting to whatever looks closest, and `list_models` is the check
+ * a caller runs first in an unfamiliar environment.
+ */
+export const CLOUDAGENT_TIER_MODELS: Readonly<
+  Record<CloudAgentTier, { model: string; reasoningEffort: string }>
+> = Object.freeze({
+  easy: { model: "claude-opus-4.8-fast", reasoningEffort: "max" },
+  normal: { model: "gpt-6-astra", reasoningEffort: "max" },
+  complex: { model: "claude-opus-5.5", reasoningEffort: "max" },
+})
 
 // --- Client plumbing -------------------------------------------------------
 
@@ -664,8 +702,8 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
     description:
       "Runs an autonomous coding agent in the Microsoft cloud against an Azure DevOps repository, and returns immediately with a job id. "
       + "A job is ONE-SHOT: it runs unattended for hours (median 221 minutes), cannot be messaged, and cannot be resumed — iteration means creating another job. "
-      + "It works in its own clone and opens a pull request when the work is done; its final answer is retrieved with get_job. "
-      + "Only `prompt` is needed in the normal case, or `agent` for a custom agent that carries its own instructions: the repository is read from the workspace's git remote and every other argument has a working default, so supply one only to change that default — each description states its default and what overrides it. "
+      + "It works in its own cloud clone, not in your working tree; its final answer is retrieved with get_job. "
+      + "Only `prompt` is needed in the normal case, or `agent` for a custom agent that carries its own instructions: the repository is read from the workspace's git remote, the model and reasoning effort come from `tier` (default normal), and every other argument has a working default, so supply one only to change that default — each description states its default and what overrides it. "
       + "Confirm with the user before creating a job they did not explicitly ask for: it spends real compute for hours. "
       + "After it returns, do not wait in one call — poll with get_job, or use wait_for_job once to confirm the job left the queue.",
     inputSchema: {
@@ -711,15 +749,25 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
           description:
             "Set true to load the service's default plugins alongside `plugins`. Default: not sent, so the service applies its own default; only set it when a job needs both the defaults and extra plugins.",
         },
+        tier: {
+          type: "string",
+          enum: ["easy", "normal", "complex"],
+          description:
+            "Preset for model and reasoning effort. Default \"normal\". "
+            + "easy = claude-opus-4.8-fast (a preview model) at max effort, for small well-specified changes; "
+            + "normal = gpt-6-astra at max effort, the everyday coding tier; "
+            + "complex = claude-opus-5.5 at max effort, for hard or long-horizon work. "
+            + "Naming `model` replaces the preset's model AND discards its effort; `context` is independent of the tier. list_models shows the live catalog and each model's effort values.",
+        },
         model: {
           type: "string",
           description:
-            "Model the agent runs on, e.g. \"claude-sonnet-4.5\". Default: the service's choice — omit it unless the work needs a specific model.",
+            "Model the agent runs on. Default: the model of `tier` (normal = gpt-6-astra). Overriding it drops the tier's `max` reasoning effort as well, leaving the model's own default unless `reasoningEffort` is also passed — the effort ladder differs per model, so the tier value is not valid everywhere. list_models lists the ids and each model's effort values.",
         },
         reasoningEffort: {
           type: "string",
           description:
-            "Reasoning effort for the job's model. Default: the model's own default. The accepted vocabulary belongs to the service, so it is not constrained here; low, medium and high are the common values, and an unknown value is reported by the service.",
+            "Reasoning effort for the job's model. Default: `max`, supplied by `tier`. The values are low, medium, high, xhigh and max, but each model accepts only a subset — list_models prints the ladder per model. Passing an effort without `model` keeps the tier's model.",
         },
         context: {
           type: "string",
@@ -749,7 +797,7 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
       const agentType = agent ? agentTypeArg(args) : undefined
       const agentInputs = agent ? agentInputsArg(args) : undefined
       const plugins = pluginsArg(args)
-      const model = modelConfiguration(args)
+      const model = resolveModelConfiguration(args)
       const metadata = metadataArg(args)
 
       const input: CloudAgentJobInput = {
@@ -771,7 +819,7 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
           : {}),
         ...(plugins ? { plugins } : {}),
         ...(args.includeDefaultPlugins === true ? { includeDefaultPlugins: true } : {}),
-        ...(model ? { modelConfiguration: model } : {}),
+        modelConfiguration: model.modelConfiguration,
         ...(metadata ? { metadata } : {}),
       }
 
@@ -788,6 +836,7 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
       lines.push("")
       lines.push("effective request (the normalized body the service received):")
       lines.push(renderEffectiveRequest(request))
+      lines.push(`  ${model.tierNote}`)
       lines.push("")
       lines.push(
         `next: the job is ${job.state ?? "created"}. Report the job id to the user and check with get_job jobId=${job.jobId} in about 10 minutes — a typical job runs for hours, so there is nothing to learn before then. wait_for_job tells you whether the handoff took (it leaves Queued) without waiting for the work.`,
@@ -1189,23 +1238,95 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
       return text(provenance ? `${provenance}\n${renderAgentPage(page)}` : renderAgentPage(page))
     },
   },
+  {
+    toolNameHttp: "list_models",
+    group: CLOUDAGENT_GROUP,
+    capability: "cloudagent",
+    description:
+      "Lists the models a Cloud Agent job can run on, from the service's live catalog, with each model's context window, output limit, reasoning-effort values and any notice the service attaches (for example a scheduled deprecation). "
+      + "This is the vocabulary create_job's `model` draws from, and the check to run before relying on a tier in an unfamiliar environment: create_job's presets name specific ids — easy = claude-opus-4.8-fast at max effort, normal = gpt-6-astra at max effort (the default), complex = claude-opus-5.5 at max effort — and a preset whose id is gone fails at the service. "
+      + "The list is global: it is identical for every repository and organization, which is why it takes no arguments.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {},
+    },
+    async handler(_args, signal) {
+      const models = await cloudAgentClient().listModels(signal)
+      const presets = CLOUDAGENT_TIERS.map((tier) => {
+        const preset = CLOUDAGENT_TIER_MODELS[tier]
+        const suffix = tier === CLOUDAGENT_DEFAULT_TIER ? " (default)" : ""
+        return `${tier} = ${preset.model} at ${preset.reasoningEffort} effort${suffix}`
+      }).join("; ")
+      return text(`create_job tier presets: ${presets}.\n${renderModelPage(models)}`)
+    },
+  },
 ])
 
 // --- Shared handler helpers ------------------------------------------------
 
-function modelConfiguration(args: Record<string, unknown>): CloudAgentJobInput["modelConfiguration"] {
-  const model = optionalString(args, "model")
-  const reasoningEffort = optionalString(args, "reasoningEffort")
+function tierArg(args: Record<string, unknown>): CloudAgentTier {
+  const raw = optionalString(args, "tier")
+  if (raw === undefined) return CLOUDAGENT_DEFAULT_TIER
+  const normalized = raw.toLowerCase()
+  const match = CLOUDAGENT_TIERS.find((tier) => tier === normalized)
+  if (match) return match
+  const options = CLOUDAGENT_TIERS
+    .map((tier) => `${tier} = ${CLOUDAGENT_TIER_MODELS[tier].model} at ${CLOUDAGENT_TIER_MODELS[tier].reasoningEffort} effort`)
+    .join(", ")
+  throw new CloudAgentError(
+    `\`tier\` must be easy, normal or complex (got "${raw}"). ${options}.`,
+    { retriable: false },
+  )
+}
+
+/**
+ * Resolve `tier`, `model`, `reasoningEffort` and `context` into the wire
+ * `modelConfiguration`, plus one line explaining what the tier contributed.
+ *
+ * Precedence, and why: a tier supplies a model AND an effort. Naming a `model`
+ * replaces the whole preset rather than only its model, because the effort
+ * ladder differs per model — measured live, 8 of 25 models do not accept `max`
+ * — so carrying the preset's `max` onto a caller-chosen model would inject a
+ * value that caller never asked for and the service may reject. An explicit
+ * `reasoningEffort` is always honored, with or without `model`.
+ *
+ * The explanation line exists because `GET /jobs/{id}` never returns
+ * `modelConfiguration`: a follow-up job can only copy values the caller can
+ * SEE were used, and "effort: max" without saying it came from the tier reads
+ * like something the caller chose.
+ */
+function resolveModelConfiguration(args: Record<string, unknown>): {
+  modelConfiguration: NonNullable<CloudAgentJobInput["modelConfiguration"]>
+  tierNote: string
+} {
+  const tier = tierArg(args)
+  const preset = CLOUDAGENT_TIER_MODELS[tier]
+  const explicitModel = optionalString(args, "model")
+  const explicitEffort = optionalString(args, "reasoningEffort")
   const context = optionalString(args, "context")
   if (context !== undefined && context !== "default" && context !== "long_context") {
     throw new CloudAgentError('`context` must be "default" or "long_context".', { retriable: false })
   }
-  if (!model && !reasoningEffort && !context) return undefined
-  return {
-    ...(model ? { model } : {}),
+  const model = explicitModel ?? preset.model
+  const reasoningEffort = explicitEffort ?? (explicitModel ? undefined : preset.reasoningEffort)
+  const modelConfiguration: NonNullable<CloudAgentJobInput["modelConfiguration"]> = {
+    model,
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(context ? { context } : {}),
   }
+  const defaultTier = tier === CLOUDAGENT_DEFAULT_TIER ? ", the default" : ""
+  let tierNote: string
+  if (!explicitModel) {
+    tierNote = explicitEffort
+      ? `tier: ${tier}${defaultTier} — its model ${model}; the effort you passed replaced its ${preset.reasoningEffort}.`
+      : `tier: ${tier}${defaultTier} — supplied model ${model} and effort ${preset.reasoningEffort}.`
+  } else if (explicitEffort) {
+    tierNote = `tier: ${tier}${defaultTier} — replaced by model ${model}; the effort you passed replaced its ${preset.reasoningEffort}.`
+  } else {
+    tierNote = `tier: ${tier}${defaultTier} — replaced by model ${model}, so its ${preset.reasoningEffort} effort was dropped and the model's own default applies.`
+  }
+  return { modelConfiguration, tierNote }
 }
 
 /**
