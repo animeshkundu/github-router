@@ -58,6 +58,12 @@ export const STRIPPED_AUTH_ROUTING_ENV_KEYS = [
   "ADO_MCP_TOKEN",
   // Kusto (Azure Data Explorer) bearer override. Same rule.
   "KUSTO_TOKEN",
+  // Cloud Agent Job API v2 bearer override. Same rule, and it matters more
+  // here than anywhere else on this list: the Cloud Agent group can launch a
+  // cloud agent that spends compute, so a bearer inherited by a spawned
+  // CLI or one of its MCPs would be both a credential leak and a
+  // capability leak.
+  "GH_ROUTER_CLOUDAGENT_TOKEN",
   // Codex CLI auth surface
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",

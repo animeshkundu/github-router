@@ -640,6 +640,20 @@ describe("query expansion (cross-skeleton)", () => {
 // ============================================================
 
 describe("structural ranking (tree-sitter)", () => {
+  // Every test in here asserts WHICH hits come back and how they rank, and the
+  // ranking signal is the AST-confirmed `symbol_context` contribution. That pass
+  // runs under a 200 ms wall-clock budget (product policy, see
+  // STRUCTURAL_BUDGET_MS), and an overrun drops the remaining hits back to the
+  // regex heuristic and sets `notice` — so under a contended lane-1 run the
+  // three-file fixture below intermittently came back with a budget notice where
+  // the same test passed 3/3 in isolation. What failed was the runner's share of
+  // the machine, not the ranking. The budget is lifted for this describe, as the
+  // determinism test and the floor-guarantee describe do; the overrun path
+  // itself stays covered by the budget-boundary tests in
+  // tests/tree-sitter-pool.test.ts.
+  beforeEach(() => __setStructuralBudgetForTest(3_600_000))
+  afterEach(() => __setStructuralBudgetForTest(null))
+
   let fx: Fixture
 
   beforeAll(() => {

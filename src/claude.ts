@@ -139,6 +139,7 @@ import {
   agentToolsEnabled,
   artifactToolsEnabled,
   kustoToolsEnabled,
+  cloudAgentToolsEnabled,
   browseAgentEnabled,
   browserCompoundToolsEnabled,
   browserToolsEnabled,
@@ -1266,6 +1267,8 @@ export const claude = defineCommand({
           !fastDescriptor.allowedGroups || fastDescriptor.allowedGroups.has(group)
         if (adoToolsEnabled() && allowsGroup("ado")) enabledGroups.push("ado")
         if (kustoToolsEnabled() && allowsGroup("kusto")) enabledGroups.push("kusto")
+        // One switch, write tools included, matching `ado` and `kusto`.
+        if (cloudAgentToolsEnabled() && allowsGroup("cloudagent")) enabledGroups.push("cloudagent")
         if (!isPinnedProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
         if (!isPinnedProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
         if (isMaxProfile && fleetToolsEnabled()) enabledGroups.push("fleet")

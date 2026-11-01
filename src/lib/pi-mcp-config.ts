@@ -72,6 +72,7 @@ export function readMcpServerKeys(raw: string): Array<string> | null {
 const GROUP_DESCRIPTIONS: Record<string, string> = {
   ado: "Azure DevOps for the open repository: repositories, work items, pipelines and wikis.",
   kusto: "Azure Data Explorer: query and management commands against the cluster named on each call, or the launch default.",
+  cloudagent: "Microsoft Cloud Agent jobs: hand a prompt plus an Azure DevOps repository to a cloud coding agent, then poll it for hours and collect the answer. create_job, create_pr_job and cancel_job spend compute; confirm with the user before creating a job the user did not ask for.",
 }
 
 export interface PiSurfaceDecision {
@@ -107,6 +108,7 @@ export function resolvePiSurfaces(opts: {
   bluebirdEnabled: boolean
   adoEnabled: boolean
   kustoEnabled: boolean
+  cloudAgentEnabled: boolean
   helpersEnabled: boolean
   peersEnabled: boolean
 }): PiSurfaceDecision {
@@ -116,6 +118,9 @@ export function resolvePiSurfaces(opts: {
     if (opts.adoEnabled) groups.push({ group: "ado", description: GROUP_DESCRIPTIONS["ado"]! })
     if (opts.kustoEnabled) {
       groups.push({ group: "kusto", description: GROUP_DESCRIPTIONS["kusto"]! })
+    }
+    if (opts.cloudAgentEnabled) {
+      groups.push({ group: "cloudagent", description: GROUP_DESCRIPTIONS["cloudagent"]! })
     }
   }
   return {

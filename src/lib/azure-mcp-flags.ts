@@ -21,8 +21,11 @@
  * repo would silently provision three credentialed network clients. Four
  * properties bound that:
  *
- *   1. Auto-enable can never produce a WRITE surface. `--ado-write` is a flag
- *      only; nothing discovered from a remote clears `X-MCP-Readonly`.
+ *   1. Within these Azure surfaces, auto-enable can never produce a WRITE
+ *      surface. `--ado-write` is a flag only; nothing discovered from a remote
+ *      clears `X-MCP-Readonly`. The separate `cloudagent` group deliberately
+ *      steps outside this bound: discovery turns on its create tools too, and
+ *      `--no-cloudagent` is the veto (see `cloudagent-flags.ts`).
  *   2. Every surface is suppressible individually (`--no-bluebird`,
  *      `--no-ado`, `--no-kusto`, or the `GH_ROUTER_DISABLE_*` env vars) and
  *      wholesale (`GH_ROUTER_AZURE_MCPS=off`), and an explicit negative always

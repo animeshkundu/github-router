@@ -1,13 +1,19 @@
 import { afterEach, describe, expect, test } from "bun:test"
 
 import {
+  __resetAzureRepoIdCacheForTests,
   type AzureRepoInfo,
   checkBranchIndexStatus,
   parseAzureRepo,
   parseGitRemoteLine,
   parseGitRemoteOutput,
   resolveAzureRepoFromRemotes,
+  resolveAzureRepoIds,
 } from "../src/lib/azure-repo"
+import {
+  __resetAzCliExecDepsForTests,
+  __setAzCliExecDepsForTests,
+} from "../src/lib/azure-cli-token"
 
 describe("parseAzureRepo", () => {
   test("parses dev.azure.com HTTPS", () => {
@@ -507,5 +513,161 @@ describe("checkBranchIndexStatus probe", () => {
     controller.abort(new Error("caller cancelled mid-read"))
 
     await expect(pending).rejects.toThrow("caller cancelled mid-read")
+  })
+})
+
+// --- resolveAzureRepoIds ---------------------------------------------------
+//
+// The Cloud Agent job filter matches `project` and `repository` by ID only
+// (measured against prod: a name narrows to zero rows and reports no error),
+// so `list_jobs` translates the names a human or a git remote supplies into
+// GUIDs here, through Azure DevOps REST, before it builds the query.
+
+describe("resolveAzureRepoIds", () => {
+  const originalFetch = globalThis.fetch
+  const SYNTHETIC_TOKEN = "synthetic-ado-rest-bearer-not-a-credential"
+  const PROJECT_ID = "11ac29bc-5a99-400b-b225-01839ab0c9df"
+  const REPO_ID = "1b255d6e-1545-42ab-9e75-1fb3f0202dfa"
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    __resetAzureRepoIdCacheForTests()
+    __resetAzCliExecDepsForTests()
+  })
+
+  /** A silent `az` that mints without a subprocess, a browser, or a network. */
+  function stubAz(): Array<Array<string>> {
+    const cmds: Array<Array<string>> = []
+    __setAzCliExecDepsForTests({
+      resolveExecutable: () => "/fake/az",
+      runCommandCapture: (cmd) => {
+        cmds.push(cmd)
+        return Promise.resolve({
+          stdout: JSON.stringify({
+            accessToken: SYNTHETIC_TOKEN,
+            expires_on: Math.floor(Date.now() / 1000) + 3600,
+          }),
+          stderr: "",
+          code: 0,
+          timedOut: false,
+          truncated: false,
+          stderrTruncated: false,
+        })
+      },
+    })
+    return cmds
+  }
+
+  function fetchStub(
+    respond: (url: string, init?: RequestInit) => Response,
+  ): { urls: Array<string> } {
+    const urls: Array<string> = []
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      urls.push(String(input))
+      return respond(String(input), init)
+    }) as unknown as typeof fetch
+    return { urls }
+  }
+
+  test("resolves a project and repository name to their ids", async () => {
+    const cmds = stubAz()
+    const { urls } = fetchStub((url) => {
+      const body = url.includes("_apis/git/repositories") ? { id: REPO_ID } : { id: PROJECT_ID }
+      return new Response(JSON.stringify(body), { status: 200 })
+    })
+
+    const ids = await resolveAzureRepoIds({
+      organization: "contoso",
+      project: "platform",
+      repository: "web",
+    })
+    expect(ids).toEqual({ projectId: PROJECT_ID, repositoryId: REPO_ID })
+
+    const parsed = urls.map((url) => new URL(url))
+    expect(parsed.map((u) => u.pathname)).toEqual([
+      "/contoso/_apis/projects/platform",
+      "/contoso/platform/_apis/git/repositories/web",
+    ])
+    expect(parsed.every((u) => u.searchParams.get("api-version") === "7.1")).toBe(true)
+    // The token is minted for the Azure DevOps resource, not the Cloud Agent
+    // one: two audiences, two origins.
+    expect(cmds[0]).toContain("499b84ac-1321-427f-aa17-267ca6975798")
+    expect(cmds[0]).toContain("--resource")
+  })
+
+  test("resolves only the project when no repository was named", async () => {
+    stubAz()
+    const { urls } = fetchStub(() => new Response(JSON.stringify({ id: PROJECT_ID }), { status: 200 }))
+    const ids = await resolveAzureRepoIds({ organization: "contoso", project: "platform" })
+    expect(ids).toEqual({ projectId: PROJECT_ID })
+    expect(urls).toHaveLength(1)
+  })
+
+  test("a resolved triple is cached, case-insensitively, for the process", async () => {
+    stubAz()
+    const { urls } = fetchStub((url) => {
+      const body = url.includes("_apis/git/repositories") ? { id: REPO_ID } : { id: PROJECT_ID }
+      return new Response(JSON.stringify(body), { status: 200 })
+    })
+    await resolveAzureRepoIds({ organization: "contoso", project: "platform", repository: "web" })
+    await resolveAzureRepoIds({ organization: "Contoso", project: "Platform", repository: "WEB" })
+    expect(urls).toHaveLength(2)
+  })
+
+  test("a failed lookup is not cached, so a transient failure self-heals", async () => {
+    stubAz()
+    let attempts = 0
+    fetchStub(() => {
+      attempts += 1
+      return attempts === 1
+        ? new Response("{}", { status: 500 })
+        : new Response(JSON.stringify({ id: PROJECT_ID }), { status: 200 })
+    })
+
+    await expect(resolveAzureRepoIds({ organization: "contoso", project: "platform" }))
+      .rejects.toThrow(/failed with HTTP 500/)
+    const ids = await resolveAzureRepoIds({ organization: "contoso", project: "platform" })
+    expect(ids.projectId).toBe(PROJECT_ID)
+    expect(attempts).toBe(2)
+  })
+
+  test("a 404 says which name is wrong, and the remedy is a correction", async () => {
+    stubAz()
+    fetchStub(() => new Response("{}", { status: 404 }))
+    await expect(
+      resolveAzureRepoIds({ organization: "contoso", project: "nope" }),
+    ).rejects.toThrow(/no project "nope" in organization "contoso" \(HTTP 404\)/)
+  })
+
+  test("a 401/403 points at `az login` and never quotes the body or the bearer", async () => {
+    stubAz()
+    fetchStub(
+      () =>
+        new Response(`{"message":"secret-detail-${SYNTHETIC_TOKEN}"}`, { status: 401 }),
+    )
+    const err = await resolveAzureRepoIds({ organization: "contoso", project: "platform" })
+      .then(() => undefined)
+      .catch((e: unknown) => e as Error)
+    expect(err).toBeInstanceOf(Error)
+    expect(err!.message).toContain("HTTP 401")
+    expect(err!.message).toContain("az login")
+    expect(err!.message).not.toContain(SYNTHETIC_TOKEN)
+    expect(err!.message).not.toContain("secret-detail")
+  })
+
+  test("malformed JSON is reported as such, not as a missing repository", async () => {
+    stubAz()
+    fetchStub(() => new Response("not json", { status: 200 }))
+    await expect(
+      resolveAzureRepoIds({ organization: "contoso", project: "platform" }),
+    ).rejects.toThrow(/returned malformed JSON/)
+  })
+
+  test("a body with no GUID id is refused rather than sent as a filter", async () => {
+    stubAz()
+    fetchStub(() => new Response(JSON.stringify({ id: "platform" }), { status: 200 }))
+    await expect(
+      resolveAzureRepoIds({ organization: "contoso", project: "platform" }),
+    ).rejects.toThrow(/no usable id for project "platform"/)
   })
 })

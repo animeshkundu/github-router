@@ -48,6 +48,7 @@ import {
   standInToolEnabled,
   workerToolsEnabled,
   adoToolsEnabled,
+  cloudAgentToolsEnabled,
   kustoToolsEnabled,
 } from "../mcp-capabilities"
 import { buildPlanReviewHookCommand, planReviewEnabled } from "../orchestration/plan-review-hook"
@@ -104,6 +105,13 @@ export interface ServeEnhancementOpts {
    *  reasoning as `adoOverTunnel`: the queries run with the operator's `az`
    *  identity against private telemetry data. */
   kustoOverTunnel?: boolean
+  /** Operator opt-in to expose the Cloud Agent MCP group over the tunnel. Stricter
+   *  than its neighbours for the reason the group is split: the READ tools
+   *  spend the operator's identity, and the write tools (create_job,
+   *  create_pr_job, cancel_job) spend the
+   *  operator's compute budget. A tunnel client is not the operator, so both
+   *  halves stay local unless this is passed. */
+  cloudAgentOverTunnel?: boolean
 }
 
 const NOOP: ServeEnhancementsHandle = { cleanup: async () => {} }
@@ -168,6 +176,7 @@ export async function provisionServeEnhancements(
     // opted in for tunnel exposure.
     if (adoToolsEnabled() && (!tunnelExposed || opts.adoOverTunnel === true)) enabledGroups.push("ado")
     if (kustoToolsEnabled() && (!tunnelExposed || opts.kustoOverTunnel === true)) enabledGroups.push("kusto")
+    if (cloudAgentToolsEnabled() && (!tunnelExposed || opts.cloudAgentOverTunnel === true)) enabledGroups.push("cloudagent")
 
     const gem = geminiAvailable()
     const { keys: groupKeys } = await resolveGroupKeysFromMirror(enabledGroups)

@@ -248,6 +248,19 @@ export interface State {
   kustoDatabase: string | null
 
   /**
+   * Cloud Agent Job API v2 MCP group (`mcp__cloudagent__*`): hand work to a cloud
+   * coding agent running against an Azure DevOps repository.
+   *
+   * Enabled by `--cloudagent`, by `GH_ROUTER_ENABLE_CLOUDAGENT=1`, or automatically
+   * when the workspace's git remotes resolve to an Azure DevOps repository.
+   * Discovery enables the whole group, write tools included, matching the ADO,
+   * Kusto and Bluebird groups; `--no-cloudagent` remains the operator's veto.
+   */
+  cloudAgentEnabled: boolean
+  /** `prod` or `ppe`, normalized by `resolveCloudAgentFlags()` at launch. */
+  cloudAgentEnvironment: string
+
+  /**
    * Humanlike pacing override:
    *   "on"   - --humanlike CLI flag or GH_ROUTER_HUMANLIKE=1 env;
    *            inject Beta-distributed inter-action delays, Bezier
@@ -333,6 +346,8 @@ export const state: State = {
   kustoEnabled: false,
   kustoCluster: null,
   kustoDatabase: null,
+  cloudAgentEnabled: false,
+  cloudAgentEnvironment: "prod",
   humanlikeForce: "auto",
   sessionId: randomUUID(),
   machineId: randomBytes(32).toString("hex"),

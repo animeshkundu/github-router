@@ -1262,13 +1262,13 @@ test("ensureClaudeConfigMirror copies user's ~/.claude entries (snapshot, not sy
   expect(settings).toBe('{"theme":"dark"}')
 })
 
-test("ensureClaudeConfigMirror excludes Agency Hub hooks from only the isolated settings mirror", async () => {
+test("ensureClaudeConfigMirror excludes Cloud Agent Hub hooks from only the isolated settings mirror", async () => {
   const claudeHome = path.join(tempDir, ".claude")
   await fs.rm(claudeHome, { recursive: true, force: true })
   await fs.mkdir(claudeHome, { recursive: true })
 
   const nonce = "a4617907-0b9e-4bcf-b4ef-b10d7c5a31be"
-  const agencyUrl = `http://127.0.0.1:7824/hook/${nonce}`
+  const cloudAgentUrl = `http://127.0.0.1:7824/hook/${nonce}`
   const httpEvents = [
     "PreToolUse",
     "PostToolUse",
@@ -1290,7 +1290,7 @@ test("ensureClaudeConfigMirror excludes Agency Hub hooks from only the isolated 
       matcher: "*",
       hooks: [{
         type: "http",
-        url: agencyUrl,
+        url: cloudAgentUrl,
         timeout: event === "PermissionRequest" ? 1800 : 10,
       }],
     }]
@@ -1299,7 +1299,7 @@ test("ensureClaudeConfigMirror excludes Agency Hub hooks from only the isolated 
     matcher: "*",
     hooks: [{
       type: "command",
-      command: `curl.exe -q -sS --noproxy "*" --connect-timeout 2 --max-time 5 -H "Content-Type: application/json" --data-binary @- "${agencyUrl}" 1>NUL 2>NUL`,
+      command: `curl.exe -q -sS --noproxy "*" --connect-timeout 2 --max-time 5 -H "Content-Type: application/json" --data-binary @- "${cloudAgentUrl}" 1>NUL 2>NUL`,
     }],
   }]
   hooks.PreToolUse!.push({

@@ -4545,3 +4545,174 @@ describe("/mcp ado + kusto groups — scoping and gating", () => {
     }
   })
 })
+
+describe("/mcp cloudagent group — scoping and the discovery gate", () => {
+  const READ_TOOLS = [
+    "get_job",
+    "get_job_logs",
+    "list_agents",
+    "list_jobs",
+    "list_models",
+    "list_plugins",
+    "wait_for_job",
+  ]
+
+  function disableCloudAgent(): void {
+    state.cloudAgentEnabled = false
+  }
+
+  afterEach(() => {
+    disableCloudAgent()
+  })
+
+  test("cloudagent is invisible by default", async () => {
+    const { json } = await scopedRpc("cloudagent", { jsonrpc: "2.0", id: 950, method: "tools/list" })
+    expect((json.result as { tools: Array<unknown> }).tools).toEqual([])
+  })
+
+  test("enabling the group lists all ten tools, write tools included", async () => {
+    // One switch, matching the ADO, Kusto and Bluebird groups: discovery of an
+    // Azure DevOps remote turns the whole group on. A half-enabled group would
+    // read to the model as a bug, and the operator's veto is `--no-cloudagent`.
+    state.cloudAgentEnabled = true
+    const { json } = await scopedRpc("cloudagent", { jsonrpc: "2.0", id: 951, method: "tools/list" })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name).sort()
+    expect(names).toEqual(["cancel_job", "create_job", "create_pr_job", ...READ_TOOLS])
+  })
+
+  test("a hard-coded create_job call on a launch that never enabled the group is -32601", async () => {
+    // Defense in depth: the client can skip tools/list entirely.
+    disableCloudAgent()
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 954,
+      method: "tools/call",
+      params: { name: "create_job", arguments: { prompt: "do something expensive" } },
+    })
+    expect((json.error as { code: number }).code).toBe(-32601)
+  })
+
+  test("a hard-coded create_pr_job call on a launch that never enabled the group is -32601", async () => {
+    // The composite tool is gated by the same predicate rather than inheriting
+    // create_job's name-based exemption.
+    disableCloudAgent()
+    const { json } = await scopedRpc("cloudagent", {
+      jsonrpc: "2.0",
+      id: 953,
+      method: "tools/call",
+      params: { name: "create_pr_job", arguments: { prompt: "do something expensive" } },
+    })
+    expect((json.error as { code: number }).code).toBe(-32601)
+  })
+
+  test("a bad input to an enabled read tool is a tool error, not -32601", async () => {
+    // The gate answers "does this group exist here"; past it, a missing
+    // argument is the tool's own verdict and must reach the model as one.
+    state.cloudAgentEnabled = true
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 955,
+      method: "tools/call",
+      params: { name: "get_job", arguments: {} },
+    })
+    expect(json.error).toBeUndefined()
+    const result = json.result as { isError?: boolean; content: Array<{ text: string }> }
+    expect(result.isError).toBe(true)
+    expect(result.content[0]!.text).toContain("`jobId` is required")
+  })
+
+  test("the cloudagent group does not leak onto another group's scope, nor the reverse", async () => {
+    state.cloudAgentEnabled = true
+    const search = await scopedRpc("search", { jsonrpc: "2.0", id: 956, method: "tools/list" })
+    const searchNames = (search.json.result as { tools: Array<{ name: string }> }).tools
+      .map((t) => t.name)
+      .sort()
+    expect(searchNames).toEqual(["code", "web"])
+
+    state.kustoEnabled = true
+    state.kustoCluster = "https://example.kusto.windows.net"
+    try {
+      const listing = await scopedRpc("cloudagent", { jsonrpc: "2.0", id: 957, method: "tools/list" })
+      const cloudAgentNames = (listing.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      expect(cloudAgentNames).not.toContain("query")
+      expect(cloudAgentNames).not.toContain("code")
+    } finally {
+      state.kustoEnabled = false
+      state.kustoCluster = null
+    }
+  })
+
+  test("the unscoped union carries the group when it is enabled", async () => {
+    state.cloudAgentEnabled = true
+    const { json } = await rpc({ jsonrpc: "2.0", id: 958, method: "tools/list" })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+    expect(names).toContain("list_jobs")
+    expect(names).toContain("create_job")
+  })
+
+  test("a pinned profile admits cloudagent through list and call, write tools included", async () => {
+    // Every `*_PROFILE.allowedGroups` carries `cloudagent` and the launcher
+    // registers the server, so the fast predicate must project BOTH capability
+    // values. A group admitted by the registry but unhandled by the predicate
+    // would list nothing and answer -32601 to every call.
+    state.cloudAgentEnabled = true
+    const nonce = "c".repeat(64)
+    const launch = registerLaunch({
+      profileId: "fast",
+      nonce,
+      secret: "fast-cloudagent-allowlist-secret",
+      allowedGroups: new Set(["search", "cloudagent"]),
+    })
+    try {
+      const listed = await rpc(
+        { jsonrpc: "2.0", id: 959, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const names = (listed.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      expect(names).toContain("list_jobs")
+      expect(names).toContain("create_job")
+      // A group outside the allow-list stays off even though it is enabled.
+      state.kustoEnabled = true
+      const withoutKusto = await rpc(
+        { jsonrpc: "2.0", id: 961, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const withoutKustoNames = (withoutKusto.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      expect(withoutKustoNames).not.toContain("databases")
+      state.kustoEnabled = false
+    } finally {
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
+  test("the pinned-profile admission still follows the capability gate", async () => {
+    // `allowedGroups` alone must not surface the group: the same launch with
+    // the capability off lists nothing from it. Without this, an allow-list and
+    // an opt-in would be indistinguishable and a profile could show tools the
+    // launch never enabled.
+    disableCloudAgent()
+    const nonce = "b".repeat(64)
+    const launch = registerLaunch({
+      profileId: "fast",
+      nonce,
+      secret: "fast-cloudagent-gate-secret",
+      allowedGroups: new Set(["search", "cloudagent"]),
+    })
+    try {
+      const listed = await rpc(
+        { jsonrpc: "2.0", id: 960, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const names = (listed.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      expect(names).not.toContain("list_jobs")
+      expect(names).not.toContain("create_job")
+      expect(names).not.toContain("cancel_job")
+    } finally {
+      unregisterLaunch(launch.launchId)
+    }
+  })
+})

@@ -53,6 +53,7 @@ import {
   agentToolsEnabled,
   artifactToolsEnabled,
   adoToolsEnabled,
+  cloudAgentToolsEnabled,
   browseAgentEnabled,
   kustoToolsEnabled,
   browserCompoundToolsEnabled,
@@ -563,12 +564,20 @@ function maxToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   if (tool.capability === "fleet") return fleetToolsEnabled()
   if (tool.capability === "agents") return agentToolsEnabled()
   if (tool.capability === "artifact") return artifactToolsEnabled()
-  // The Azure groups, mirroring `fastToolIsEnabled`. Without these arms the
-  // fall-through below admitted them on a launch that never enabled the
-  // capability: the names were listed and every call answered -32601. The
+  // The remote-service groups, mirroring `fastToolIsEnabled`. Without these
+  // arms the fall-through below admitted them on a launch that never enabled
+  // the capability: the names were listed and every call answered -32601. The
   // capability gate is the same predicate the standard projection applies.
+  //
+  // Cloud Agent is one switch, like `ado` and `kusto`: the discovered Azure
+  // DevOps remote enables the whole group, write tools included. `cloudagent_write`
+  // stays a distinct capability because it labels a dangerous tool, not because
+  // it gates on anything of its own.
   if (tool.group === "ado") return adoToolsEnabled()
   if (tool.group === "kusto") return kustoToolsEnabled()
+  if (tool.capability === "cloudagent" || tool.capability === "cloudagent_write") {
+    return cloudAgentToolsEnabled()
+  }
   return true
 }
 
@@ -617,15 +626,22 @@ function fastToolIsEnabled(tool: NonPersonaMcpTool): boolean {
       && tool.capability === "browse_agent"
       && browseAgentEnabled()
   }
-  // The Azure groups are read-only, operator-opted-in data tools, so every
-  // profile whose `allowedGroups` carries them (all five pinned profiles do)
-  // must also LIST and CALL them: this predicate is the fast family's whole
-  // projection, shared by `tools/list` and `tools/call`. Gating falls through
-  // to the same capability predicates the standard projection applies, and the
-  // caller's `allowedGroups` check still runs first, so an opt-in on a launch
-  // that never enabled the group changes nothing.
+  // Groups outside the model-persona business: every pinned profile whose
+  // `allowedGroups` carries them must also LIST and CALL them, because this
+  // predicate is the fast family's whole projection, shared by `tools/list`
+  // and `tools/call`. Gating falls through to the same capability predicates
+  // the standard projection applies, and the caller's `allowedGroups` check
+  // still runs first, so an opt-in on a launch that never enabled the group
+  // changes nothing.
+  //
+  // These are NOT all read-only. `ado` and `kusto` are; Cloud Agent is not, but
+  // it is one switch like them, so a discovered git remote enables the write
+  // tools too.
   if (tool.group === "ado") return adoToolsEnabled()
   if (tool.group === "kusto") return kustoToolsEnabled()
+  if (tool.capability === "cloudagent" || tool.capability === "cloudagent_write") {
+    return cloudAgentToolsEnabled()
+  }
   if (tool.group !== "browser") return false
   if (!browserToolsEnabled()) return false
   if (tool.capability === "browser_compound") return browserCompoundToolsEnabled()
@@ -807,6 +823,9 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       if (t.capability === "artifact") return artifactToolsEnabled()
       if (t.capability === "ado") return adoToolsEnabled()
       if (t.capability === "kusto") return kustoToolsEnabled()
+      if (t.capability === "cloudagent" || t.capability === "cloudagent_write") {
+        return cloudAgentToolsEnabled()
+      }
       // Compound tools require BOTH the browser surface opt-in AND a
       // compressor backend in the catalog. Without browseEnabled the
       // compound tools must be invisible alongside the L0/L1 primitives.
@@ -1420,6 +1439,17 @@ function toolAcceptsWorkspace(tool: NonPersonaMcpTool): boolean {
     // to name the tree it is briefing against, and an empty workspace would
     // refuse every call.
     || tool.toolNameHttp === "prompt_brief"
+    // Cloud Agent resolves its repository from the workspace's git remote when the
+    // caller names no `organization`/`project`/`repository`. Without these three
+    // the header never reaches the handler, so the default silently degrades to
+    // "no repository": a required-argument error for `create_job` and
+    // `create_pr_job`, and an unfiltered listing of every job the account can
+    // see for `list_jobs`.
+    // `get_job_logs` could use a workspace too and deliberately does not: a job
+    // id already identifies its repository.
+    || tool.toolNameHttp === "create_job"
+    || tool.toolNameHttp === "create_pr_job"
+    || tool.toolNameHttp === "list_jobs"
 }
 
 /**
@@ -1833,12 +1863,13 @@ async function handleToolsCall(
       `tools/call: unknown tool "${name}"`,
     )
   }
-  // The Azure groups are gated on the flags `setupAndServe` resolved, so a
-  // client that hard-codes `mcp__ado__*` or `mcp__kusto__*` on a launch that
-  // never enabled them reaches the same -32601 as an unknown tool. For `ado`
-  // this also covers the runtime case: the group is switched off when its
-  // launch probe failed, and `allNonPersonaTools()` then serves no `ado` entry
-  // for this lookup to find in the first place.
+  // The remote-service groups are gated on the flags `setupAndServe` resolved,
+  // so a client that hard-codes `mcp__ado__*`, `mcp__kusto__*` or
+  // `mcp__cloudagent__*` on a launch that never enabled them reaches the same
+  // -32601 as an unknown tool. For `ado` this also covers the runtime case: the
+  // group is switched off when its launch probe failed, and
+  // `allNonPersonaTools()` then serves no `ado` entry for this lookup to find
+  // in the first place.
   if (nonPersonaTool && nonPersonaTool.capability === "ado" && !adoToolsEnabled()) {
     return rpcError(
       body.id,
@@ -1847,6 +1878,17 @@ async function handleToolsCall(
     )
   }
   if (nonPersonaTool && nonPersonaTool.capability === "kusto" && !kustoToolsEnabled()) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (
+    nonPersonaTool
+    && (nonPersonaTool.capability === "cloudagent" || nonPersonaTool.capability === "cloudagent_write")
+    && !cloudAgentToolsEnabled()
+  ) {
     return rpcError(
       body.id,
       RPC_METHOD_NOT_FOUND,

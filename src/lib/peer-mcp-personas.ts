@@ -48,6 +48,10 @@ import { FIRST_MATE_TOOLS } from "./first-mate/tools"
 // `NonPersonaMcpTool` from here with `import type`, which the compiler elides,
 // so nothing at runtime reaches back into this module during its init.
 import { KUSTO_TOOLS } from "./kusto-tools"
+// Cloud Agent, for the same reason and with the same shape: static tools over a
+// client in this repo, imported with `import type` on the other side so there
+// is no runtime cycle back into this module during its init.
+import { CLOUDAGENT_TOOLS } from "./cloudagent-tools"
 import { runUnifiedCodeSearch } from "./unified-code-search"
 // Static import is safe: the previous module-init cycle (peer-mcp-personas
 // → worker-agent/index → engine → tools → peer-mcp-personas) was caused
@@ -126,8 +130,9 @@ import { runWorkflowLive } from "~/lib/orchestration/run-workflow-live"
  *   - `decide`  — `stand_in` (three-lab away-mode decision advisor)
  *   - `fleet`   — remote ai-or-die session-control tools
  *   - `first-mate` — durable GitHub cloud-agent controller tools
+ *   - `cloudagent`  — Microsoft Cloud Agent Job API v2 (cloud coding-agent jobs)
  */
-export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide" | "fleet" | "first-mate" | "ado" | "kusto"
+export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide" | "fleet" | "first-mate" | "ado" | "kusto" | "cloudagent"
 /** Either a single group (scoped endpoint) or the full union (`/mcp`). */
 export type McpScope = McpGroup | "all"
 export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
@@ -141,6 +146,7 @@ export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
   "first-mate",
   "ado",
   "kusto",
+  "cloudagent",
 ])
 
 export interface McpGroupMeta {
@@ -170,6 +176,7 @@ export const GROUP_META: Record<McpGroup, McpGroupMeta> = Object.freeze({
   "first-mate": { preferredKey: "first-mate", urlSuffix: "first-mate", serverInfoName: "github-router-first-mate" },
   ado: { preferredKey: "ado", urlSuffix: "ado", serverInfoName: "github-router-ado" },
   kusto: { preferredKey: "kusto", urlSuffix: "kusto", serverInfoName: "github-router-kusto" },
+  cloudagent: { preferredKey: "cloudagent", urlSuffix: "cloudagent", serverInfoName: "github-router-cloudagent" },
 })
 
 /** True iff `s` is a registered group name (route `:group` param validation). */
@@ -1448,11 +1455,21 @@ export interface NonPersonaMcpTool {
    *   the ai-or-die tab-scoped env trio (`AIORDIE_BASE_URL`,
    *   `AIORDIE_TOKEN`, `AIORDIE_SESSION_ID`; see `artifactToolsEnabled()`
    *   in `lib/mcp-capabilities.ts`).
+   * - `"cloudagent"` (the seven Cloud Agent Job API read tools) requires
+   *   `state.cloudAgentEnabled` — `--cloudagent`, `GH_ROUTER_ENABLE_CLOUDAGENT=1`, OR
+   *   discovery of an Azure DevOps git remote (see `resolveCloudAgentFlags()` in
+   *   `lib/cloudagent-flags.ts`).
+   * - `"cloudagent_write"` (create_job / create_pr_job / cancel_job) is a
+   *   CATEGORY label for the tools that spend cloud compute, not a second gate:
+   *   it resolves through the same `cloudAgentToolsEnabled()` predicate, because
+   *   discovery enables the whole group the way it does for `ado` / `kusto` /
+   *   Bluebird. The operator's veto is `--no-cloudagent` /
+   *   `GH_ROUTER_DISABLE_CLOUDAGENT`.
    *
    * Absent on `web` / `code`; those are always available once the proxy is
    * in claude mode (loopback + nonce already gate `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "agents" | "artifact" | "kusto" | "ado"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "agents" | "artifact" | "kusto" | "ado" | "cloudagent" | "cloudagent_write"
   /**
    * Hook-channel only: CALLABLE, but never advertised in `tools/list`.
    *
@@ -3259,6 +3276,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     // `~/lib/ado-tools` for why, and `allNonPersonaTools()` in the MCP
     // handler for the single accessor that folds it in.
     ...KUSTO_TOOLS,
+    ...CLOUDAGENT_TOOLS,
   ])
 
 /**

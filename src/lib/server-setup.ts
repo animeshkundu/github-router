@@ -9,6 +9,11 @@ import {
   resolveAzureMcpFlags,
   type AzureMcpInputs,
 } from "./azure-mcp-flags"
+import {
+  cloudAgentDiscoveryNeeded,
+  resolveCloudAgentFlags,
+  type CloudAgentInputs,
+} from "./cloudagent-flags"
 import { provisionAdoTools } from "./ado-tools"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
@@ -275,6 +280,14 @@ export interface ServerSetupOptions {
   kustoEnabled?: boolean | undefined
   kustoCluster?: string | undefined
   kustoDatabase?: string | undefined
+  /**
+   * Tri-state, as `bluebirdEnabled`. `true` enables all ten Cloud Agent tools;
+   * `undefined` leaves the WHOLE group, write tools included, to Azure DevOps
+   * repository discovery. `--no-cloudagent` is the veto.
+   */
+  cloudAgentEnabled?: boolean | undefined
+  /** `prod` or `ppe`, already falling back to GH_ROUTER_CLOUDAGENT_ENV. */
+  cloudAgentEnvironment?: string | undefined
   silent: boolean
 }
 
@@ -420,10 +433,19 @@ export async function setupAndServe(
     kustoCluster: options.kustoCluster,
     kustoDatabase: options.kustoDatabase,
   }
-  const discovered = azureDiscoveryNeeded(azureInputs)
+  // Cloud Agent joins the same discovery probe. It is a SEPARATE services surface
+  // with its own flags (`./cloudagent-flags`), but the signal is the same `git
+  // remote -v`, and `discoverAzureRepo` memoizes, so the second consumer is
+  // free. Either consumer needing the answer pays for the one probe.
+  const cloudAgentInputs: CloudAgentInputs = {
+    cloudAgentFlag: options.cloudAgentEnabled,
+    cloudAgentEnvironment: options.cloudAgentEnvironment,
+  }
+  const discovered = azureDiscoveryNeeded(azureInputs) || cloudAgentDiscoveryNeeded(cloudAgentInputs)
     ? await discoverAzureRepo({})
     : null
   const azureFlags = resolveAzureMcpFlags(azureInputs, discovered)
+  const cloudAgentFlags = resolveCloudAgentFlags(cloudAgentInputs, discovered)
   state.bluebirdEnabled = azureFlags.bluebird
   state.adoEnabled = azureFlags.ado
   state.adoOrganization = azureFlags.adoOrganization
@@ -432,6 +454,8 @@ export async function setupAndServe(
   state.kustoEnabled = azureFlags.kusto
   state.kustoCluster = azureFlags.kustoCluster
   state.kustoDatabase = azureFlags.kustoDatabase
+  state.cloudAgentEnabled = cloudAgentFlags.enabled
+  state.cloudAgentEnvironment = cloudAgentFlags.environment
   // Said here rather than at the first tool call: a `--kusto` that was meant as
   // `--kusto-cluster` would otherwise stay silent until a model spent a turn
   // discovering the group needs a cluster per call. This now also fires for an
@@ -453,6 +477,20 @@ export async function setupAndServe(
     )
   }
   for (const warning of azureFlags.warnings) consola.warn(`Azure MCP: ${warning}`)
+  // One line naming the cause, so a group that appeared or stayed home is
+  // explainable. `cloudAgentDiscoveryNeeded` consults `azureMcpsSuppressed`
+  // too, but a computed `enabled` is what the caller needs explained, not the
+  // route it took to get there.
+  if (state.cloudAgentEnabled) {
+    const source = cloudAgentFlags.reasons[0]
+      ?? (options.cloudAgentEnabled === true
+        ? "--cloudagent"
+        : "GH_ROUTER_ENABLE_CLOUDAGENT")
+    // A discovered remote turns on a group that spends compute, so the line
+    // that says why it appeared also says how to keep it off.
+    const veto = cloudAgentFlags.discovered ? " (--no-cloudagent opts out)" : ""
+    consola.info(`Cloud Agent MCP (${state.cloudAgentEnvironment}): enabled by ${source}${veto}.`)
+  }
   if (state.adoEnabled && options.adoWriteEnabled === true) {
     consola.warn(
       "Azure DevOps MCP is running WITHOUT X-MCP-Readonly (--ado-write). "
@@ -793,6 +831,19 @@ export const sharedServerArgs = {
     description:
       "Default Kusto database for calls that do not name one, applied to whichever cluster the call resolves. Falls back to GH_ROUTER_KUSTO_DATABASE.",
   },
+  cloudagent: {
+    type: "boolean" as const,
+    default: undefined,
+    description:
+      "Expose the Cloud Agent Job API v2 MCP group (mcp__cloudagent__*), all ten tools including create_job, create_pr_job and cancel_job. The whole group is enabled automatically in a checkout whose git remote is an Azure DevOps repository, like the --ado, --kusto and --bluebird groups; the create tools spend an hour or more of compute (measured median 66 min, max 447), so their descriptions tell the model to confirm with the user first. GH_ROUTER_ENABLE_CLOUDAGENT=1 is the env equivalent; --no-cloudagent is the veto. Authentication is automatic via `az account get-access-token`; no token to supply.",
+    negativeDescription:
+      "Never expose the Cloud Agent MCP group, even when the env equivalent is set or the repository is an Azure DevOps checkout.",
+  },
+  "cloudagent-env": {
+    type: "string" as const,
+    description:
+      "Cloud Agent service environment: prod (default) or ppe. Naming one does NOT enable the group; it selects which service --cloudagent talks to, and which Entra audience the token is minted for. Falls back to GH_ROUTER_CLOUDAGENT_ENV.",
+  },
 } as const
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
@@ -847,6 +898,8 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   kustoEnabled?: boolean | undefined
   kustoCluster?: string | undefined
   kustoDatabase?: string | undefined
+  cloudAgentEnabled?: boolean | undefined
+  cloudAgentEnvironment?: string | undefined
 } {
   const portRaw = args.port as string | undefined
   let port: number | undefined
@@ -910,6 +963,8 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     kustoEnabled: args.kusto as boolean | undefined,
     kustoCluster: args["kusto-cluster"] as string | undefined,
     kustoDatabase: args["kusto-database"] as string | undefined,
+    cloudAgentEnabled: args.cloudagent as boolean | undefined,
+    cloudAgentEnvironment: args["cloudagent-env"] as string | undefined,
   }
 }
 

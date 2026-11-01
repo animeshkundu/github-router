@@ -33,6 +33,8 @@ const baseState: State = {
   kustoEnabled: false,
   kustoCluster: null,
   kustoDatabase: null,
+  cloudAgentEnabled: false,
+  cloudAgentEnvironment: "prod",
   humanlikeForce: "auto",
   sessionId: "test-session-id",
   machineId: "test-machine-id",

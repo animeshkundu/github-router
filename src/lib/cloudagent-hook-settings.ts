@@ -26,14 +26,14 @@ const RETRYABLE_RENAME_CODES = new Set(["EACCES", "EBUSY", "EPERM"])
 
 type JsonObject = Record<string, unknown>
 
-interface AgencyEndpoint {
+interface CloudAgentEndpoint {
   url: string
   port: number
   nonce: string
   key: string
 }
 
-export interface AgencyHookSanitizeResult {
+export interface CloudAgentHookSanitizeResult {
   written: boolean
   removed: number
   endpointCount: number
@@ -44,7 +44,7 @@ function isObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
 
-function parseAgencyEndpoint(raw: string): AgencyEndpoint | undefined {
+function parseCloudAgentEndpoint(raw: string): CloudAgentEndpoint | undefined {
   let parsed: URL
   try {
     parsed = new URL(raw)
@@ -80,7 +80,7 @@ function singleHookConfig(value: unknown): JsonObject | undefined {
   return hooks[0]
 }
 
-function httpEndpoint(value: unknown, expectedTimeout?: number): AgencyEndpoint | undefined {
+function httpEndpoint(value: unknown, expectedTimeout?: number): CloudAgentEndpoint | undefined {
   const config = singleHookConfig(value)
   if (
     !config
@@ -90,24 +90,24 @@ function httpEndpoint(value: unknown, expectedTimeout?: number): AgencyEndpoint 
   ) {
     return undefined
   }
-  return parseAgencyEndpoint(config.url)
+  return parseCloudAgentEndpoint(config.url)
 }
 
-function commandEndpoint(value: unknown): AgencyEndpoint | undefined {
+function commandEndpoint(value: unknown): CloudAgentEndpoint | undefined {
   const config = singleHookConfig(value)
   if (!config || config.type !== "command" || typeof config.command !== "string") {
     return undefined
   }
   const urls = config.command.match(URL_IN_COMMAND_RE) ?? []
   if (urls.length !== 1) return undefined
-  const endpoint = parseAgencyEndpoint(urls[0]!)
+  const endpoint = parseCloudAgentEndpoint(urls[0]!)
   if (!endpoint) return undefined
   const windows = `curl.exe -q -sS --noproxy "*" --connect-timeout 2 --max-time 5 -H "Content-Type: application/json" --data-binary @- "${endpoint.url}" 1>NUL 2>NUL`
   const posix = `curl -q -sS --noproxy '*' --connect-timeout 2 --max-time 5 -H 'Content-Type: application/json' --data-binary @- '${endpoint.url}' >/dev/null 2>&1 || true`
   return config.command === windows || config.command === posix ? endpoint : undefined
 }
 
-function agencyPorts(hooks: JsonObject): Set<number> {
+function cloudAgentPorts(hooks: JsonObject): Set<number> {
   const ports = new Set<number>()
 
   const starts = hooks.SessionStart
@@ -118,7 +118,7 @@ function agencyPorts(hooks: JsonObject): Set<number> {
     }
   }
 
-  const cohort = new Map<string, { endpoint: AgencyEndpoint; events: Set<string> }>()
+  const cohort = new Map<string, { endpoint: CloudAgentEndpoint; events: Set<string> }>()
   for (const [event, timeout] of HTTP_EVENT_TIMEOUTS) {
     const entries = hooks[event]
     if (!Array.isArray(entries)) continue
@@ -136,7 +136,7 @@ function agencyPorts(hooks: JsonObject): Set<number> {
   return ports
 }
 
-function removeAgencyEntries(hooks: JsonObject, ports: ReadonlySet<number>): {
+function removeCloudAgentEntries(hooks: JsonObject, ports: ReadonlySet<number>): {
   hooks: JsonObject
   removed: number
   endpoints: Set<string>
@@ -196,14 +196,14 @@ async function renameWithRetry(
 }
 
 /**
- * Remove Microsoft Agency Hub's rotating localhost hooks from one router-owned
- * settings mirror. Agency replaces its per-daemon UUID on restart; retaining
+ * Remove Microsoft Cloud Agent Hub's rotating localhost hooks from one router-owned
+ * settings mirror. Cloud Agent replaces its per-daemon UUID on restart; retaining
  * those URLs in a one-way launch snapshot makes every later hook call return
  * 404. The operator's canonical settings file is never touched.
  */
-export async function sanitizeAgencyHooksInSettingsFile(
+export async function sanitizeCloudAgentHooksInSettingsFile(
   settingsPath: string,
-): Promise<AgencyHookSanitizeResult> {
+): Promise<CloudAgentHookSanitizeResult> {
   let parsed: unknown
   for (let attempt = 0; ; attempt += 1) {
     let raw: string
@@ -260,18 +260,18 @@ export async function sanitizeAgencyHooksInSettingsFile(
     return { written: false, removed: 0, endpointCount: 0 }
   }
 
-  const ports = agencyPorts(parsed.hooks)
+  const ports = cloudAgentPorts(parsed.hooks)
   if (ports.size === 0) {
     return { written: false, removed: 0, endpointCount: 0 }
   }
-  const sanitized = removeAgencyEntries(parsed.hooks, ports)
+  const sanitized = removeCloudAgentEntries(parsed.hooks, ports)
   if (sanitized.removed === 0) {
     return { written: false, removed: 0, endpointCount: 0 }
   }
 
   const next = { ...parsed, hooks: sanitized.hooks }
   const content = `${JSON.stringify(next, null, 2)}\n`
-  const temp = `${settingsPath}.${process.pid}.${randomBytes(4).toString("hex")}.agency.tmp`
+  const temp = `${settingsPath}.${process.pid}.${randomBytes(4).toString("hex")}.cloudagent.tmp`
   await fs.mkdir(path.dirname(settingsPath), { recursive: true })
   try {
     await fs.writeFile(temp, content, { mode: 0o600, flag: "wx" })

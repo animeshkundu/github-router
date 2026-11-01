@@ -907,3 +907,19 @@ export function adoToolsEnabled(): boolean {
 export function kustoToolsEnabled(): boolean {
   return state.kustoEnabled
 }
+
+/**
+ * Gate for the Cloud Agent MCP group, all ten tools (`mcp__cloudagent__*`).
+ *
+ * Returns true iff `setupAndServe` resolved the group ON: `--cloudagent`,
+ * `GH_ROUTER_ENABLE_CLOUDAGENT=1`, or an Azure DevOps git remote in this session's
+ * workspace. Discovery enables the write tools too, matching the ADO, Kusto and
+ * Bluebird groups; the operator's `--no-cloudagent` is the veto. There is no
+ * separate availability probe for the same reason `adoToolsEnabled()` has none:
+ * the tools reach a remote service whose reachability cannot be established
+ * without a token, and minting one during `tools/list` would make listing tools
+ * cost an `az` process.
+ */
+export function cloudAgentToolsEnabled(): boolean {
+  return state.cloudAgentEnabled
+}
