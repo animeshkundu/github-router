@@ -542,9 +542,33 @@ the runtime identity is and what it is not:
   read pull requests but not create one ("requires user authentication").
 - None of the sampled traces called a Kusto tool. Six of 235 plugins advertise
   Kusto execution (`agency-kusto-canvas`, `cdss-insight-copilot`, `pirbot`,
-  `trusted-platform-support`, `odl-assistant`, `service360-breeze-common`), so a
-  job configured with one plausibly can, but that path and any ambient managed
-  identity are **unverified**: confirming either requires running a job.
+  `trusted-platform-support`, `odl-assistant`, `service360-breeze-common`). The
+  most explicit of them was then tested with a real job (below), so that path is
+  no longer an open question; the other five and any ambient managed identity
+  remain **unverified**.
+
+### A configured Kusto plugin does not make the job able to query Kusto
+
+One real job was created to settle the plugin path:
+`domoreexp-2a63aaa0-a944-4403-a4b0-2dd747ed13b1` on
+`domoreexp/Teamspace/teams-modular-packages`, `claude-haiku-5.5` at effort `low`,
+plugin `agency-kusto-canvas`, and a prompt that asked only for `print 1` against
+`msteamsusea2.eastus2.kusto.windows.net/TeamsGraniteFabric` (no repository work,
+no installs, no `az login`). It completed in about three minutes and failed to
+reach Kusto by every route:
+
+- The plugin was loaded, but the job's own tool search found no Kusto, KQL, Data
+  Explorer or ADX tool. `agency-kusto-canvas` is a Copilot-app co-editing canvas,
+  not a tool the coding agent receives.
+- `az account show` failed with "Please run 'az login' to setup account."
+- A raw `POST /v1/rest/query` bearer-authenticated with the sandbox's `ADO_TOKEN`
+  returned HTTP 401, the wrong audience for Kusto.
+- `python3 -c "import azure.kusto.data"` raised `ModuleNotFoundError`.
+
+The sandbox did expose `SYSTEM_CONNECTION_ACCESSTOKENSCOPE` and
+`SYSTEM_CANISSUEOIDCTOKENFORWORKLOADIDENTITYFEDERATION`, so a pipeline
+provisioned with a federated Kusto identity is the remaining plausible path. It
+was not exercised, and nothing in the default job shape produces it.
 
 Consequence for callers: a job does not run with the operator's rights. Anything
 the job must do with the user's identity has to come from its own repository,
