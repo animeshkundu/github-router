@@ -54,7 +54,6 @@ import {
   artifactToolsEnabled,
   adoToolsEnabled,
   cloudAgentToolsEnabled,
-  cloudAgentWriteToolsEnabled,
   browseAgentEnabled,
   kustoToolsEnabled,
   browserCompoundToolsEnabled,
@@ -570,16 +569,15 @@ function maxToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   // the capability: the names were listed and every call answered -32601. The
   // capability gate is the same predicate the standard projection applies.
   //
-  // Cloud Agent splits read from write, and the split is not a profile concern: a
-  // discovered Azure DevOps remote turns the seven read tools on and leaves
-  // `create_job`/`create_pr_job`/`cancel_job` off, because a job spends
-  // compute. Gating both halves through `cloudAgentToolsEnabled()` alone would
-  // put "launch a cloud agent" in front of a model on a launch no operator
-  // opted into.
+  // Cloud Agent is one switch, like `ado` and `kusto`: the discovered Azure
+  // DevOps remote enables the whole group, write tools included. `cloudagent_write`
+  // stays a distinct capability because it labels a dangerous tool, not because
+  // it gates on anything of its own.
   if (tool.group === "ado") return adoToolsEnabled()
   if (tool.group === "kusto") return kustoToolsEnabled()
-  if (tool.capability === "cloudagent") return cloudAgentToolsEnabled()
-  if (tool.capability === "cloudagent_write") return cloudAgentWriteToolsEnabled()
+  if (tool.capability === "cloudagent" || tool.capability === "cloudagent_write") {
+    return cloudAgentToolsEnabled()
+  }
   return true
 }
 
@@ -636,12 +634,14 @@ function fastToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   // still runs first, so an opt-in on a launch that never enabled the group
   // changes nothing.
   //
-  // These are NOT all read-only. `ado` and `kusto` are; Cloud Agent is not, so its
-  // two halves gate separately — a discovered git remote enables reads only.
+  // These are NOT all read-only. `ado` and `kusto` are; Cloud Agent is not, but
+  // it is one switch like them, so a discovered git remote enables the write
+  // tools too.
   if (tool.group === "ado") return adoToolsEnabled()
   if (tool.group === "kusto") return kustoToolsEnabled()
-  if (tool.capability === "cloudagent") return cloudAgentToolsEnabled()
-  if (tool.capability === "cloudagent_write") return cloudAgentWriteToolsEnabled()
+  if (tool.capability === "cloudagent" || tool.capability === "cloudagent_write") {
+    return cloudAgentToolsEnabled()
+  }
   if (tool.group !== "browser") return false
   if (!browserToolsEnabled()) return false
   if (tool.capability === "browser_compound") return browserCompoundToolsEnabled()
@@ -823,8 +823,9 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       if (t.capability === "artifact") return artifactToolsEnabled()
       if (t.capability === "ado") return adoToolsEnabled()
       if (t.capability === "kusto") return kustoToolsEnabled()
-      if (t.capability === "cloudagent") return cloudAgentToolsEnabled()
-      if (t.capability === "cloudagent_write") return cloudAgentWriteToolsEnabled()
+      if (t.capability === "cloudagent" || t.capability === "cloudagent_write") {
+        return cloudAgentToolsEnabled()
+      }
       // Compound tools require BOTH the browser surface opt-in AND a
       // compressor backend in the catalog. Without browseEnabled the
       // compound tools must be invisible alongside the L0/L1 primitives.
@@ -1883,17 +1884,11 @@ async function handleToolsCall(
       `tools/call: unknown tool "${name}"`,
     )
   }
-  if (nonPersonaTool && nonPersonaTool.capability === "cloudagent" && !cloudAgentToolsEnabled()) {
-    return rpcError(
-      body.id,
-      RPC_METHOD_NOT_FOUND,
-      `tools/call: unknown tool "${name}"`,
-    )
-  }
-  // Separate from the read half on purpose: a launch enabled by a discovered
-  // Azure DevOps remote serves `list_jobs` and must answer -32601 to
-  // `create_job`, exactly as though the tool did not exist.
-  if (nonPersonaTool && nonPersonaTool.capability === "cloudagent_write" && !cloudAgentWriteToolsEnabled()) {
+  if (
+    nonPersonaTool
+    && (nonPersonaTool.capability === "cloudagent" || nonPersonaTool.capability === "cloudagent_write")
+    && !cloudAgentToolsEnabled()
+  ) {
     return rpcError(
       body.id,
       RPC_METHOD_NOT_FOUND,

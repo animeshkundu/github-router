@@ -253,7 +253,6 @@ mock.module("~/lib/mcp-capabilities", () => ({
   adoToolsEnabled: adoToolsEnabledMock,
   kustoToolsEnabled: kustoToolsEnabledMock,
   cloudAgentToolsEnabled: cloudAgentToolsEnabledMock,
-  cloudAgentWriteToolsEnabled: mock(() => false),
   standInToolEnabled: standInToolEnabledMock,
   browserToolsEnabled: browserToolsEnabledMock,
   browserCompoundToolsEnabled: browserCompoundToolsEnabledMock,

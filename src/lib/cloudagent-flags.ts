@@ -1,34 +1,36 @@
 /**
  * Whether this launch enables the `cloudagent` MCP group, and why.
  *
- * The group has two halves with different trust requirements, so it has two
- * switches:
+ * One switch. `--cloudagent` or `GH_ROUTER_ENABLE_CLOUDAGENT=1` turns the group
+ * on, and so does the workspace's git remote being an Azure DevOps repository
+ * when neither was given. That last path exists for the same reason the ADO,
+ * Kusto and Bluebird groups have one: an ADO checkout is already proof the
+ * operator works in the ecosystem, and a group nobody remembers to enable is a
+ * group nobody uses.
  *
- *   - READING (get/list/wait/logs/plugins/agents) is enabled by `--cloudagent`,
- *     `GH_ROUTER_ENABLE_CLOUDAGENT=1`, or — when neither was given — by the
- *     workspace's git remote being an Azure DevOps repository. That last path
- *     exists for the same reason the ADO and Kusto groups have one: an ADO
- *     checkout is already proof the operator works in the ecosystem, and a
- *     group nobody remembers to enable is a group nobody uses.
- *   - WRITING (`create_job`, `create_pr_job`, `cancel_job`) requires the
- *     explicit flag, never discovery. This is the load-bearing asymmetry: a job
- *     spends real compute
- *     against a cloud service, and a cloned repository's `origin` is
- *     attacker-controllable, so a remote must never be able to put a
- *     "launch a cloud agent" tool in front of a model. The same rule the Azure
- *     groups state for `--ado-write`, applied one level up.
+ * Discovery enables the WHOLE group, write tools included. That steps outside
+ * the Azure surfaces' read-only discovery rule. It was originally read-only, on
+ * the ground that a cloned repository's `origin` is attacker-controllable and
+ * `create_job` spends real compute. Two things carry that risk now: the
+ * operator's
+ * `--no-cloudagent` / `GH_ROUTER_DISABLE_CLOUDAGENT`, which is the veto, and the
+ * create tools' own descriptions, which tell the model to confirm with the user
+ * before creating a job the user did not ask for. A half-enabled group was the
+ * worse failure mode: a model that can see `list_jobs` and cannot see
+ * `create_job` reads the gap as a bug and spends turns looking for the tool
+ * that is missing.
  *
  * Kept in its own file rather than folded into `azure-mcp-flags.ts`: that file
  * owns three Azure surfaces with one shared discovery verdict and one banner,
- * and Cloud Agent is a separate service whose only overlap is the remote it reads.
- * The discovery probe itself is shared and memoized, so splitting the rule
- * costs no extra `git remote -v`.
+ * and Cloud Agent is a separate service whose only overlap is the remote it
+ * reads. The discovery probe itself is shared and memoized, so splitting the
+ * rule costs no extra `git remote -v`.
  *
- * Precedence, per half: explicit negative → explicit positive → discovery →
+ * Precedence: explicit negative, then explicit positive, then discovery, then
  * off. The flag is TRI-STATE (`undefined` = absent, `true` = asked for,
- * `false` = explicitly refused) because an absent flag and `--no-cloudagent` are
- * different intentions, and "off unless discovered" can only be safe while an
- * operator can always say no.
+ * `false` = explicitly refused) because an absent flag and `--no-cloudagent`
+ * are different intentions, and "off unless discovered" can only be safe while
+ * an operator can always say no.
  */
 
 import { azureMcpsSuppressed } from "./azure-mcp-flags"
@@ -51,21 +53,17 @@ export interface CloudAgentInputs {
 }
 
 export interface CloudAgentFlags {
-  /** The seven read tools. */
+  /** All ten tools, read and write. */
   enabled: boolean
-  /** `create_job` / `create_pr_job` / `cancel_job`, never true from discovery. */
-  writeEnabled: boolean
   environment: CloudAgentEnvironment
   /** True when `enabled` came from the git remote rather than from the operator. */
   discovered: boolean
   /** One line per surface that DISCOVERY turned on, for the launch banner. */
   reasons: Array<string>
-  /** Something the operator asked for that cannot work, with the reason. */
-  warnings: Array<string>
 }
 
 /**
- * Tri-state intent for the read half.
+ * Tri-state intent for the whole group.
  *
  * An explicit CLI negative beats an env positive: the CLI is the more specific
  * and more recent statement of intent. `GH_ROUTER_DISABLE_CLOUDAGENT` is folded in
@@ -85,7 +83,7 @@ function readIntent(inputs: CloudAgentInputs, env: NodeJS.ProcessEnv): boolean |
 /**
  * Whether the git-remote read can change any outcome, consulted before
  * `discoverAzureRepo` so a launch that already knows its answer does not pay
- * for the probe. Only the read half is ever decided by discovery.
+ * for the probe.
  */
 export function cloudAgentDiscoveryNeeded(inputs: CloudAgentInputs = {}): boolean {
   const env = inputs.env ?? process.env
@@ -113,7 +111,6 @@ export function resolveCloudAgentFlags(
   )
   const intent = readIntent(inputs, env)
   const reasons: Array<string> = []
-  const warnings: Array<string> = []
 
   let enabled = false
   let fromDiscovery = false
@@ -123,26 +120,14 @@ export function resolveCloudAgentFlags(
     enabled = true
     fromDiscovery = true
     reasons.push(
-      `cloudagent (read-only): Azure DevOps remote ${discovered.organization}/${discovered.project}/${discovered.repository}`,
-    )
-  }
-
-  // The write half is the operator's alone. Discovery is reported as a
-  // warning rather than silently dropped, because a model that can see
-  // `list_jobs` and cannot see `create_job` will otherwise look for the tool
-  // that is missing and call it a bug.
-  if (enabled && fromDiscovery) {
-    warnings.push(
-      "cloudagent: read tools enabled by the git remote; the write tools stay off until `--cloudagent` is passed (they spend compute).",
+      `Azure DevOps remote ${discovered.organization}/${discovered.project}/${discovered.repository}`,
     )
   }
 
   return {
     enabled,
-    writeEnabled: intent === true,
     environment,
     discovered: fromDiscovery,
     reasons,
-    warnings,
   }
 }

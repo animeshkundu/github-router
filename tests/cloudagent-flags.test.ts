@@ -26,30 +26,24 @@ function resolve(inputs: CloudAgentInputs, discovered: AzureRepoInfo | null = nu
   return resolveCloudAgentFlags({ env: EMPTY_ENV, ...inputs }, discovered)
 }
 
-describe("the read half and the write half are decided separately", () => {
-  test("an explicit --cloudagent turns on both halves", () => {
+describe("one switch decides the whole group", () => {
+  test("an explicit --cloudagent turns the group on", () => {
     const flags = resolve({ cloudAgentFlag: true })
     expect(flags.enabled).toBe(true)
-    expect(flags.writeEnabled).toBe(true)
     expect(flags.discovered).toBe(false)
-    expect(flags.warnings).toEqual([])
+    expect(flags.reasons).toEqual([])
   })
 
-  test("discovery turns on the read tools and NEVER the write tools", () => {
-    // This is the load-bearing asymmetry: a repository cloned from a remote the
-    // operator did not choose must not be able to hand a model a tool that
-    // spends cloud compute.
+  test("discovery turns the group on, write tools included", () => {
+    // Parity with the ADO, Kusto and Bluebird groups: an ADO checkout is proof
+    // the operator works in the ecosystem, and a half-enabled group is the worse
+    // failure mode. The operator's `--no-cloudagent` is the veto.
     const flags = resolve({}, REPO)
     expect(flags.enabled).toBe(true)
-    expect(flags.writeEnabled).toBe(false)
     expect(flags.discovered).toBe(true)
     expect(flags.reasons).toEqual([
-      "cloudagent (read-only): Azure DevOps remote contoso/platform/web",
+      "Azure DevOps remote contoso/platform/web",
     ])
-    // Reported rather than silent: a model that can see `list_jobs` and cannot
-    // see `create_job` will otherwise read the gap as a bug.
-    expect(flags.warnings).toHaveLength(1)
-    expect(flags.warnings[0]).toContain("--cloudagent")
   })
 
   test("a discovered repository with no flag is what makes discovery worth running", () => {
@@ -58,10 +52,9 @@ describe("the read half and the write half are decided separately", () => {
     expect(cloudAgentDiscoveryNeeded({ cloudAgentFlag: false, env: EMPTY_ENV })).toBe(false)
   })
 
-  test("the env positive enables both halves exactly like the flag", () => {
+  test("the env positive enables the group exactly like the flag", () => {
     const flags = resolve({ env: { GH_ROUTER_ENABLE_CLOUDAGENT: "1" } })
     expect(flags.enabled).toBe(true)
-    expect(flags.writeEnabled).toBe(true)
   })
 })
 
@@ -69,7 +62,6 @@ describe("precedence: explicit negative, then explicit positive, then discovery"
   test("the CLI negative beats the env positive", () => {
     const flags = resolve({ cloudAgentFlag: false, env: { GH_ROUTER_ENABLE_CLOUDAGENT: "1" } }, REPO)
     expect(flags.enabled).toBe(false)
-    expect(flags.writeEnabled).toBe(false)
   })
 
   test("the disable env beats an explicit enable, so a shell profile cannot win", () => {
@@ -78,7 +70,14 @@ describe("precedence: explicit negative, then explicit positive, then discovery"
       env: { GH_ROUTER_ENABLE_CLOUDAGENT: "1", GH_ROUTER_DISABLE_CLOUDAGENT: "1" },
     })
     expect(flags.enabled).toBe(false)
-    expect(flags.writeEnabled).toBe(false)
+  })
+
+  test("--no-cloudagent vetoes a discovered repository too", () => {
+    // The veto is the whole mitigation for discovery enabling the write tools.
+    expect(resolve({ cloudAgentFlag: false }, REPO).enabled).toBe(false)
+    expect(
+      resolve({ env: { GH_ROUTER_DISABLE_CLOUDAGENT: "1" } }, REPO).enabled,
+    ).toBe(false)
   })
 
   test("an env negative is an intent, so discovery does not override it", () => {
@@ -100,9 +99,7 @@ describe("precedence: explicit negative, then explicit positive, then discovery"
   test("no flag, no env, no discovery is simply off", () => {
     const flags = resolve({}, null)
     expect(flags.enabled).toBe(false)
-    expect(flags.writeEnabled).toBe(false)
     expect(flags.reasons).toEqual([])
-    expect(flags.warnings).toEqual([])
   })
 })
 

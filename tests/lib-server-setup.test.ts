@@ -89,6 +89,14 @@ describe("parseSharedArgs", () => {
       else process.env.GH_TOKEN = origToken
     }
   })
+
+  test("cloudagent stays tri-state so discovery can still decide", () => {
+    // An absent flag must not read as "no": `undefined` is what lets an Azure
+    // DevOps remote enable the whole group.
+    expect(parseSharedArgs({}).cloudAgentEnabled).toBeUndefined()
+    expect(parseSharedArgs({ cloudagent: true }).cloudAgentEnabled).toBe(true)
+    expect(parseSharedArgs({ cloudagent: false }).cloudAgentEnabled).toBe(false)
+  })
 })
 
 describe("getClaudeCodeEnvVars", () => {

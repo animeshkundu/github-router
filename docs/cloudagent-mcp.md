@@ -31,38 +31,50 @@ tracked locally; there is no state to lose.
 | Surface | Effect |
 |---|---|
 | `--cloudagent` / `GH_ROUTER_ENABLE_CLOUDAGENT=1` | All ten tools, including `create_job`, `create_pr_job` and `cancel_job` |
-| Azure DevOps git remote discovered | The **seven read tools only** |
+| Azure DevOps git remote discovered | All ten tools, by the same route the `ado`, `kusto` and Bluebird groups take |
 | `--no-cloudagent` / `GH_ROUTER_DISABLE_CLOUDAGENT=1` | Never |
 | `GH_ROUTER_AZURE_MCPS=off` | The shared wholesale kill switch; suppresses the discovery enable too |
 | `--cloudagent-env prod\|ppe` / `GH_ROUTER_CLOUDAGENT_ENV` | Selects the service; does **not** enable the group |
 
-Precedence per half: explicit negative → explicit positive → discovery → off.
+Precedence: explicit negative → explicit positive → discovery → off.
 The flag is tri-state (`undefined` = absent, `true` = asked for, `false` =
 refused) because "off unless discovered" is only safe while an operator can
 always say no.
 
-### The read/write split is the load-bearing part
+### One switch, write tools included
 
-`create_job`, `create_pr_job` and `cancel_job` carry the `cloudagent_write`
-capability and require the explicit flag. Discovery never enables them.
+`create_job`, `create_pr_job` and `cancel_job` keep the distinct
+`cloudagent_write` capability, but it is a label for the tools that spend cloud
+compute, not a second gate: it resolves through the same
+`cloudAgentToolsEnabled()` predicate the seven read tools use.
 
-`src/lib/azure-mcp-flags.ts` states the invariant for the Azure groups: a
-git remote that turned a group on can never produce a write surface. A clone's
-`origin` is attacker-controllable, and the read tools are the whole reason the
-auto-enable exists; a job, by contrast, spends hours of real compute. So the
-discovered half is the seven read tools, and the launcher banner says so
-explicitly (`Cloud Agent MCP (prod): read-only, enabled by the git remote.`) — a
-model that can see `list_jobs` and not `create_job` will otherwise look for the
-missing tool and call it a bug.
+That is a deliberate reversal of an earlier read-only design. The original
+argument was the Azure invariant in `src/lib/azure-mcp-flags.ts`: a git remote
+that turned a group on can never produce a write surface, because a clone's
+`origin` is attacker-controllable. Two things carry the risk now:
+
+- The operator's veto, `--no-cloudagent` / `GH_ROUTER_DISABLE_CLOUDAGENT=1`,
+  which beats discovery.
+- The create tools' own descriptions, which tell the model to confirm with the
+  user before creating a job the user did not ask for.
+
+Against that, a half-enabled group was the worse failure mode: a model that can
+see `list_jobs` and not `create_job` reads the gap as a bug and spends turns
+looking for the tool that is missing. Enabling a group wholesale from the
+discovered remote is what the `ado`, `kusto` and Bluebird groups do too; the
+difference is that Cloud Agent's create tools need no second opt-in, which is
+why the veto and the confirmation guidance carry that weight instead. An Azure
+DevOps checkout is the same evidence the operator works in the ecosystem in all
+four cases.
 
 The discovery probe is shared and memoized with the Azure groups
-(`discoverAzureRepo()` runs once), so the split costs no extra `git remote -v`.
+(`discoverAzureRepo()` runs once), so the group costs no extra `git remote -v`.
 
 ### Profiles
 
 `"cloudagent"` is in every group allow-list in `src/lib/launch-profile.ts`. A
 profile that hid a group the operator explicitly asked for would be worse than
-one that honours it, and discovery can only ever surface the read tools anyway.
+one that honours it.
 
 `github-router serve` adds one more gate: with a tunnel exposed, the group is
 off unless `--cloudagent-over-tunnel` is passed, because the tools act with the
@@ -511,6 +523,32 @@ The operator never supplies an Cloud Agent credential. Nothing beyond an existin
   spill file. `GH_ROUTER_CLOUDAGENT_TOKEN` (a test/operator override of the token,
   never the destination) is in `STRIPPED_AUTH_ROUTING_ENV_KEYS`, so the spawned
   CLI and everything under it cannot see it.
+
+### The job does not inherit that token (measured, 2026-10-31)
+
+A read-only probe of 11 job traces, with no job created for it, established what
+the runtime identity is and what it is not:
+
+- The request body has no identity or credential field at all
+  (`GenericJobRequest`: prompt, repository context, optional agent, plugins,
+  model configuration, metadata). The proxy's Entra token authorizes the Job API
+  call and never enters the job.
+- Job records attribute the job to the initiating user
+  (`initiatingUser`/`requester` of type `UserRequester`) for `WebApi` jobs, or to
+  an app (`AppRequester`) for `EventTrigger` jobs. Attribution is not execution.
+- The sampled sandbox ran as a 1ES/Agency pipeline identity
+  (`BUILD_REQUESTEDFOR=Agency`, `USER=cloudtest`); `az account show` failed with
+  "Please run 'az login'". Its `SYSTEM_ACCESSTOKEN` is ADO-audience: it could
+  read pull requests but not create one ("requires user authentication").
+- None of the sampled traces called a Kusto tool. Six of 235 plugins advertise
+  Kusto execution (`agency-kusto-canvas`, `cdss-insight-copilot`, `pirbot`,
+  `trusted-platform-support`, `odl-assistant`, `service360-breeze-common`), so a
+  job configured with one plausibly can, but that path and any ambient managed
+  identity are **unverified**: confirming either requires running a job.
+
+Consequence for callers: a job does not run with the operator's rights. Anything
+the job must do with the user's identity has to come from its own repository,
+pipeline or plugin configuration, not from the proxy's `az login`.
 
 ## Clients that receive the group
 

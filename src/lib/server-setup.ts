@@ -282,8 +282,8 @@ export interface ServerSetupOptions {
   kustoDatabase?: string | undefined
   /**
    * Tri-state, as `bluebirdEnabled`. `true` enables all ten Cloud Agent tools;
-   * `undefined` leaves the read half to Azure DevOps repository discovery and
-   * the write half OFF. There is no path by which discovery enables a write.
+   * `undefined` leaves the WHOLE group, write tools included, to Azure DevOps
+   * repository discovery. `--no-cloudagent` is the veto.
    */
   cloudAgentEnabled?: boolean | undefined
   /** `prod` or `ppe`, already falling back to GH_ROUTER_CLOUDAGENT_ENV. */
@@ -455,7 +455,6 @@ export async function setupAndServe(
   state.kustoCluster = azureFlags.kustoCluster
   state.kustoDatabase = azureFlags.kustoDatabase
   state.cloudAgentEnabled = cloudAgentFlags.enabled
-  state.cloudAgentWriteEnabled = cloudAgentFlags.writeEnabled
   state.cloudAgentEnvironment = cloudAgentFlags.environment
   // Said here rather than at the first tool call: a `--kusto` that was meant as
   // `--kusto-cluster` would otherwise stay silent until a model spent a turn
@@ -478,21 +477,20 @@ export async function setupAndServe(
     )
   }
   for (const warning of azureFlags.warnings) consola.warn(`Azure MCP: ${warning}`)
-  // One line per enabled Cloud Agent half, because the two halves are gated
-  // differently and "the group is on but create_job is missing" is otherwise
-  // indistinguishable from a bug. `cloudAgentDiscoveryNeeded` consults
-  // `azureMcpsSuppressed` too, but a computed `enabled` is what the caller
-  // needs explained, not the route it took to get there.
+  // One line naming the cause, so a group that appeared or stayed home is
+  // explainable. `cloudAgentDiscoveryNeeded` consults `azureMcpsSuppressed`
+  // too, but a computed `enabled` is what the caller needs explained, not the
+  // route it took to get there.
   if (state.cloudAgentEnabled) {
-    const half = state.cloudAgentWriteEnabled ? "read + write" : "read-only"
-    const source = cloudAgentFlags.discovered
-      ? "Azure DevOps remote"
-      : options.cloudAgentEnabled === true
+    const source = cloudAgentFlags.reasons[0]
+      ?? (options.cloudAgentEnabled === true
         ? "--cloudagent"
-        : "GH_ROUTER_ENABLE_CLOUDAGENT"
-    consola.info(`Cloud Agent MCP (${state.cloudAgentEnvironment}): ${half}, enabled by ${source}.`)
+        : "GH_ROUTER_ENABLE_CLOUDAGENT")
+    // A discovered remote turns on a group that spends compute, so the line
+    // that says why it appeared also says how to keep it off.
+    const veto = cloudAgentFlags.discovered ? " (--no-cloudagent opts out)" : ""
+    consola.info(`Cloud Agent MCP (${state.cloudAgentEnvironment}): enabled by ${source}${veto}.`)
   }
-  for (const warning of cloudAgentFlags.warnings) consola.warn(`Cloud Agent MCP: ${warning}`)
   if (state.adoEnabled && options.adoWriteEnabled === true) {
     consola.warn(
       "Azure DevOps MCP is running WITHOUT X-MCP-Readonly (--ado-write). "
@@ -837,7 +835,7 @@ export const sharedServerArgs = {
     type: "boolean" as const,
     default: undefined,
     description:
-      "Expose the Cloud Agent Job API v2 MCP group (mcp__cloudagent__*), including create_job, create_pr_job and cancel_job. The seven read tools are enabled automatically in a checkout whose git remote is an Azure DevOps repository; the WRITE tools are not, because a job runs a cloud agent for hours (measured median 221 min) and spends compute, and a cloned repository's git remote is not an operator. GH_ROUTER_ENABLE_CLOUDAGENT=1 is the env equivalent. Authentication is automatic via `az account get-access-token`; no token to supply.",
+      "Expose the Cloud Agent Job API v2 MCP group (mcp__cloudagent__*), all ten tools including create_job, create_pr_job and cancel_job. The whole group is enabled automatically in a checkout whose git remote is an Azure DevOps repository, like the --ado, --kusto and --bluebird groups; the create tools spend hours of compute (measured median 221 min), so their descriptions tell the model to confirm with the user first. GH_ROUTER_ENABLE_CLOUDAGENT=1 is the env equivalent; --no-cloudagent is the veto. Authentication is automatic via `az account get-access-token`; no token to supply.",
     negativeDescription:
       "Never expose the Cloud Agent MCP group, even when the env equivalent is set or the repository is an Azure DevOps checkout.",
   },

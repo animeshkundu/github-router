@@ -4559,7 +4559,6 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
 
   function disableCloudAgent(): void {
     state.cloudAgentEnabled = false
-    state.cloudAgentWriteEnabled = false
   }
 
   afterEach(() => {
@@ -4571,54 +4570,18 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
     expect((json.result as { tools: Array<unknown> }).tools).toEqual([])
   })
 
-  test("discovery enables the SEVEN read tools and never a tool that spends compute", async () => {
-    // The load-bearing asymmetry of this group: a checkout cloned from a remote
-    // the operator did not choose turns the ledger on, and create_job stays out
-    // of reach until `--cloudagent` is passed explicitly.
+  test("enabling the group lists all ten tools, write tools included", async () => {
+    // One switch, matching the ADO, Kusto and Bluebird groups: discovery of an
+    // Azure DevOps remote turns the whole group on. A half-enabled group would
+    // read to the model as a bug, and the operator's veto is `--no-cloudagent`.
     state.cloudAgentEnabled = true
-    state.cloudAgentWriteEnabled = false
     const { json } = await scopedRpc("cloudagent", { jsonrpc: "2.0", id: 951, method: "tools/list" })
-    const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name).sort()
-    expect(names).toEqual(READ_TOOLS)
-  })
-
-  test("the explicit flag adds the three write tools", async () => {
-    state.cloudAgentEnabled = true
-    state.cloudAgentWriteEnabled = true
-    const { json } = await scopedRpc("cloudagent", { jsonrpc: "2.0", id: 952, method: "tools/list" })
     const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name).sort()
     expect(names).toEqual(["cancel_job", "create_job", "create_pr_job", ...READ_TOOLS])
   })
 
-  test("a hard-coded create_job call under discovery alone is -32601", async () => {
-    // Defense in depth: the client can skip tools/list entirely, and this is
-    // the one tool whose dispatch would spend compute.
-    state.cloudAgentEnabled = true
-    state.cloudAgentWriteEnabled = false
-    const { json } = await scopedRpc("cloudagent", {
-      jsonrpc: "2.0",
-      id: 953,
-      method: "tools/call",
-      params: { name: "create_job", arguments: { prompt: "do something expensive" } },
-    })
-    expect((json.error as { code: number }).code).toBe(-32601)
-  })
-
-  test("a hard-coded create_pr_job call under discovery alone is -32601", async () => {
-    // The composite tool spends compute the same way, so it sits behind the
-    // same gate rather than inheriting create_job's name-based exemption.
-    state.cloudAgentEnabled = true
-    state.cloudAgentWriteEnabled = false
-    const { json } = await scopedRpc("cloudagent", {
-      jsonrpc: "2.0",
-      id: 955,
-      method: "tools/call",
-      params: { name: "create_pr_job", arguments: { prompt: "do something expensive" } },
-    })
-    expect((json.error as { code: number }).code).toBe(-32601)
-  })
-
   test("a hard-coded create_job call on a launch that never enabled the group is -32601", async () => {
+    // Defense in depth: the client can skip tools/list entirely.
     disableCloudAgent()
     const { json } = await rpc({
       jsonrpc: "2.0",
@@ -4629,11 +4592,23 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
     expect((json.error as { code: number }).code).toBe(-32601)
   })
 
+  test("a hard-coded create_pr_job call on a launch that never enabled the group is -32601", async () => {
+    // The composite tool is gated by the same predicate rather than inheriting
+    // create_job's name-based exemption.
+    disableCloudAgent()
+    const { json } = await scopedRpc("cloudagent", {
+      jsonrpc: "2.0",
+      id: 953,
+      method: "tools/call",
+      params: { name: "create_pr_job", arguments: { prompt: "do something expensive" } },
+    })
+    expect((json.error as { code: number }).code).toBe(-32601)
+  })
+
   test("a bad input to an enabled read tool is a tool error, not -32601", async () => {
     // The gate answers "does this group exist here"; past it, a missing
     // argument is the tool's own verdict and must reach the model as one.
     state.cloudAgentEnabled = true
-    state.cloudAgentWriteEnabled = false
     const { json } = await rpc({
       jsonrpc: "2.0",
       id: 955,
@@ -4648,7 +4623,6 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
 
   test("the cloudagent group does not leak onto another group's scope, nor the reverse", async () => {
     state.cloudAgentEnabled = true
-    state.cloudAgentWriteEnabled = true
     const search = await scopedRpc("search", { jsonrpc: "2.0", id: 956, method: "tools/list" })
     const searchNames = (search.json.result as { tools: Array<{ name: string }> }).tools
       .map((t) => t.name)
@@ -4671,20 +4645,18 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
 
   test("the unscoped union carries the group when it is enabled", async () => {
     state.cloudAgentEnabled = true
-    state.cloudAgentWriteEnabled = true
     const { json } = await rpc({ jsonrpc: "2.0", id: 958, method: "tools/list" })
     const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
     expect(names).toContain("list_jobs")
     expect(names).toContain("create_job")
   })
 
-  test("a pinned profile admits cloudagent through list and call, write half included", async () => {
+  test("a pinned profile admits cloudagent through list and call, write tools included", async () => {
     // Every `*_PROFILE.allowedGroups` carries `cloudagent` and the launcher
     // registers the server, so the fast predicate must project BOTH capability
-    // halves. A group admitted by the registry but unhandled by the predicate
+    // values. A group admitted by the registry but unhandled by the predicate
     // would list nothing and answer -32601 to every call.
     state.cloudAgentEnabled = true
-    state.cloudAgentWriteEnabled = true
     const nonce = "c".repeat(64)
     const launch = registerLaunch({
       profileId: "fast",
@@ -4716,9 +4688,12 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
     }
   })
 
-  test("the pinned-profile admission still follows the write gate", async () => {
-    state.cloudAgentEnabled = true
-    state.cloudAgentWriteEnabled = false
+  test("the pinned-profile admission still follows the capability gate", async () => {
+    // `allowedGroups` alone must not surface the group: the same launch with
+    // the capability off lists nothing from it. Without this, an allow-list and
+    // an opt-in would be indistinguishable and a profile could show tools the
+    // launch never enabled.
+    disableCloudAgent()
     const nonce = "b".repeat(64)
     const launch = registerLaunch({
       profileId: "fast",
@@ -4733,7 +4708,7 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
       )
       const names = (listed.json.result as { tools: Array<{ name: string }> }).tools
         .map((t) => t.name)
-      expect(names).toContain("list_jobs")
+      expect(names).not.toContain("list_jobs")
       expect(names).not.toContain("create_job")
       expect(names).not.toContain("cancel_job")
     } finally {

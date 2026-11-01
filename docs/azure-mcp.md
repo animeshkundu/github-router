@@ -45,7 +45,7 @@ positives.
 
 Launching inside a checkout whose git remotes resolve to an Azure DevOps
 repository turns **Bluebird, `ado` and `kusto`** on without a flag, and turns on
-the `cloudagent` group's read tools (never its writes).
+the whole `cloudagent` group, write tools included.
 
 Kusto joined that rule when the cluster became a per-call argument. What kept it
 out before was that a git remote carries no cluster identity, so a
@@ -88,10 +88,12 @@ failure resolves to "not an Azure DevOps workspace" rather than failing the
 launch. Tests inject a synthetic probe; see "Testing" below.
 
 The same probe also feeds the `cloudagent` group, which applies this rule one level
-up: a discovered remote enables its seven **read** tools, never the write tools
-(`create_job`, `create_pr_job`, `cancel_job`). Cloud Agent is a separate service with its own flags
-(`src/lib/cloudagent-flags.ts`) and its own doc — see
-[`docs/cloudagent-mcp.md`](cloudagent-mcp.md).
+up: a discovered remote enables all ten tools, `create_job`, `create_pr_job` and
+`cancel_job` included. The operator's `--no-cloudagent` /
+`GH_ROUTER_DISABLE_CLOUDAGENT` is the veto, and the create tools' own descriptions
+tell the model to confirm with the user before spending hours of compute. Cloud
+Agent is a separate service with its own flags (`src/lib/cloudagent-flags.ts`) and
+its own doc: see [`docs/cloudagent-mcp.md`](cloudagent-mcp.md).
 
 ## Azure DevOps (`ado`)
 

@@ -1459,10 +1459,12 @@ export interface NonPersonaMcpTool {
    *   `state.cloudAgentEnabled` — `--cloudagent`, `GH_ROUTER_ENABLE_CLOUDAGENT=1`, OR
    *   discovery of an Azure DevOps git remote (see `resolveCloudAgentFlags()` in
    *   `lib/cloudagent-flags.ts`).
-   * - `"cloudagent_write"` (create_job / create_pr_job / cancel_job)
-   *   additionally requires
-   *   `state.cloudAgentWriteEnabled`, which is set by the EXPLICIT flag only:
-   *   discovery never enables a tool that spends cloud compute.
+   * - `"cloudagent_write"` (create_job / create_pr_job / cancel_job) is a
+   *   CATEGORY label for the tools that spend cloud compute, not a second gate:
+   *   it resolves through the same `cloudAgentToolsEnabled()` predicate, because
+   *   discovery enables the whole group the way it does for `ado` / `kusto` /
+   *   Bluebird. The operator's veto is `--no-cloudagent` /
+   *   `GH_ROUTER_DISABLE_CLOUDAGENT`.
    *
    * Absent on `web` / `code`; those are always available once the proxy is
    * in claude mode (loopback + nonce already gate `/mcp` itself).

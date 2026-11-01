@@ -31,11 +31,12 @@
  *   the live catalog so a caller can see what else exists and which effort
  *   values each model actually accepts (the ladder is not uniform).
  *
- * Read/write split: the seven read tools are enabled by `--cloudagent`,
- * `GH_ROUTER_ENABLE_CLOUDAGENT=1`, or discovery of an Azure DevOps git remote;
- * `create_job` / `create_pr_job` / `cancel_job` carry the `cloudagent_write`
- * capability and require the explicit flag (see `./cloudagent-flags`). A cloned
- * repository's `origin` must never be able to hand a model a "spend compute" tool.
+ * One switch for the group: the seven read tools and the three that spend
+ * compute (`create_job` / `create_pr_job` / `cancel_job`) are enabled together by
+ * `--cloudagent`, `GH_ROUTER_ENABLE_CLOUDAGENT=1`, or discovery of an Azure DevOps
+ * git remote (see `./cloudagent-flags`). The write tools still carry the distinct
+ * `cloudagent_write` capability so the surface stays labelled by danger, and their
+ * descriptions tell the model to confirm with the user before spending compute.
  *
  * Every result text goes through `relaySafeText` last, so an oversized raw
  * trace spills to a durable file instead of being clipped at the relay.

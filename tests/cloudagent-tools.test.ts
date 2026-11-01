@@ -317,7 +317,7 @@ describe("the tool surface", () => {
     for (const tool of CLOUDAGENT_TOOLS) expect(tool.group).toBe("cloudagent")
   })
 
-  test("splits read from write, so discovery can never spend compute", () => {
+  test("labels the compute-spending tools, even though the group is one switch", () => {
     const capabilities = Object.fromEntries(
       CLOUDAGENT_TOOLS.map((tool) => [tool.toolNameHttp, tool.capability]),
     )

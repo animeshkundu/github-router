@@ -253,15 +253,10 @@ export interface State {
    *
    * Enabled by `--cloudagent`, by `GH_ROUTER_ENABLE_CLOUDAGENT=1`, or automatically
    * when the workspace's git remotes resolve to an Azure DevOps repository.
-   * The automatic path turns on READS only; see `cloudAgentWriteEnabled`.
+   * Discovery enables the whole group, write tools included, matching the ADO,
+   * Kusto and Bluebird groups; `--no-cloudagent` remains the operator's veto.
    */
   cloudAgentEnabled: boolean
-  /**
-   * `create_job` / `create_pr_job` / `cancel_job`. Set by the explicit flag and nothing else:
-   * a job spends real cloud compute for hours, and a cloned repository's
-   * `origin` (which is what discovery reads) is attacker-controllable.
-   */
-  cloudAgentWriteEnabled: boolean
   /** `prod` or `ppe`, normalized by `resolveCloudAgentFlags()` at launch. */
   cloudAgentEnvironment: string
 
@@ -352,7 +347,6 @@ export const state: State = {
   kustoCluster: null,
   kustoDatabase: null,
   cloudAgentEnabled: false,
-  cloudAgentWriteEnabled: false,
   cloudAgentEnvironment: "prod",
   humanlikeForce: "auto",
   sessionId: randomUUID(),
