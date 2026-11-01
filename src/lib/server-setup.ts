@@ -835,7 +835,7 @@ export const sharedServerArgs = {
     type: "boolean" as const,
     default: undefined,
     description:
-      "Expose the Cloud Agent Job API v2 MCP group (mcp__cloudagent__*), all ten tools including create_job, create_pr_job and cancel_job. The whole group is enabled automatically in a checkout whose git remote is an Azure DevOps repository, like the --ado, --kusto and --bluebird groups; the create tools spend hours of compute (measured median 221 min), so their descriptions tell the model to confirm with the user first. GH_ROUTER_ENABLE_CLOUDAGENT=1 is the env equivalent; --no-cloudagent is the veto. Authentication is automatic via `az account get-access-token`; no token to supply.",
+      "Expose the Cloud Agent Job API v2 MCP group (mcp__cloudagent__*), all ten tools including create_job, create_pr_job and cancel_job. The whole group is enabled automatically in a checkout whose git remote is an Azure DevOps repository, like the --ado, --kusto and --bluebird groups; the create tools spend an hour or more of compute (measured median 66 min, max 447), so their descriptions tell the model to confirm with the user first. GH_ROUTER_ENABLE_CLOUDAGENT=1 is the env equivalent; --no-cloudagent is the veto. Authentication is automatic via `az account get-access-token`; no token to supply.",
     negativeDescription:
       "Never expose the Cloud Agent MCP group, even when the env equivalent is set or the repository is an Azure DevOps checkout.",
   },

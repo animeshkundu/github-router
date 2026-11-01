@@ -581,7 +581,8 @@ function renderEffectiveRequest(request: GenericJobRequest): string {
  * The plan caps this at 50 s. Two reasons, and the second is the real one:
  * a raw-JSON MCP client is capped at ~60 s per call (Claude Code regression
  * #50289), and no wait that fits in one call can observe a terminal state anyway
- * — the fastest observed job took 13 minutes. So the contract is deliberately
+ * — across 161 jobs none finished in under 60 seconds and the shortest took 3
+ * minutes. So the contract is deliberately
  * "did the handoff take, or is this stuck in the queue?", which is the one
  * question a short wait can actually answer.
  */
@@ -852,10 +853,10 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
     capability: "cloudagent_write",
     description:
       "Runs an autonomous coding agent in the Microsoft cloud against an Azure DevOps repository, and returns immediately with a job id. "
-      + "A job is ONE-SHOT: it runs unattended for hours (median 221 minutes), cannot be messaged, and cannot be resumed — iteration means creating another job. "
+      + "A job is ONE-SHOT: it runs unattended for a median of about an hour and can run for many hours, cannot be messaged, and cannot be resumed — iteration means creating another job. "
       + "It works in its own cloud clone, not in your working tree; its final answer is retrieved with get_job. "
       + "Only `prompt` is needed in the normal case, or `agent` for a custom agent that carries its own instructions: the repository is read from the workspace's git remote, the model and reasoning effort come from `tier` (default normal), and every other argument has a working default, so supply one only to change that default — each description states its default and what overrides it. "
-      + "Confirm with the user before creating a job they did not explicitly ask for: it spends real compute for hours. "
+      + "Confirm with the user before creating a job they did not explicitly ask for: it spends real compute for an hour or more. "
       + "After it returns, do not wait in one call — poll with get_job, or use wait_for_job once to confirm the job left the queue.",
     inputSchema: {
       type: "object",
@@ -1003,9 +1004,9 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
       "Runs an autonomous coding agent in the Microsoft cloud that takes one request from understanding to a review-ready pull request, and returns immediately with a job id. "
       + "It is create_job with three decisions already made: the `agency-coding` plugin is loaded (branch, commit, push, pull request, pipeline and work item tools), the model defaults to claude-opus-5.5 at max reasoning effort (the `complex` tier), and a fixed engineering workflow is prepended to `prompt`: research, a reviewed plan, implementation with tests, an independent adversarial review of the change, the pull request, a green build, and a work item that links it. "
       + "You supply the task in `prompt`; the workflow and its conventions are added automatically, so do not restate them. "
-      + "A job is ONE-SHOT: it runs unattended for hours (median 221 minutes), cannot be messaged, and cannot be resumed. "
+      + "A job is ONE-SHOT: it runs unattended for a median of about an hour and can run for many hours, cannot be messaged, and cannot be resumed. "
       + "The job leaves its pull request open for a human to review and never merges. "
-      + "Confirm with the user before creating a job they did not explicitly ask for: it spends real compute for hours. "
+      + "Confirm with the user before creating a job they did not explicitly ask for: it spends real compute for an hour or more. "
       + "After it returns, poll with get_job, or use wait_for_job once to confirm the job left the queue.",
     inputSchema: {
       type: "object",
@@ -1284,7 +1285,7 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
     description:
       "Waits a short, bounded time for a Cloud Agent job to leave the queue, i.e. for the service to allocate compute and start it. "
       + "Returns as soon as the job starts running, reaches a terminal state, or the wait expires — \"still Queued after 25 s\" is a normal answer, not an error. "
-      + "Use it once after create_job to confirm the handoff took. Do not use it to wait for the work: jobs run for hours (median 221 min), so use get_job for that.",
+      + "Use it once after create_job to confirm the handoff took. Do not use it to wait for the work: jobs run for a median of about an hour, so use get_job for that.",
     inputSchema: {
       type: "object",
       required: ["jobId"],

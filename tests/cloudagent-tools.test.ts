@@ -403,7 +403,7 @@ describe("the tool surface", () => {
     // The two properties the surface cannot function without: a model that
     // thinks a job can be messaged, or that it finishes quickly, misuses it.
     expect(tool.description).toContain("ONE-SHOT")
-    expect(tool.description).toContain("median 221 minutes")
+    expect(tool.description).toContain("can run for many hours")
     expect(tool.description).toContain("Confirm with the user")
   })
 
@@ -412,7 +412,7 @@ describe("the tool surface", () => {
     // The same two properties create_job's surface cannot function without,
     // plus the two decisions this tool makes on the caller's behalf.
     expect(tool.description).toContain("ONE-SHOT")
-    expect(tool.description).toContain("median 221 minutes")
+    expect(tool.description).toContain("can run for many hours")
     expect(tool.description).toContain("Confirm with the user")
     expect(tool.description).toContain("agency-coding")
     expect(tool.description).toContain("claude-opus-5.5 at max reasoning effort")

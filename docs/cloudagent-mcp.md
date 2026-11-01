@@ -88,15 +88,32 @@ the commit that probed them:
 
 - **One-shot.** No continuation, no follow-up message, no resume. Iteration is a
   sequence of jobs.
-- **Hours, not minutes.** Over the last 25 jobs: median 221 min, min 13 min, max
-  416 min. The minimum is why `wait_for_job` cannot be a wait for completion.
+- **Tens of minutes to hours, never seconds.** The 2026-10-29 probe sampled the
+  organization's 25 most recent jobs: median 221 min, max 416 min. Both
+  reproduce exactly from the ledger on 2026-11-01, so the sample is identifiable;
+  the 13-minute minimum stated here originally does not, because that window's
+  minimum is 32 min. That window is rolling, so the figures move: over the 161
+  jobs in the organization's ledger on 2026-11-01 the distribution was min 3 min,
+  p25 30 min, median 66 min, p75 148 min, p90 336 min, max 447 min, and **no job
+  finished in under 60 seconds**. The minimum is why `wait_for_job` cannot be a
+  wait for completion, and it is a claim about the floor rather than about the
+  median.
 - **The deliverable is a tool call.** A successful job's final `task_complete`
   call carries `arguments.summary`, the agent's full markdown answer. It is
   reachable only through `GET /jobs/{id}/logs`, which is 233 KB to 7.5 MB of
   `chatHistory`. A failed job has no `task_complete`.
-- **`toolDiffs` is empty on every sampled job**, successful or failed. "What
-  changed" is derived from the trace (`edit`/`create`/`write` call arguments),
-  never from that field.
+- **`toolDiffs` never carries diff content.** Re-sampled on 2026-11-01 against
+  five logs, four returned `[]` and one returned a 65-element array whose every
+  entry was `{"id": …, "fileDiffs": []}`. So "always `[]`" is imprecise and the
+  decision is unaffected: the field can be populated per tool call while every
+  `fileDiffs` is empty, and "what changed" is derived from the trace
+  (`edit`/`create`/`write` call arguments) rather than from that field.
+- **Two agent runtimes share the service.** `agentPlatform` was `Agency` on 33 of
+  62 live jobs and `SweAgent` on the other 29, so it is a real discriminator
+  rather than the constant the first samples suggested. No tool selects it; the
+  client parses it and does not render it, because knowing which runtime ran a
+  finished job explains a difference after the fact and changes nothing a caller
+  can do next.
 
 ### The write path, measured (2026-10-30)
 
@@ -364,10 +381,11 @@ agent that needs `agentInputs`.
 ### Why `create_job` returns instead of waiting
 
 The tool description carries the contract: a job is **ONE-SHOT**, runs
-unattended for hours (median 221 minutes), cannot be messaged or resumed, and
-the model should confirm with the user before creating a job the user did not
-ask for. After it returns, the caller polls with `get_job` or makes one
-`wait_for_job` call.
+unattended for a median of about an hour (66 min over the whole ledger, 221 min
+over the 2026-10-29 window) and can run for many hours, cannot be messaged or
+resumed, and the model should confirm with the user before creating a job the
+user did not ask for. After it returns, the caller polls with `get_job` or makes
+one `wait_for_job` call.
 
 ### The repository, and provenance
 
@@ -442,10 +460,12 @@ state; otherwise it reports "still `Queued` after N s".
 
 50 s is not an arbitrary convenience. A raw-JSON MCP client is capped near 60 s
 per call ([#50289](https://github.com/anthropics/claude-code/issues/50289)), and
-no wait that fits in one call can observe a terminal state anyway — the fastest
-observed job took 13 minutes. So the contract is deliberately the one question a
-short wait can answer: **did the handoff take, or is this stuck in the queue?**
-Long-horizon checking is `get_job`.
+no wait that fits in one call can observe a terminal state anyway. The 2026-11-01
+sweep of the organization's 161 jobs found a 3-minute minimum and **no job that
+finished in under 60 seconds**, so a 50 s wait cannot see a terminal state even in
+the best case. So the contract is deliberately the one question a short wait can
+answer: **did the handoff take, or is this stuck in the queue?** Long-horizon
+checking is `get_job`.
 
 ### `get_job`: the summary leads
 
@@ -492,6 +512,17 @@ larger than the cap.
 normal result: it renders `outcome.code`, `outcome.description`,
 `jobOutcomeType` (who is responsible) and the tail of the trace, so the model
 diagnoses instead of retrying the same call.
+
+`outcome.code` alone is not a success verdict and must not be read as one. It is
+the **pipeline run's** outcome, so a job the agent finished and reported on
+still reads `Succeeded` when the work itself failed. Over 62 live jobs the four
+observed values were `Pending` 46, `Succeeded` 13, `UserCancelled` 2 and
+`PipelineTaskSkipped` 1, and `Pending` does not mean the job is still alive: it
+covered 46 of the 62 rows, including jobs that had long since stopped. The
+renderer therefore prints
+`jobOutcomeType` and `result` on their own labelled lines, and the Kusto probe
+job is the worked example: `outcome: Succeeded` and `result: Failure` in the
+same block, because the agent completed and the task did not.
 
 ## Token: acquired and managed by the proxy
 

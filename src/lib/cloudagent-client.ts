@@ -362,7 +362,13 @@ export interface CloudAgentJob {
   metadata?: CloudAgentJobMetadata
   /** Plugins the job asked for, by name. */
   plugins?: Array<string>
-  /** Constant `"Agency"` today; kept because it is the platform discriminator. */
+  /**
+   * Which agent runtime ran the job. Measured across 62 live jobs on
+   * 2026-11-01: `Agency` 33, `SweAgent` 29, so it is a real discriminator and
+   * not a constant as the first samples suggested. Parsed, deliberately not
+   * rendered: it explains a behavioural difference after the fact but nothing
+   * a caller can do with it, so it does not earn a line in every result.
+   */
   agentPlatform?: string
   /** Where the job was started from: `Hub`, `WebApi`, `EventTrigger`, … */
   source?: string
@@ -1193,10 +1199,10 @@ export function isQueuedJob(job: CloudAgentJob): boolean {
 /**
  * The cadence line on a live poll.
  *
- * Without it a model re-polls on every turn against a job whose minimum
- * observed runtime is 13 minutes (median 221), which burns context and tokens
- * to learn nothing. The elapsed figure is what tells the caller whether a
- * multi-hour job is young or overdue.
+ * Without it a model re-polls on every turn against a job whose shortest
+ * observed runtime is 3 minutes and whose median is about an hour, which burns
+ * context and tokens to learn nothing. The elapsed figure is what tells the
+ * caller whether a multi-hour job is young or overdue.
  */
 export function renderPollHint(job: CloudAgentJob, now: number = Date.now()): string {
   const elapsed = elapsedMinutes(job.createdAt, now)
