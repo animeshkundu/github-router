@@ -18,6 +18,7 @@ import {
   getPiLaunchEnvVars,
   withBodyLimit,
 } from "../src/lib/server-setup"
+import { piSessionsDir } from "../src/lib/pi-paths"
 
 describe("parseSharedArgs", () => {
   test("valid port parsed correctly", () => {
@@ -1751,6 +1752,37 @@ describe("getPiLaunchEnvVars npm quiet", () => {
     } finally {
       if (prior === undefined) delete process.env.GH_ROUTER_PI_VERBOSE_NPM
       else process.env.GH_ROUTER_PI_VERBOSE_NPM = prior
+    }
+  })
+})
+
+describe("getPiLaunchEnvVars session durability", () => {
+  test("the session root is stable across launches and outside the mirror", () => {
+    // The mirror is per-launch and removed on shutdown. Pi's default session
+    // root lives inside it, which is why a quit used to erase the history and
+    // leave `--continue` with nothing to resume.
+    const first = getPiLaunchEnvVars("/tmp/mirror-a")
+    const second = getPiLaunchEnvVars("/tmp/mirror-b")
+    expect(first.PI_CODING_AGENT_SESSION_DIR).toBeDefined()
+    expect(second.PI_CODING_AGENT_SESSION_DIR).toBe(first.PI_CODING_AGENT_SESSION_DIR)
+    expect(first.PI_CODING_AGENT_SESSION_DIR).toBe(piSessionsDir())
+    expect(first.PI_CODING_AGENT_DIR).not.toBe(second.PI_CODING_AGENT_DIR)
+    // Same parent as the mirrors, but a sibling: never swept with them.
+    expect(first.PI_CODING_AGENT_SESSION_DIR.startsWith("/tmp/mirror")).toBe(false)
+  })
+
+  test("a user-set session dir does not leak through the strip", () => {
+    // PI_CODING_AGENT_SESSION_DIR is in STRIPPED_PARENT_ENV_KEYS for the same
+    // isolation reason PI_CODING_AGENT_DIR is, so the child env value is ours
+    // regardless of what the operator exported. `--session-dir` is the
+    // per-launch override, and Pi gives it the highest precedence.
+    const prior = process.env.PI_CODING_AGENT_SESSION_DIR
+    process.env.PI_CODING_AGENT_SESSION_DIR = "/tmp/their-sessions"
+    try {
+      expect(getPiLaunchEnvVars("/tmp/mirror").PI_CODING_AGENT_SESSION_DIR).toBe(piSessionsDir())
+    } finally {
+      if (prior === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR
+      else process.env.PI_CODING_AGENT_SESSION_DIR = prior
     }
   })
 })

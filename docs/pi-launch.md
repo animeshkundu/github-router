@@ -50,10 +50,14 @@ intentionally shadows the packaged prompt of the same name.
 ```bash
 github-router pi -m cheapest --search --browse
 github-router pi -m balanced -- --print "review this diff"
+github-router pi -m balanced2 --continue
 ```
 
 Everything after `--` is forwarded verbatim to `pi`; other Pi flags
-(`--print`, `--mode`, `--session`, …) flow through automatically.
+(`--print`, `--mode`, `--continue`, `--resume`, `--session`, …) flow
+through automatically. Sessions live in a router-owned root that outlives
+the launch, so `--continue` picks up the last session in the current
+working directory and `--resume` lets you pick from the list.
 
 ## Flag policy (mirrors the Claude launcher's house rules)
 
@@ -186,6 +190,21 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   per-launch dir (`PI_CODING_AGENT_DIR` → mirror); `auth.json` and
   `sessions/` are never copied. The mirror is swept on shutdown (plus a
   boot sweep of dead-PID mirrors).
+- **Sessions outlive the launch.** Pi's default session root is
+  `<agent dir>/sessions`, which sits inside the mirror that shutdown
+  deletes, so quitting used to erase the transcript history and leave
+  `--continue` / `--resume` with nothing to resume. The child now gets
+  `PI_CODING_AGENT_SESSION_DIR` → `~/.local/share/github-router/pi-sessions`,
+  one stable root shared by every launch. Pi groups sessions under it by
+  working directory, so per-workspace history stays separate and
+  `--continue` still picks the right one. The root is a sibling of the
+  `pi-mirrors` directory, never inside it: the boot sweep reaps mirrors by
+  PID because they are scratch, and this directory is history, so nothing
+  ages it out. Pi documents no retention policy; the session picker's
+  delete (and `/session`) is the pruning surface. `--session-dir` remains
+  the per-launch override (Pi gives it precedence over the env var), and
+  the user's own `PI_CODING_AGENT_SESSION_DIR` export is stripped from the
+  parent env for the same isolation reason `PI_CODING_AGENT_DIR` is.
 - **Persistent npm-package cache.** A fresh mirror would force Pi to
   reinstall every `packages[]` entry from the registry on each boot
   (seconds + `added N packages` noise that bypasses npm's loglevel, since
@@ -329,7 +348,8 @@ runner degrades to Pi's native footer, never a broken launch.
   `tests/pi-tier-windows.test.ts`.
 - `src/lib/pi-extension.ts` — extension source + skills + prompts + bridge lazy-attach (`tool_result`) + `/memory` + `/context`.
 - `src/lib/pi-memory-bridge.ts` — pure bridge builders (frontmatter scope, glob match, `@` imports, caps, redaction, mirror synthesis). Unit-tested in `tests/pi-memory-bridge.test.ts`.
-- `src/lib/pi-paths.ts` — mirror lifecycle.
+- `src/lib/pi-paths.ts` — mirror lifecycle plus the durable session
+  root (`piSessionsDir()`).
 - `src/lib/pi-version-check.ts` — install/update gate.
 
 ## Claude-Code look (bundled by default)
