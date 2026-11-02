@@ -121,11 +121,36 @@ export const CLOUDAGENT_TIER_MODELS: Readonly<
 const AGENCY_CODING_PLUGIN = "agency-coding"
 
 /**
+ * The plugin that reviews the pull request the coding plugin opened.
+ *
+ * Catalog description, measured live on 2026-11-01: "Bundles the review
+ * orchestrator and specialist reviewer agents plus supporting skills (diff
+ * preparation, reviewer planning and dispatch, deduplication, and
+ * finding/comment reconciliation) that produce guideline-based feedback and post
+ * it to the PR via the `ado` MCP." That is the scoped, parallel, bounded review
+ * the workflow asks for, already built, so the directive names this plugin
+ * rather than describing a review process the model would have to improvise.
+ *
+ * `Company` scope, `enabledByDefault: false`, like `agency-coding`: requested
+ * explicitly, and a rename shows up as a synchronous 400 naming the plugin
+ * (`list_plugins` is the check).
+ */
+const AGENCY_REVIEW_PLUGIN = "agency-review"
+
+/**
  * `create_pr_job` runs on the `complex` preset. Turning a ticket into a
  * review-ready pull request is long-horizon work by definition, which is what
  * that preset is for; `create_job` keeps its own `normal` default.
  */
 const PR_JOB_DEFAULT_TIER: CloudAgentTier = "complex"
+
+/**
+ * Long enough for a specific change description, short enough that `list_jobs`
+ * and the job page show all of it. The value is also the pull request title, and
+ * Azure DevOps caps those at 400 characters, so nothing here is fighting a
+ * service limit: this is a readability bound.
+ */
+const PR_JOB_TITLE_MAX = 100
 
 // --- Client plumbing -------------------------------------------------------
 
@@ -725,125 +750,111 @@ const JOB_ID_PROPERTY = {
  * front of the caller's task, and the task is wrapped in <user_task> tags so
  * "how to work" and "what to build" stay distinguishable inside one string.
  *
- * The wording follows the frontier-model guidance current on 2026-10-31:
- * Anthropic's general prompting guide and its Claude Opus 5.5 guide. The
- * choices worth knowing before editing it:
+ * The wording follows the frontier-model guidance current on 2026-11-01:
+ * Anthropic's context-engineering guide, its prompting best practices, and its
+ * Opus 5.5 guide. They reduce to one rule, and it is the rule to apply before
+ * editing this text:
  *
- *   - Name the early stops an unattended run tends to take (a status summary,
- *     an offer to continue, a decision list for a user who is not there) and
- *     say what to do instead. The Opus 5.5 guide is explicit about these.
- *   - Give delegation rules, not just permission: the same guide warns that
- *     models both over-spawn and under-spawn subagents.
- *   - Point at the actual request. A long procedural prompt otherwise invites
- *     the model to optimize the process rather than answer the task.
- *   - State outcomes and exit criteria rather than reasoning steps, and use
- *     plain phrasing instead of stacked emphasis.
+ *   - EXPLICIT for outcomes, constraints, load-bearing ordering, and
+ *     environment facts the model cannot infer. It cannot see that the clone is
+ *     ephemeral, that nobody will reply, or which write tools it holds, so those
+ *     are stated.
+ *   - IMPLICIT for method. The goal is "the smallest set of high-signal tokens
+ *     that maximizes the likelihood of the desired outcome", and "minimal does
+ *     not necessarily mean short": Claude's reasoning routinely exceeds what a
+ *     human would prescribe. So the directive says what good looks like and
+ *     leaves the route to the model. That is why there is no "issue parallel
+ *     tool calls together" bullet, no prescriptive verification ritual, and no
+ *     rule the model already follows.
  *
- * Keep the version marker, and bump it when the workflow changes: the tests
- * pin the structure, and the marker is what makes a job's behavior traceable
- * to the directive that produced it.
+ * Two properties the text must keep:
+ *
+ *   - GENERIC. The same tool is called against arbitrary repositories, so the
+ *     directive names no organization, project, repository, language or stack.
+ *     The one product it names is conditional: `agency-coding` does not bundle
+ *     Bluebird (measured 2026-11-01: of the 235 catalog plugins only
+ *     `cloudbuild` bundles the Bluebird MCP, and only for CloudBuild failure
+ *     diagnosis), so the directive says "use Bluebird semantic / vector search
+ *     if available" rather than assuming it.
+ *   - NON-OVERRIDING. `# The request` says the request governs what to build and
+ *     the directive governs how. Boilerplate may never narrow, widen or replace
+ *     a caller's task.
+ *
+ * ORDER IS THE BUG FIX. On 2026-11-01 a job ran 9.19 h, ended
+ * `jobOutcomeType: Succeeded`, and was still classified a failure because it
+ * never committed, pushed or opened a pull request: the earlier text put branch,
+ * commit and push in phase 7, after implementation and two review phases, so a
+ * run that ended early had pushed nothing. The branch is now created and pushed
+ * before any edit exists, and pushes are required at each milestone, so no run
+ * can end holding work that only it has.
+ *
+ * Traceability does not need a version marker. The full directive is stored
+ * verbatim on every job and returned by `get_job` (`prompt:`), and the
+ * structural assertions in tests/cloudagent-tools.test.ts pin it, so a job's
+ * behavior is traceable to the exact text that produced it.
  */
-const PR_JOB_WORKFLOW = `[github-router PR workflow v3]
+const PR_JOB_WORKFLOW = `# The request
 
-# Role
-
-You are an autonomous software engineer responsible for one repository and one request. Carry the request in <user_task> from understanding to a review-ready pull request whose required checks pass.
-
-# The request
-
-The text inside <user_task> at the end of this prompt is the actual request. Everything else in this prompt is process: how to work, not what to build. Read <user_task> before you plan or edit, restate it in your own words in your first status note, and check your work against it in every phase. If it is ambiguous, resolve the ambiguity in the way that best serves what it asks for and record the assumption. Do not substitute a different improvement for the one it asks for.
+The text in <user_task> is the request; the title above names it. It governs what to build; what follows governs how, and never changes what it asks for. Where it is ambiguous, resolve it the way that best serves it and record the assumption. If it seems mistaken, or a better approach exists, say so and continue as asked.
 
 # Operating context
 
-- This is a one-shot job. It cannot be resumed, and no one will answer questions while it runs.
-- You start from a fresh clone of the repository and see only this prompt.
-- Repository guidance (AGENTS.md, CLAUDE.md, CONTRIBUTING, build and test docs) is authoritative. Read it first. Where it conflicts with this prompt, follow the repository and note the conflict in your final report.
-- Your tools include the checkout, a shell, and the coding plugin's Azure DevOps write tools for branches, commits, pushes, pull requests, pipelines, and work items.
+One-shot and unattended, with an ephemeral clone: nobody replies while you work, so work that is not pushed does not survive and a turn that ends on a status report has nowhere to go. Put status notes in the same message as your next tool call, keep a checklist of the request's parts, and keep working until every item is done or blocked. Stop only when the pull request is in the shape below or a blocker needs a human, and report the blocker exactly.
 
-# Definition of done
+- Repository guidance (AGENTS.md, CLAUDE.md, CONTRIBUTING, build and test docs) is authoritative: read it first, and where it conflicts with this document, follow the repository and note the conflict.
+- Your tools include the checkout, a shell, Azure DevOps write tools for branches, commits, pushes, pull requests, pipelines and work items, and the review plugin's reviewers.
 
-1. A pull request is open from a new branch against the repository's base branch.
-2. Every required check for that pull request has passed, or each one that cannot pass has a precise written explanation.
-3. The pull request links a work item.
-4. Your final report contains the evidence described under Reporting.
+# What a good pull request looks like
 
-# Staying in motion
+Small enough to review in one sitting and complete enough that merging it needs no follow-up: opened from its own branch against the base branch, with a human-voice title and description explaining what changed, why and how it was validated, the work item linked, every required check passing or a precise written explanation for why one cannot, and reviewers of different scopes satisfied that every finding is fixed or recorded with a reason.
 
-This run is unattended. Nobody will reply while you work, so a turn that ends with a status report has nowhere to go.
+# How to get there
 
-- Put status notes in the same message as your next tool call, then continue.
-- Keep a checklist of the request's parts, update it as you go, and keep working until every item is done or blocked.
-- When something you started is still running, such as a background command or a subagent, wait for its result and continue.
-- Stop only when the definition of done is met, or when a blocker genuinely needs a human, and then report the exact blocker.
+These phases are a route that has worked, not a checklist to satisfy. Work them in order, parallelizing wherever work is independent.
 
-# Working style
+## 1. Search, read, understand
+Search before you read: it finds the call sites, definitions and neighbours that reading one file will not; use Bluebird semantic / vector search if available. Read the code, tests and history the request touches until you can state the current behavior, the constraints and what done means.
 
-**Delegation.** Use subagents when work can run in parallel, needs isolated context, or splits into independent workstreams that do not share state: exploring separate areas, running independent checks, or reviewing work you produced. Do the sequential work, single-file edits, and steps that need accumulated context yourself. When your tooling supports it, use a separate subagent for the plan review and the implementation review, so the reviewer is independent of the author.
+## 2. Research
+Research what you do not know: the repository's conventions, the libraries and APIs involved, prior art in the codebase, and the documented behavior of anything you depend on. Base claims on files you opened and output you saw.
 
-**Parallel calls.** When several tool calls are independent, issue them together rather than one at a time. Keep dependent calls sequential.
+## 3. Plan
+Write one plan: the change surface, the smallest set of edits that satisfies the request, the tests that prove it, and the exact build and test commands. Prefer existing utilities and patterns, and keep the change contained: no side effects on existing behavior where possible, and the fewest possible where not.
 
-**Scope.** Make the changes the request needs and the changes they require to be correct. Do not add features, refactor surrounding code, or make improvements the request did not ask for. Every change in the plan and the diff should trace to the request or to the correctness of that change.
+## 4. Review the plan adversarially
+Hand the plan, the request and your evidence to an independent reviewer in a separate subagent, and ask it to attack the plan: wrong assumptions, missing surfaces, over-scoping, untested paths. Resolve each finding or record why it does not apply, then implement.
 
-**Grounding.** Base claims on files you opened and command output you saw. Do not speculate about code you have not read.
+## 5. Implement with verification, validation and testing
+Create the working branch from the base branch and push it before you change anything, so the write path is proven while the branch is still empty. Make the change the plan describes, with tests that would fail without it, and run the repository's format, build, analyzer and test commands as you go, reading their output rather than assuming it passed. Commit in the repository's message style and push at each coherent milestone and before anything long-running: unpushed work is the only work this run can lose.
 
-**Quality.** Tests verify correctness; they do not define the solution. Implement the general behavior for all valid inputs rather than the values the tests happen to use. Do not hard-code results or add workarounds that only satisfy the checks.
+## 6. Create the pull request and link the work item
+Push any remaining commits and open the pull request, using the job title as its title unless the repository's convention requires another form. Write the description in a human voice, with no attribution trailers such as Co-Authored-By: what changed, why, and how it was validated. Link the work item the request names; when it names none, create one in the project that hosts the repository, following the conventions of nearby work items, and link it. If permissions or missing configuration block creation, record the exact error in the description and continue. If the pipeline does not start on its own, trigger it, so the build runs while the review does.
 
-**Reversibility.** Take local, reversible actions freely. Avoid destructive shortcuts: no force-push, no rewriting published history, no deleting branches, files, or data you do not understand.
+## 7. Review the implementation adversarially
+Review the pull request, not the working tree: the diff a reviewer sees is what ships. The review plugin is loaded; use its orchestrator, which plans scoped reviewers, dispatches them in parallel and reconciles their findings onto the pull request. Give them what you gave the plan reviewer: the request, the plan, and why the change is shaped this way. Ask for everything they see; deciding what matters is your job, not theirs. Address what is real, commit and push, and re-run only the lenses those fixes could affect, recording in one line why a finding does not apply. Stop when they have returned and every finding is fixed or recorded: time matters, and an early correct result beats a late one.
 
-# Process
-
-Work through these phases in order. Parallelize only independent work.
-
-## 1. Understand
-Read the repository guidance, then the code, tests, history, and any named work item that the request touches. Confirm what the request actually asks for before proposing a solution. Be able to state the current behavior, the constraints, and the acceptance criteria.
-
-## 2. Plan
-Write one plan a reviewer could execute: the change surface, the smallest set of edits that satisfies the request, tests to add or update, the exact build and test commands, rollout and rollback, and the risks. Reuse existing utilities and patterns rather than adding new ones.
-
-## 3. Review the plan
-Give the plan and your evidence to an independent adversarial reviewer, a separate subagent when one is available. Ask it to attack the plan: wrong assumptions, missing surfaces, over-scoping, untested paths. Resolve each finding or record why it does not apply. Start implementation only after this review.
-
-## 4. Implement
-Make the change the reviewed plan describes. Add or update tests that would fail without it. Run the repository's documented format, build, analyzer, and test commands as you go. When something fails, fix the cause and keep tests, analyzers, and linters enabled as the repository configures them. Remove any temporary scripts or files you created before you finish.
-
-## 5. Verify
-Collect real evidence for every claim: command lines and their outcomes, build and test results, and any validation the repository requires. Empirical output beats assumption. If something cannot be verified from your environment, say so explicitly instead of implying it passed.
-
-## 6. Review the implementation
-Give the diff, the plan, and the verification output to an independent adversarial reviewer, a separate subagent when one is available. It looks for correctness bugs, edge cases, error handling, concurrency, security, and gaps between the diff and the plan. Fix real findings and re-run verification. Repeat until the review is clean or every remaining finding is recorded with a reason.
-
-## 7. Open the pull request
-Create a new branch from the base branch, commit in the repository's existing message style, push, and open a pull request. Write the title and description in a human voice: what changed, why, how it was validated, and what a reviewer should look at. Use plain prose without em dashes and without attribution trailers such as Co-Authored-By or generated-with footers, because the team's convention is that those read as machine output. When the request names a work item, link it to the pull request.
-
-## 8. Get the build green
-Watch the pull request's required checks and fix failures on the branch until they pass. While a check is queued or running, wait for it rather than guessing its outcome. If a check cannot pass because of permissions, credentials, an outage, or missing configuration, record its name, its state, and the exact step a human must take. When the repository has no pull request pipeline, run the documented local build and test commands and use their output as the green evidence.
-
-## 9. Handle the work item
-If the request named a work item, the pull request links that one and this phase is done. Otherwise, once the pull request exists and its required checks pass, create one in the Azure DevOps organization that hosts the repository, in the MSTeams project, not the Teamspace project. Look up recent work items assigned to you (System.AssignedTo = @Me) and reuse their area path, current sprint iteration, priority, and tags where they fit. Write the title and description in a human voice with no em dashes: what changed, why it matters, risk, and the validation evidence. Link the new work item to the pull request. If permissions or a missing project block creation, record the exact error, note it in the pull request description, and continue to Reporting rather than stopping the run.
+## 8. Get to a green build
+Watch the required checks and fix failures until they pass. If one cannot pass because of permissions, credentials, an outage or missing configuration, record its name, its state and the exact step a human must take. With no pull request pipeline, the documented local build and test commands are the green evidence.
 
 # Reporting
 
-Your final message is the handoff. Include:
-- a one-line restatement of what was asked,
-- the pull request id and link,
-- the work item id and link,
-- each check you observed with its final state,
-- the commands you ran and their results,
-- decisions you made without confirmation and why,
-- anything open, unverified, or blocked, with the exact blocker.
+Your final message is the handoff: the request in one line; the branch and last commit pushed; the pull request id, link and title; the work item id and link; each check with its final state; the commands you ran and their results; what each reviewer found; decisions you made without confirmation and why; and anything open, unverified or blocked, with the exact blocker.
 
-# Working rules
+# Guardrails
 
-- Keep secrets out of everything you emit or commit. Reference sensitive files such as .env, *.pem, and *.key by path only, and do not read their contents into output.
-- Work on a new branch and open a pull request. The default branch stays untouched so a human can gate the change.
-- Keep one logical change per pull request; unrelated fixes belong on their own branch.
-- If the request is already satisfied, or cannot be done with the access you have, stop and report exactly what you found and what a human needs to do next.
-- Leave the pull request open for review. Merging stays with a human.
+- Keep secrets out of everything you emit or commit; reference .env, *.pem and *.key by path only.
+- Tests verify correctness, they do not define the solution: implement the general behavior, not the values the tests happen to use.
+- Leave the pull request open; merging stays with a human.
 
 # Task`
 
-function composePrJobPrompt(task: string): string {
-  return `${PR_JOB_WORKFLOW}\n\n<user_task>\n${task.trim()}\n</user_task>`
+/**
+ * The title is composed ahead of the directive so the prompt opens with the
+ * job's own name, which is what a human reading `get_job` or the job page sees
+ * first, and what `# The request` refers to when it says "the title above".
+ */
+function composePrJobPrompt(task: string, title: string): string {
+  return `# Title\n\n${title}\n\n${PR_JOB_WORKFLOW}\n\n<user_task>\n${task.trim()}\n</user_task>`
 }
 
 export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze([
@@ -1002,21 +1013,26 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
     capability: "cloudagent_write",
     description:
       "Runs an autonomous coding agent in the Microsoft cloud that takes one request from understanding to a review-ready pull request, and returns immediately with a job id. "
-      + "It is create_job with three decisions already made: the `agency-coding` plugin is loaded (branch, commit, push, pull request, pipeline and work item tools), the model defaults to claude-opus-5.5 at max reasoning effort (the `complex` tier), and a fixed engineering workflow is prepended to `prompt`: research, a reviewed plan, implementation with tests, an independent adversarial review of the change, the pull request, a green build, and a work item that links it. "
-      + "You supply the task in `prompt`; the workflow and its conventions are added automatically, so do not restate them. "
+      + "It is create_job with three decisions already made: the `agency-coding` and `agency-review` plugins are loaded (branch, commit, push, pull request, pipeline and work item tools, plus a review orchestrator that dispatches scoped reviewers in parallel and reconciles their findings onto the pull request), the model defaults to claude-opus-5.5 at max reasoning effort (the `complex` tier), and a fixed engineering workflow is prepended to `prompt`: search and understand, research, a plan, an adversarial review of that plan, implementation with tests, the pull request and its work item, an adversarial review of the change, and a green build. "
+      + "You supply the task in `prompt` and the job's name in `title`; the workflow and its conventions are added automatically, so do not restate them. "
       + "A job is ONE-SHOT: it runs unattended for a median of about an hour and can run for many hours, cannot be messaged, and cannot be resumed. "
       + "The job leaves its pull request open for a human to review and never merges. "
       + "Confirm with the user before creating a job they did not explicitly ask for: it spends real compute for an hour or more. "
       + "After it returns, poll with get_job, or use wait_for_job once to confirm the job left the queue.",
     inputSchema: {
       type: "object",
-      required: ["prompt"],
+      required: ["prompt", "title"],
       additionalProperties: false,
       properties: {
+        title: {
+          type: "string",
+          description:
+            "The job's name, at most 100 characters on one line, e.g. \"Fix shared-channel membership revocation\". It is what list_jobs and get_job show first, it opens the prompt so the agent knows what it is working on, and it becomes the pull request title unless the repository's convention requires another form. Name the change, not the ticket.",
+        },
         prompt: {
           type: "string",
           description:
-            "The task, written as a brief rather than a one-liner: the outcome wanted, how the caller will know it is done, constraints, relevant links, and the work item id if one already exists. This is the request the job answers; the workflow, plugin and model come from the tool, so do not restate them. The agent starts from a fresh clone and sees nothing else.",
+            "The task, written as a brief rather than a one-liner: the outcome wanted, how the caller will know it is done, constraints, relevant links, and the work item id if one already exists. This is the request the job answers; the workflow, plugins and model come from the tool, so do not restate them. The agent starts from a fresh clone and sees nothing else.",
         },
         ...REPOSITORY_PROPERTIES,
         branch: {
@@ -1072,20 +1088,48 @@ export const CLOUDAGENT_TOOLS: ReadonlyArray<NonPersonaMcpTool> = Object.freeze(
           { retriable: false },
         )
       }
+      const title = optionalString(args, "title")
+      if (!title) {
+        throw new CloudAgentError(
+          "`title` is required: it names the job and becomes the pull request title.",
+          { retriable: false },
+        )
+      }
+      if (/[\r\n]/.test(title)) {
+        throw new CloudAgentError(
+          "`title` must be a single line: it is the job's name in list_jobs and the pull request title.",
+          { retriable: false },
+        )
+      }
+      if (title.length > PR_JOB_TITLE_MAX) {
+        throw new CloudAgentError(
+          `\`title\` must be at most ${PR_JOB_TITLE_MAX} characters; it is a name, not a summary.`,
+          { retriable: false },
+        )
+      }
       const model = resolveModelConfiguration(args, PR_JOB_DEFAULT_TIER)
       const metadata = metadataArg(args)
+      if (metadata && Object.prototype.hasOwnProperty.call(metadata, "title")) {
+        // The tool writes `title` into metadata itself. Two sources would drift,
+        // and renderMetadataBrief shows only the first four pairs, so a caller's
+        // duplicate could silently win the slot the real name occupies.
+        throw new CloudAgentError(
+          "`metadata.title` is reserved on create_pr_job; pass the job name as `title`.",
+          { retriable: false },
+        )
+      }
 
       const request = buildGenericJobRequest({
-        prompt: composePrJobPrompt(task),
+        prompt: composePrJobPrompt(task, title),
         repository: {
           organization: repository.organization,
           project: repository.project,
           repository: repository.repository,
           ...(branch ? { branch } : {}),
         },
-        plugins: [{ name: AGENCY_CODING_PLUGIN }],
+        plugins: [{ name: AGENCY_CODING_PLUGIN }, { name: AGENCY_REVIEW_PLUGIN }],
         modelConfiguration: model.modelConfiguration,
-        ...(metadata ? { metadata } : {}),
+        metadata: { title, ...(metadata ?? {}) },
       })
       const job = await cloudAgentClient().createJob(request)
 

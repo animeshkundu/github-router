@@ -137,7 +137,7 @@ One approved probe job: created, then cancelled as soon as it was seen running.
 | Tool | Capability | Contract |
 |---|---|---|
 | `create_job` | `cloudagent_write` | Returns immediately with the job id and the normalized request |
-| `create_pr_job` | `cloudagent_write` | `create_job` with the `agency-coding` plugin, the `complex` tier, and a fixed request-to-pull-request workflow prepended to the prompt |
+| `create_pr_job` | `cloudagent_write` | `create_job` with the `agency-coding` and `agency-review` plugins, the `complex` tier, a required `title`, and a fixed request-to-pull-request workflow prepended to the prompt |
 | `cancel_job` | `cloudagent_write` | `POST /jobs/{id}/cancel` (not under `/v2/`); irreversible |
 | `get_job` | `cloudagent` | The poll. The summary leads on a terminal job |
 | `list_jobs` | `cloudagent` | The durable ledger; defaults to the workspace's repository |
@@ -190,23 +190,45 @@ block as a `tier:` line, since `GET /jobs/{id}` never returns
 
 ### `create_pr_job`: one request in, one review-ready pull request out
 
-`create_job` requires the caller to know three things beyond the task: which
-plugin provides the Azure DevOps write tools, which model suits long-horizon
-work, and which engineering process the job should follow. `create_pr_job`
-takes only the task and fixes all three:
+`create_job` requires the caller to know four things beyond the task: which
+plugins provide the Azure DevOps write tools and the review orchestrator, which
+model suits long-horizon work, which engineering process the job should follow,
+and what the job should be called. `create_pr_job` takes the task and a title
+and fixes the rest:
 
-- **Plugin.** `agency-coding`, measured live on 2026-10-31 (`Company` scope,
+- **Plugins.** `agency-coding`, measured live on 2026-10-31 (`Company` scope,
   not enabled by default; the whole 235-entry catalog has no default-enabled
-  plugin). It provides branch, commit, push, pull request, pipeline and work
-  item tools.
+  plugin), provides branch, commit, push, pull request, pipeline and work item
+  tools. `agency-review`, measured live on 2026-11-01 at the same scope,
+  bundles the review orchestrator and specialist reviewer agents plus the
+  skills that prepare diffs, plan and dispatch reviewers, deduplicate, and
+  reconcile findings onto the pull request through the `ado` MCP. Naming that
+  plugin is what makes the review scoped, parallel and bounded, rather than a
+  process the model has to improvise.
 - **Model.** The `complex` tier: `claude-opus-5.5` at `max` effort. `tier`,
   `model`, `reasoningEffort` and `context` are still accepted and behave
   exactly as they do on `create_job`.
-- **Workflow.** A fixed directive is prepended to `prompt`: read the request,
-  plan, have the plan independently reviewed, implement with tests, have the
-  implementation independently reviewed, open the pull request, get its
-  required checks green, and link or create a work item (`MSTeams` when the
-  task named none). The job leaves the pull request open; it never merges.
+- **Workflow.** A fixed directive is prepended to `prompt`, in eight phases:
+  search and understand, research, a plan, an adversarial review of that plan,
+  implementation with verification and tests, the pull request and its work
+  item, an adversarial review of the change, and a green build. The job leaves
+  the pull request open; it never merges.
+- **Title.** `title` is required. It is the job's name in `list_jobs` and
+  `get_job`, it opens the prompt, and it becomes the pull request title unless
+  the repository's convention requires another form. It is written into
+  `metadata.title` as well so the job is named in the metadata line, and a
+  caller-supplied `metadata.title` is rejected rather than left to drift from
+  it.
+
+The directive answers a measured failure. Job
+`domoreexp-4657bde2-1c19-4107-ae93-a317d1827fc1` ran 9.19 hours on
+`teams-userprofilesvc` and was **not** killed: it ended `Completed` with
+`jobOutcomeType: Succeeded`, and the service classified the work a failure
+because nothing was pushed and no pull request was opened. The old order put
+branch, commit and push after implementation and two review phases, so a run
+that ended early left no durable trace. The branch is now created and pushed
+before any edit exists, and pushes are required at each milestone and before
+anything long-running. The review phase is bounded for the same reason.
 
 The Job API has no system-prompt field. A validate probe sent one on
 2026-10-31, got a 200, and the field was ignored and not echoed, so the
@@ -222,8 +244,23 @@ Claude Opus 5.5:
 [prompt engineering best practices](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices)
 and
 [prompting Claude Opus 5.5](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5-5).
-Treat a directive edit as a product change: bump its version marker, and keep
-the structural assertions in `tests/cloudagent-tools.test.ts` green.
+Every token has to earn its place: the target is "the smallest possible set of
+high-signal tokens that maximize the likelihood of some desired outcome", and
+minimal "does not necessarily mean short". So outcomes, constraints,
+load-bearing ordering and environment facts the model cannot infer are stated
+explicitly, while method stays implicit: general instructions beat prescriptive
+steps, parallel tool calls need no instruction, and a standalone verification
+phase causes over-verification on Opus 5. The one product the directive names
+is Bluebird, and only conditionally: of the 235 catalog plugins, only
+`cloudbuild` bundles the Bluebird MCP and only for CloudBuild failure
+diagnosis, so `agency-coding` cannot be assumed to provide it and the text says
+"use Bluebird semantic / vector search if available".
+
+Traceability does not need a version marker. The full directive is stored
+verbatim on every job and returned by `get_job` under `prompt:`, so a job's
+behavior is traceable to the exact text that produced it, and the structural
+assertions in `tests/cloudagent-tools.test.ts` keep a rewrite from silently
+dropping a section. Treat a directive edit as a product change.
 
 ### `list_models`: the catalog behind the tiers
 
