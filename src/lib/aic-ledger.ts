@@ -170,6 +170,35 @@ export function recordAic(
 }
 
 /**
+ * Record one request the router knows cost nothing: a `-m local` / `-m local2`
+ * lead turn served by the operator's own local model server.
+ *
+ * A local response carries no `copilot_usage` and never will, so without this
+ * the ledger would count zero REQUESTS as well as zero credits and the whole
+ * session would read like a broken ledger rather than a free one.
+ *
+ * The key is the RAW model id on purpose. `aicModelKey` resolves through the
+ * Copilot catalog, which maps `opus` onto `claude-opus-5.5` — filing a free
+ * local turn under a Copilot model would be a false attribution in the exit
+ * cost table. Local ids are not catalog ids and must not be treated as such.
+ */
+export function recordZeroCostRequest(model: string | undefined): void {
+  const key =
+    typeof model === "string" && model.trim().length > 0 ?
+      model.trim()
+    : "unknown"
+  ledger.requests += 1
+  // An existing entry keeps whatever spend it already has (a local id can
+  // never have any, but the ledger is shared with a launch that may switch
+  // models), so the credit total is untouched here by construction.
+  const entry = ledger.perModel[key] ?? { nanoAiu: 0, requests: 0 }
+  entry.requests += 1
+  ledger.perModel[key] = entry
+  ledger.tokensByModel[key] ??= emptyModelTokens()
+  persistBestEffort()
+}
+
+/**
  * Map an upstream `token_type` to its count bucket. Unknown/missing types
  * land in `other` (priced at the model's input factor downstream) rather
  * than being dropped — the observed universe is the four known types, this
@@ -319,10 +348,20 @@ export function aicTotalCredits(snapshot: AicSnapshot): number {
   return nanoAiuToCredits(snapshot.totalNanoAiu)
 }
 
-/** One-line status fragment: `[AIC 12.42]`. Empty string when nothing recorded. */
+/**
+ * One-line status fragment: `[AIC 12.42]`. Empty string only when nothing has
+ * been recorded at all.
+ *
+ * The guard is `requests === 0`, NOT `totalNanoAiu <= 0`: a recorded request
+ * that cost nothing is a MEASURED zero, and hiding it would make a local
+ * session indistinguishable from a session whose ledger never worked. Zero
+ * keeps the two-decimal shape (`formatAic(0)` is a bare `"0"`) so it reads as
+ * a number rather than an absence.
+ */
 export function formatAicStatus(snapshot: AicSnapshot): string {
-  if (snapshot.requests === 0 || snapshot.totalNanoAiu <= 0) return ""
-  return `[AIC ${formatAic(aicTotalCredits(snapshot))}]`
+  if (snapshot.requests === 0) return ""
+  const total = aicTotalCredits(snapshot)
+  return `[AIC ${total > 0 ? formatAic(total) : "0.00"}]`
 }
 
 /**

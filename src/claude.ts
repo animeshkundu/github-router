@@ -185,10 +185,12 @@ import {
   formatCheap1mPrerequisiteFailure,
   formatCheapPrerequisiteFailure,
   formatCheapestPrerequisiteFailure,
+  formatLocalPrerequisiteFailure,
   profileDescriptor,
   resolveLaunchProfile,
   validateBalancedProfilePrerequisites,
   validateFastProfilePrerequisites,
+  validateLocalProfilePrerequisites,
   validateMaxProfileLaunch,
   validateCheap1mProfilePrerequisites,
   validateCheapProfilePrerequisites,
@@ -200,7 +202,10 @@ import {
   displayModelName,
   isBalancedFamily,
   isCheapestFamily,
+  isLocalFamily,
   isPinnedLaunchProfile,
+  local2AdvisorContract,
+  localContractFor,
 } from "./lib/profile-family"
 import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
 import { LAUNCH_SECRET_HEADER } from "./lib/messages-identity-preflight"
@@ -223,6 +228,7 @@ import {
   CHEAP_PROFILE_MODELS,
   CHEAP_PROFILE_NATIVE_MODELS,
 } from "./lib/cheap-profile-contract"
+import { configureLocalEgress, localBaseUrl } from "./lib/local-egress"
 
 export const claudeArgs = {
   ...sharedServerArgs,
@@ -230,7 +236,17 @@ export const claudeArgs = {
     alias: "m",
     type: "string",
     description:
-      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, cheapest, cheapest2, balanced, balanced2, max), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog.",
+      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, cheapest, cheapest2, balanced, balanced2, max, local, local2), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog. `local` / `local2` send the main loop to a locally running Anthropic-compatible server instead of Copilot.",
+  },
+  localport: {
+    type: "string" as const,
+    description:
+      "Port of the LOCAL MODEL SERVER that `-m local` / `-m local2` forward the main loop to (not the proxy's own --port). Default 11111, giving https://localhost:11111/v1. Inert on every other profile.",
+  },
+  localurl: {
+    type: "string" as const,
+    description:
+      "Full base URL, including the /v1 prefix, of the local model server for `-m local` / `-m local2` (e.g. http://localhost:11434/v1). Sets scheme/host/path, which --localport cannot. Mutually exclusive with --localport. Inert on every other profile.",
   },
   "codex-mcp": {
     type: "boolean" as const,
@@ -403,6 +419,31 @@ export const claude = defineCommand({
 
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
     const requestedLaunchProfileId = resolveLaunchProfile(args.model)
+
+    // Local-model egress (`-m local` / `-m local2`): resolve the endpoint ONCE,
+    // before `setupAndServe` starts accepting requests. Both flags are declared
+    // in `claudeArgs` so `collectChildPassthroughArgs` drops them (and their
+    // value) from the spawned claude argv instead of forwarding them.
+    // A bad endpoint spelling fails the launch here rather than surfacing
+    // later as a connection error mid-session.
+    try {
+      configureLocalEgress({
+        ...(typeof args.localurl === "string" ? { baseUrl: args.localurl } : {}),
+        ...(typeof args.localport === "string" ? { port: args.localport } : {}),
+        profileId: requestedLaunchProfileId,
+      })
+      // Echo the resolved endpoint so a wrong scheme or port is visible at
+      // launch instead of as a TLS/connection error a few seconds later.
+      // Printing the configuration is not probing it: no request is issued.
+      if (isLocalFamily(requestedLaunchProfileId)) {
+        consola.info(`[local] upstream ${localBaseUrl()}`)
+      }
+    } catch (error) {
+      process.stderr.write(
+        `${error instanceof Error ? error.message : String(error)}\n`,
+      )
+      process.exit(1)
+    }
     const codexMcpEnabled = (args as Record<string, unknown>)["codex-mcp"] !== false
     // Opt-in SWE pipeline: the gather-context / plan / implement /
     // swe-pipeline skills, their slash commands, and their CLAUDE.md +
@@ -697,14 +738,34 @@ export const claude = defineCommand({
           formatBalancedPrerequisiteFailure(prereqCheck.missing, launchProfileId),
         )
       }
+    } else if (isLocalFamily(launchProfileId)) {
+      // The lead and every native role run on the local endpoint, which has no
+      // Copilot catalog entry and must not be checked against one. Only
+      // `local2`'s Advisor is served by Copilot, so only its model is
+      // validated; `local` has nothing to check and returns ok unconditionally.
+      const prereqCheck = validateLocalProfilePrerequisites(
+        state.models,
+        launchProfileId,
+      )
+      if (!prereqCheck.ok) {
+        await fastFatal(
+          formatLocalPrerequisiteFailure(prereqCheck.missing, launchProfileId),
+        )
+      }
     } else {
       // Standard profile behavior is unchanged. This branch intentionally keeps
       // all ordinary launches on the existing catalog/model flow.
     }
     let chosenSlug = requestedSlug
-    let resolvedSlug = resolveModel(chosenSlug)
+    // A local lead id (`opus`/`sonnet`/`haiku`) is NOT a Copilot slug, and
+    // `resolveModel`'s opus-family preference would rewrite it to
+    // `claude-opus-5.5` — a model the local server has never heard of, and one
+    // the catalog warning below would then chase. Resolve nothing on this path.
+    let resolvedSlug = isLocalFamily(launchProfileId)
+      ? chosenSlug
+      : resolveModel(chosenSlug)
 
-    if (usingDefault && state.models) {
+    if (usingDefault && state.models && !isLocalFamily(launchProfileId)) {
       const inCache = (slug: string) =>
         state.models?.data.some((m) => m.id === resolveModel(slug)) ?? false
       if (!inCache(chosenSlug)) {
@@ -734,8 +795,12 @@ export const claude = defineCommand({
     if (resolvedSlug !== chosenSlug) {
       consola.info(`Model "${chosenSlug}" resolved to "${resolvedSlug}"`)
     }
-    const modelEntry = state.models?.data.find((m) => m.id === resolvedSlug)
-    if (!modelEntry) {
+    const modelEntry = isLocalFamily(launchProfileId)
+      ? undefined
+      : state.models?.data.find((m) => m.id === resolvedSlug)
+    // A local lead id is deliberately absent from the Copilot catalog; warning
+    // that `opus` is "not found" would be reporting the design as a fault.
+    if (!modelEntry && !isLocalFamily(launchProfileId)) {
       const available = listModelsForEndpoint("/v1/messages")
       consola.warn(
         `Model "${resolvedSlug}" not found. Available claude models: ${available.join(", ")}`,
@@ -833,7 +898,7 @@ export const claude = defineCommand({
     // `[1m]` unlock entirely — so a decorated row here would be doubly wrong
     // (a "(1M)" label that still budgets 200K). No exemptions: every picker
     // row in these profiles is bare.
-    if (launchProfileId === "cheap" || isCheapestFamily(launchProfileId) || isBalancedFamily(launchProfileId)) {
+    if (launchProfileId === "cheap" || isCheapestFamily(launchProfileId) || isBalancedFamily(launchProfileId) || isLocalFamily(launchProfileId)) {
       const suspectKeys = [
         "ANTHROPIC_MODEL",
         "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -974,6 +1039,21 @@ export const claude = defineCommand({
         cheapestAdvisorClientEnabled(process.env),
         cheapestContractFor(launchProfileId).advisorClientModel,
       )
+    } else if (launchProfileId === "local2") {
+      // `local2` is the only local launch with an Advisor, and it is the same
+      // `gpt-6.1-sol` the `cheapest2` Advisor pins. `local` deliberately takes
+      // the branch below instead: it has no Advisor, and a caller-supplied
+      // `--advisor` would advertise a router-owned tool to a server whose
+      // behaviour we have refused to assume.
+      extraArgs = withFixedCheapestAdvisorArg(
+        extraArgs,
+        cheapestAdvisorClientEnabled(process.env),
+        local2AdvisorContract().advisorClientModel,
+      )
+    } else if (isLocalFamily(launchProfileId)) {
+      // `local` (and any future Advisor-free local sibling): strip every
+      // caller-supplied Advisor option and insert nothing.
+      extraArgs = withFixedCheapestAdvisorArg(extraArgs, false)
     }
 
     // LLM toolbelt: materialize curated CLI tools (rg/fd/jq/sd/sg/yq)
@@ -1131,6 +1211,17 @@ export const claude = defineCommand({
                 balancedContractFor(launchProfileId).nativeModels["General-Purpose"],
               reviewer: balancedReviewerModel(launchProfileId),
             }
+        : isLocalFamily(launchProfileId)
+          ? {
+              // The local endpoint's OWN tier ids, read from the contract rather
+              // than resolved against the Copilot catalog: `opus`/`sonnet`/`haiku`
+              // are not catalog ids and every resolver here would either miss or
+              // alias-rewrite them.
+              Explore: localContractFor(launchProfileId).nativeModels.Explore,
+              "General-Purpose":
+                localContractFor(launchProfileId).nativeModels["General-Purpose"],
+              reviewer: localContractFor(launchProfileId).nativeModels.reviewer,
+            }
         : launchProfileId === "max"
           ? {
               Explore: MAX_PROFILE_MODELS.luna,
@@ -1157,6 +1248,7 @@ export const claude = defineCommand({
           || launchProfileId === "cheap1m"
           || isCheapestFamily(launchProfileId)
           || isBalancedFamily(launchProfileId)
+          || isLocalFamily(launchProfileId)
           ? nativeAgentModels.Explore
           : nativeAgentModels.scout)
         != null,
@@ -1195,9 +1287,15 @@ export const claude = defineCommand({
           || launchProfileId === "cheap1m"
           || isCheapestFamily(launchProfileId)
           || isBalancedFamily(launchProfileId)
+        // A local launch is pinned (fixed HTTP surface, fixed roster, fixed
+        // prose) but NOT cheap-shaped everywhere: it has no Copilot oracle or
+        // advisor to resolve, and its role models come from its own contract.
+        // Keeping it a separate flag lets each branch below opt in explicitly
+        // instead of inheriting a catalog assumption.
+        const isLocalProfile = isLocalFamily(launchProfileId)
         // Fast and the cheap family share the exact fixed HTTP surface; max has its own.
-        const isPinnedProfile = isFastProfile || isMaxProfile || isCheapProfile
-        if ((isFastProfile || isCheapProfile) && requestedCli) {
+        const isPinnedProfile = isFastProfile || isMaxProfile || isCheapProfile || isLocalProfile
+        if ((isFastProfile || isCheapProfile || isLocalProfile) && requestedCli) {
           process.stderr.write(
             "Fast/cheap profile uses its fixed HTTP MCP surface; ignoring --codex-cli.\n",
           )
@@ -1288,8 +1386,26 @@ export const claude = defineCommand({
         // so no worker-* .md (and no injected worker/orchestration skill or
         // guard, both gated on this same flag below) survives the profile
         // restriction even if the catalog gate would otherwise pass.
+        // A local launch has no Copilot catalog entries to drift-check: its
+        // lead and every native role are the local endpoint's own tier ids.
+        // The single Copilot dependency, `local2`'s Advisor, is re-validated
+        // here so the check still happens at the write site that the other
+        // pinned profiles use, and a miss fails the launch instead of
+        // silently dropping the Advisor.
+        if (isLocalProfile) {
+          const localCheck = validateLocalProfilePrerequisites(
+            state.models,
+            launchProfileId,
+          )
+          if (!localCheck.ok) {
+            throw new Error(
+              formatLocalPrerequisiteFailure(localCheck.missing, launchProfileId),
+            )
+          }
+        }
         if (
           isPinnedProfile
+          && !isLocalProfile
           && ((isCheapestFamily(launchProfileId)
             ? cheapestOracleModel(launchProfileId)
             : isBalancedFamily(launchProfileId)
@@ -1349,12 +1465,14 @@ export const claude = defineCommand({
           reviewerFastModel: nativeAgentModels["reviewer-fast"],
           brainstormModel: nativeAgentModels.brainstorm,
           scoutModel:
-            (isFastProfile || isCheapProfile) ? nativeAgentModels.Explore : nativeAgentModels.scout,
+            (isFastProfile || isCheapProfile || isLocalProfile)
+              ? nativeAgentModels.Explore
+              : nativeAgentModels.scout,
           scribeModel: nativeAgentModels.scribe,
           implementerFastModel: nativeAgentModels["implementer-fast"],
           generalPurposeFastModel: nativeAgentModels["general-purpose-fast"],
           nativeRoster: fastDescriptor.nativeRoster,
-          personaAllowlist: isFastProfile || isCheapProfile
+          personaAllowlist: isFastProfile || isCheapProfile || isLocalProfile
             ? undefined
             : fastDescriptor.personaAllowlist
               ? agentNamesForToolAllowlist(fastDescriptor.personaAllowlist)
@@ -1383,6 +1501,16 @@ export const claude = defineCommand({
                   balancedExploreModel: nativeAgentModels.Explore,
                   balancedGeneralPurposeModel: nativeAgentModels["General-Purpose"],
                   balancedReviewerModel: nativeAgentModels.reviewer,
+                }
+            : isLocalProfile
+              ? {
+                  localProfile: true,
+                  localExploreModel: nativeAgentModels.Explore,
+                  localGeneralPurposeModel: nativeAgentModels["General-Purpose"],
+                  localReviewerModel: nativeAgentModels.reviewer,
+                  // `local` has no Advisor, and the reviewer prompt must never
+                  // name an `advisor` tool the session cannot reach.
+                  advisorAvailable: launchProfileId === "local2",
                 }
             : isCheapProfile
               ? {
@@ -1498,7 +1626,7 @@ export const claude = defineCommand({
         // with inherited tools would otherwise receive Oracle or Artifact tools.
         let subagentVisibility: string
         let injected: Awaited<ReturnType<typeof injectPeerMcpIntoMirror>> | undefined
-        if (isFastProfile || isCheapProfile) {
+        if (isFastProfile || isCheapProfile || isLocalProfile) {
           extraArgs.push("--mcp-config", runtime.mcpConfigPath)
           if ((args as Record<string, unknown>)["codex-mcp-only"] === true) {
             extraArgs.push("--strict-mcp-config")
@@ -1541,7 +1669,7 @@ export const claude = defineCommand({
             : `subagent-INVISIBLE (collision on user-side mcpServers: [${injected.conflictingServers.join(", ")}]; parent-only via --mcp-config)`
         }
 
-        if (isFastProfile || isCheapProfile) {
+        if (isFastProfile || isCheapProfile || isLocalProfile) {
           let fastGuardInstalled = false
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
@@ -1735,7 +1863,8 @@ export const claude = defineCommand({
           // raw `mcp__workers__*` escape hatch on demand (e.g. for guaranteed
           // structured-arg fidelity, or when a blocking call is acceptable) — so
           // the worker-* agents COMPLEMENT rather than hard-replace the raw tools.
-          const dispatcherCanReachWorkers = isFastProfile || isCheapProfile || injected?.ok === true
+          const dispatcherCanReachWorkers =
+            isFastProfile || isCheapProfile || isLocalProfile || injected?.ok === true
           if (!dispatcherCanReachWorkers) {
             consola.warn(
               "Workers non-blocking guard NOT registered: subagent MCP injection "
@@ -1874,7 +2003,7 @@ export const claude = defineCommand({
         // from artifact auto-open. It is default-on when the hook MCP runtime is
         // wired, top-level-only at runtime, and never blocks ExitPlanMode; material
         // findings are written to the shared findings store for the next prompt.
-        if (!isFastProfile && !isCheapProfile && hookMcpRuntimeFromEnv(envVars) && planReviewEnabled()) {
+        if (!isFastProfile && !isCheapProfile && !isLocalProfile && hookMcpRuntimeFromEnv(envVars) && planReviewEnabled()) {
           try {
             const settingsPath = nodePath.join(PATHS.CLAUDE_CONFIG_DIR, "settings.json")
             const command = buildPlanReviewHookCommand(selfInvocation)
@@ -1888,7 +2017,7 @@ export const claude = defineCommand({
         // never runs an UNTRUSTED repo's scripts). `--trust-gate` records consent
         // for this repo; GH_ROUTER_ENABLE_STOP_GATE force-enables. The hook also
         // re-checks trust at runtime and scopes to the top-level session.
-        if (!isFastProfile && !isCheapProfile && !isMaxProfile && (args as Record<string, unknown>)["trust-gate"] === true) {
+        if (!isFastProfile && !isCheapProfile && !isLocalProfile && !isMaxProfile && (args as Record<string, unknown>)["trust-gate"] === true) {
           try {
             const root = await trustRepo(sessionCwd)
             process.stderr.write(

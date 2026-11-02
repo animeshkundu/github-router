@@ -12,7 +12,10 @@ import {
   displayModelName,
   isBalancedFamily,
   isCheapestFamily,
+  isLocalFamily,
   isPinnedLaunchProfile,
+  local2AdvisorContract,
+  localContractFor,
 } from "./profile-family"
 
 /**
@@ -216,7 +219,12 @@ export interface NativeAgentAvailability {
    *  Sol Advisor/Oracle; never astra) minus the `Plan` role (the lead plans
    *  directly). The balanced family (`"balanced"`/`"balanced2"`) selects the
    *  same restricted roster prose Sol-led with its Grok Oracle (never astra),
-   *  likewise without a `Plan` role. When set,
+   *  likewise without a `Plan` role. The local pair (`"local"`/`"local2"`)
+   *  selects the cheapest-shaped restricted roster, because the local endpoint
+   *  serves its own `opus`/`sonnet`/`haiku` tiers and inherits the cheapest
+   *  prompts; the model labels are the tier names, and Oracle stays the
+   *  Copilot-served `gpt-6.1-sol` consult. `"local"` has no Advisor at all, so
+   *  no local clause may name one. When set,
    *  `buildNativeReachClauses` and
    *  `buildOperatingDefaultsDirective` return a short, self-contained
    *  rendering naming only the profile's own natives
@@ -230,7 +238,7 @@ export interface NativeAgentAvailability {
    *  or `stand_in`, since none of those are registered in this profile
    *  regardless of catalog state.
    *  Absent/`"standard"` is today's catalog-driven full roster. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "local" | "local2" | "max"
   /** False when a fast launch disabled or failed its MCP/native runtime wiring.
    *  The fallback directive must not advertise agents/tools that do not exist. */
   fastRuntimeAvailable?: boolean
@@ -291,6 +299,19 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
         "`Explore` (Luna/high, cheap breadth) for discovery, dependency mapping, and convention tracking spanning more than a couple of files",
         "`General-Purpose` (Luna/max, the heavy execution tier) for mixed, iterative, or multi-step execution",
         "`reviewer` (Luna/max, the heavy verification tier) for independent adversarial verification, reproduction, and root-causing",
+      ]) + ". Delegate by value — cheap breadth to `Explore`, heavy execution to `General-Purpose`, verification to `reviewer`. All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
+    }
+    // Local: same three-role roster and the same split of duty as cheapest, but
+    // the model labels are the local endpoint's OWN tier ids rather than Copilot
+    // slugs. Those ids are whatever the server maps them to, so the clause names
+    // the tier and what it is for, never a model family. `Plan` is deliberately
+    // absent: the local roster does not emit it.
+    if (isLocalFamily(opts.profile)) {
+      const models = localContractFor(opts.profile).nativeModels
+      return joinClauses([
+        `\`Explore\` (${models.Explore} tier, cheap breadth) for discovery, dependency mapping, and convention tracking spanning more than a couple of files`,
+        `\`General-Purpose\` (${models["General-Purpose"]} tier, the heavy execution tier) for mixed, iterative, or multi-step execution`,
+        `\`reviewer\` (${models.reviewer} tier, the heavy verification tier) for independent adversarial verification, reproduction, and root-causing`,
       ]) + ". Delegate by value — cheap breadth to `Explore`, heavy execution to `General-Purpose`, verification to `reviewer`. All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
     }
     // Balanced: lead owns planning, implementation, verification by default —
@@ -462,6 +483,23 @@ export const CHEAPEST_CONSULT_CONTRACT_POINTER =
   "Consulting `advisor`/`oracle` (small budget, ~8-10 calls — choose wisely): use them for how/what — shortest path, what to consider, planning, strategy, direction — never for anything a search, read, or run settles, nor for routine progress, reassurance, or completion ritual; do not spend one where `reviewer` (verification) or `oracle` (a self-contained technical trade-off) owns the moment. Full how-to (when to spend, the call brief, the discriminator) is in your CLAUDE.md project instructions.\n\n"
 
 /**
+ * Oracle-only sibling of `CHEAPEST_CONSULT_CONTRACT` for the `-m local` launch
+ * profile, which is Advisor-free by design.
+ *
+ * Naming the Advisor there would point the lead at a tool the session cannot
+ * reach, so the budget, the anchors and the disqualifiers are restated against
+ * `oracle` alone. Everything that is not about the Advisor is the cheapest
+ * contract's wording, and `local2` — which does carry an Advisor — keeps the
+ * original.
+ */
+export const ORACLE_ONLY_CONSULT_CONTRACT =
+  "Consulting `oracle` (a small budget — choose wisely): you have roughly 8-10 oracle calls for this session, and each costs real time and money, so spend them only where direction changes the outcome. Oracle gives you COUNSEL on HOW — and sometimes WHAT — to do: the shortest path, what to consider or look at, planning, strategy, and direction. It never replaces evidence you can gather yourself: anything a search, read, build, test, or run can settle, settle it yourself — never spend a consult on it. Spend a consult on: (1) a pre-commit framing check, after you have oriented but before you lock an approach on a non-trivial task; (2) an unresolvable judgment call — conflicting evidence, or a stale-knowledge / high-consequence risk or severity call; (3) a pre-presentation framing check on the final plan. Do NOT spend one on routine progress, reassurance, completion ritual, or a moment that belongs to `reviewer` (verify/reproduce a change). Make the brief self-contained: Oracle reads only what you write, so state the objective, your current job, what you verified / suspect is missing / ruled irrelevant, your confidence and what being wrong would cost, and one neutral question phrased with any competing hypotheses. Never paste raw tool output or ask it to \"review the whole thing\". State your confidence after you have committed to a position, not before, and weigh the reply against verified repository evidence — counsel is direction, not dictation, and you own the decision.\n\n"
+
+/** Short, always-resident pointer to `ORACLE_ONLY_CONSULT_CONTRACT`. */
+export const ORACLE_ONLY_CONSULT_CONTRACT_POINTER =
+  "Consulting `oracle` (small budget, ~8-10 calls — choose wisely): use it for how/what — shortest path, what to consider, planning, strategy, direction — never for anything a search, read, or run settles, nor for routine progress, reassurance, or completion ritual; do not spend one where `reviewer` owns the moment. Full how-to (when to spend, the call brief) is in your CLAUDE.md project instructions.\n\n"
+
+/**
  * Build the operating-defaults directive for one launch, naming only the
  * natives that launch actually emitted.
  *
@@ -494,22 +532,39 @@ export function buildOperatingDefaultsDirective(
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
     const isCheapest = isCheapestFamily(opts.profile)
     const isBalanced = isBalancedFamily(opts.profile)
-    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
+    const isLocal = isLocalFamily(opts.profile)
+    // `local` is Advisor-free; only `local2` carries one.
+    const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
+    const profileLabel = isLocal
+      ? "Local"
+      : isCheapest
+        ? "Cheapest"
+        : isCheap
+          ? "Cheap"
+          : isBalanced
+            ? "Balanced"
+            : "Fast"
     // The family contract names the Oracle identity, so `balanced` renders
-    // Grok 4.6 and `balanced2` Grok 4.7 without a parallel literal here.
+    // Grok 4.6 and `balanced2` Grok 4.7 without a parallel literal here. Local
+    // resolves through its own contract: `cheapestContractFor` hands back a
+    // Copilot lead/reviewer identity for a launch that must never name one.
     const familyContract = isCheapest
       ? cheapestContractFor(opts.profile)
       : isBalanced
         ? balancedContractFor(opts.profile)
-        : undefined
+        : isLocal
+          ? localContractFor(opts.profile)
+          : undefined
     const oracleDescriptor = familyContract
       ? `${displayModelName(familyContract.oracleModel)} (200K/${familyContract.oracleEffort})`
       : isCheap
         ? "Grok 4.6 (200K/medium)"
         : "exact Opus 5.5 (1M/high)"
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
-    // Cheapest/balanced have no Plan role; fast/cheap/cheap1m still do.
-    const expensiveModels = isCheapest || isBalanced ? "(reviewer, Oracle)" : "(Plan, reviewer, Oracle)"
+    // Cheapest/balanced/local have no Plan role; fast/cheap/cheap1m still do.
+    const expensiveModels = isCheapest || isBalanced || isLocal
+      ? "(reviewer, Oracle)"
+      : "(Plan, reviewer, Oracle)"
     const searchGuidance = opts.bluebirdEnabled === true
       ? "Search strategy: use Bluebird `code` search in `lexical` mode for indexed keyword queries and `semantic` mode for intent/concept questions. Bluebird failures remain visible and never fall back locally; `exact`, `regex`, and `ast` stay on the local live tree. `Explore` subagents read the narrowed files and return file:line conclusions; expensive models " + expensiveModels + " see only the synthesized subset, never raw search output. "
       : opts.semanticSearchAvailable === true
@@ -548,15 +603,18 @@ export function buildOperatingDefaultsDirective(
     // scope with code/web search before paying for Explore fan-out, and the
     // reviewer may invoke Explore for targeted discovery (see
     // BALANCED_PROFILE_DELEGATION_GRAPH).
-    const pipeline = isCheapest
+    const pipeline = isCheapest || isLocal
       ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly. `
         + buildNativeReachClauses(opts)
         + ". Handle trivial, surgical, single-file, or single-command tasks directly; you do not need to justify skipping delegation. "
         + "`Explore` may be used for discovery spanning more than a couple of files; `General-Purpose` for mixed multi-step execution; `reviewer` for behavior-changing or risk-sensitive changes. "
-        + "In plan mode, produce the plan and acceptance criteria directly and do not edit files; before presenting the final plan to the user, consult `advisor` once for a framing check. "
+        + "In plan mode, produce the plan and acceptance criteria directly and do not edit files"
+        // `local` has no Advisor, and naming one would point the lead at a tool
+        // this session cannot reach.
+        + (hasAdvisor ? "; before presenting the final plan to the user, consult `advisor` once for a framing check. " : ". ")
         + "Work to your strengths as a fast, cost-efficient model: verify by execution rather than memory; before a non-trivial task, write a short plan (steps, files involved, the check settling each step) and execute it; persist through tool failures with a rephrased attempt before asking the user; stop searching when further results stop changing the answer; tag claims verified, inferred, or unverified — never state that something passes, compiles, or is covered without observed output. "
         + "Delegation graph: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents.\n\n"
-        + CHEAPEST_CONSULT_CONTRACT
+        + (hasAdvisor ? CHEAPEST_CONSULT_CONTRACT : ORACLE_ONLY_CONSULT_CONTRACT)
       : isBalanced
         ? `${profileLabel} launch profile. The lead coordinates execution across specialized native roles: `
         + buildNativeReachClauses(opts)
@@ -584,7 +642,7 @@ export function buildOperatingDefaultsDirective(
     // 200K profiles: every role the lead can reach runs at the 200K default
     // window (cheap1m's lead excepted at 1M), so the directive names targeted
     // reads once instead of repeating it per role.
-    const windowNote = isCheapest || isBalanced
+    const windowNote = isCheapest || isBalanced || isLocal
       ? "All roles run at a 200K context window — use targeted reads (search, Grep, Read specific files) over full file reads.\n\n"
       : isCheap
         ? "The lead runs at a 200K context window on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — use targeted reads (search, Grep, Read specific files) over full file reads.\n\n"
@@ -595,18 +653,18 @@ export function buildOperatingDefaultsDirective(
     // legacy text for callers without a flag concept (serve path).
     const swePipelineClause = opts.sweEnabled === false
       ? ""
-      : `${isCheapest || isBalanced ? PIPELINE_SKILLS_AWARENESS_NO_PLAN_AGENT : PIPELINE_SKILLS_AWARENESS}\n\n`
-    // Balanced has no Advisor: Oracle is the only consultant, framed as a
-    // second opinion on a precise question — never a discovery tool. For
-    // unknowns, only search (then Explore) helps. Cheapest and balanced have
-    // no Plan role, so Oracle is lead-only there; fast/cheap/cheap1m keep
-    // lead-and-Plan Oracle access.
-    const oracleLeadOnly = isCheapest || isBalanced
-    const consultation = isBalanced
+      : `${isCheapest || isBalanced || isLocal ? PIPELINE_SKILLS_AWARENESS_NO_PLAN_AGENT : PIPELINE_SKILLS_AWARENESS}\n\n`
+    // Balanced and `local` have no Advisor: Oracle is the only consultant,
+    // framed as a second opinion on a precise question — never a discovery
+    // tool. For unknowns, only search (then Explore) helps. Cheapest,
+    // balanced, and local have no Plan role, so Oracle is lead-only there;
+    // fast/cheap/cheap1m keep lead-and-Plan Oracle access.
+    const oracleLeadOnly = isCheapest || isBalanced || isLocal
+    const consultation = !hasAdvisor
       ? "Consultation guidance: funnel unknowns cheapest-first. (1) `code_search` and `web` search narrow scope and rule out hypotheses — always first. (2) `Explore` subagents for targeted breadth only when search is insufficient. "
         + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle; available to the lead; \`reviewer\` and other subagents cannot call Oracle. Optimize for accuracy, intelligence, and correctness at the lowest cost — prefer direct evidence over delegation when the question is narrow. `
       : "Consultation guidance: Follow an evidence-first escalation ladder. Direct empirical evidence (search, code, tests, builds) settles factual questions first. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance or framing checks (direction, not dictation), and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
-        + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, an expert consultant ${oracleLeadOnly ? "available to the lead" : "available to the lead and `Plan`"}, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. Discriminator: transcript-aware trajectory/framing/momentum → advisor; a self-contained technical/architectural trade-off → Oracle.${isCheapest ? "" : " `Plan` may consult Oracle on unresolved trade-offs, and reports any remaining tie-breaking gap to the lead."}${astraClause} `
+        + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, an expert consultant ${oracleLeadOnly ? "available to the lead" : "available to the lead and `Plan`"}, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. Discriminator: transcript-aware trajectory/framing/momentum → advisor; a self-contained technical/architectural trade-off → Oracle.${isCheapest || isLocal ? "" : " `Plan` may consult Oracle on unresolved trade-offs, and reports any remaining tie-breaking gap to the lead."}${astraClause} `
     return (
       "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
       + pipeline
@@ -662,15 +720,16 @@ const STANDARD_OPERATING_DEFAULTS_DIGEST =
   + "without a lookup."
 
 export function buildOperatingDefaultsDigest(
-  opts: { profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "max"; astraAvailable?: boolean; sweEnabled?: boolean } = {},
+  opts: { profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "local" | "local2" | "max"; astraAvailable?: boolean; sweEnabled?: boolean } = {},
 ): string {
   // --swe-gated pipeline sentence: without the flag the skill files are not
   // written, so the digest must not name them. Absent keeps the legacy text
-  // for callers without a flag concept. Cheapest/balanced have no Plan role,
-  // so their sentence names lead-direct planning instead of a Plan dispatch.
+  // for callers without a flag concept. Cheapest/balanced/local have no Plan
+  // role, so their sentence names lead-direct planning instead of a Plan
+  // dispatch.
   const digestPipelineSentence = opts.sweEnabled === false
     ? ""
-    : isCheapestFamily(opts.profile) || isBalancedFamily(opts.profile)
+    : isCheapestFamily(opts.profile) || isBalancedFamily(opts.profile) || isLocalFamily(opts.profile)
       ? "Pipeline skills (all 200K default, native subagents only): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (the lead plans directly on this profile; trivial exits planless, waits for user approval), `/gh-implement` after approval with parallel subagents and conditional reviewer. Skip for trivial work.\n\n"
       : "Pipeline skills (all 200K default, native subagents only): `/gh-gather-context` before planning when context is needed, `/gh-plan` before implementation (trivial exits planless, waits for user approval), `/gh-implement` after approval with parallel subagents and conditional reviewer. Skip for trivial work.\n\n"
   if (opts.profile === "max") {
@@ -687,40 +746,62 @@ export function buildOperatingDefaultsDigest(
     const isCheap = opts.profile === "cheap" || opts.profile === "cheap1m"
     const isCheapest = isCheapestFamily(opts.profile)
     const isBalanced = isBalancedFamily(opts.profile)
-    const profileLabel = isCheapest ? "Cheapest" : isCheap ? "Cheap" : isBalanced ? "Balanced" : "Fast"
-    const cheapestContract = isCheapest
+    const isLocal = isLocalFamily(opts.profile)
+    // `local` is Advisor-free; only `local2` carries one.
+    const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
+    const profileLabel = isLocal
+      ? "Local"
+      : isCheapest
+        ? "Cheapest"
+        : isCheap
+          ? "Cheap"
+          : isBalanced
+            ? "Balanced"
+            : "Fast"
+    const familyContract = isCheapest
       ? cheapestContractFor(opts.profile)
-      : undefined
-    const balancedContract = isBalanced
-      ? balancedContractFor(opts.profile)
-      : undefined
-    const familyContract = cheapestContract ?? balancedContract
-    // Both families are lead-only on Oracle (neither has a Plan role), so one
-    // contract-derived form serves both: `balanced` Grok 4.6 →
-    // `balanced2` Grok 4.7, `cheapest` GPT-5.6 Sol → `cheapest2` GPT-6.1 Sol.
+      : isBalanced
+        ? balancedContractFor(opts.profile)
+        : isLocal
+          ? localContractFor(opts.profile)
+          : undefined
+    // Every family here is lead-only on Oracle (none has a Plan role), so one
+    // contract-derived form serves them all: `balanced` Grok 4.6 →
+    // `balanced2` Grok 4.7, `cheapest` GPT-5.6 Sol → `cheapest2` GPT-6.1 Sol,
+    // and local's contract keeps Oracle on the same Copilot slug.
     const oracleDescriptor = familyContract
       ? `(${displayModelName(familyContract.oracleModel)} 200K/${familyContract.oracleEffort}, lead-only)`
       : isCheap
         ? "(Grok 4.6 200K/medium, lead and Plan)"
         : "(Opus 5 1M/high, lead and Plan)"
-    // No balanced branch: balanced exposes Oracle but no Advisor, so its
-    // ladder (consultationLadder below) never interpolates this descriptor.
-    const advisorDescriptor = cheapestContract
-      ? `(${displayModelName(cheapestContract.advisorModel)}/${cheapestContract.advisorEffort}, lead-only)`
+    // Only the two Advisor-carrying contracts describe the Advisor step. The
+    // base local contract has no advisor fields at the type level and balanced
+    // has no Advisor at all, so neither can be read here: `local` renders this
+    // descriptor nowhere, because `hasAdvisor` routes it down the Oracle-only
+    // ladder below.
+    const advisorContract:
+      | { advisorModel: string; advisorEffort: string }
+      | undefined = isCheapest
+      ? cheapestContractFor(opts.profile)
+      : opts.profile === "local2"
+        ? local2AdvisorContract()
+        : undefined
+    const advisorDescriptor = advisorContract
+      ? `(${displayModelName(advisorContract.advisorModel)}/${advisorContract.advisorEffort}, lead-only)`
       : "(Sol/high, lead-only)"
     const astraStep =
     opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? `; (4) \`astra\` (GPT-6 Astra 200K/${isCheap ? "medium" : "high"}, lead-only) only as a last resort when direct evidence, Advisor, and Oracle cannot produce a defensible path (at most 1-2 calls per decision).`
       : "."
-    const delegation = isCheapest
-      ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. In plan mode, produce the plan and acceptance criteria directly; before presenting the final plan to the user, consult \`advisor\` once for a framing check. Plan briefly before non-trivial acts, verify by execution, tag unverified claims, and stop searching when results stop changing the answer. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
-        + CHEAPEST_CONSULT_CONTRACT_POINTER
+    const delegation = isCheapest || isLocal
+      ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. In plan mode, produce the plan and acceptance criteria directly${hasAdvisor ? "; before presenting the final plan to the user, consult `advisor` once for a framing check." : "."} Plan briefly before non-trivial acts, verify by execution, tag unverified claims, and stop searching when results stop changing the answer. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
+        + (hasAdvisor ? CHEAPEST_CONSULT_CONTRACT_POINTER : ORACLE_ONLY_CONSULT_CONTRACT_POINTER)
       : isBalanced
         ? `${profileLabel} launch profile. The lead owns planning, implementation, and verification by default: narrow scope first with \`code_search\` and \`web\` search to rule out hypotheses (cheapest, always first); delegate to \`Explore\` in parallel only when search is insufficient (read directly only files you will act on); delegate to \`General-Purpose\` FREELY for multi-step work combining investigation, tool workflows, and code changes; invoke \`reviewer\` ONLY when the change is genuinely behavior-changing, cross-boundary, or risk-sensitive (\`reviewer\` narrows scope with search first and may invoke \`Explore\` for targeted discovery); handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
         : `${profileLabel} launch profile. The lead coordinates execution across specialized roles: delegate broad discovery to \`Explore\` in parallel and do not sweep the repo yourself (read directly only files you will act on); delegate to \`Plan\` in plan mode or when structuring complex multi-step sequencing (\`Plan\` is an advisory planning capability, not an approval gate, and writes handoff-ready steps for \`General-Purpose\`); delegate mixed multi-step execution and Plan handoffs to \`General-Purpose\` in a fresh context; delegate to \`reviewer\` after behavior-changing or risk-sensitive implementation to verify correctness before declaring done; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
-    // Balanced has no Advisor: the ladder is search → Explore → Oracle
-    // (second opinion on a framed question, never discovery).
-    const consultationLadder = isBalanced
+    // Balanced and `local` have no Advisor: the ladder is search → Explore →
+    // Oracle (second opinion on a framed question, never discovery).
+    const consultationLadder = !hasAdvisor
       ? "Verify claims against real evidence: run relevant commands and tests. Funnel unknowns cheapest-first: (1) `code_search` + `web` search narrow scope and rule out hypotheses first; (2) `Explore` for targeted breadth when search is insufficient; (3) `oracle` "
         + oracleDescriptor
         + " as a second opinion for precise, self-contained technical/architectural trade-offs that search and `Explore` cannot settle. Optimize for accuracy, intelligence, and correctness at the lowest cost."
@@ -731,7 +812,7 @@ export function buildOperatingDefaultsDigest(
         + " for self-contained technical/architectural trade-offs"
         + astraStep
     // Mirror of the directive's windowNote, condensed for the digest.
-    const digestWindowNote = isCheapest || isBalanced
+    const digestWindowNote = isCheapest || isBalanced || isLocal
       ? "All roles run at a 200K context window — use targeted reads over full file reads.\n\n"
       : isCheap
         ? "The lead runs at 200K on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — use targeted reads over full file reads.\n\n"

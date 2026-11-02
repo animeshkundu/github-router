@@ -87,12 +87,15 @@ import { resolvePiSurfaces, writePiMcpJson } from "./lib/pi-mcp-config"
 import {
   formatBalancedPrerequisiteFailure,
   formatCheapestPrerequisiteFailure,
+  formatLocalPrerequisiteFailure,
   profileDescriptor,
   resolveLaunchProfile,
   validateBalancedProfilePrerequisites,
   validateCheapestProfilePrerequisites,
+  validateLocalProfilePrerequisites,
 } from "./lib/launch-profile"
-import { isBalancedFamily, isCheapestFamily } from "./lib/profile-family"
+import { configureLocalEgress, localBaseUrl } from "./lib/local-egress"
+import { isBalancedFamily, isCheapestFamily, isLocalFamily } from "./lib/profile-family"
 import {
   getPiLaunchEnvVars,
   parseSharedArgs,
@@ -106,7 +109,17 @@ export const piArgs = {
     alias: "m",
     type: "string",
     description:
-      "Pi launch profile: cheapest/cheapest2 (Luna-led, cheapest tier) or balanced/balanced2 (Sol-led, most-complex-tasks tier). The `-2` aliases move the Sol tier from 5.6 to 6.1; cheapest2 also raises the Advisor to high, and balanced2's Oracle is Grok 4.7. Only these four aliases are supported for `github-router pi`.",
+      "Pi launch profile: cheapest/cheapest2 (Luna-led, cheapest tier), balanced/balanced2 (Sol-led, most-complex-tasks tier), or local/local2 (main loop runs against a locally running Anthropic-compatible server instead of Copilot, which keeps serving the Oracle and local2's Advisor). The `-2` aliases move the Sol tier from 5.6 to 6.1; cheapest2 also raises the Advisor to high, and balanced2's Oracle is Grok 4.7. Only these six aliases are supported for `github-router pi`.",
+  },
+  localport: {
+    type: "string" as const,
+    description:
+      "Port of the LOCAL MODEL SERVER that `-m local` / `-m local2` forward the main loop to (not the proxy's own --port). Default 11111, giving https://localhost:11111/v1. Inert on every other profile.",
+  },
+  localurl: {
+    type: "string" as const,
+    description:
+      "Full base URL, including the /v1 prefix, of the local model server for `-m local` / `-m local2` (e.g. http://localhost:11434/v1). Sets scheme/host/path, which --localport cannot. Mutually exclusive with --localport. Inert on every other profile.",
   },
   "update-check": {
     type: "boolean" as const,
@@ -221,7 +234,8 @@ async function writeTextFile(file: string, content: string): Promise<void> {
 export const pi = defineCommand({
   meta: {
     name: "pi",
-    description: "Start the proxy server and launch the Pi coding agent (cheapest/balanced families)",
+    description:
+      "Start the proxy server and launch the Pi coding agent (cheapest/balanced families, or a local model server)",
   },
   args: piArgs,
   async run({ args, rawArgs }) {
@@ -234,14 +248,34 @@ export const pi = defineCommand({
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
     const launchProfileId = resolveLaunchProfile(args.model)
     if (
-      !isCheapestFamily(launchProfileId) && !isBalancedFamily(launchProfileId)
+      !isCheapestFamily(launchProfileId) &&
+      !isBalancedFamily(launchProfileId) &&
+      !isLocalFamily(launchProfileId)
     ) {
       process.stderr.write(
-        `github-router pi supports only -m cheapest, -m cheapest2, -m balanced, and -m balanced2 (got ${JSON.stringify(args.model ?? "")}).\n`,
+        `github-router pi supports only -m cheapest, -m cheapest2, -m balanced, -m balanced2, -m local, and -m local2 (got ${JSON.stringify(args.model ?? "")}).\n`,
       )
       process.exit(1)
     }
     const profileId: PiProfileId = launchProfileId
+
+    // Local egress is resolved once, before the server accepts requests, so
+    // the same `--localport` / `--localurl` resolution serves both subcommands.
+    try {
+      configureLocalEgress({
+        ...(typeof args.localurl === "string" ? { baseUrl: args.localurl } : {}),
+        ...(typeof args.localport === "string" ? { port: args.localport } : {}),
+        profileId,
+      })
+      if (isLocalFamily(profileId)) {
+        consola.info(`[local] upstream ${localBaseUrl()}`)
+      }
+    } catch (error) {
+      process.stderr.write(
+        `${error instanceof Error ? error.message : String(error)}\n`,
+      )
+      process.exit(1)
+    }
 
     let server: Awaited<ReturnType<typeof setupAndServe>>["server"]
     let serverUrl: string
@@ -385,21 +419,27 @@ export const pi = defineCommand({
 
     // Pin-mode prerequisites against the live catalog (fail-closed).
     // Peerless launches validate the lead only (nothing else is consumed).
-    const prereqCheck = isCheapestFamily(profileId)
-      ? validateCheapestProfilePrerequisites(
-          state.models,
-          { peers: peersEnabled },
-          profileId,
-        )
-      : validateBalancedProfilePrerequisites(
-          state.models,
-          { peers: peersEnabled },
-          profileId,
-        )
+    // Local profiles need no catalog entry for any role they run locally;
+    // `local2` validates only its Copilot-served Advisor.
+    const prereqCheck = isLocalFamily(profileId)
+      ? validateLocalProfilePrerequisites(state.models, profileId)
+      : isCheapestFamily(profileId)
+        ? validateCheapestProfilePrerequisites(
+            state.models,
+            { peers: peersEnabled },
+            profileId,
+          )
+        : validateBalancedProfilePrerequisites(
+            state.models,
+            { peers: peersEnabled },
+            profileId,
+          )
     if (!prereqCheck.ok) {
-      const message = isCheapestFamily(profileId)
-        ? formatCheapestPrerequisiteFailure(prereqCheck.missing, profileId)
-        : formatBalancedPrerequisiteFailure(prereqCheck.missing, profileId)
+      const message = isLocalFamily(profileId)
+        ? formatLocalPrerequisiteFailure(prereqCheck.missing, profileId, "pi")
+        : isCheapestFamily(profileId)
+          ? formatCheapestPrerequisiteFailure(prereqCheck.missing, profileId)
+          : formatBalancedPrerequisiteFailure(prereqCheck.missing, profileId)
       consola.error(message)
       process.stderr.write(`${message}\n`)
       process.exit(1)
@@ -425,6 +465,14 @@ export const pi = defineCommand({
     // on shutdown before the mirror is removed.
     let packagesForCache: Array<PiPackageEntry> = []
 
+    // `/v1/messages` launch binding. Minted here, before models.json is
+    // written, because the local tier rows must carry it as a per-model
+    // header: without the secret the proxy sees Pi's lead traffic as
+    // unbound BYO and routes it to Copilot, so a local session gets
+    // Copilot's "model is not supported" 400 for the bare `opus` id.
+    // Registered further down with the same value.
+    const launchSecret = randomBytes(32).toString("hex")
+
     // Generate the mode's Pi files into the mirror.
     try {
       const catalog = state.models?.data.map((m) => {
@@ -443,7 +491,22 @@ export const pi = defineCommand({
       })
       await writeJsonFile(
         path.join(mirror, "models.json"),
-        buildPiModelsJson({ serverUrl, profileId, catalog, peers: peersEnabled }),
+        buildPiModelsJson({
+          serverUrl,
+          profileId,
+          catalog,
+          peers: peersEnabled,
+          // Local tier rows carry `x-claude-code-session-id` (the local server
+          // rejects a request without one). Pi has no such header of its own,
+          // so the launch seeds the same process-level id the proxy falls back
+          // to for Claude Code.
+          sessionId: state.sessionId,
+          // Binds Pi's lead turns to THIS launch, the same channel Claude Code
+          // gets through `ANTHROPIC_CUSTOM_HEADERS`. Copilot-served rows never
+          // carry it: a bound launch whose profile is local routes to the
+          // local endpoint, which is not where those ids belong.
+          launchSecret,
+        }),
       )
 
       // Merge over snapshotted user settings: our keys win, user keys survive.
@@ -680,11 +743,10 @@ export const pi = defineCommand({
     // the unwritten tools.
     const descriptor = profileDescriptor(profileId)
     const nonce = randomBytes(32).toString("hex")
-    const secret = randomBytes(32).toString("hex")
     const entry = registerLaunch({
       profileId,
       nonce,
-      secret,
+      secret: launchSecret,
       allowedGroups: peersEnabled
         ? descriptor.allowedGroups
         : new Set(

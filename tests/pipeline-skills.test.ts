@@ -126,7 +126,18 @@ describe("pipeline skills registry", () => {
 
   test("covers every pinned profile and excludes standard", () => {
     expect([...PIPELINE_SKILL_PROFILES].sort()).toEqual(
-      ["balanced", "balanced2", "cheap", "cheap1m", "cheapest", "cheapest2", "fast", "max"].sort() as Array<
+      [
+        "balanced",
+        "balanced2",
+        "cheap",
+        "cheap1m",
+        "cheapest",
+        "cheapest2",
+        "fast",
+        "local",
+        "local2",
+        "max",
+      ].sort() as Array<
         (typeof PIPELINE_SKILL_PROFILES)[number]
       >,
     )

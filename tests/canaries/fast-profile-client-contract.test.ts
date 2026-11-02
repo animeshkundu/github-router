@@ -57,6 +57,8 @@ const REQUIRED_MARKERS = [
     'var nXt="advisor_20260301",oXt="advisor_20260301".replace(/\\d+$/,"");',
     // 2.1.314: same two bindings, rolled names.
     'var f7t="advisor_20260301",p7t="advisor_20260301".replace(/\\d+$/,"");',
+    // 2.1.316: same two bindings, rolled names once more.
+    'var bQt="advisor_20260301",wQt="advisor_20260301".replace(/\\d+$/,"");',
   ],
   [
     'type:"advisor_20260301",name:"advisor",model:',
@@ -69,6 +71,10 @@ const REQUIRED_MARKERS = [
     "push({type:nXt,name:vNe,model:Dd,...Ua&&{defer_loading:!0}})",
     // And in 2.1.314.
     "push({type:f7t,name:oFe,model:Ld,...Vl&&{defer_loading:!0}})",
+    // 2.1.316: identifiers rolled, shape unchanged. The advisor name is now
+    // held in `CFe="advisor"` rather than inlined, which is why the literal
+    // `type:"advisor_20260301",name:"advisor",model:` no longer appears.
+    "push({type:bQt,name:CFe,model:bd,...Nl&&{defer_loading:!0}})",
   ],
   "Advising",
   " using ",
@@ -86,6 +92,9 @@ const REQUIRED_MARKERS = [
     'check:N((e,o,r)=>nt(e,"{ model }",(n)=>typeof n.model==="string")??Ot("deny",e,r))',
     // 2.1.314: same predicate and the same `?? deny(...)` fallback.
     'check:M((e,o,r)=>st(e,"{ model }",(n)=>typeof n.model==="string")??Ot("deny",e,r))',
+    // 2.1.316: the outer check identifier rolled (M -> N); inner `st` and
+    // `Ot("deny", ...)` are unchanged.
+    'check:N((e,o,r)=>st(e,"{ model }",(n)=>typeof n.model==="string")??Ot("deny",e,r))',
     "a rewrite changes model alone",
   ],
   'agentType:"Explore"',

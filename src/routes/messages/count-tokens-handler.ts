@@ -15,6 +15,8 @@ import {
   identityPreflightErrorResponse,
   runMessagesIdentityPreflight,
 } from "~/lib/messages-identity-preflight"
+import { isLocalFamily } from "~/lib/profile-family"
+import { localBaseUrl, localSessionId } from "~/lib/local-egress"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyRecord = Record<string, any>
@@ -130,24 +132,46 @@ export async function handleCountTokens(c: Context) {
     }
   }
 
-  const { body: finalBody, originalModel, resolvedModel } = resolveModelInBody(strippedBody)
+  const localProfileRequest = isLocalFamily(identity.launch?.profileId)
+
+  // A local profile forwards the body VERBATIM, for the same reasons as the
+  // main `/v1/messages` handler: `resolveModel` would rewrite the bare `opus`
+  // tier id, and the strip passes are Copilot schema workarounds for a server
+  // this profile has refused to assume anything about.
+  const { body: finalBody, originalModel, resolvedModel } = localProfileRequest
+    ? localModelInBody(strippedBody)
+    : resolveModelInBody(strippedBody)
 
   const extraHeaders: Record<string, string> = {}
   const anthropicBeta = c.req.header("anthropic-beta")
   if (anthropicBeta) {
-    const filtered = filterBetaHeader(anthropicBeta)
+    // Verbatim on a local profile: the allowlist states what COPILOT supports.
+    // The one value dropped is the proxy's own advisor marker.
+    const filtered = localProfileRequest
+      ? anthropicBeta
+          .split(",")
+          .map((part) => part.trim())
+          .filter((part) => part.length > 0 && !part.startsWith("advisor-tool-"))
+          .join(",")
+      : filterBetaHeader(anthropicBeta)
     if (filtered) extraHeaders["anthropic-beta"] = filtered
   }
 
   const modelId = resolvedModel ?? originalModel
-  const selectedModel = state.models?.data.find((m) => m.id === modelId)
+  // The catalog says nothing about a local model, so consulting it could only
+  // contribute Copilot request headers the local server never asked for.
+  const selectedModel = localProfileRequest
+    ? undefined
+    : state.models?.data.find((m) => m.id === modelId)
 
   // retryTransient: true — count_tokens is non-streaming, so the whole call
   // is pre-first-byte and a transient retry is safe.
   const response = await countTokens(finalBody, {
     ...selectedModel?.requestHeaders,
     ...extraHeaders,
-  }, undefined, true)
+  }, undefined, true, localProfileRequest ?
+    { baseUrl: localBaseUrl(), sessionId: localSessionId(c) }
+  : undefined)
   const responseBody = await parseJsonOrDiagnose<{ input_tokens?: number }>(
     response,
     c.req.path,
@@ -167,6 +191,32 @@ export async function handleCountTokens(c: Context) {
   )
 
   return c.json(responseBody)
+}
+
+/**
+ * Verbatim alternative to `resolveModelInBody` for the local profiles: read
+ * the body's own `model` and change nothing else. See the sibling helper in
+ * `handler.ts` for the full rationale.
+ */
+function localModelInBody(rawBody: string): {
+  body: string
+  originalModel?: string
+  resolvedModel?: string
+} {
+  let originalModel: string | undefined
+  try {
+    const parsed: unknown = JSON.parse(rawBody)
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const model = (parsed as AnyRecord).model
+      if (typeof model === "string" && model.length > 0) originalModel = model
+    }
+  } catch {
+    // Malformed body: forwarded verbatim; the local server owns the parse error.
+  }
+  return {
+    body: rawBody,
+    ...(originalModel ? { originalModel, resolvedModel: originalModel } : {}),
+  }
 }
 
 /**

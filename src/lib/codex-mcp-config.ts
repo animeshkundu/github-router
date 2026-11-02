@@ -19,6 +19,11 @@ import {
   CHEAPEST_PROFILE_NATIVE_EFFORTS,
 } from "./cheapest-profile-contract"
 import {
+  LOCAL_PROFILE_NATIVE_AGENT_NAMES,
+  LOCAL_PROFILE_NATIVE_MODELS,
+  LOCAL_PROFILE_TIER_MODELS,
+} from "./local-profile-contract"
+import {
   BALANCED_PROFILE_NATIVE_AGENT_NAMES,
   BALANCED_PROFILE_NATIVE_EFFORTS,
 } from "./balanced-profile-contract"
@@ -235,6 +240,18 @@ interface BuildOpts {
   balancedExploreModel?: string
   balancedGeneralPurposeModel?: string
   balancedReviewerModel?: string
+  /** Local-profile role assignments. The cheapest surface with every role's
+   *  model swapped for the local endpoint's own tier id (`haiku`/`sonnet`/
+   *  `opus`), which is not a Copilot catalog id and must never be
+   *  alias-translated. */
+  localProfile?: boolean
+  localExploreModel?: string
+  localGeneralPurposeModel?: string
+  localReviewerModel?: string
+  /** Whether this launch has a server-side Advisor (`local2` yes, `local`
+   *  no). Gates the reviewer's protege-advisor appendix, which names an
+   *  `advisor` tool: a prompt must never name a tool the session lacks. */
+  advisorAvailable?: boolean
   /** Max-profile role assignments. */
   maxProfile?: boolean
   maxExploreModel?: string
@@ -1371,6 +1388,113 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
   return out
 }
 
+/**
+ * Build the literal `-m local` / `-m local2` native roster.
+ *
+ * The cheapest surface with the cheapest prompts, differing in exactly one
+ * dimension: every role's `model:` is the LOCAL endpoint's own tier id
+ * (`haiku` / `sonnet` / `opus`) instead of a router-owned alias. Those ids
+ * resolve back to themselves through the `ANTHROPIC_DEFAULT_*_MODEL` tier rows
+ * the launcher seeds, so Claude Code neither catalog-resolves them nor
+ * upgrades their accounting, and the local server receives the id it
+ * advertises.
+ *
+ * Deliberately NOT run through `MODEL_ALIAS_TABLE`: that table exists so
+ * Claude Code will not `[1m]`-upgrade a REAL catalog id, and a local tier id is
+ * not a catalog id at all.
+ *
+ * The one prompt deviation from cheapest is the reviewer's optional protege
+ * appendix, which names an `advisor` tool. It is emitted only when the launch
+ * actually has an Advisor (`local2`): naming a tool that does not exist is the
+ * failure mode the droppable-agent rule exists to prevent.
+ */
+function buildLocalProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
+  const exploreModel = opts.localExploreModel ?? LOCAL_PROFILE_NATIVE_MODELS.Explore
+  const generalModel =
+    opts.localGeneralPurposeModel ?? LOCAL_PROFILE_NATIVE_MODELS["General-Purpose"]
+  const reviewerModel = opts.localReviewerModel ?? LOCAL_PROFILE_NATIVE_MODELS.reviewer
+  const semanticAvailable = opts.semanticSearchAvailable === true
+  const protegeAdvisor = opts.advisorAvailable === true
+
+  const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
+  const searchMcpServers = opts.serverUrl
+    ? {
+        [searchKey]: httpEntryFor(
+          opts.serverUrl,
+          "search",
+          opts.nonce,
+          opts.workspaceHeaderCmd,
+        ),
+      }
+    : undefined
+
+  const readSearchTools = ["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", `mcp__${searchKey}__*`]
+  const effort = (name: keyof typeof CHEAPEST_PROFILE_NATIVE_EFFORTS): SubagentEffort =>
+    CHEAPEST_PROFILE_NATIVE_EFFORTS[name]
+
+  const out: PeerAgentDefinitions = {
+    Explore: {
+      description: pinnedExploreDescription(false, true),
+      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled }),
+      tools: readSearchTools,
+      model: exploreModel,
+      effort: effort("Explore"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    "General-Purpose": {
+      description: pinnedGeneralPurposeDescription(false, false, true),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true }),
+      model: generalModel,
+      effort: effort("General-Purpose"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    reviewer: {
+      description: pinnedReviewerDescription(false, false, true, protegeAdvisor),
+      prompt: pinnedReviewerPrompt(semanticAvailable, { is200K: true, protegeAdvisor }),
+      model: reviewerModel,
+      effort: effort("reviewer"),
+      tools: readSearchTools,
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+  }
+
+  if (opts.browseAvailable && opts.groupKeys.workers) {
+    const workersKey = workersKeyOf(opts.groupKeys)
+    out["worker-browse"] = {
+      description: dispatcherDescription("browse"),
+      prompt: dispatcherPrompt("browse", workersKey),
+      // Amended from cheapest, which pins BROWSE_LOW_ALIAS_ID: local egress is
+      // byte-faithful, so the alias would be forwarded verbatim and the local
+      // server has never heard of it. The cheapest tier is the local haiku.
+      model: LOCAL_PROFILE_TIER_MODELS.haiku,
+      effort: "low",
+      tools: dispatcherTools("browse", workersKey),
+      ...(opts.serverUrl
+        ? {
+            mcpServers: {
+              [workersKey]: httpEntryFor(
+                opts.serverUrl,
+                "workers",
+                opts.nonce,
+                opts.workspaceHeaderCmd,
+              ),
+            },
+          }
+        : {}),
+    }
+  }
+
+  const roster = opts.nativeRoster == null
+    ? new Set<string>(LOCAL_PROFILE_NATIVE_AGENT_NAMES)
+    : opts.nativeRoster instanceof Set
+      ? opts.nativeRoster
+      : new Set(opts.nativeRoster)
+  for (const name of Object.keys(out)) {
+    if (name !== "worker-browse" && !roster.has(name)) delete out[name]
+  }
+  return out
+}
+
 /** Build the literal `-m balanced` native roster. Three-agent surface
  * (`Explore`, `General-Purpose`, `reviewer` — no `Plan`: the lead owns
  * planning directly), Sol-led at the 200K default window for the most
@@ -1487,6 +1611,7 @@ export function buildPeerAgentDefinitions(
   if (opts.cheapProfile) return buildCheapProfileAgentDefinitions(opts)
   if (opts.cheapestProfile) return buildCheapestProfileAgentDefinitions(opts)
   if (opts.balancedProfile) return buildBalancedProfileAgentDefinitions(opts)
+  if (opts.localProfile) return buildLocalProfileAgentDefinitions(opts)
 
   const out: PeerAgentDefinitions = {}
   const personas = personasFor({
@@ -1840,6 +1965,13 @@ interface WriteOpts {
   balancedExploreModel?: string
   balancedGeneralPurposeModel?: string
   balancedReviewerModel?: string
+  /** Local-profile role assignments, mirrored from `BuildOpts`. */
+  localProfile?: boolean
+  localExploreModel?: string
+  localGeneralPurposeModel?: string
+  localReviewerModel?: string
+  /** `advisorAvailable` mirror, from `BuildOpts`. */
+  advisorAvailable?: boolean
   /** Whether local ColBERT semantic search or Bluebird semantic routing is
    *  available for this launch. */
   semanticSearchAvailable?: boolean
@@ -2421,6 +2553,11 @@ export async function writePeerMcpRuntimeFiles(
     balancedExploreModel: opts.balancedExploreModel,
     balancedGeneralPurposeModel: opts.balancedGeneralPurposeModel,
     balancedReviewerModel: opts.balancedReviewerModel,
+    localExploreModel: opts.localExploreModel,
+    localGeneralPurposeModel: opts.localGeneralPurposeModel,
+    localReviewerModel: opts.localReviewerModel,
+    localProfile: opts.localProfile,
+    advisorAvailable: opts.advisorAvailable,
     semanticSearchAvailable: opts.semanticSearchAvailable,
     bluebirdEnabled: opts.bluebirdEnabled,
     nativeRoster: opts.nativeRoster,

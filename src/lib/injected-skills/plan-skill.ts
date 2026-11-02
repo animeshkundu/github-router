@@ -1,17 +1,24 @@
-import { isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
+import { isBalancedFamily, isCheapestFamily, isLocalFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
 
 /**
- * Profiles without a `Plan` native (`cheapest`, `balanced`): the lead plans
- * directly instead of dispatching a Plan subagent. Every other profile uses
- * the native Plan dispatch.
+ * Profiles without a `Plan` native (`cheapest`, `balanced`, `local`): the lead
+ * plans directly instead of dispatching a Plan subagent. Every other profile
+ * uses the native Plan dispatch.
  */
-export type PlanSkillProfile = "cheapest" | "cheapest2" | "balanced" | "balanced2"
+export type PlanSkillProfile =
+  | "cheapest"
+  | "cheapest2"
+  | "balanced"
+  | "balanced2"
+  | "local"
+  | "local2"
 
 export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
-  const leadPlansDirectly = isCheapestFamily(profile) || isBalancedFamily(profile)
+  const leadPlansDirectly =
+    isCheapestFamily(profile) || isBalancedFamily(profile) || isLocalFamily(profile)
   const planningMeans = leadPlansDirectly
-    ? "the lead plans directly (no Plan subagent exists on the cheapest/balanced rosters)"
+    ? "the lead plans directly (no Plan subagent exists on the cheapest/balanced/local rosters)"
     : "dispatch the native Plan subagent (subagent_type Plan) present on the profile roster where provided; profile frontmatter pins its model and effort (Sol at the 200K default window)"
   const dispatchStep = leadPlansDirectly
     ? `3. Compose the plan directly with that brief, then validate it against
@@ -34,7 +41,8 @@ export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProf
    send ONE bounded follow-up to the same Plan dispatch naming the exact gaps
    (at most 2 follow-up rounds total). If still underspecified, checkpoint
    with the gaps as residual risk instead of pretending the plan is complete.`
-  const advisorStep = isCheapestFamily(profile)
+  // `local2` carries an Advisor; `local` is Advisor-free by design.
+  const advisorStep = isCheapestFamily(profile) || profile === "local2"
     ? `
 6. Review the final plan with the Advisor before presenting it to the user:
    consult \`advisor\` once for a framing check. It is non-binding counsel;

@@ -234,6 +234,121 @@ describe("pi models.json", () => {
   })
 })
 
+describe("pi models.json local profiles", () => {
+  const SESSION = "pi-session-local-1"
+  const LAUNCH_SECRET = "launch-secret-local-1"
+
+  test("anthropic-messages provider, tier rows carry the launch session id", () => {
+    for (const profile of ["local", "local2"] as const) {
+      const json = buildPiModelsJson({
+        serverUrl: "http://127.0.0.1:8787",
+        profileId: profile,
+        sessionId: SESSION,
+        launchSecret: LAUNCH_SECRET,
+      })
+      const provider = json.providers["gh-router"]
+      // The local endpoint speaks Anthropic Messages natively, so that is the
+      // provider default; the Copilot-served rows override it per model.
+      expect(provider.api).toBe("anthropic-messages")
+      // Pi's bundled Anthropic client POSTs `{baseUrl}/v1/messages`, so the
+      // local root must be the bare origin. Measured against the installed
+      // Pi bundle: on the `/v1` root it requested `/v1/v1/messages` and the
+      // proxy answered 404.
+      expect(provider.baseUrl).toBe("http://127.0.0.1:8787")
+      const rows = Object.fromEntries(provider.models.map((m) => [m.id, m]))
+      for (const id of ["opus", "sonnet", "haiku"]) {
+        const row = rows[id]
+        expect(row).toBeDefined()
+        // The endpoint 400s a request that carries no session id, and the
+        // proxy needs the launch secret to know the lead traffic belongs to
+        // a local launch rather than an unbound BYO caller.
+        expect(row.headers).toEqual({
+          "x-claude-code-session-id": SESSION,
+          "X-GH-Router-Launch-Secret": LAUNCH_SECRET,
+        })
+        // Bare tier ids inherit the provider's Anthropic wire format.
+        expect(row.api).toBeUndefined()
+        expect(row.contextWindow).toBe(200_000)
+        // We know nothing about the endpoint's pricing or effort ladder, so
+        // neither is invented here.
+        expect(row.cost).toBeUndefined()
+        expect(row.thinkingLevelMap).toBeUndefined()
+      }
+      // gpt-6.1-sol is Copilot-served (oracle on both profiles, advisor too
+      // on local2) and must not be sent down the Anthropic wire.
+      const sol = rows["gpt-6.1-sol"]
+      expect(sol).toBeDefined()
+      expect(sol.api).toBe("openai-responses")
+      expect(sol.headers).toBeUndefined()
+      // Pi's OpenAI client POSTs `{baseUrl}/responses`, so the Copilot-served
+      // rows carry the `/v1` root the provider no longer supplies.
+      expect(sol.baseUrl).toBe("http://127.0.0.1:8787/v1")
+      // The local tier rows inherit the bare origin and must NOT carry one.
+      for (const id of ["opus", "sonnet", "haiku"]) {
+        expect(rows[id].baseUrl).toBeUndefined()
+      }
+    }
+  })
+
+  test("no session id means no header rather than an empty one", () => {
+    const json = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "local",
+    })
+    for (const m of json.providers["gh-router"].models) {
+      expect(m.headers).toBeUndefined()
+    }
+  })
+
+  test("each header is emitted only when its value is supplied", () => {
+    const secretOnly = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "local",
+      launchSecret: LAUNCH_SECRET,
+    })
+    const sessionOnly = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "local",
+      sessionId: SESSION,
+    })
+    for (const [json, expected] of [
+      [secretOnly, { "X-GH-Router-Launch-Secret": LAUNCH_SECRET }],
+      [sessionOnly, { "x-claude-code-session-id": SESSION }],
+    ] as const) {
+      const rows = Object.fromEntries(
+        json.providers["gh-router"].models.map((m) => [m.id, m]),
+      )
+      for (const id of ["opus", "sonnet", "haiku"]) {
+        expect(rows[id].headers).toEqual(expected)
+      }
+      // A Copilot-served row is never bound to the local launch.
+      expect(rows["gpt-6.1-sol"].headers).toBeUndefined()
+    }
+  })
+
+  test("roster: bare tier ids, Copilot oracle, advisor only on local2", () => {
+    const json = buildPiModelsJson({
+      serverUrl: "http://127.0.0.1:8787",
+      profileId: "local",
+    })
+    expect(
+      json.providers["gh-router"].models.map((m) => m.id).sort(),
+    ).toEqual(["gpt-6.1-sol", "haiku", "opus", "sonnet"])
+
+    expect(piLeadModel("local")).toBe("opus")
+    expect(piNativeRoles("local").map((r) => `${r.name}:${r.model}`)).toEqual([
+      "Explore:haiku",
+      "General-Purpose:sonnet",
+      "reviewer:opus",
+    ])
+    expect(piAdvisorModel("local")).toBeUndefined()
+    expect(piAdvisorModel("local2")).toEqual({
+      model: "gpt-6.1-sol",
+      thinking: "high",
+    })
+  })
+})
+
 describe("pi models.json vision + thinking + api parity", () => {
   test("vision fail-open: unknown advertises image, explicit false is text-only", () => {
     const json = buildPiModelsJson({

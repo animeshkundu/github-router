@@ -50,6 +50,7 @@ import {
 import {
   balancedContractFor,
   cheapestContractFor,
+  localContractFor,
 } from "./profile-family"
 import { state, type State } from "./state"
 import {
@@ -586,9 +587,21 @@ export function cheapestAdvisorModel(profileId?: string): string | undefined {
   return contract.advisorModel
 }
 
-/** Sol Oracle for the cheapest family at the 200K default window. */
-export function cheapestOracleModel(profileId?: string): string | undefined {
-  const contract = cheapestContractFor(profileId)
+/**
+ * Catalog gate shared by every family Oracle: the contract's model must be
+ * present, serve enough prompt/window for the family's subagent budget, offer
+ * the contract's effort, and route over `/responses`.
+ *
+ * The local profiles use it too. Their LEAD turns go to the local endpoint, but
+ * the Oracle is still a Copilot persona, so it is gated against the live
+ * catalog exactly like the cheapest family's rather than falling back to the
+ * fast-profile default.
+ */
+function familyOracleModelFor(contract: {
+  oracleModel: string
+  oracleEffort: string
+  subagentContextTokens: number
+}): string | undefined {
   const found = state.models?.data.find((m) => m.id === contract.oracleModel)
   if (!found) return undefined
   if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < contract.subagentContextTokens) return undefined
@@ -597,6 +610,16 @@ export function cheapestOracleModel(profileId?: string): string | undefined {
   if (!Array.isArray(efforts) || !efforts.includes(contract.oracleEffort)) return undefined
   if (fastEndpointForModel(found) !== "responses") return undefined
   return contract.oracleModel
+}
+
+/** Sol Oracle for the cheapest family at the 200K default window. */
+export function cheapestOracleModel(profileId?: string): string | undefined {
+  return familyOracleModelFor(cheapestContractFor(profileId))
+}
+
+/** Copilot-served Oracle for `local` / `local2` at the 200K default window. */
+export function localOracleModel(profileId?: string): string | undefined {
+  return familyOracleModelFor(localContractFor(profileId))
 }
 
 /** Luna/max reviewer for the cheapest family at the 200K default window. */
@@ -629,15 +652,7 @@ export function cheapAstraModel(): string | undefined {
 /** Exact Grok only: the balanced-family Oracle at 200K/medium, like cheap.
  *  `balanced` gates `grok-4.6`, `balanced2` gates `grok-4.7`. */
 export function balancedOracleModel(profileId?: string): string | undefined {
-  const contract = balancedContractFor(profileId)
-  const found = state.models?.data.find((m) => m.id === contract.oracleModel)
-  if (!found) return undefined
-  if ((found.capabilities?.limits?.max_context_window_tokens ?? 0) < contract.subagentContextTokens) return undefined
-  if ((found.capabilities?.limits?.max_prompt_tokens ?? 0) <= 0) return undefined
-  const efforts = found.capabilities?.supports?.reasoning_effort
-  if (!Array.isArray(efforts) || !efforts.includes(contract.oracleEffort)) return undefined
-  if (fastEndpointForModel(found) !== "responses") return undefined
-  return contract.oracleModel
+  return familyOracleModelFor(balancedContractFor(profileId))
 }
 
 /** Sol reviewer for the balanced family at the 200K default window. */

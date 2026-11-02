@@ -1,7 +1,7 @@
 # Pi launch (`github-router pi`)
 
 Launches the [Pi coding agent](https://pi.dev) against the proxy with a
-fixed, cost-controlled profile. Four `-m` aliases are supported; the two
+fixed, cost-controlled profile. Six `-m` aliases are supported; the two
 `-2` variants are derived from their base profile and move only the model
 identities named below:
 
@@ -11,18 +11,67 @@ identities named below:
 | `cheapest2` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol 6.1/high Advisor (plan review + capped reviewer rounds), Sol 6.1/high Oracle |
 | `balanced` | `gpt-5.6-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 5.6/high, may delegate Explore); no Plan | Grok 4.6/medium Oracle only — **advisor-free by design** |
 | `balanced2` | `gpt-6.1-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 6.1/high, may delegate Explore); no Plan | Grok 4.7/medium Oracle only — **advisor-free by design** |
+| `local` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/high); no Plan | Sol 6.1/high Oracle only — **advisor-free by design** |
+| `local2` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/high); no Plan | Sol 6.1/high Advisor (plan review + capped reviewer rounds), Sol 6.1/high Oracle |
 
 Both `-2` profiles inherit everything else from their base: the delegation
 graph, the peer set, the prompt-rewrite brief (`cheapest` family only), the
 compaction reserves, and the bare-200K accounting. `balanced2` keeps the
 declarative `astra` slot (`gpt-6-astra`, not callable on this family).
 
-No role runs above its Copilot **Default-tier** window (Luna/Sol 272K, Grok
-200K, anything else 200K) — that is the whole cost lever here, the Pi
-counterpart of the bare-200K default window the Claude `cheap` family
-(`cheap`, `cheap1m`) and the `cheapest`/`balanced` families (each including
-its `-2` sibling) rely on. There is no `[1m]` accounting anywhere; see
-[Tier-priced context windows](#tier-priced-context-windows).
+No Copilot-served role runs above its **Default-tier** window (Luna/Sol
+272K, Grok 200K, anything else 200K) — that is the whole cost lever here,
+the Pi counterpart of the bare-200K default window the Claude `cheap` family
+(`cheap`, `cheap1m`), the `cheapest`/`balanced` families (each including
+its `-2` sibling), and the `local` family rely on. There is no `[1m]`
+accounting anywhere; see [Tier-priced context windows](#tier-priced-context-windows).
+
+### Local profiles (`-m local`, `-m local2`)
+
+The two local aliases are the Pi counterpart of the Claude `-m local` /
+`-m local2` launch profiles: the main loop runs against a locally running
+server that already speaks Anthropic Messages, and Copilot keeps serving the
+Oracle (and, for `local2`, the Advisor). The endpoint is configured exactly
+as the Claude launcher configures it — `--localurl <url>` > `--localport
+<port>` > `GH_ROUTER_LOCAL_BASE_URL` > `GH_ROUTER_LOCAL_PORT` > the default
+`https://localhost:11111/v1`; the two flags are a launch error together and
+are inert on every other profile. Nothing is assumed about the server beyond
+that base URL: no stack detection, no model discovery, no launch-time
+request, and no fallback to Copilot.
+
+On the Pi side that means these concrete differences from a Copilot profile:
+
+- The provider's `api` is `anthropic-messages` (every Copilot-served row —
+  the Oracle and `local2`'s Advisor — is pinned back to `openai-responses`,
+  so the two never mix).
+- The provider's `baseUrl` is the proxy ORIGIN, not `<proxy>/v1`: Pi's
+  bundled Anthropic client POSTs `{baseUrl}/v1/messages`, so the `/v1` root
+  produced `/v1/v1/messages` and a proxy 404 (measured against the installed
+  Pi bundle). Each Copilot-served row overrides `baseUrl` back to
+  `<proxy>/v1`, which is what the OpenAI client's `{baseUrl}/responses`
+  expects. Non-local providers keep the `/v1` root.
+- Each tier row carries a per-model `x-claude-code-session-id` header
+  (`state.sessionId`), because the local server rejects a conversation
+  without one. This is the "populate the same session id" requirement; Claude
+  Code's own header is forwarded verbatim on the Claude path.
+- Each tier row also carries `X-GH-Router-Launch-Secret`, the same value
+  `/mcp` registration holds. The proxy keys its local routing off the launch
+  bound to that header; a request without it is treated as unbound BYO
+  traffic and goes to Copilot, where the bare `opus` id does not exist (the
+  observed symptom was Copilot's "The requested model is not supported" 400).
+  Claude Code gets the header through `ANTHROPIC_CUSTOM_HEADERS`; Pi has no
+  such channel, so `models.json` is it. Copilot-served rows deliberately
+  never carry it, or their own ids would be routed to the local server.
+- Tier rows are the bare ids `opus` / `sonnet` / `haiku` at a 200K
+  `contextWindow`, with no `cost` and no `thinkingLevelMap`: a local id has
+  no catalog entry to derive either from, and the server's effort ladder is
+  unknown, so both are omitted rather than guessed.
+
+Lead turns are recorded in the AIC ledger at zero (`recordZeroCostRequest`,
+keyed on the raw id), so the footer reads `[AIC 0.00]` / `~$0.00` while the
+Oracle's and Advisor's Copilot-billed credits accumulate beside them. See
+[`default-models.md`](default-models.md#local-launch-profiles--m-local--m-local2)
+for the full contract.
 
 Roster notes: our `reviewer`/`oracle` agent files intentionally shadow the
 same-named pi-subagents builtins (pinned models); builtin
@@ -114,9 +163,10 @@ The consequence to know: the `description` string is the model's entire
 pre-search signal, which is why each one says what the group is for rather than
 just naming it.
 
-**Group set, per profile.** All four Pi profiles carry the same
+**Group set, per profile.** All six Pi profiles carry the same
 `allowedGroups` (`peers`, `search`, `workers`, `browser`, `ado`, `kusto`,
-`cloudagent`), so they publish the same set Claude does for the same flags:
+`cloudagent`), so they publish the same set Claude does for the same flags
+(the local family is deliberately the `cheapest2` group set):
 
 | Group | Emitted when | Key |
 |---|---|---|
@@ -306,6 +356,10 @@ tokens. Each Pi model row carries its cheap-tier window, so Long-tier
 | `grok-4.6` | ≤ 200K ($2.00/1M in) | 200000 |
 | `grok-4.7` | ≤ 200K ($2.00/1M in) | 200000 |
 | anything else | — | 200000 (fallback) |
+
+The `local` family's `opus` / `sonnet` / `haiku` rows have no catalog entry
+to key on and take that 200K fallback like any other unknown id, which is
+the window the profile asks for anyway.
 
 Pinned in `src/lib/pi-tier-windows.ts` (sourced to the billing doc;
 the live catalog carries no tier data). Compaction reserves derive per

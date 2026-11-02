@@ -10,6 +10,7 @@ import {
   balancedContractFor,
   isBalancedFamily,
   isCheapestFamily,
+  isLocalFamily,
   isPinnedLaunchProfile,
 } from "./profile-family"
 import type { LaunchRegistryEntry } from "./state"
@@ -93,6 +94,15 @@ export function preprocessFastRequest(
   }
   const originalModel = typeof parsed.model === "string" ? parsed.model : undefined
   if (!originalModel) return { body: rawBody, modified: false }
+
+  // The local profiles forward the body verbatim. Their ids (`opus`/`sonnet`/
+  // `haiku`) are resolved by the local server, match no alias or fixed-effort
+  // row here, and would otherwise fall through the ladder as `rejectedModel`
+  // and 400 every local request. This check must stay ABOVE the retired-alias
+  // and alias-resolution branches so no alias table can ever see a local id.
+  if (isLocalFamily(launch?.profileId)) {
+    return { body: rawBody, originalModel, modified: false }
+  }
 
   if (isRetiredFastModelAlias(originalModel)) {
     return { body: rawBody, originalModel, modified: false, retiredAlias: originalModel }

@@ -120,6 +120,14 @@ const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
     ',h=s==="m"?1e6:s==="k"?1000:void 0,',
     'case"below_minimum":return xx;case"above_maximum":return VN',
   ],
+  // 2.1.316 rolled the two bound identifiers once more (xx/VN became Kx/dL,
+  // still bound to 1e5/1e6 by `Kx=1e5,dL=1e6`). The suffix parser and the
+  // resolve-to-the-bound behavior are byte-identical to 2.1.312/2.1.314.
+  [
+    ',h=s==="m"?1e6:s==="k"?1000:void 0,',
+    "Kx=1e5,dL=1e6",
+    'case"below_minimum":return Kx;case"above_maximum":return dL',
+  ],
 ]
 
 describe("client overflow-contract canary", () => {
