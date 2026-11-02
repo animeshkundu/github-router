@@ -329,6 +329,41 @@ describe("advisorSystemPrompt cheapest clause", () => {
     expect(prompt).toContain("<session_transcript>")
     expect(prompt.toLowerCase()).toContain("luna")
     expect(prompt).toContain("untrusted data")
+    expect(prompt).toContain("Supply the frontier facts it will not reliably hold")
+  })
+
+  test("the local variant keeps the shape and drops every model claim", () => {
+    // `-m local2` gets the same curated consult, but its model is unknowable.
+    const prompt = advisorSystemPrompt(false, true, false, false, true, true)
+    for (const label of [
+      "JUDGMENT",
+      "WHY",
+      "ASSUMPTIONS",
+      "RISK",
+      "ALTERNATIVE",
+      "FLIPS_IF",
+      "CONFIDENCE",
+    ]) {
+      expect(prompt).toContain(label)
+    }
+    expect(prompt).toContain("<operator_focus>")
+    expect(prompt).toContain("<caller_context>")
+    expect(prompt).toContain("<session_transcript>")
+    expect(prompt).toContain("untrusted data")
+    expect(prompt).toContain("You are advising the lead model on a machine.")
+    expect(prompt).not.toMatch(/\bLuna\b/)
+    for (const phrase of [
+      "faster, cheaper",
+      "cost-efficient",
+      "less equipped",
+      "will not reliably hold",
+      "frontier",
+    ]) {
+      expect(prompt).not.toContain(phrase)
+    }
+    // Duplicated shared text reads as correct and passes every absence
+    // assertion, so count the shared fragment.
+    expect(prompt.split("label each as external knowledge").length - 1).toBe(1)
   })
 
   test("other profiles do NOT get the cheapest clause", () => {

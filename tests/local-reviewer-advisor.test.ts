@@ -330,3 +330,229 @@ describe("local (no Advisor) grants nothing", () => {
     expect(captured[0]!.body.model).toBe("opus")
   })
 })
+
+// ---------------------------------------------------------------------------
+// What the consult actually sends, and where the lead turn goes afterwards
+//
+// The grants above decide WHETHER `local2` may consult. These cover the two
+// halves that are assembled server-side and are therefore easy to lose
+// silently:
+//
+//   - the advisor system prompt, built from the profile flags at dispatch
+//     time (the tool description is a separate surface, already pinned above);
+//   - the LEAD's continuation after an advisor round, which the advisor loop
+//     dispatches itself rather than the handler's first-call egress.
+// ---------------------------------------------------------------------------
+
+const SESSION_ID = "session-local-2"
+
+interface StreamCaptured {
+  url: string
+  body: Record<string, unknown>
+  headers: Record<string, string>
+}
+
+function sse(events: Array<{ event: string; data: Record<string, unknown> }>): Response {
+  return new Response(
+    events
+      .map(({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+      .join(""),
+    { headers: { "content-type": "text/event-stream" } },
+  )
+}
+
+function advisorTurnSse(): Response {
+  return sse([
+    { event: "message_start", data: { type: "message_start", message: { id: "m1" } } },
+    {
+      event: "content_block_start",
+      data: {
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "toolu_local_advisor",
+          name: ADVISOR_INTERNAL_TOOL_NAME,
+          input: {},
+        },
+      },
+    },
+    { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+    {
+      event: "message_delta",
+      data: {
+        type: "message_delta",
+        delta: { stop_reason: "tool_use", stop_sequence: null },
+        usage: { output_tokens: 1 },
+      },
+    },
+    { event: "message_stop", data: { type: "message_stop" } },
+  ])
+}
+
+function finalTurnSse(): Response {
+  return sse([
+    { event: "message_start", data: { type: "message_start", message: { id: "m2" } } },
+    {
+      event: "content_block_start",
+      data: {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      },
+    },
+    {
+      event: "content_block_delta",
+      data: {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "done" },
+      },
+    },
+    { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } },
+    {
+      event: "message_delta",
+      data: {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { output_tokens: 1 },
+      },
+    },
+    { event: "message_stop", data: { type: "message_stop" } },
+  ])
+}
+
+function streamingLeadBody(): string {
+  return JSON.stringify({
+    model: "opus",
+    max_tokens: 100,
+    stream: true,
+    messages: [{ role: "user", content: "Review this change." }],
+    tools: [
+      {
+        name: "Read",
+        description: "Read a file",
+        input_schema: { type: "object", properties: {} },
+      },
+    ],
+  })
+}
+
+// Local turns stream; the advisor call does not. Capturing the headers is what
+// pins the session id on the continuation.
+function captureStreamFetch(): StreamCaptured[] {
+  const captured: StreamCaptured[] = []
+  let localTurns = 0
+  globalThis.fetch = mock((url: string | URL | Request, init?: RequestInit) => {
+    const href = String(url)
+    let parsed: Record<string, unknown> = {}
+    try {
+      parsed = JSON.parse(String(init?.body ?? "")) as Record<string, unknown>
+    } catch {
+      // A streamed or empty body — nothing to parse here.
+    }
+    captured.push({
+      url: href,
+      body: parsed,
+      headers: (init?.headers ?? {}) as Record<string, string>,
+    })
+    if (href.startsWith(LOCAL_BASE)) {
+      localTurns += 1
+      return Promise.resolve(localTurns === 1 ? advisorTurnSse() : finalTurnSse())
+    }
+    return Promise.resolve(
+      Response.json({
+        output: [
+          {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Advisor advice." }],
+          },
+        ],
+      }),
+    )
+  }) as unknown as typeof fetch
+  return captured
+}
+
+function streamingRequestOptions(agentId?: string) {
+  return {
+    method: "POST" as const,
+    headers: {
+      "content-type": "application/json",
+      "anthropic-beta": ADVISOR_BETA,
+      [LAUNCH_SECRET_HEADER]: SECRET,
+      "x-claude-code-session-id": SESSION_ID,
+      ...(agentId ? { "x-claude-code-agent-id": agentId } : {}),
+    },
+    body: streamingLeadBody(),
+  }
+}
+
+describe("local2 advisor dispatch", () => {
+  test("the lead consult is assumption-free about the local model", async () => {
+    register("local2")
+    const captured = captureStreamFetch()
+
+    const response = await server.request("/v1/messages", streamingRequestOptions())
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain("advisor_tool_result")
+
+    const advisorCall = captured.find((call) => call.url.includes("/responses"))
+    expect(advisorCall).toBeDefined()
+    const instructions = String(advisorCall!.body.instructions ?? "")
+    expect(instructions).toContain("You are advising the lead model on a machine.")
+    // The profile cannot observe which model answers its endpoint, so the
+    // consult may not name it or grade it against the advisor.
+    expect(instructions).not.toMatch(/\bLuna\b/)
+    expect(instructions).not.toContain("faster, cheaper")
+    expect(instructions).not.toContain("cost-efficient")
+    expect(instructions).not.toContain("frontier")
+  })
+
+  test("the post-advisor turn stays on the local endpoint with the same session", async () => {
+    register("local2")
+    const captured = captureStreamFetch()
+
+    const response = await server.request("/v1/messages", streamingRequestOptions())
+    expect(response.status).toBe(200)
+    await response.text()
+
+    const localCalls = captured.filter((call) => call.url.startsWith(LOCAL_BASE))
+    // First lead turn, then the continuation after the advisor round.
+    expect(localCalls).toHaveLength(2)
+    expect(localCalls[1]!.body.model).toBe("opus")
+    // The session id is the local server's prompt-cache routing key; an
+    // advisor round must not lose it.
+    expect(localCalls[1]!.headers["x-claude-code-session-id"]).toBe(SESSION_ID)
+    // And the advisor model call itself must NOT carry the local endpoint.
+    for (const call of captured) {
+      if (call.url.includes("/responses")) {
+        expect(call.url.startsWith(LOCAL_BASE)).toBe(false)
+      }
+    }
+  })
+
+  test("the reviewer consult keeps the mentor contract without grading the local model", async () => {
+    register("local2")
+    const captured = captureStreamFetch()
+
+    const response = await server.request(
+      "/v1/messages",
+      streamingRequestOptions("reviewer"),
+    )
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain("advisor_tool_result")
+
+    const advisorCall = captured.find((call) => call.url.includes("/responses"))
+    expect(advisorCall).toBeDefined()
+    const instructions = String(advisorCall!.body.instructions ?? "")
+    expect(instructions).toContain("You are the senior mentor to a reviewer model")
+    expect(instructions).toContain("Verdict (SHIP / FIX / BLOCK)")
+    expect(instructions).toContain("at most 5 rounds per review")
+    expect(instructions).not.toMatch(/\bLuna\b/)
+    expect(instructions).not.toContain("weaker, faster")
+    expect(instructions).not.toContain("ill-equipped")
+    expect(instructions).not.toContain("frontier")
+  })
+})

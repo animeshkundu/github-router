@@ -248,6 +248,7 @@ describe("advisorSystemPrompt reviewer profile", () => {
   test("reviewer variant names the weaker-executor relationship and the output contract", () => {
     const prompt = advisorSystemPrompt(false, false, false, true)
     expect(prompt).toContain("weaker, faster executor")
+    expect(prompt).toContain("Supply frontier knowledge and intuition it lacks")
     expect(prompt).toContain("at most 5 rounds per review")
     expect(prompt).toContain("Verdict (SHIP / FIX / BLOCK)")
     expect(prompt).toContain("non-binding counsel")
@@ -263,5 +264,30 @@ describe("advisorSystemPrompt reviewer profile", () => {
 
   test("reviewer turn cap is 5, below the lead-global 16", () => {
     expect(ADVISOR_REVIEWER_MAX_TURNS).toBe(5)
+  })
+
+  test("the local variant drops the weaker/faster framing and keeps the contract", () => {
+    // `-m local2` cannot observe which model answers its endpoint, so the
+    // mentor clause may not name or grade it. Everything the advisor needs to
+    // act stays: the verdict shape, the round cap, and the evidence demand.
+    const prompt = advisorSystemPrompt(false, false, false, true, true, true)
+    expect(prompt).toContain("You are the senior mentor to a reviewer model")
+    expect(prompt).toContain("Verdict (SHIP / FIX / BLOCK)")
+    expect(prompt).toContain("at most 5 rounds per review")
+    expect(prompt).toContain("Demand execution evidence")
+    expect(prompt).not.toMatch(/\bLuna\b/)
+    expect(prompt).not.toContain("weaker, faster")
+    expect(prompt).not.toContain("diligent but small")
+    expect(prompt).not.toContain("ill-equipped")
+    expect(prompt).not.toContain("frontier")
+    // A duplicated shared fragment reads as correct text and passes every
+    // absence assertion, so count it. (This caught a real edit that spliced the
+    // list twice.)
+    expect(prompt.split("attack patterns, system-level consequences").length - 1).toBe(1)
+    // The cheapest reviewer keeps its framing, so a future edit cannot quiet
+    // both sides by deleting the comparison everywhere.
+    expect(advisorSystemPrompt(false, false, false, true)).toContain(
+      "weaker, faster executor",
+    )
   })
 })

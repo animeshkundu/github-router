@@ -1043,6 +1043,7 @@ export async function handleCompletion(c: Context) {
           // `advisorCheapProfile` (which also covers `-m cheap`).
           advisorCheapestProfile: curatedAdvisorEnabled || curatedReviewerEnabled,
           advisorReviewerProfile: curatedReviewerEnabled,
+          advisorLocalProfile: localAdvisorRequest,
           advisorMaxTurns: curatedReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: advisorChoice.effort,
           externalAborter: translatedAdvisorAborter,
@@ -1341,6 +1342,13 @@ export async function handleCompletion(c: Context) {
           // Cheapest-only structured protégé consult (lead or reviewer).
           advisorCheapestProfile: curatedAdvisorEnabled || curatedReviewerEnabled,
           advisorReviewerProfile: curatedReviewerEnabled,
+          advisorLocalProfile: localAdvisorRequest,
+          // A local lead's post-advisor turn is still a LEAD turn: without
+          // this the continuation went to Copilot with the bare local model
+          // id and the session died on the first advisor round.
+          localEgress: localProfileRequest
+            ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c) }
+            : undefined,
           advisorMaxTurns: curatedReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: maxAdvisorChoice
             ? maxAdvisorChoice.effort
