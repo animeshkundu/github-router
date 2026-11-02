@@ -779,13 +779,19 @@ describe("/mcp scoped endpoints (/mcp/:group)", () => {
 describe("/mcp prompt_brief (hook channel)", () => {
   // The Pi extension's `before_agent_start` handler calls this over
   // `/mcp/search` with the launch nonce, because the generated extension is a
-  // STRING with no import surface and cannot reach `runCheapestRewrite`. Two
-  // properties matter and neither is visible from the tool registry:
+  // STRING with no import surface and cannot run the hook decision itself. The
+  // handler is `runPiPromptBrief`, which runs the SAME `decidePromptSubmitV2`
+  // as Claude Code's `UserPromptSubmit`. Three properties matter and none is
+  // visible from the tool registry:
   //
-  //   1. the CALL must work end-to-end on a cheapest launch (the whole point);
-  //   2. a non-cheapest launch must answer with an EMPTY text block, not an
-  //      error — the extension injects nothing on empty, while `isError` would
-  //      make it log a failure for the ordinary case.
+  //   1. the CALL must work end-to-end on a cheapest launch, including the
+  //      one-shot Sol rewrite (the whole point of the channel);
+  //   2. every OTHER profile gets the shared advisory block — the search tip
+  //      plus the grounded scope note — and never the Sol rewrite, which is
+  //      cheapest-only by contract;
+  //   3. the ordinary "nothing to inject" answer is an EMPTY text block, not
+  //      an error: the extension injects nothing on empty, while `isError`
+  //      would make it log a failure for the everyday case.
   //
   // The list-side property (the model never sees `prompt_brief`) is pinned by
   // the exact `["code", "web"]` assertion on `/mcp/search` above: a listed
@@ -823,7 +829,11 @@ describe("/mcp prompt_brief (hook channel)", () => {
     return captured
   }
 
-  async function callBrief(auth: string, sessionId: string) {
+  async function callBrief(
+    auth: string,
+    sessionId: string,
+    prompt = "implement a caching layer across the render module and its tests",
+  ) {
     const { status, json } = await scopedRpc(
       "search",
       {
@@ -833,7 +843,7 @@ describe("/mcp prompt_brief (hook channel)", () => {
         params: {
           name: "prompt_brief",
           arguments: {
-            prompt: "implement a caching layer across the render module and its tests",
+            prompt,
             session_id: sessionId,
             workspace: WORKSPACE,
           },
@@ -901,10 +911,32 @@ describe("/mcp prompt_brief (hook channel)", () => {
     }
   })
 
-  test("a non-cheapest launch answers empty, not an error, and spends nothing", async () => {
-    // The default (standard) launch owns NONCE.
-    const upstream = mockBriefUpstream("SHOULD NOT BE USED")
+  test("a non-cheapest launch gets the shared advisory block and never the Sol rewrite", async () => {
+    // The default (standard) launch owns NONCE. It is outside the cheapest
+    // family, so the ONE model call is the gpt-6-luna scope inference; a Sol
+    // rewrite here would silently bill every profile at the cheapest rate.
+    const upstream = mockBriefUpstream(
+      "SCOPE: focused on render.ts." + String.fromCharCode(10) + "GOAL: cache render output.",
+    )
     const { status, result, text } = await callBrief(AUTH_HEADER, `sess-${Date.now()}-std`)
+    expect(status).toBe(200)
+    expect(result.isError).toBeFalsy()
+    expect(text).toContain("TIP (advisory)")
+    // Pi's prefixed MCP key: Claude's bare `mcp__search__code` does not exist
+    // in a Pi session, so naming it would point the model at nothing callable.
+    expect(text).toContain("mcp__gh-router-search__code")
+    expect(text).toContain("cache render output")
+    expect(text).not.toContain("EXECUTION BRIEF")
+    expect(upstream.models).toEqual(["gpt-6-luna"])
+  })
+
+  test("a trivial prompt on a non-cheapest launch answers empty, not an error, and spends nothing", async () => {
+    const upstream = mockBriefUpstream("SHOULD NOT BE USED")
+    const { status, result, text } = await callBrief(
+      AUTH_HEADER,
+      `sess-${Date.now()}-std-trivial`,
+      "hi",
+    )
     expect(status).toBe(200)
     expect(result.isError).toBeFalsy()
     expect(text).toBe("")

@@ -409,6 +409,69 @@ describe("pi cosmetic user overrides", () => {
     )
     expect(overrides).toEqual({ markdown: { mermaid: "off" }, collapseChangelog: false })
   })
+
+  test("a user who prefers fullscreen keeps it", () => {
+    // The regular-mode default is OUR choice, not a policy: a user who has
+    // set their own terminal mode must not have it overwritten at launch.
+    const overrides = applyCosmeticUserOverrides(
+      {
+        tuiMode: "fullscreen",
+        quietStartup: false,
+        fullscreenScrollbar: "always",
+        fullscreenCopyOnSelect: false,
+        fullscreenWheelScrollLines: 3,
+        fullscreenExitOutput: "resume-hint",
+      },
+      built(),
+    )
+    expect(overrides).toEqual({
+      tuiMode: "fullscreen",
+      quietStartup: false,
+      fullscreenScrollbar: "always",
+      fullscreenCopyOnSelect: false,
+      fullscreenWheelScrollLines: 3,
+      fullscreenExitOutput: "resume-hint",
+    })
+  })
+})
+
+describe("pi tui defaults", () => {
+  const built = () =>
+    buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: false,
+    })
+
+  test("regular mode is the launch default", () => {
+    // Pi's own default is "fullscreen". Regular keeps the terminal's native
+    // scrollback, so select/copy/scroll are the terminal's bindings rather
+    // than an app-level reimplementation of them.
+    expect(built().tuiMode).toBe("regular")
+  })
+
+  test("the startup banner is suppressed because the router prints its own", () => {
+    expect(built().quietStartup).toBe(true)
+  })
+
+  test("the fullscreen knobs are pinned so the opt-in path cannot regress", () => {
+    // Inert under `regular`, load-bearing the moment someone passes
+    // `--tui-mode fullscreen`: pinned to Pi's current defaults so a future Pi
+    // default change cannot silently alter a router launch.
+    const s = built()
+    expect(s.fullscreenExitOutput).toBe("transcript")
+    expect(s.fullscreenScrollbar).toBe("auto")
+    expect(s.fullscreenCopyOnSelect).toBe(true)
+    expect(s.fullscreenWheelScrollLines).toBe("auto")
+  })
+
+  test("project trust is never relaxed by the generated settings", () => {
+    // Auto-trust would let a cloned repository load its own extensions at
+    // startup. That is a security downgrade, not a convenience, so the key
+    // stays absent and Pi's "ask" default applies.
+    const raw = built() as unknown as Record<string, unknown>
+    expect("defaultProjectTrust" in raw).toBe(false)
+  })
 })
 
 describe("pi launch card", () => {

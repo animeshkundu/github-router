@@ -556,6 +556,32 @@ export interface PiSettingsJson {
    */
   hideThinkingBlock?: boolean
   /**
+   * Interactive TUI mode. Pinned to `regular` (Pi's own default is
+   * `fullscreen`): the terminal keeps its native scrollback, so
+   * select/copy/scroll are the terminal's own bindings rather than an
+   * app-level reimplementation. `--tui-mode fullscreen` still reaches
+   * Pi through the passthrough args for anyone who prefers the
+   * app-owned viewport.
+   */
+  tuiMode?: "regular" | "fullscreen"
+  /**
+   * Startup banner suppression. The router prints its own banner
+   * before spawning Pi, so Pi's header plus its loaded-resource
+   * listing is duplicate noise. `"header"` (keep the version/key-hint
+   * line only) remains available as a user override.
+   */
+  quietStartup?: boolean | "header"
+  /**
+   * The four fullscreen knobs below are PINNED to Pi's current
+   * defaults rather than left absent, so the `--tui-mode fullscreen`
+   * opt-in cannot silently regress when Pi changes a default. They are
+   * inert in the `regular` mode this launcher emits.
+   */
+  fullscreenExitOutput?: "transcript" | "resume-hint"
+  fullscreenScrollbar?: "auto" | "always" | "hidden"
+  fullscreenCopyOnSelect?: boolean
+  fullscreenWheelScrollLines?: "auto" | number
+  /**
    * Companion config for the bundled `pi-claude-code-ui` package
    * (which reads flat settings keys): `false` keeps its fixed
    * Claude-style palette regardless of the active Pi theme instead of
@@ -632,6 +658,12 @@ export interface PiSettingsJson {
  */
 export const PI_COSMETIC_SETTING_KEYS = [
   "hideThinkingBlock",
+  "tuiMode",
+  "quietStartup",
+  "fullscreenExitOutput",
+  "fullscreenScrollbar",
+  "fullscreenCopyOnSelect",
+  "fullscreenWheelScrollLines",
   "theme",
   "themeAdaptive",
   "groupToolCalls",
@@ -840,6 +872,16 @@ export function buildPiSettingsJson(opts: {
     images: { autoResize: true, blockImages: false },
     transport: "auto",
     hideThinkingBlock: true,
+    // Terminal-native interaction by default: regular mode leaves
+    // scrollback and mouse selection to the terminal, which is what
+    // "mouse support" means for most users. The fullscreen knobs are
+    // pinned so opting in later is not a behavior change.
+    tuiMode: "regular",
+    quietStartup: true,
+    fullscreenExitOutput: "transcript",
+    fullscreenScrollbar: "auto",
+    fullscreenCopyOnSelect: true,
+    fullscreenWheelScrollLines: "auto",
     ...(ui
       ? {
           themeAdaptive: false,

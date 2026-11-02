@@ -144,22 +144,41 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   guidance lives in skills (`gh-oracle`, `gh-search-first`,
   `gh-delegate`, cheapest-only `gh-advisor`) and `/review`,
   `/parallel-review` (+ cheapest-only `/plan-review`) prompts.
-- **Per-prompt execution brief, cheapest only.** The extension also
-  registers a `before_agent_start` handler that relays the user's prompt to
-  a hook-only MCP tool, `prompt_brief` (group `search`, hook-nonce
+- **Per-prompt brief, full `UserPromptSubmit` parity.** The extension
+  registers a `before_agent_start` handler that relays the user's prompt to a
+  hook-only MCP tool, `prompt_brief` (group `search`, hook-nonce
   authenticated, never listed to the model), and re-emits the reply as a
   custom message ABOVE the user turn — additive, `systemPrompt` untouched.
-  The proxy produces it with the same `runCheapestRewrite` the Claude
-  `UserPromptSubmit` hook uses (`src/lib/hook-prompt-brief.ts` over
-  `src/lib/cheapest-prompt-rewrite.ts`), grounding search, static pack, and
-  one-shot per-session flag included, so `GH_ROUTER_DISABLE_CHEAPEST_REWRITE=1`
-  opts both front-ends out. Trivial prompts decline; the handler stands down
-  inside a `pi-subagents` child process so a fanout cannot spend one brief
-  per child. Deliberately narrower than the Claude hook: no prior-turn
-  findings and no Stop-gate budget reset (Pi has no `Stop` hook to produce
-  them), and a missed or timed-out rewrite injects nothing where Claude
-  falls open to the search tip plus the grounded scope note. `balanced` is
-  floor-free on both counts, like its advisor.
+  `runPiPromptBrief` (`src/lib/hook-prompt-brief.ts`) calls the SAME
+  `decidePromptSubmitV2` the Claude Code hook calls, so the two clients cannot
+  drift on when to search, when to spend a model call, or when to stay silent:
+  pending prior-turn findings are surfaced once and cleared, a non-trivial
+  prompt gets the search tip plus a grounded scope/goal note from one
+  `gpt-6-luna` call (lexical search when semantic is off, lexical + semantic
+  in parallel when it is on), and the cheapest family additionally spends its
+  one-shot Sol rewrite (`GH_ROUTER_DISABLE_CHEAPEST_REWRITE=1` opts both
+  front-ends out, `GH_ROUTER_DISABLE_PROMPT_STEER=1` disables the steer).
+  The handler stands down inside a `pi-subagents` child process so a fanout
+  cannot spend one brief per child.
+
+  Only the PROSE differs, through `PromptProseOverrides`: Pi has no
+  `/gh-research` or `/gh-orchestrate` skills and its native MCP servers carry
+  the `gh-router-` prefix, so the tip names `mcp__gh-router-search__code` and
+  the fallback goal names the `subagent` roster (Explore for recon,
+  General-Purpose for scoped implementation, reviewer for verification).
+  Naming Claude's nouns there would point the model at tools and skills that
+  do not exist in the session. `decision.resetSession` is dropped: it clears
+  the Claude Stop-gate's per-prompt block budget, and Pi has no Stop gate.
+  An empty string is the ordinary "nothing to inject" answer for a trivial
+  prompt with no pending findings, never an error.
+
+  **Latency budget.** The extension aborts the brief at 45 s
+  (`BRIEF_TIMEOUT_MS`); the Claude hook has no client-side bound. A cheapest
+  prompt whose Sol rewrite misses cleanly then runs the Luna scope path, so the
+  theoretical worst case (a 30 s rewrite budget followed by the 22 s scope
+  budget) can exceed Pi's abort. A clean miss is normally fast, and the abort is
+  fail-open — the extension injects nothing and the turn proceeds — so the
+  overlap costs a brief on a rare path, not a hang.
 - **Native compaction stays authoritative.** Each model row carries its
   Default-tier `contextWindow` (272K for Luna/Sol, 200K for Grok — never the
   advertised 1.05M), and `compaction.reserveTokens` is derived per model from
@@ -300,7 +319,8 @@ Yes — every display default is overridable, at three levels:
    `groupToolCalls`, `readOutputMode` (`summary`/`preview`/`hidden`),
    `searchOutputMode` (`count`/`preview`/`hidden`),
    `mcpOutputMode`, `bashOutputMode` (`summary`/`preview`/`opencode`),
-   `toolBackground`,    `terminal`, `images`, `markdown` (`mermaid: streaming` pinned).
+   `toolBackground`,    `terminal`, `images`, `markdown` (`mermaid: streaming` pinned),
+   `tuiMode`, `quietStartup`, and the four `fullscreen*` keys.
    Example:
    `"hideThinkingBlock": false` shows thinking again;
    `"readOutputMode": "preview"` restores expanded reads. Load-bearing keys (models, tools, thinking levels,
@@ -317,6 +337,38 @@ Rich rendering never costs tokens: mermaid diagrams stream in the TUI
 inline (`terminal.showImages`, kitty/iTerm2 auto-detect), and diffs
 render via Shiki in `pi-claude-code-ui`. All three are display-side —
 they change zero bytes on the wire to the model.
+
+## Terminal mode (regular by default)
+
+Pi defaults to `tuiMode: "fullscreen"`; the generated settings pin
+`"regular"`. Regular mode hands the screen back to the terminal: scrollback,
+select, copy and wheel scrolling are the terminal's own bindings, over the
+whole session, instead of an app-owned viewport that reimplements them. That
+is what most people mean by "mouse support" and it is the mode that keeps
+terminal-native search (`Ctrl+Shift+F`, `tmux copy-mode`) working.
+
+Mouse is a fullscreen-only feature by Pi's design — regular mode deliberately
+leaves mouse input to the terminal, because the terminal owns the scrollback
+(`docs/tui.md` in the Pi package). Anyone who wants app-level mouse (drag
+selection inside the transcript, the app's own scrollbar) opts in per launch:
+
+```bash
+github-router pi --tui-mode fullscreen
+```
+
+`--tui-mode` is not a router flag, so it passes straight through to Pi. The
+four fullscreen knobs are pinned to Pi's current defaults
+(`fullscreenExitOutput: "transcript"`, `fullscreenScrollbar: "auto"`,
+`fullscreenCopyOnSelect: true`, `fullscreenWheelScrollLines: "auto"`) rather
+than left absent, so the opt-in path cannot silently regress when a Pi release
+changes one of those defaults. They are inert in regular mode.
+
+`quietStartup: true` is also emitted: the router prints its own launch card
+before spawning Pi, so Pi's startup header plus its loaded-resource listing is
+duplicate noise. `"header"` (version and key hints only) and `false` remain
+available as user overrides. `defaultProjectTrust` is deliberately NOT set:
+auto-trust would let a cloned repository load its own extensions at startup,
+which is a security downgrade rather than a convenience.
 
 ## Verification
 

@@ -80,6 +80,17 @@ export function decidePromptSubmit(input: { stdin: string; steerEnabled: boolean
 // ─── UserPromptSubmit V2 (advisory: classify + grounded scope/goal) ──────────
 
 /**
+ * The tool name the tip and the scope note point at. Claude Code resolves the
+ * scoped `search` group under its bare key; Pi always prefixes its native MCP
+ * servers with `gh-router-` (`PI_MCP_SERVER_PREFIX`) so the same group lands
+ * under a different name there.
+ *
+ * Declared BEFORE `PROMPT_SEARCH_TIP`: that const evaluates at module load,
+ * so a declaration below it would still be in its temporal dead zone.
+ */
+export const DEFAULT_PROMPT_SEARCH_TOOL = "mcp__search__code"
+
+/**
  * Static encouragement injected only for a non-trivial prompt (no extra model
  * call, no latency tax): nudge parallel lexical+semantic search before
  * concluding. Mirrors the v1 advisory tone: additive, never blocking.
@@ -94,32 +105,47 @@ export const PROMPT_SEARCH_TIP = getPromptSearchTip(true)
  * Build the search tip for the launch's search backend. When Bluebird is
  * enabled it owns both semantic and lexical calls; otherwise local ColBERT is
  * used when enabled, or lexical-only search when neither backend is enabled.
+ *
+ * `searchToolName` exists because the advice is client-facing prose, not
+ * policy: the decision to search is identical everywhere, but Pi's MCP server
+ * keys carry a `gh-router-` prefix, so naming Claude's tool there would point
+ * the model at a tool it cannot call.
  */
 export function getPromptSearchTip(
   searchEnabled: boolean,
   bluebirdEnabled: boolean = false,
+  searchToolName: string = DEFAULT_PROMPT_SEARCH_TOOL,
 ): string {
+  const tool = searchToolName
   if (bluebirdEnabled) {
     return (
       "TIP (advisory): when this task needs code context, search Bluebird semantic + "
-      + "lexical in parallel — two `mcp__search__code` calls issued in the same turn. "
+      + `lexical in parallel — two \`${tool}\` calls issued in the same turn. `
       + "Bluebird failures are visible and do not fall back locally."
     )
   }
   if (searchEnabled) {
     return (
       "TIP (advisory): when this task needs code context, search lexical + semantic in "
-      + "parallel — one `mcp__search__code` call with mode:\"lexical\" and one with "
+      + `parallel — one \`${tool}\` call with mode:"lexical" and one with `
       + "mode:\"semantic\", issued in the same turn — before concluding."
     )
   }
   return (
     "TIP (advisory): when this task needs code context, search lexical "
-    + "(`mcp__search__code` with mode:\"lexical\"/\"exact\"/\"regex\" for exact "
+    + `(\`${tool}\` with mode:"lexical"/"exact"/"regex" for exact `
     + "symbols, filenames, errors, routes, flags, and config keys), issuing "
     + "parallel calls in the same turn — before concluding."
   )
 }
+
+/**
+ * The large-task escalation advice inside the scope note. Names the two Claude
+ * Code skills that compose a floor-raising run; a client without those skills
+ * passes its own sentence through `scopeAdvice`.
+ */
+export const DEFAULT_PROMPT_SCOPE_ADVICE =
+  "Consider /gh-research first to saturate understanding, then /gh-orchestrate to compose a floor-raising workflow."
 
 /**
  * Build the scope-inference system prompt for the launch's search backend.
@@ -129,6 +155,7 @@ export function getPromptSearchTip(
 export function getPromptScopeSystem(
   searchEnabled: boolean,
   bluebirdEnabled: boolean = false,
+  scopeAdvice: string = DEFAULT_PROMPT_SCOPE_ADVICE,
 ): string {
   const searchNoun = bluebirdEnabled
     ? "a Bluebird lexical + semantic code search"
@@ -143,8 +170,7 @@ export function getPromptScopeSystem(
     + "what the search surfaced (reference the most relevant file(s) by name).\n"
     + "2. GOAL: restate the user's OWN ask as a single measurable objective, in THEIR terms. Do NOT "
     + "invent new requirements or acceptance criteria beyond what they asked.\n"
-    + "3. Only if the task is large/cross-cutting, add a final line: \"Consider /gh-research first to "
-    + "saturate understanding, then /gh-orchestrate to compose a floor-raising workflow.\" Omit it for a "
+    + `3. Only if the task is large/cross-cutting, add a final line: "${scopeAdvice}" Omit it for a `
     + "focused or trivial task.\n"
     + "This is advisory — the agent decides whether to follow it. Be concrete and concise; no preamble."
   )
@@ -184,6 +210,23 @@ export interface PromptSubmitV2IO {
   /** Wall-clock budget for the substantive-prompt enrichment (search+infer);
    *  on overrun the decision falls open to the regex goal. Default 22s. */
   timeoutMs?: number
+}
+
+/**
+ * Client-specific wording for the advisory blocks. The DECISION is shared —
+ * when to steer, when to search, when to spend the rewrite — but the nouns are
+ * not: Claude Code has `/gh-research` + `/gh-orchestrate` and resolves the
+ * search group as `mcp__search__code`, while Pi has a `subagent` roster and
+ * `gh-router-`-prefixed MCP keys. Passing prose rather than forking the
+ * decision keeps both clients on one policy.
+ */
+export interface PromptProseOverrides {
+  /** Tool the search tip points at. Default `mcp__search__code`. */
+  searchToolName?: string
+  /** Regex-fallback goal used when enrichment times out or misses. */
+  fallbackGoal?: string
+  /** Large-task escalation sentence inside the scope note. */
+  scopeAdvice?: string
 }
 
 /** Max chars of each search-result blob fed into the scope inference. */
@@ -237,6 +280,9 @@ export async function decidePromptSubmitV2(input: {
   rewriteDisabled?: boolean
   /** Sol rewrite IO (cheapest only). Absent = existing Luna scope path. */
   rewrite?: CheapestRewriteIO
+  /** Client-specific wording (tool names, skill names). Decision logic is
+   *  unchanged; only the injected prose differs. */
+  prose?: PromptProseOverrides
 }): Promise<PromptSubmitDecision> {
   let payload: { session_id?: unknown; prompt?: unknown; agent_type?: unknown; agent_id?: unknown } = {}
   try {
@@ -282,7 +328,12 @@ export async function decidePromptSubmitV2(input: {
   const searchEnabled = input.searchEnabled === true
   const bluebirdEnabled = input.bluebirdEnabled === true
   const semanticAvailable = searchEnabled || bluebirdEnabled
-  const searchTip = getPromptSearchTip(searchEnabled, bluebirdEnabled)
+  const fallbackGoal = input.prose?.fallbackGoal ?? PROMPT_STEER_GOAL
+  const searchTip = getPromptSearchTip(
+    searchEnabled,
+    bluebirdEnabled,
+    input.prose?.searchToolName,
+  )
 
   // Cheapest-only Sol → Luna rewrite: adaptive 3/5-turn grounded contract,
   // additive. Outcome is `{ brief, timedOut }`:
@@ -322,15 +373,19 @@ export async function decidePromptSubmitV2(input: {
       // regex goal only (no second model call). A timed-out rewrite already
       // spent its one shot; running the Luna scope path would stack a second
       // model call under a budget we just exhausted.
-      decision.inject = joinSections([searchTip, PROMPT_STEER_GOAL, findingsBlock])
+      decision.inject = joinSections([searchTip, fallbackGoal, findingsBlock])
       return decision
     }
     // else: a clean miss/empty — fall through to the existing Luna scope path.
   }
 
-  const scopeSystem = getPromptScopeSystem(searchEnabled, bluebirdEnabled)
+  const scopeSystem = getPromptScopeSystem(
+    searchEnabled,
+    bluebirdEnabled,
+    input.prose?.scopeAdvice,
+  )
   const timeoutMs = input.io.timeoutMs ?? 22_000
-  let goal = PROMPT_STEER_GOAL // fail-open default.
+  let goal = fallbackGoal // fail-open default.
   let timer: ReturnType<typeof setTimeout> | undefined
   // One controller cancels BOTH search calls + the inference when the race ends
   // (timeout OR success), so a lost-race fetch never keeps the short-lived hook
