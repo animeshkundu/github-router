@@ -1,25 +1,34 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 
+import { profileDescriptor } from "./launch-profile"
+import type { PiProfileId } from "./pi-models-settings"
+
 /**
  * Pi's MCP surface for the router's scoped groups.
  *
- * `<Pi agent dir>/mcp.json` is Pi's own MCP configuration (the file `pi mcp add`
- * writes), and `pi-mcp-adapter` reads it as a compatibility input on Pi 0.99+.
- * Pi's agent dir in a router launch IS the per-launch mirror
- * (`PI_CODING_AGENT_DIR`, `getPiLaunchEnvVars`), so this file is per-launch and
- * swept with the mirror. Nothing here touches the user's real `~/.pi/agent`.
+ * `<Pi agent dir>/mcp.json` is Pi's OWN MCP configuration: built-in MCP reads
+ * it at session start (`builtin:mcp`, Pi 0.99+), and the router's agent dir in
+ * a Pi launch IS the per-launch mirror (`PI_CODING_AGENT_DIR`,
+ * `getPiLaunchEnvVars`), so this file is per-launch and swept with the mirror.
+ * Nothing here touches the user's real `~/.pi/agent`.
  *
- * Precedence is the reason every key carries the `gh-router-` prefix. In the
- * adapter's load order the mirror file is #4, while `.mcp.json` (#7),
- * `.pi/mcp.json` (#8) and `.pi/mcp-adapter.json` (#9) all win over it and
- * replace a same-named server as a whole. Keying a group as `ado` would
+ * Built-in MCP is why `pi-mcp-adapter` is gone from the helper bundle. Per Pi's
+ * own `docs/mcp.md`, an installed extension that registers `/mcp` REPLACES
+ * built-in MCP for the session, and Pi then never reads this file at all. The
+ * adapter was a prerequisite for MCP before native support landed and is a
+ * blocker for it now, so the two cannot coexist.
+ *
+ * Precedence is the reason every key carries the `gh-router-` prefix. Native Pi
+ * reads user-level servers from this file and project servers from
+ * `.pi/mcp.json` (once the project is trusted), and a project entry replaces a
+ * same-named user-level entry as a whole. Keying a group as `ado` would
  * therefore hand the model the workspace's own `ado` server under a name we
  * meant for ours; `gh-router-ado` cannot be shadowed by accident.
  *
  * The bearer is written as an interpolation placeholder rather than a literal:
- * the adapter expands `${VAR}` in `headers` from the child environment at
- * connection time, and `GH_ROUTER_HOOK_NONCE` is already in the Pi launch env
+ * Pi expands `${VAR}` in `headers` from the child environment at connection
+ * time, and `GH_ROUTER_HOOK_NONCE` is already in the Pi launch env
  * (`src/pi.ts`). A literal token would put a live secret on disk for the life
  * of the mirror.
  *
@@ -30,13 +39,41 @@ import path from "node:path"
 /** Key prefix reserved for router-owned entries. Never emit a bare group name. */
 export const PI_MCP_SERVER_PREFIX = "gh-router-"
 
-/** Placeholder the adapter expands from the Pi child env at connect time. */
+/** Placeholder Pi expands from the Pi child env at connect time. */
 export const PI_MCP_NONCE_PLACEHOLDER = "Bearer ${GH_ROUTER_HOOK_NONCE}"
+
+/**
+ * Workspace header placeholder.
+ *
+ * Native MCP sends no workspace of its own, and the worker tools refuse a call
+ * that names neither an explicit `workspace` argument nor this header. The
+ * generated extension set it by hand on its own `search`/`workers`/
+ * `orchestrate` calls; with those calls gone, the header has to ride the server
+ * entry or every worker call fails for want of a workspace. Sent on every
+ * group: the proxy ignores it where it is unused.
+ */
+export const PI_MCP_WORKSPACE_PLACEHOLDER = "${GH_ROUTER_WORKSPACE}"
+
+/**
+ * Deferred, not direct.
+ *
+ * `deferred` keeps the tools out of the declared tool set until `tool_search`
+ * loads a match, which Pi activates automatically for a deferred server. Two
+ * reasons this is the right default rather than `direct`:
+ *
+ *   - every group is listed in the `mcp_servers` system-prompt section with its
+ *     `description`, so discovery is intact without paying the declaration cost
+ *     of ~60 tools on every request;
+ *   - Pi waits up to 10 s at the first prompt for servers with `direct` tools
+ *     to connect. `deferred` servers are not in that wait, so a slow or absent
+ *     proxy cannot stall the session.
+ */
+export const PI_MCP_EXPOSURE = "deferred"
 
 export interface PiMcpGroupEntry {
   /** Scoped MCP group name; also the suffix of the server key. */
   group: string
-  /** One-line capability note. The adapter forwards `description` verbatim. */
+  /** One-line capability note, surfaced in the `mcp_servers` system prompt. */
   description: string
 }
 
@@ -64,12 +101,20 @@ export function readMcpServerKeys(raw: string): Array<string> | null {
 }
 
 /**
- * The adapter forwards `description` verbatim, so this is the model's only
- * pre-search signal for what a server is. Kept to what every tool in the group
- * actually does; read-only is a property of the group's default surface, not a
- * promise about every call.
+ * Under `deferred` exposure this line is the model's ONLY pre-search signal for
+ * what a server is, so each one says what the group does and when to reach for
+ * it rather than naming the server back at the model.
+ *
+ * Only the seven groups a Pi profile can reach are listed. `orchestrate`,
+ * `decide`, `fleet` and `first-mate` sit outside every Pi profile's
+ * `allowedGroups` (`src/lib/launch-profile.ts`), so `resolvePiSurfaces` can
+ * never emit them and a description for them would be dead text.
  */
 const GROUP_DESCRIPTIONS: Record<string, string> = {
+  peers: "Cross-lab adversarial reviewers (codex_critic, codex_reviewer, gemini_critic, gemini_reviewer, opus_critic) plus oracle, a stateless expert consultant. Reach for a critic when a plan or a diff needs a second lab's judgement; reach for oracle when repository evidence alone cannot settle a self-contained technical trade-off.",
+  search: "Code and web search for this workspace. code is semantic-first with a labelled lexical fallback and reports which engine answered; web runs a Copilot-backed web search. Reach for code before broad file reads when you are locating code by meaning rather than by exact text.",
+  workers: "Autonomous worker subagents that run their own agent loop on a scoped task: explore reads and searches, review also runs commands to verify, implement edits files in an isolated git worktree and returns the diff. Reach for a worker when the task is big enough that its context should not land in yours.",
+  browser: "Drive a real Chrome or Edge tab: open, navigate, read the page, screenshot, click, type, evaluate JavaScript. Reach for it when the answer lives in a web UI rather than in the repository.",
   ado: "Azure DevOps for the open repository: repositories, work items, pipelines and wikis.",
   kusto: "Azure Data Explorer: query and management commands against the cluster named on each call, or the launch default.",
   cloudagent: "Microsoft Cloud Agent jobs: hand a prompt plus an Azure DevOps repository to a cloud coding agent, then poll it for hours and collect the answer. create_job, create_pr_job and cancel_job spend compute; confirm with the user before creating a job the user did not ask for.",
@@ -78,11 +123,11 @@ const GROUP_DESCRIPTIONS: Record<string, string> = {
 export interface PiSurfaceDecision {
   /** ColBERT / `--search` surfaces: `pi-web-access`, the semantic skill, the launch card. */
   search: boolean
-  /** The generated `code_search` seam. Bluebird serves the same tool, different engine. */
+  /** The semantic search seam. Bluebird serves the same tool, different engine. */
   codeSearch: boolean
-  /** Which engine answers `code_search`; Bluebird wins when both are on. */
+  /** Which engine answers `code`; Bluebird wins when both are on. */
   codeSearchBackend: "colbert" | "bluebird"
-  /** Azure groups to publish to Pi. Empty unless the adapter ships. */
+  /** Scoped groups to publish to Pi as native MCP servers. */
   groups: Array<PiMcpGroupEntry>
 }
 
@@ -95,34 +140,50 @@ export interface PiSurfaceDecision {
  * same flag), and the skill prose it would enable is ColBERT-specific. What
  * Bluebird does serve is `code` — `runUnifiedCodeSearch` routes `semantic` and
  * `lexical` through it whenever `state.bluebirdEnabled` is set — so an Azure
- * checkout with Bluebird auto-enabled and no `--search` still deserves the seam.
+ * checkout with Bluebird auto-enabled and no `--search` still deserves the
+ * group.
  *
- * The Azure groups ride the adapter, which only exists when `helpers` and
- * `peers` both hold (`buildPiSettingsJson` adds it as `helpers && peers`).
- * Writing the config without the adapter would leave it inert at best: the file
- * is also Pi's own built-in MCP config, so an ungated write would expose the
- * groups through a backend this path has never validated.
+ * Group selection reproduces the pinned-profile branch of the Claude launcher
+ * (`src/claude.ts`) instead of inventing a second policy, so a Pi session and a
+ * `github-router claude -m cheapest2` session see the same servers:
+ * `peers` (unless `--no-peers`), `search`, `workers` only when the browse agent
+ * is available, `browser` under `--browse`, and the three Azure groups under
+ * their own predicates. Everything is then filtered through
+ * `profileDescriptor(profileId).allowedGroups`, which is
+ * `{peers, search, workers, browser, ado, kusto, cloudagent}` for all four Pi
+ * profiles — so `orchestrate`, `decide`, `fleet` and `first-mate` stay off.
  */
 export function resolvePiSurfaces(opts: {
+  profileId: PiProfileId
   searchEnabled: boolean
   bluebirdEnabled: boolean
   adoEnabled: boolean
   kustoEnabled: boolean
   cloudAgentEnabled: boolean
-  helpersEnabled: boolean
+  /** Browse-worker gate (`browseAgentEnabled()`), which also requires the model. */
+  browseAgentAvailable: boolean
+  /** Direct browser-control gate (`browserToolsEnabled()`), the `--browse` opt-in. */
+  directBrowserAvailable: boolean
   peersEnabled: boolean
 }): PiSurfaceDecision {
   const codeSearchBackend = opts.bluebirdEnabled ? "bluebird" : "colbert"
+  const allowed = profileDescriptor(opts.profileId).allowedGroups
   const groups: Array<PiMcpGroupEntry> = []
-  if (opts.helpersEnabled && opts.peersEnabled) {
-    if (opts.adoEnabled) groups.push({ group: "ado", description: GROUP_DESCRIPTIONS["ado"]! })
-    if (opts.kustoEnabled) {
-      groups.push({ group: "kusto", description: GROUP_DESCRIPTIONS["kusto"]! })
-    }
-    if (opts.cloudAgentEnabled) {
-      groups.push({ group: "cloudagent", description: GROUP_DESCRIPTIONS["cloudagent"]! })
-    }
+  const push = (group: string): void => {
+    if (allowed && !allowed.has(group)) return
+    const description = GROUP_DESCRIPTIONS[group]
+    if (!description) return
+    groups.push({ group, description })
   }
+
+  if (opts.peersEnabled) push("peers")
+  push("search")
+  if (opts.browseAgentAvailable) push("workers")
+  if (opts.directBrowserAvailable) push("browser")
+  if (opts.adoEnabled) push("ado")
+  if (opts.kustoEnabled) push("kusto")
+  if (opts.cloudAgentEnabled) push("cloudagent")
+
   return {
     search: opts.searchEnabled,
     codeSearch: opts.searchEnabled || opts.bluebirdEnabled,
@@ -157,12 +218,12 @@ export interface PiMcpJsonResult {
   skippedReason?: string
 }
 
-/** Project-scoped files the adapter reads, in its own precedence order. */
-const PROJECT_MCP_FILES = [
-  path.join(".mcp.json"),
-  path.join(".pi", "mcp.json"),
-  path.join(".pi", "mcp-adapter.json"),
-]
+/**
+ * The project-scoped file native Pi reads. `.mcp.json` and
+ * `.pi/mcp-adapter.json` were adapter-only inputs and are gone with it: warning
+ * about a file Pi never reads would be a false positive.
+ */
+const PROJECT_MCP_FILES = [path.join(".pi", "mcp.json")]
 
 /**
  * Write one remote entry per group into `<mirrorDir>/mcp.json`.
@@ -221,7 +282,11 @@ export async function writePiMcpJson(opts: {
     nextServers[key] = {
       type: "http",
       url: `${opts.serverUrl}/mcp/${group.group}`,
-      headers: { Authorization: PI_MCP_NONCE_PLACEHOLDER },
+      headers: {
+        Authorization: PI_MCP_NONCE_PLACEHOLDER,
+        "X-GH-Workspace": PI_MCP_WORKSPACE_PLACEHOLDER,
+      },
+      exposure: PI_MCP_EXPOSURE,
       description: group.description,
     }
   }

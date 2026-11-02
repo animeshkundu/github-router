@@ -21,13 +21,19 @@ import {
  * The gh-router Pi extension source, generated per launch into the
  * isolated mirror (`extensions/gh-router-pi/index.ts`).
  *
- * Design (Pi-cooperative): executable seams only — oracle/advisor
- * consult, semantic search, and browser dispatch all POST JSON-RPC
- * `tools/call` to the running proxy's `/mcp/<group>` with the
- * per-launch nonce (the same `GH_ROUTER_HOOK_MCP_URL/NONCE` channel the
- * Claude hooks use), then return the text. No custom provider, no
- * compaction replacement: `session_before_compact` only routes the
- * summary model and always falls back to Pi native on failure.
+ * Design (Pi-cooperative): executable seams only. Model-facing tools are
+ * NOT registered here — every scoped MCP group is published as a native Pi
+ * server in the mirror's `mcp.json` (`src/lib/pi-mcp-config.ts`), which
+ * brings `tool_search`, the `mcp_servers` roster and per-server `exposure`
+ * that a hand-wrapped `registerTool` cannot. What stays is the work no MCP
+ * server can do: the statusline footer, the memory bridge, and (cheapest
+ * family only) the prompt-submit relay, which POSTs JSON-RPC `tools/call`
+ * to the running proxy with the per-launch nonce (the same
+ * `GH_ROUTER_HOOK_MCP_URL/NONCE` channel the Claude hooks use).
+ *
+ * No custom provider, no compaction replacement: `session_before_compact`
+ * only routes the summary model and always falls back to Pi native on
+ * failure.
  *
  * Statusline footer (always on): this extension owns Pi's footer and
  * renders the SAME `internal-aic-status` runner Claude Code uses, fed a
@@ -391,111 +397,25 @@ export function buildPiMemoryBridgeSection(bridge: PiBridgeExtensionInput): Arra
 
 export function buildPiExtensionSource(opts: {
   profileId: PiProfileId
-  searchEnabled: boolean
-  /**
-   * Engine behind `code_search`. Under `bluebird` the tool reaches the Azure
-   * DevOps index and a failure is `source:"error"` with NO local fallback
-   * (`runUnifiedCodeSearch`), so the description must not promise one: a model
-   * that believes in a fallback reads an empty `error` result as "not found".
-   */
-  searchBackend?: "colbert" | "bluebird"
-  browseEnabled: boolean
-  peers?: boolean
   bridge?: PiBridgeExtensionInput
 }): string {
-  const peers = opts.peers !== false
-  const advisor = peers ? piAdvisorModel(opts.profileId) : undefined
-  // Cheapest-only, like the advisor: the brief is the front-end half of the
-  // same floor-raising surface `buildPiAppendSystem` writes the consult contract
-  // for, and `balanced` is deliberately floor-free on both counts.
+  // Cheapest-only, like the advisor some profiles carry: the brief is the
+  // front-end half of the same floor-raising surface `buildPiAppendSystem`
+  // writes the consult contract for, and `balanced` is deliberately floor-free
+  // on both counts.
   const promptBrief = isCheapestFamily(opts.profileId)
   const lines: Array<string> = []
   lines.push(
     `// gh-router-pi extension (${opts.profileId} mode). Generated per launch; do not edit.`,
     `// Executable seams only. Workflow guidance lives in skills/, not here.`,
-    `import { Type } from "typebox";`,
     `import { spawn } from "node:child_process";`,
     ``,
-    ...(peers
-      ? [
-          `const OracleParams = Type.Object({`,
-          `  decision: Type.String({ description: "The risky decision to get a second opinion on" }),`,
-          `  options: Type.Optional(Type.String({ description: "Options considered" })),`,
-          `  context: Type.String({ description: "Missing-context gaps and background the cold-start oracle needs" }),`,
-          `});`,
-        ]
-      : []),
-    ...(advisor
-      ? [
-          `const AdvisorParams = Type.Object({`,
-          `  plan: Type.String({ description: "The final plan to review (advisory)" }),`,
-          `  context: Type.Optional(Type.String({ description: "Background context" })),`,
-          `});`,
-        ]
-      : []),
-    ...(opts.searchEnabled
-      ? [
-          `const CodeSearchParams = Type.Object({`,
-          `  query: Type.String({ description: "What to find" }),`,
-          `  mode: Type.Optional(Type.String({ description: "semantic (default), lexical, exact, regex, or ast" })),`,
-          `  limit: Type.Optional(Type.Number({ description: "Max results" })),`,
-          `  workspace: Type.Optional(Type.String({ description: "Absolute path to the project root to search. Defaults to the launch workspace." })),`,
-          `  file_glob: Type.Optional(Type.String({ description: "Optional ripgrep glob filter (e.g. src/**/*.ts)" })),`,
-          `});`,
-        ]
-      : []),
-    ...(opts.browseEnabled
-      ? [
-          `const OpenTabParams = Type.Object({`,
-          `  url: Type.String({ description: "URL to load" }),`,
-          `  reuseActive: Type.Optional(Type.Boolean({ description: "Navigate the active tab instead of opening a new one" })),`,
-          `});`,
-          `const NavigateParams = Type.Object({`,
-          `  tabId: Type.Number({ description: "Tab id from open_tab" }),`,
-          `  action: Type.String({ description: "goto, back, forward, or reload" }),`,
-          `  url: Type.Optional(Type.String({ description: "URL for action=goto" })),`,
-          `  hard: Type.Optional(Type.Boolean({ description: "Reload only: bypass cache" })),`,
-          `});`,
-          `const ScreenshotParams = Type.Object({`,
-          `  tabId: Type.Number({ description: "Tab id from open_tab" }),`,
-          `  format: Type.Optional(Type.String({ description: "png or jpeg" })),`,
-          `  quality: Type.Optional(Type.Number({ description: "JPEG quality 1-100" })),`,
-          `});`,
-          `const ActParams = Type.Object({`,
-          `  tabId: Type.Number({ description: "Tab id from open_tab" }),`,
-          `  intent: Type.Optional(Type.String({ description: "Natural-language action (INTENT mode)" })),`,
-          `  ref: Type.Optional(Type.String({ description: "Element ref for REF mode" })),`,
-          `  action: Type.Optional(Type.String({ description: "REF mode action" })),`,
-          `  value: Type.Optional(Type.String({ description: "Value for fill/type/select" })),`,
-          `});`,
-          `const ObserveParams = Type.Object({`,
-          `  tabId: Type.Number({ description: "Tab id from open_tab" }),`,
-          `  intent: Type.Optional(Type.String({ description: "Focus for the summary" })),`,
-          `});`,
-          `const ExtractParams = Type.Object({`,
-          `  tabId: Type.Number({ description: "Tab id from open_tab" }),`,
-          `  schema: Type.Any({ description: "JSON schema for the desired output shape" }),`,
-          `  instruction: Type.String({ description: "What to extract" }),`,
-          `});`,
-        ]
-      : []),
     `function stripNul(s) { return String(s ?? "").replace(/\\0/g, ""); }`,
-    `async function toolText(promise) {`,
-    // Inbound NUL strip: MCP/tool results flow into workflowScript text and
-    // strict downstream JSON consumers reject literal U+0000 (observed as a
-    // subagent-workflow validate failure). Outbound params are stripped at
-    // each call site; this covers the return path in one place.
-    `  const text = await promise;`,
-    `  return { content: [{ type: "text", text: stripNul(text) }], details: undefined };`,
-    `}`,
-    `function toolErrorText(text) {`,
-    `  return { content: [{ type: "text", text }], details: undefined };`,
-    `}`,
-    `const MCP_URL = (process.env.GH_ROUTER_HOOK_MCP_URL ?? "").replace(/\\/+$/, "");`,
-    `const MCP_NONCE = process.env.GH_ROUTER_HOOK_NONCE ?? "";`,
-    `const PI_WORKSPACE = (process.env.GH_ROUTER_WORKSPACE ?? "").trim();`,
     ...(promptBrief
       ? [
+          `const MCP_URL = (process.env.GH_ROUTER_HOOK_MCP_URL ?? "").replace(/\\/+$/, "");`,
+          `const MCP_NONCE = process.env.GH_ROUTER_HOOK_NONCE ?? "";`,
+          `const PI_WORKSPACE = (process.env.GH_ROUTER_WORKSPACE ?? "").trim();`,
           // Backstop only. The proxy bounds its own rewrite at
           // CHEAPEST_REWRITE_TIMEOUT_MS (30s) and answers with an empty text
           // block on a timeout, so this is what catches a hung socket rather
@@ -508,167 +428,34 @@ export function buildPiExtensionSource(opts: {
     `const LEAD_THINKING = ${JSON.stringify(piLeadThinking(opts.profileId))};`,
     `void LEAD_MODEL; void LEAD_THINKING;`,
     ``,
-    `async function callMcp(group, tool, args, signal) {`,
-    `  const headers = { "content-type": "application/json", accept: "application/json", authorization: "Bearer " + MCP_NONCE };`,
-    `  if (PI_WORKSPACE && (group === "search" || group === "workers" || group === "orchestrate")) { headers["X-GH-Workspace"] = PI_WORKSPACE; }`,
-    `  const res = await fetch(MCP_URL + "/mcp/" + group, {`,
-    `    method: "POST",`,
-    `    headers,`,
-    `    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } }),`,
-    `    signal,`,
-    `  });`,
-    `  if (!res.ok) throw new Error("mcp " + group + "/" + tool + " -> HTTP " + res.status);`,
-    `  const body = await res.json();`,
-    `  if (body.error) return "Error: " + body.error.message;`,
-    `  const content = body.result && body.result.content;`,
-    `  if (!Array.isArray(content)) return "";`,
-    `  return content.map((c) => c.text || "").join("\\n");`,
-    `}`,
-    ``,
-    `export default function (pi) {`,
-    ...(peers
+    ...(promptBrief
       ? [
-          `  pi.registerTool({`,
-          `    name: "oracle",`,
-          `    label: "Oracle",`,
-          `    description: "Second opinion before acting on a risky decision. Advisory only: challenges assumptions, never edits. Pass decision, options, and context.",`,
-          `    parameters: OracleParams,`,
-          `    async execute(_toolCallId, params, signal) {`,
-          `      const query = stripNul(params.decision || "").trim();`,
-          `      const opts = stripNul(params.options || "").trim();`,
-          `      const ctx = stripNul(params.context || "").trim();`,
-          `      const context = (opts ? "Options considered:\\n" + opts + "\\n\\n" : "") + ctx;`,
-          `      if (!query || !context.trim()) return toolErrorText("oracle: decision and context are required (non-empty strings)");`,
-          `      return await toolText(callMcp("peers", "oracle", { query, context }, signal));`,
-          `    },`,
+          // The prompt-submit relay is the extension's only MCP call now. Every
+          // model-facing tool arrives through Pi's own `mcp.json` (native MCP),
+          // so the workspace header is set on the server entry rather than
+          // here; this call still sends it because the hook channel is a raw
+          // fetch and the proxy reads the header, not a workspace argument.
+          `async function callMcp(group, tool, args, signal) {`,
+          `  const headers = { "content-type": "application/json", accept: "application/json", authorization: "Bearer " + MCP_NONCE };`,
+          `  if (PI_WORKSPACE) { headers["X-GH-Workspace"] = PI_WORKSPACE; }`,
+          `  const res = await fetch(MCP_URL + "/mcp/" + group, {`,
+          `    method: "POST",`,
+          `    headers,`,
+          `    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } }),`,
+          `    signal,`,
           `  });`,
+          `  if (!res.ok) throw new Error("mcp " + group + "/" + tool + " -> HTTP " + res.status);`,
+          `  const body = await res.json();`,
+          `  if (body.error) return "Error: " + body.error.message;`,
+          `  const content = body.result && body.result.content;`,
+          `  if (!Array.isArray(content)) return "";`,
+          `  return content.map((c) => c.text || "").join("\\n");`,
+          `}`,
+          ``,
         ]
       : []),
+    `export default function (pi) {`,
   )
-  if (advisor) {
-    lines.push(
-      `  pi.registerTool({`,
-      `    name: "advisor",`,
-      `    label: "Advisor",`,
-      `    description: "Advisory plan review for the lead: review the final plan before presenting it. Never executes.",`,
-      `    parameters: AdvisorParams,`,
-      `    async execute(_toolCallId, params, signal) {`,
-      `      const plan = stripNul(params.plan || "").trim();`,
-      `      const ctx = stripNul(params.context || "").trim();`,
-      `      const context = (plan ? "Plan under review:\\n" + plan : "") + (ctx ? "\\n\\nBackground:\\n" + ctx : "");`,
-      `      if (!plan || !context.trim()) return toolErrorText("advisor: plan and context are required (non-empty strings)");`,
-      `      return await toolText(callMcp("peers", "oracle", { query: "Review this plan (advisory)", context }, signal));`,
-      `    },`,
-      `  });`,
-    )
-  }
-  if (opts.searchEnabled) {
-    const codeSearchDescription =
-      opts.searchBackend === "bluebird"
-        ? "Search the indexed Azure DevOps code for this repository (Bluebird). Modes semantic and lexical answer from the remote index and have NO local fallback: a failure returns source \\\"error\\\" and zero results, which means the search did not run, not that nothing matched. Use mode exact/regex/ast for the local engine."
-        : "Semantic-first code search over the workspace index (falls back to lexical with a label). Use for finding code by meaning."
-    lines.push(
-      `  pi.registerTool({`,
-      `    name: "code_search",`,
-      `    label: "Code search",`,
-      `    description: "${codeSearchDescription}",`,
-      `    parameters: CodeSearchParams,`,
-      `    async execute(_toolCallId, params, signal) {`,
-      `      const query = stripNul(params.query || "").trim();`,
-      `      if (!query) return toolErrorText("code_search: query is required (non-empty string)");`,
-      `      const workspace = (typeof params.workspace === "string" && params.workspace.trim()) ? params.workspace.trim() : PI_WORKSPACE;`,
-      `      if (!workspace) return toolErrorText("code_search: a workspace is required. Pass the absolute project path as workspace.");`,
-      `      const args = { query, mode: params.mode || "semantic", limit: params.limit || 15, workspace };`,
-      `      if (typeof params.file_glob === "string" && params.file_glob) args.file_glob = params.file_glob;`,
-      `      return await toolText(callMcp("search", "code", args, signal));`,
-      `    },`,
-      `  });`,
-    )
-  }
-  if (opts.browseEnabled) {
-    lines.push(
-      `  pi.registerTool({`,
-      `    name: "open_tab",`,
-      `    label: "Browser open tab",`,
-      `    description: "Open a URL in a new browser tab (MCP browser/open_tab). Returns install_required with setup steps when the extension is not loaded.",`,
-      `    parameters: OpenTabParams,`,
-      `    async execute(_toolCallId, params, signal) {`,
-      `      const url = stripNul(params.url || "").trim();`,
-      `      if (!url) return toolErrorText("open_tab: url is required");`,
-      `      const args = { url };`,
-      `      if (typeof params.reuseActive === "boolean") args.reuseActive = params.reuseActive;`,
-      `      return await toolText(callMcp("browser", "open_tab", args, signal));`,
-      `    },`,
-      `  });`,
-      `  pi.registerTool({`,
-      `    name: "navigate",`,
-      `    label: "Browser navigate",`,
-      `    description: "Navigate an existing tab (MCP browser/navigate). Requires tabId + action; url only for action=goto.",`,
-      `    parameters: NavigateParams,`,
-      `    async execute(_toolCallId, params, signal) {`,
-      `      if (typeof params.tabId !== "number") return toolErrorText("navigate: tabId is required (number from open_tab)");`,
-      `      if (!params.action) return toolErrorText("navigate: action is required (goto, back, forward, reload)");`,
-      `      const args = { tabId: params.tabId, action: params.action };`,
-      `      if (typeof params.url === "string" && params.url) args.url = params.url;`,
-      `      if (typeof params.hard === "boolean") args.hard = params.hard;`,
-      `      return await toolText(callMcp("browser", "navigate", args, signal));`,
-      `    },`,
-      `  });`,
-      `  pi.registerTool({`,
-      `    name: "screenshot",`,
-      `    label: "Browser screenshot",`,
-      `    description: "Screenshot a tab (MCP browser/screenshot). Requires tabId.",`,
-      `    parameters: ScreenshotParams,`,
-      `    async execute(_toolCallId, params, signal) {`,
-      `      if (typeof params.tabId !== "number") return toolErrorText("screenshot: tabId is required (number from open_tab)");`,
-      `      const args = { tabId: params.tabId };`,
-      `      if (typeof params.format === "string" && params.format) args.format = params.format;`,
-      `      if (typeof params.quality === "number") args.quality = params.quality;`,
-      `      return await toolText(callMcp("browser", "screenshot", args, signal));`,
-      `    },`,
-      `  });`,
-      `  pi.registerTool({`,
-      `    name: "act",`,
-      `    label: "Browser act",`,
-      `    description: "Interact with a tab (MCP browser/act). Requires tabId plus intent or ref.",`,
-      `    parameters: ActParams,`,
-      `    async execute(_toolCallId, params, signal) {`,
-      `      if (typeof params.tabId !== "number") return toolErrorText("act: tabId is required (number from open_tab)");`,
-      `      if (!params.intent && !params.ref) return toolErrorText("act: intent or ref is required");`,
-      `      const args = { tabId: params.tabId };`,
-      `      if (typeof params.intent === "string" && params.intent) args.intent = params.intent;`,
-      `      if (typeof params.ref === "string" && params.ref) args.ref = params.ref;`,
-      `      if (typeof params.action === "string" && params.action) args.action = params.action;`,
-      `      if (typeof params.value === "string") args.value = params.value;`,
-      `      return await toolText(callMcp("browser", "act", args, signal));`,
-      `    },`,
-      `  });`,
-      `  pi.registerTool({`,
-      `    name: "observe",`,
-      `    label: "Browser observe",`,
-      `    description: "Summarize a tab (MCP browser/observe). Requires tabId.",`,
-      `    parameters: ObserveParams,`,
-      `    async execute(_toolCallId, params, signal) {`,
-      `      if (typeof params.tabId !== "number") return toolErrorText("observe: tabId is required (number from open_tab)");`,
-      `      const args = { tabId: params.tabId };`,
-      `      if (typeof params.intent === "string" && params.intent) args.intent = params.intent;`,
-      `      return await toolText(callMcp("browser", "observe", args, signal));`,
-      `    },`,
-      `  });`,
-      `  pi.registerTool({`,
-      `    name: "extract",`,
-      `    label: "Browser extract",`,
-      `    description: "Extract structured data from a tab (MCP browser/extract). Requires tabId, schema, instruction.",`,
-      `    parameters: ExtractParams,`,
-      `    async execute(_toolCallId, params, signal) {`,
-      `      if (typeof params.tabId !== "number") return toolErrorText("extract: tabId is required (number from open_tab)");`,
-      `      if (!params.instruction) return toolErrorText("extract: instruction is required");`,
-      `      if (params.schema === undefined) return toolErrorText("extract: schema is required");`,
-      `      return await toolText(callMcp("browser", "extract", { tabId: params.tabId, schema: params.schema, instruction: params.instruction }, signal));`,
-      `    },`,
-      `  });`,
-    )
-  }
   if (opts.bridge && opts.bridge.scopedRules.length + opts.bridge.stats.staticFiles > 0) {
     lines.push(...buildPiMemoryBridgeSection(opts.bridge))
   }
@@ -785,12 +572,13 @@ export function buildPiSkills(opts: {
         "",
         "# Oracle consult",
         "",
-        "Call the `oracle` tool with the decision, the options considered, and the",
-        "missing-context gaps. The oracle is cold-start: it sees only what you pass.",
-        "Its verdict is advisory — verify with tests and code, never substitute votes",
-        "for verification. (The `oracle` tool is the one-shot consult; the `oracle`",
-        "subagent is the same role for interactive follow-ups — same name, different",
-        "invocation. Prefer the tool for a single verdict.)",
+        "Call `mcp__gh-router-peers__oracle` (load it with `tool_search` if it is",
+        "not in the tool list yet) with the decision, the options considered, and",
+        "the missing-context gaps. The oracle is cold-start: it sees only what you",
+        "pass. Its verdict is advisory — verify with tests and code, never",
+        "substitute votes for verification. (The MCP tool is the one-shot consult;",
+        "the `oracle` subagent is the same role for interactive follow-ups — same",
+        "name, different invocation. Prefer the tool for a single verdict.)",
       ].join("\n"),
     })
   }
@@ -805,10 +593,11 @@ export function buildPiSkills(opts: {
         "",
         "# Search first",
         "",
-        "Use `code_search` (semantic by default) before broad reads. The response",
-        "labels its `source`: `semantic`, `lexical`, or `lexical-fallback` — a",
-        "fallback is never silent, so retry narrower on fallback rather than",
-        "assuming full coverage.",
+        "Use `mcp__gh-router-search__code` (semantic by default; load it with",
+        "`tool_search` if it is not in the tool list yet) before broad reads. The",
+        "response labels its `source`: `semantic`, `lexical`, or",
+        "`lexical-fallback` — a fallback is never silent, so retry narrower on",
+        "fallback rather than assuming full coverage.",
       ].join("\n"),
     })
   }
@@ -857,7 +646,7 @@ export function buildPiSkills(opts: {
           "# Advisor review",
           "",
           "The lead plans directly (there is no Plan subagent). Review the final plan",
-          "with the `advisor` tool before presenting it. Advisory only: it never",
+          "with the `advisor` subagent before presenting it. Advisory only: it never",
           "executes and never overrides verification.",
         ].join("\n"),
       })
@@ -918,7 +707,7 @@ export function buildPiPrompts(opts: {
         'description: Advisory review of the current plan before presenting',
         'argument-hint: "[plan]"',
         "---",
-        "Review the final plan with the advisor tool (advisory) before presenting it: ${1:-the current plan}.",
+        "Review the final plan with the advisor subagent (advisory) before presenting it: ${1:-the current plan}.",
       ].join("\n"),
     })
   }

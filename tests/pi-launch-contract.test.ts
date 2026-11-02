@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test"
+import path from "node:path"
 
+import { collectPiPassthroughArgs, piArgs } from "~/pi"
+import { piMirrorDir, piSessionsDir } from "~/lib/pi-paths"
 import {
   buildPiAgentFiles,
   buildPiModelsJson,
@@ -231,6 +234,53 @@ describe("pi launch contract: cost ceiling", () => {
       expect(JSON.stringify(settings)).not.toContain("[1m]")
     })
   }
+})
+
+describe("pi launch contract: sessions survive a quit", () => {
+  test("the session root is a sibling of the mirror, never inside it", () => {
+    // The mirror is per-launch and removed on shutdown, so anything under it
+    // is history the user loses. Pi's own default root is `<agent dir>/
+    // sessions`, which is exactly why quitting used to erase every transcript
+    // and leave `--continue` with nothing to resume.
+    const root = piSessionsDir()
+    const mirror = piMirrorDir()
+    expect(root).not.toBe(mirror)
+    expect(path.relative(mirror, root).startsWith("..")).toBe(true)
+    // Siblings under the app dir: `pi-sessions` next to the `pi-mirrors` root,
+    // so the mirror sweep never walks into the history.
+    expect(path.dirname(root)).toBe(path.dirname(path.dirname(mirror)))
+  })
+
+  test("resume flags are forwarded untouched", () => {
+    // The flag plumbing was never the bug, so it must not become one: none of
+    // these are declared in piArgs, and declaring one later would swallow the
+    // value and silently turn `--resume <id>` into a router flag.
+    expect(collectPiPassthroughArgs(["--continue"], piArgs)).toEqual(["--continue"])
+    expect(collectPiPassthroughArgs(["-c"], piArgs)).toEqual(["-c"])
+    expect(collectPiPassthroughArgs(["--resume"], piArgs)).toEqual(["--resume"])
+    expect(collectPiPassthroughArgs(["--resume", "abc123"], piArgs)).toEqual([
+      "--resume",
+      "abc123",
+    ])
+    expect(collectPiPassthroughArgs(["--session-dir", "/tmp/s"], piArgs)).toEqual([
+      "--session-dir",
+      "/tmp/s",
+    ])
+    expect(collectPiPassthroughArgs(["--fork", "abc123"], piArgs)).toEqual([
+      "--fork",
+      "abc123",
+    ])
+  })
+
+  test("the declared flags still stay with the router", () => {
+    // The mirror-image assertion: a passthrough that forwarded everything
+    // would hand `-m` to Pi and lose the profile resolution.
+    expect(collectPiPassthroughArgs(["-m", "balanced2"], piArgs)).toEqual([])
+    expect(collectPiPassthroughArgs(["--no-ui"], piArgs)).toEqual([])
+    expect(collectPiPassthroughArgs(["-m", "cheapest2", "--continue"], piArgs)).toEqual([
+      "--continue",
+    ])
+  })
 })
 
 describe("pi launch contract: agent files", () => {

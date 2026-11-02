@@ -75,11 +75,7 @@ function stubPi(): { pi: unknown; registered: Registered } {
 async function loadExtension(
   opts: { profileId: PiProfileId; name: string },
 ): Promise<Registered> {
-  const source = buildPiExtensionSource({
-    profileId: opts.profileId,
-    searchEnabled: false,
-    browseEnabled: false,
-  })
+  const source = buildPiExtensionSource({ profileId: opts.profileId })
   mkdirSync(SANDBOX, { recursive: true })
   // `.ts`, because that is what the launcher writes: `src/pi.ts` persists this
   // string as `extensions/gh-router-pi/index.ts` and Pi loads extensions
@@ -152,7 +148,7 @@ const EMPTY_BRIEF = 'EXECUTION BRIEF (advisory): Try the cache first.'
 describe("pi prompt brief: emission gate", () => {
   test("cheapest family emits the handler, balanced family does not", () => {
     const emit = (profileId: PiProfileId): string =>
-      buildPiExtensionSource({ profileId, searchEnabled: false, browseEnabled: false })
+      buildPiExtensionSource({ profileId })
     for (const profileId of ["cheapest", "cheapest2"] as const) {
       expect(emit(profileId)).toContain('pi.on("before_agent_start"')
       expect(emit(profileId)).toContain('callMcp("search", "prompt_brief"')

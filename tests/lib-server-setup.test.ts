@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test"
 import type { ServerHandler } from "srvx"
 
 import { PATHS } from "../src/lib/paths"
+import { PI_DEFAULT_REGISTRY } from "../src/lib/pi-version-check"
 import {
   FAST_LEAD_MODEL,
   BUDGET_SMALL_FAST_SLUG,
@@ -18,6 +19,7 @@ import {
   getPiLaunchEnvVars,
   withBodyLimit,
 } from "../src/lib/server-setup"
+import { piSessionsDir } from "../src/lib/pi-paths"
 
 describe("parseSharedArgs", () => {
   test("valid port parsed correctly", () => {
@@ -1748,6 +1750,111 @@ describe("getPiLaunchEnvVars npm quiet", () => {
     try {
       const vars = getPiLaunchEnvVars("/tmp/mirror")
       expect(vars.npm_config_allow_scripts).toBe("")
+    } finally {
+      if (prior === undefined) delete process.env.GH_ROUTER_PI_VERBOSE_NPM
+      else process.env.GH_ROUTER_PI_VERBOSE_NPM = prior
+    }
+  })
+})
+
+describe("getPiLaunchEnvVars session durability", () => {
+  test("the session root is stable across launches and outside the mirror", () => {
+    // The mirror is per-launch and removed on shutdown. Pi's default session
+    // root lives inside it, which is why a quit used to erase the history and
+    // leave `--continue` with nothing to resume.
+    const first = getPiLaunchEnvVars("/tmp/mirror-a")
+    const second = getPiLaunchEnvVars("/tmp/mirror-b")
+    expect(first.PI_CODING_AGENT_SESSION_DIR).toBeDefined()
+    expect(second.PI_CODING_AGENT_SESSION_DIR).toBe(first.PI_CODING_AGENT_SESSION_DIR)
+    expect(first.PI_CODING_AGENT_SESSION_DIR).toBe(piSessionsDir())
+    expect(first.PI_CODING_AGENT_DIR).not.toBe(second.PI_CODING_AGENT_DIR)
+    // Same parent as the mirrors, but a sibling: never swept with them.
+    expect(first.PI_CODING_AGENT_SESSION_DIR.startsWith("/tmp/mirror")).toBe(false)
+  })
+
+  test("a user-set session dir does not leak through the strip", () => {
+    // PI_CODING_AGENT_SESSION_DIR is in STRIPPED_PARENT_ENV_KEYS for the same
+    // isolation reason PI_CODING_AGENT_DIR is, so the child env value is ours
+    // regardless of what the operator exported. `--session-dir` is the
+    // per-launch override, and Pi gives it the highest precedence.
+    const prior = process.env.PI_CODING_AGENT_SESSION_DIR
+    process.env.PI_CODING_AGENT_SESSION_DIR = "/tmp/their-sessions"
+    try {
+      expect(getPiLaunchEnvVars("/tmp/mirror").PI_CODING_AGENT_SESSION_DIR).toBe(piSessionsDir())
+    } finally {
+      if (prior === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR
+      else process.env.PI_CODING_AGENT_SESSION_DIR = prior
+    }
+  })
+})
+
+describe("getPiLaunchEnvVars npm registry", () => {
+  test("the Pi child resolves through npmjs with no publish-age gate", () => {
+    // A corporate feed lags behind npmjs, so the version floor Pi enforces is
+    // unreachable there. The router already installs Pi itself through
+    // resolvePiRegistry(); this is the same recovery for the `npm install` a
+    // model runs inside a session, expressed as child env so nothing is
+    // written to the user's .npmrc.
+    const priorRegistry = process.env.GH_ROUTER_NPM_REGISTRY
+    const priorAge = process.env.npm_config_min_release_age
+    delete process.env.GH_ROUTER_NPM_REGISTRY
+    process.env.npm_config_min_release_age = "1440"
+    try {
+      const vars = getPiLaunchEnvVars("/tmp/mirror")
+      expect(vars.npm_config_registry).toBe(PI_DEFAULT_REGISTRY)
+      // `0` is the env form of `npm config delete min-release-age`: a cooldown
+      // window that holds back fresh versions breaks a package whose floor is
+      // newer than the window.
+      expect(vars.npm_config_min_release_age).toBe("0")
+    } finally {
+      if (priorRegistry === undefined) delete process.env.GH_ROUTER_NPM_REGISTRY
+      else process.env.GH_ROUTER_NPM_REGISTRY = priorRegistry
+      if (priorAge === undefined) delete process.env.npm_config_min_release_age
+      else process.env.npm_config_min_release_age = priorAge
+    }
+  })
+
+  test("GH_ROUTER_NPM_REGISTRY is honored and normalized", () => {
+    const prior = process.env.GH_ROUTER_NPM_REGISTRY
+    try {
+      process.env.GH_ROUTER_NPM_REGISTRY = "https://npm.example.internal"
+      expect(getPiLaunchEnvVars("/tmp/mirror").npm_config_registry).toBe(
+        "https://npm.example.internal/",
+      )
+      process.env.GH_ROUTER_NPM_REGISTRY = "https://npm.example.internal/"
+      expect(getPiLaunchEnvVars("/tmp/mirror").npm_config_registry).toBe(
+        "https://npm.example.internal/",
+      )
+    } finally {
+      if (prior === undefined) delete process.env.GH_ROUTER_NPM_REGISTRY
+      else process.env.GH_ROUTER_NPM_REGISTRY = prior
+    }
+  })
+
+  test("a non-http override degrades to npmjs rather than bricking npm", () => {
+    const prior = process.env.GH_ROUTER_NPM_REGISTRY
+    process.env.GH_ROUTER_NPM_REGISTRY = "npm.example.internal"
+    try {
+      expect(getPiLaunchEnvVars("/tmp/mirror").npm_config_registry).toBe(
+        PI_DEFAULT_REGISTRY,
+      )
+    } finally {
+      if (prior === undefined) delete process.env.GH_ROUTER_NPM_REGISTRY
+      else process.env.GH_ROUTER_NPM_REGISTRY = prior
+    }
+  })
+
+  test("the registry is set regardless of the verbosity opt-out", () => {
+    // Same reasoning as allow-scripts: verbosity is about log noise. Folding
+    // the registry into that block would point an operator who asked for stock
+    // npm output back at the feed that cannot serve the install.
+    const prior = process.env.GH_ROUTER_PI_VERBOSE_NPM
+    process.env.GH_ROUTER_PI_VERBOSE_NPM = "1"
+    try {
+      const vars = getPiLaunchEnvVars("/tmp/mirror")
+      expect(vars).not.toHaveProperty("npm_config_loglevel")
+      expect(vars.npm_config_registry).toBe(PI_DEFAULT_REGISTRY)
+      expect(vars.npm_config_min_release_age).toBe("0")
     } finally {
       if (prior === undefined) delete process.env.GH_ROUTER_PI_VERBOSE_NPM
       else process.env.GH_ROUTER_PI_VERBOSE_NPM = prior

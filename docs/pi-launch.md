@@ -50,10 +50,14 @@ intentionally shadows the packaged prompt of the same name.
 ```bash
 github-router pi -m cheapest --search --browse
 github-router pi -m balanced -- --print "review this diff"
+github-router pi -m balanced2 --continue
 ```
 
 Everything after `--` is forwarded verbatim to `pi`; other Pi flags
-(`--print`, `--mode`, `--session`, …) flow through automatically.
+(`--print`, `--mode`, `--continue`, `--resume`, `--session`, …) flow
+through automatically. Sessions live in a router-owned root that outlives
+the launch, so `--continue` picks up the last session in the current
+working directory and `--resume` lets you pick from the list.
 
 ## Flag policy (mirrors the Claude launcher's house rules)
 
@@ -62,39 +66,98 @@ plus the mode identity. Each surface rides a flag:
 
 | Flag | Default | Surface |
 |---|---|---|
-| `--peers` / `--no-peers` | **on** | Native agent files, oracle tool (+cheapest advisor), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
-| `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: `pi-mcp-adapter`, allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer and no `files` picker, whose `ctrl+shift+o` would collide with the UI's extra-detail toggle), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
+| `--peers` / `--no-peers` | **on** | Native agent files, the `peers` MCP group (`mcp__gh-router-peers__oracle`, plus the `advisor` subagent on cheapest), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
+| `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer and no `files` picker, whose `ctrl+shift+o` would collide with the UI's extra-detail toggle), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
 | `--ui` / `--no-ui` | **on** | Claude-Code look: genuine `claude-code-dark` theme (`#D77757` coral palette; all six CC variants pickable via `/settings`), fixed Claude palette in tool rows (`themeAdaptive: false`), one-line tool rows (`summary`/`count` modes), transparent tool backgrounds. Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag (the cc-ui `Thought for Xs` one-liner has no off switch upstream — it is the minimum). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
 | `--swe` | off | Pipeline surface: `gh-delegate` (+cheapest `gh-advisor`) skills, `review` / `parallel-review` (+cheapest `plan-review`) prompts |
-| `--search` | off | ColBERT provision + `code_search` tool + `gh-search-first` skill. The prose rides this flag alone; the tool also appears under `--bluebird`, below |
-| `--browse` | off | Browser tool surface when a supported browser is installed |
-| `--bluebird` | auto on an Azure DevOps remote | Routes the `code` tool's `semantic` and `lexical` modes to Bluebird server-side, and emits the `code_search` seam **even without `--search`** — same tool, remote engine, and the description says so (no local fallback: a failure is `source:"error"`, not an empty result). `gh-search-first` prose and `pi-web-access` deliberately stay on `--search`: neither is Bluebird's job |
-| `--ado` | auto on an Azure DevOps remote | `ado` MCP group, reached through `pi-mcp-adapter` from `<mirror>/mcp.json` (key `gh-router-ado` -> `<serverUrl>/mcp/ado`, read-only unless `--ado-write`). Needs `--helpers` **and** `--peers`; either one off leaves Pi with no Azure MCP surface |
+| `--search` | off | ColBERT provision + the `gh-search-first` skill prose. The `code` tool itself is published on every launch (see the MCP section), so this flag now owns only the ColBERT-specific advice, which would be wrong on a Bluebird or lexical backend |
+| `--browse` | off | Browser MCP group when a supported browser is installed |
+| `--bluebird` | auto on an Azure DevOps remote | Routes the `code` tool's `semantic` and `lexical` modes to Bluebird server-side. The tool is already on the `search` group, so nothing extra is emitted; the description and the runtime `source` label say which engine answered. `gh-search-first` prose and `pi-web-access` deliberately stay on `--search`: neither is Bluebird's job |
+| `--ado` | auto on an Azure DevOps remote | `ado` MCP group (key `gh-router-ado` -> `<serverUrl>/mcp/ado`, read-only unless `--ado-write`). Gated on its own predicate only, exactly as on the Claude side, so neither `--no-peers` nor `--no-helpers` removes it |
 | `--kusto` | auto on an Azure DevOps remote | `kusto` MCP group by the same route (key `gh-router-kusto`). A remote enables it and the flag forces it anywhere; `--kusto-cluster` only sets a default, and without one every call names the cluster it queries. There is no launch-side reachability probe: the group is served read-only by the service |
 | `--cloudagent` | auto on an Azure DevOps remote | `cloudagent` MCP group (Microsoft Cloud Agent Job API v2) by the same route (key `gh-router-cloudagent`). The git remote enables all ten tools, `create_job`, `create_pr_job` and `cancel_job` included; `--no-cloudagent` is the veto, and the create tools tell the model to confirm with the user first because a job runs a cloud agent for hours and spends compute. `--cloudagent-env prod\|ppe` selects the service. The proxy mints the Entra token itself from an existing `az login`, and the base URL is not configurable |
 | `--memory-bridge` / `--no-memory-bridge` | **on** | Copilot (`.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` `applyTo`) + Claude (`.claude/rules/`, `.claude/CLAUDE.md`, `~/.claude/CLAUDE.md`, `~/.copilot/copilot-instructions.md`) bridge. Static repo-wide slice synthesizes into the mirror `AGENTS.md` (Pi-native candidate, 24KB budget, secrets-redacted, fenced idempotent); path-scoped rules lazy-attach on matching `read/edit/write` (once/session). Auto-memory (`~/.claude/projects/<slug>/memory/MEMORY.md`, 200-line/25KB) is on-demand via `/memory` only, never auto-injected. Honors `GH_ROUTER_PI_BRIDGE=0` / `GH_ROUTER_DISABLE_PI_BRIDGE=1` and Pi's own `--no-context-files`/`-nc` passthrough. `--no-memory-bridge` = Pi-native `AGENTS.md`/`CLAUDE.md` discovery only. |
 
 Always injected regardless of flags (like Claude's operating
-defaults): `models.json` (routing is load-bearing), minimal
-`settings.json`, `APPEND_SYSTEM.md` digest, statusline footer (built into
+defaults): `models.json` (routing is load-bearing), `mcp.json` (the
+`search` group at minimum), minimal `settings.json`, `APPEND_SYSTEM.md`
+digest, statusline footer (built into
 the `gh-router-pi` extension — no third-party package; opt out with
 `GH_ROUTER_DISABLE_AIC_STATUSLINE=1`), toolbelt PATH (opt out with
 `GH_ROUTER_DISABLE_TOOLBELT=1`), launch binding. The user's own
 `~/.pi/agent` snapshot is their Pi default, never gated.
 
-**Pi's own `mcp.json`.** The two Azure groups have no extension seam, so they are
-published through Pi's own MCP config in the mirror (`<mirror>/mcp.json`, which
-`pi-mcp-adapter` reads as a user-global source on Pi 0.99+). The file is written
-only when a group is enabled *and* the adapter ships (`--helpers` + `--peers`),
-is read-merged so a user's own `mcpServers` survive untouched, and carries the
-bearer as `Bearer ${GH_ROUTER_HOOK_NONCE}` — a placeholder the adapter expands at
-connect time, never a token on disk. Keys are always `gh-router-<group>`, never
-the bare name: project files (`.mcp.json`, `.pi/mcp.json`,
-`.pi/mcp-adapter.json`) outrank the mirror and replace a same-named server
+## MCP: Pi's built-in client, every profile-appropriate group
+
+Every group reaches Pi through **Pi's own MCP client**, configured in
+`<mirror>/mcp.json` (`PI_CODING_AGENT_DIR` already points there). Nothing is
+hand-wrapped in the generated extension any more: the extension is a seam for
+the prompt-submit relay and the statusline footer, and it registers no
+model-facing tools.
+
+**The adapter had to go, not merely be optional.** An installed extension that
+registers `/mcp` replaces built-in MCP for the session, and Pi then never reads
+`mcp.json` at all. `pi-mcp-adapter` is therefore a blocker for native MCP, not
+an alternative to it, and it is out of the `--helpers` bundle. What native
+brings that the adapter could not: `tool_search`, MCP resources, per-server
+`exposure` / `toolExposure` / `timeout`, and the `mcp_servers` system-prompt
+roster.
+
+**All servers are `deferred`.** Pi lists a deferred server in the
+`mcp_servers` section of the system prompt with one line from its `description`
+and activates `tool_search` automatically, so the model can find a tool without
+any server being connected up front. The alternative, `direct`, makes the first
+prompt wait up to 10 s per server while every tool definition is fetched. On a
+launch that can carry seven groups that is an unacceptable first-turn cost for
+a surface most turns never touch, so `deferred` is the only exposure we emit.
+The consequence to know: the `description` string is the model's entire
+pre-search signal, which is why each one says what the group is for rather than
+just naming it.
+
+**Group set, per profile.** All four Pi profiles carry the same
+`allowedGroups` (`peers`, `search`, `workers`, `browser`, `ado`, `kusto`,
+`cloudagent`), so they publish the same set Claude does for the same flags:
+
+| Group | Emitted when | Key |
+|---|---|---|
+| `peers` | `--peers` (default on) | `gh-router-peers` |
+| `search` | always | `gh-router-search` |
+| `workers` | the browse agent's model resolves | `gh-router-workers` |
+| `browser` | `--browse` and a supported browser is installed | `gh-router-browser` |
+| `ado` | `--ado` / an Azure DevOps remote | `gh-router-ado` |
+| `kusto` | `--kusto` / an Azure DevOps remote | `gh-router-kusto` |
+| `cloudagent` | `--cloudagent` / an Azure DevOps remote | `gh-router-cloudagent` |
+
+`orchestrate`, `decide`, `fleet` and `first-mate` are outside the pinned
+profiles' `allowedGroups`, so no flag combination surfaces them. That is the
+same hard deny the Claude launcher applies, not a Pi-specific choice.
+
+`search` is the one unconditional group: `code` always answers (semantic when
+the index is ready, labelled lexical otherwise) and `web` is Copilot-backed, so
+there is no configuration where withholding it buys anything.
+
+**Entry shape.** Each entry is `type: "http"` with the scoped URL
+`<serverUrl>/mcp/<group>`, `exposure: "deferred"`, a `description`, and two
+headers:
+
+- `Authorization: Bearer ${GH_ROUTER_HOOK_NONCE}` — a placeholder Pi expands
+  from the child env at connect time, never a token on disk.
+- `X-GH-Workspace: ${GH_ROUTER_WORKSPACE}` — load-bearing, not cosmetic. The
+  worker tools refuse a call that names no workspace, and native MCP sends no
+  such header on its own (the old extension set it by hand). It rides every
+  group and is ignored where unused.
+
+**Keys are always `gh-router-<group>`, never the bare name.** A project
+`.pi/mcp.json` outranks the user-level file and replaces a same-named server
 wholesale, so a bare `ado` key would be hijacked by the workspace's own. A
 project file that declares one of our prefixed keys is reported in a launch
-warning, never edited. A file we cannot parse is left exactly as it is, and the
-groups are simply not exposed that launch.
+warning, never edited. `.mcp.json` and `.pi/mcp-adapter.json` are no longer
+scanned: native Pi never opens them, so warning about them would be a false
+positive.
+
+The file is read-merged, so a user's own `mcpServers` survive untouched. A file
+we cannot parse is left exactly as it is, and the groups are simply not exposed
+that launch.
 
 Deliberate divergence: pinned Claude profiles refuse `--no-codex-mcp`;
 Pi allows `--no-peers`. Do not "fix" this back into parity.
@@ -127,6 +190,21 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   per-launch dir (`PI_CODING_AGENT_DIR` → mirror); `auth.json` and
   `sessions/` are never copied. The mirror is swept on shutdown (plus a
   boot sweep of dead-PID mirrors).
+- **Sessions outlive the launch.** Pi's default session root is
+  `<agent dir>/sessions`, which sits inside the mirror that shutdown
+  deletes, so quitting used to erase the transcript history and leave
+  `--continue` / `--resume` with nothing to resume. The child now gets
+  `PI_CODING_AGENT_SESSION_DIR` → `~/.local/share/github-router/pi-sessions`,
+  one stable root shared by every launch. Pi groups sessions under it by
+  working directory, so per-workspace history stays separate and
+  `--continue` still picks the right one. The root is a sibling of the
+  `pi-mirrors` directory, never inside it: the boot sweep reaps mirrors by
+  PID because they are scratch, and this directory is history, so nothing
+  ages it out. Pi documents no retention policy; the session picker's
+  delete (and `/session`) is the pruning surface. `--session-dir` remains
+  the per-launch override (Pi gives it precedence over the env var), and
+  the user's own `PI_CODING_AGENT_SESSION_DIR` export is stripped from the
+  parent env for the same isolation reason `PI_CODING_AGENT_DIR` is.
 - **Persistent npm-package cache.** A fresh mirror would force Pi to
   reinstall every `packages[]` entry from the registry on each boot
   (seconds + `added N packages` noise that bypasses npm's loglevel, since
@@ -138,28 +216,49 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   packages periodically refresh; opt out with
   `GH_ROUTER_PI_NO_PACKAGE_CACHE=1`.
 - **Subagents via `pi-subagents` + our agents.** The `gh-router-pi`
-  extension registers executable seams only (`oracle`, cheapest-only
-  `advisor`, `code_search`, `browser_*`), each POSTing JSON-RPC
-  `tools/call` to the proxy's `/mcp` with the per-launch nonce. Rover
-  guidance lives in skills (`gh-oracle`, `gh-search-first`,
+  extension registers no model-facing tools; every consult and search tool
+  arrives through native MCP as `mcp__gh-router-peers__oracle`,
+  `mcp__gh-router-search__code`, and the rest. The extension keeps two
+  non-tool seams: the prompt-submit relay and the statusline footer.
+  Guidance lives in skills (`gh-oracle`, `gh-search-first`,
   `gh-delegate`, cheapest-only `gh-advisor`) and `/review`,
-  `/parallel-review` (+ cheapest-only `/plan-review`) prompts.
-- **Per-prompt execution brief, cheapest only.** The extension also
-  registers a `before_agent_start` handler that relays the user's prompt to
-  a hook-only MCP tool, `prompt_brief` (group `search`, hook-nonce
+  `/parallel-review` (+ cheapest-only `/plan-review`) prompts, all
+  pointing at those MCP tool names.
+- **Per-prompt brief, full `UserPromptSubmit` parity.** The extension
+  registers a `before_agent_start` handler that relays the user's prompt to a
+  hook-only MCP tool, `prompt_brief` (group `search`, hook-nonce
   authenticated, never listed to the model), and re-emits the reply as a
   custom message ABOVE the user turn — additive, `systemPrompt` untouched.
-  The proxy produces it with the same `runCheapestRewrite` the Claude
-  `UserPromptSubmit` hook uses (`src/lib/hook-prompt-brief.ts` over
-  `src/lib/cheapest-prompt-rewrite.ts`), grounding search, static pack, and
-  one-shot per-session flag included, so `GH_ROUTER_DISABLE_CHEAPEST_REWRITE=1`
-  opts both front-ends out. Trivial prompts decline; the handler stands down
-  inside a `pi-subagents` child process so a fanout cannot spend one brief
-  per child. Deliberately narrower than the Claude hook: no prior-turn
-  findings and no Stop-gate budget reset (Pi has no `Stop` hook to produce
-  them), and a missed or timed-out rewrite injects nothing where Claude
-  falls open to the search tip plus the grounded scope note. `balanced` is
-  floor-free on both counts, like its advisor.
+  `runPiPromptBrief` (`src/lib/hook-prompt-brief.ts`) calls the SAME
+  `decidePromptSubmitV2` the Claude Code hook calls, so the two clients cannot
+  drift on when to search, when to spend a model call, or when to stay silent:
+  pending prior-turn findings are surfaced once and cleared, a non-trivial
+  prompt gets the search tip plus a grounded scope/goal note from one
+  `gpt-6-luna` call (lexical search when semantic is off, lexical + semantic
+  in parallel when it is on), and the cheapest family additionally spends its
+  one-shot Sol rewrite (`GH_ROUTER_DISABLE_CHEAPEST_REWRITE=1` opts both
+  front-ends out, `GH_ROUTER_DISABLE_PROMPT_STEER=1` disables the steer).
+  The handler stands down inside a `pi-subagents` child process so a fanout
+  cannot spend one brief per child.
+
+  Only the PROSE differs, through `PromptProseOverrides`: Pi has no
+  `/gh-research` or `/gh-orchestrate` skills and its native MCP servers carry
+  the `gh-router-` prefix, so the tip names `mcp__gh-router-search__code` and
+  the fallback goal names the `subagent` roster (Explore for recon,
+  General-Purpose for scoped implementation, reviewer for verification).
+  Naming Claude's nouns there would point the model at tools and skills that
+  do not exist in the session. `decision.resetSession` is dropped: it clears
+  the Claude Stop-gate's per-prompt block budget, and Pi has no Stop gate.
+  An empty string is the ordinary "nothing to inject" answer for a trivial
+  prompt with no pending findings, never an error.
+
+  **Latency budget.** The extension aborts the brief at 45 s
+  (`BRIEF_TIMEOUT_MS`); the Claude hook has no client-side bound. A cheapest
+  prompt whose Sol rewrite misses cleanly then runs the Luna scope path, so the
+  theoretical worst case (a 30 s rewrite budget followed by the 22 s scope
+  budget) can exceed Pi's abort. A clean miss is normally fast, and the abort is
+  fail-open — the extension injects nothing and the turn proceeds — so the
+  overlap costs a brief on a rare path, not a hang.
 - **Native compaction stays authoritative.** Each model row carries its
   Default-tier `contextWindow` (272K for Luna/Sol, 200K for Grok — never the
   advertised 1.05M), and `compaction.reserveTokens` is derived per model from
@@ -268,7 +367,8 @@ runner degrades to Pi's native footer, never a broken launch.
   `tests/pi-tier-windows.test.ts`.
 - `src/lib/pi-extension.ts` — extension source + skills + prompts + bridge lazy-attach (`tool_result`) + `/memory` + `/context`.
 - `src/lib/pi-memory-bridge.ts` — pure bridge builders (frontmatter scope, glob match, `@` imports, caps, redaction, mirror synthesis). Unit-tested in `tests/pi-memory-bridge.test.ts`.
-- `src/lib/pi-paths.ts` — mirror lifecycle.
+- `src/lib/pi-paths.ts` — mirror lifecycle plus the durable session
+  root (`piSessionsDir()`).
 - `src/lib/pi-version-check.ts` — install/update gate.
 
 ## Claude-Code look (bundled by default)
@@ -300,7 +400,8 @@ Yes — every display default is overridable, at three levels:
    `groupToolCalls`, `readOutputMode` (`summary`/`preview`/`hidden`),
    `searchOutputMode` (`count`/`preview`/`hidden`),
    `mcpOutputMode`, `bashOutputMode` (`summary`/`preview`/`opencode`),
-   `toolBackground`,    `terminal`, `images`, `markdown` (`mermaid: streaming` pinned).
+   `toolBackground`,    `terminal`, `images`, `markdown` (`mermaid: streaming` pinned),
+   `tuiMode`, `quietStartup`, and the four `fullscreen*` keys.
    Example:
    `"hideThinkingBlock": false` shows thinking again;
    `"readOutputMode": "preview"` restores expanded reads. Load-bearing keys (models, tools, thinking levels,
@@ -318,6 +419,38 @@ inline (`terminal.showImages`, kitty/iTerm2 auto-detect), and diffs
 render via Shiki in `pi-claude-code-ui`. All three are display-side —
 they change zero bytes on the wire to the model.
 
+## Terminal mode (regular by default)
+
+Pi defaults to `tuiMode: "fullscreen"`; the generated settings pin
+`"regular"`. Regular mode hands the screen back to the terminal: scrollback,
+select, copy and wheel scrolling are the terminal's own bindings, over the
+whole session, instead of an app-owned viewport that reimplements them. That
+is what most people mean by "mouse support" and it is the mode that keeps
+terminal-native search (`Ctrl+Shift+F`, `tmux copy-mode`) working.
+
+Mouse is a fullscreen-only feature by Pi's design — regular mode deliberately
+leaves mouse input to the terminal, because the terminal owns the scrollback
+(`docs/tui.md` in the Pi package). Anyone who wants app-level mouse (drag
+selection inside the transcript, the app's own scrollbar) opts in per launch:
+
+```bash
+github-router pi --tui-mode fullscreen
+```
+
+`--tui-mode` is not a router flag, so it passes straight through to Pi. The
+four fullscreen knobs are pinned to Pi's current defaults
+(`fullscreenExitOutput: "transcript"`, `fullscreenScrollbar: "auto"`,
+`fullscreenCopyOnSelect: true`, `fullscreenWheelScrollLines: "auto"`) rather
+than left absent, so the opt-in path cannot silently regress when a Pi release
+changes one of those defaults. They are inert in regular mode.
+
+`quietStartup: true` is also emitted: the router prints its own launch card
+before spawning Pi, so Pi's startup header plus its loaded-resource listing is
+duplicate noise. `"header"` (version and key hints only) and `false` remain
+available as user overrides. `defaultProjectTrust` is deliberately NOT set:
+auto-trust would let a cloned repository load its own extensions at startup,
+which is a security downgrade rather than a convenience.
+
 ## Verification
 
 ```bash
@@ -334,17 +467,21 @@ note was measured against.
 
 ## Helpful bundle (exclusion guardrails)
 
-`--helpers` (default on, peers-gated) wires `pi-mcp-adapter`,
-allowlisted `pi-agent-extensions`, and conditional `pi-web-access`
-(all extensions-only filtered: `skills: []`, `prompts: []`, so
-third-party prose never reaches Ctrl+O). Deliberately excluded:
+`--helpers` (default on, peers-gated) wires allowlisted
+`pi-agent-extensions` and conditional `pi-web-access` (all
+extensions-only filtered: `skills: []`, `prompts: []`, so third-party
+prose never reaches Ctrl+O). Deliberately excluded:
+`pi-mcp-adapter` (an installed `/mcp` extension replaces built-in MCP,
+so it would silently take the whole native surface away),
 `review`/`loop`/`workflow`/`control` (overlap our delegate/review
 pipeline), any footer/statusline package (router owns the AIC footer
 via `gh-router-pi`), compaction replacers (`session_before_compact`
 stays observe-only), and provider/model overriders (would break the
 fixed-roster cost contract). `--ui` opts into `pi-code` +
 `pi-claude-code-ui`; `pi-lean-ctx` stays a docs recipe until its
-manifest paths are pinned.
+manifest paths are pinned. `pi-claude-code` is likewise a manual
+recipe: it duplicates the two UI packages already bundled and ships a
+statusline that would fight the router-owned AIC footer.
 
 ## npm `allow-scripts` is neutralized for the Pi child
 
@@ -367,3 +504,40 @@ allowlist, and their shell export still applies to their own npm use. The
 router's other npm invocations are `npm install -g` (Pi's own install and
 update), which the rule exempts because global installs have no project
 context to protect.
+
+## npm registry and publish-age, for the Pi child only
+
+The router installs Pi itself through `resolvePiRegistry()`
+(`src/lib/pi-version-check.ts`), which defaults to
+`https://registry.npmjs.org/` because a corporate feed lags behind npmjs and
+the version floor becomes unreachable. That covered the router's own install
+and nothing else: the moment the model ran `npm install` from Pi's bash tool
+the same feed came back through the front door, which for a coding agent is
+the common case rather than the exception.
+
+`getPiLaunchEnvVars` now emits both settings into the child env:
+
+| Variable | Value | Why |
+| --- | --- | --- |
+| `npm_config_registry` | `resolvePiRegistry()` | Same registry the router's own Pi install uses, so `GH_ROUTER_NPM_REGISTRY` (http(s)-validated, trailing slash normalized) stays the single override |
+| `npm_config_min_release_age` | `"0"` | npm's `min-release-age` holds fresh versions back for a cooldown window. Fine for an application, fatal for a package whose floor is newer than the window. `0` is the env form of deleting the setting |
+
+Both are read from the environment and override the `.npmrc` cascade. Verified
+on npm 11.19: `npm config list` reports the user and global entries as
+"overridden by env", and `npm config get min-release-age --json` returns `0`
+for a numeric value.
+
+**Blast radius, stated plainly.** `npm_config_registry` reaches every process
+the Pi child spawns, including anything the model runs through bash. That is
+the intent: it reproduces the operator's own
+`npm config set registry https://registry.npmjs.org/ && npm config delete
+min-release-age --location=global` prefix for the whole session. It is
+narrower than that prefix in one respect and wider in another. Narrower:
+nothing is written to the user's `.npmrc`, so their own npm keeps the
+corporate feed. Wider: an `npm publish` inside a Pi session also targets
+npmjs, which is why the setting lives only in this child and not in the
+parent env.
+
+Neither variable is gated on `GH_ROUTER_PI_VERBOSE_NPM`. That flag is about
+log noise; folding reachability into it would point an operator who asked for
+stock npm output back at the feed that cannot serve the install.

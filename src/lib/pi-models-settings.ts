@@ -556,6 +556,32 @@ export interface PiSettingsJson {
    */
   hideThinkingBlock?: boolean
   /**
+   * Interactive TUI mode. Pinned to `regular` (Pi's own default is
+   * `fullscreen`): the terminal keeps its native scrollback, so
+   * select/copy/scroll are the terminal's own bindings rather than an
+   * app-level reimplementation. `--tui-mode fullscreen` still reaches
+   * Pi through the passthrough args for anyone who prefers the
+   * app-owned viewport.
+   */
+  tuiMode?: "regular" | "fullscreen"
+  /**
+   * Startup banner suppression. The router prints its own banner
+   * before spawning Pi, so Pi's header plus its loaded-resource
+   * listing is duplicate noise. `"header"` (keep the version/key-hint
+   * line only) remains available as a user override.
+   */
+  quietStartup?: boolean | "header"
+  /**
+   * The four fullscreen knobs below are PINNED to Pi's current
+   * defaults rather than left absent, so the `--tui-mode fullscreen`
+   * opt-in cannot silently regress when Pi changes a default. They are
+   * inert in the `regular` mode this launcher emits.
+   */
+  fullscreenExitOutput?: "transcript" | "resume-hint"
+  fullscreenScrollbar?: "auto" | "always" | "hidden"
+  fullscreenCopyOnSelect?: boolean
+  fullscreenWheelScrollLines?: "auto" | number
+  /**
    * Companion config for the bundled `pi-claude-code-ui` package
    * (which reads flat settings keys): `false` keeps its fixed
    * Claude-style palette regardless of the active Pi theme instead of
@@ -632,6 +658,12 @@ export interface PiSettingsJson {
  */
 export const PI_COSMETIC_SETTING_KEYS = [
   "hideThinkingBlock",
+  "tuiMode",
+  "quietStartup",
+  "fullscreenExitOutput",
+  "fullscreenScrollbar",
+  "fullscreenCopyOnSelect",
+  "fullscreenWheelScrollLines",
   "theme",
   "themeAdaptive",
   "groupToolCalls",
@@ -681,8 +713,6 @@ export function applyCosmeticUserOverrides(
  * no statusline/footer package (built into `local:gh-router-pi`), no
  * compaction replacers, no provider/model overriders.
  *
- * - `pi-mcp-adapter`: MCP servers as one proxy tool instead of hundreds
- *   of definitions (context/cost win).
  * - `pi-web-access`: search/fetch/PDF-extract fallback. Only wired when
  *   the launch has neither `--search` nor `--browse`, otherwise it
  *   double-pays our ColBERT/browser surfaces.
@@ -697,12 +727,6 @@ export function applyCosmeticUserOverrides(
  *   shipping it only buys noise. `@file` mentions + the `context`
  *   dashboard + `read`/`ls`/`find` cover the need.
  */
-export const PI_HELPERS_MCP_ADAPTER: PiPackageEntry = {
-  source: "npm:pi-mcp-adapter",
-  skills: [],
-  prompts: [],
-}
-
 export const PI_HELPERS_WEB_ACCESS: PiPackageEntry = {
   source: "npm:pi-web-access",
   skills: [],
@@ -791,9 +815,13 @@ export const PI_DEFAULT_TOOLS: ReadonlyArray<string> = Object.freeze([
  * (skills/prompts filtered out — the mode's own skills/prompts cover
  * the roster, so the third-party sets never reach Ctrl+O).
  * The helpful bundle rides `helpers` (default on, peers-gated):
- * `pi-mcp-adapter` + allowlisted `pi-agent-extensions` always, plus
- * `pi-web-access` only when neither search nor browse is on (otherwise
- * it double-pays our ColBERT/browser surfaces). The `--ui` bundle
+ * allowlisted `pi-agent-extensions` always, plus `pi-web-access` only
+ * when neither search nor browse is on (otherwise it double-pays our
+ * ColBERT/browser surfaces). `pi-mcp-adapter` is deliberately NOT in the
+ * bundle any more: an installed extension that registers `/mcp` replaces
+ * Pi's built-in MCP, and the router's scoped groups are published through
+ * native MCP (`<mirror>/mcp.json`) precisely so the model gets
+ * `tool_search` and the `mcp_servers` roster. The `--ui` bundle
  * (`pi-code`, `pi-claude-code-ui`) is opt-in.
  * The statusline footer is built into `local:gh-router-pi` (no
  * third-party statusline package: the community bridge reads only the
@@ -840,6 +868,16 @@ export function buildPiSettingsJson(opts: {
     images: { autoResize: true, blockImages: false },
     transport: "auto",
     hideThinkingBlock: true,
+    // Terminal-native interaction by default: regular mode leaves
+    // scrollback and mouse selection to the terminal, which is what
+    // "mouse support" means for most users. The fullscreen knobs are
+    // pinned so opting in later is not a behavior change.
+    tuiMode: "regular",
+    quietStartup: true,
+    fullscreenExitOutput: "transcript",
+    fullscreenScrollbar: "auto",
+    fullscreenCopyOnSelect: true,
+    fullscreenWheelScrollLines: "auto",
     ...(ui
       ? {
           themeAdaptive: false,
@@ -859,7 +897,7 @@ export function buildPiSettingsJson(opts: {
       ...(peers
         ? [{ source: "npm:pi-subagents", skills: [], prompts: [] } as PiPackageEntry]
         : []),
-      ...(helpers ? [PI_HELPERS_MCP_ADAPTER, PI_HELPERS_AGENT_EXTENSIONS] : []),
+      ...(helpers ? [PI_HELPERS_AGENT_EXTENSIONS] : []),
       ...(webAccess ? [PI_HELPERS_WEB_ACCESS] : []),
       ...(ui ? [...PI_UI_PACKAGES, PI_CC_THEME_PACKAGE] : []),
       "local:gh-router-pi",
@@ -1164,14 +1202,12 @@ export interface PiLaunchCardOpts {
   search: boolean
   browse: boolean
   /**
-   * Azure MCP groups the launch actually wires into the Pi mirror, by their
-   * flag names (`ado`, `kusto`). Empty or absent means none, which is also
-   * what a peerless or helper-less launch resolves to: the groups travel
-   * through `pi-mcp-adapter`, so without that bundle they are not in the
-   * session at all. Passed from the resolved surface decision rather than
+   * MCP groups the launch actually publishes into the Pi mirror, by their
+   * bare group names (`ado`, `kusto`, `cloudagent`, `peers`, ...). Empty or
+   * absent means none. Passed from the resolved surface decision rather than
    * from `state`, so the card can never advertise a group the mirror lacks.
    */
-  azureGroups?: Array<string> | undefined
+  mcpGroups?: Array<string> | undefined
   serverUrl: string
 }
 
@@ -1189,7 +1225,12 @@ export function buildPiLaunchCard(opts: PiLaunchCardOpts): string {
   if (opts.swe) surface.push("swe")
   if (opts.search) surface.push("search")
   if (opts.browse) surface.push("browse")
-  for (const group of opts.azureGroups ?? []) surface.push(group)
+  // The group list is the mirror's own truth, so it also carries `peers` and
+  // `search`, which the flags above already named. Dedupe rather than drop
+  // them: a group the flags missed still has to appear.
+  for (const group of opts.mcpGroups ?? []) {
+    if (!surface.includes(group)) surface.push(group)
+  }
   const identity = [
     opts.accountType,
     opts.login,

@@ -76,7 +76,13 @@ import { colbertDegradedWarning, provisionAndIndexColbert } from "./lib/colbert"
 import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
-import { browserToolsEnabled, adoToolsEnabled, cloudAgentToolsEnabled, kustoToolsEnabled } from "./lib/mcp-capabilities"
+import {
+  browseAgentEnabled,
+  browserToolsEnabled,
+  adoToolsEnabled,
+  cloudAgentToolsEnabled,
+  kustoToolsEnabled,
+} from "./lib/mcp-capabilities"
 import { resolvePiSurfaces, writePiMcpJson } from "./lib/pi-mcp-config"
 import {
   formatBalancedPrerequisiteFailure,
@@ -124,13 +130,13 @@ export const piArgs = {
     type: "boolean" as const,
     default: true,
     description:
-      "Wire the peer/subagent floor: native agent files, the oracle tool (plus cheapest-family advisor), the gh-oracle skill, and the pi-subagents package. Set to false (--no-peers) for a lead-only session; prereqs then validate the lead model only.",
+      "Wire the peer/subagent floor: native agent files, the gh-oracle skill, the pi-subagents package, and the gh-router-peers MCP group (which carries oracle, plus the critics). Set to false (--no-peers) for a lead-only session; prereqs then validate the lead model only.",
   },
   helpers: {
     type: "boolean" as const,
     default: true,
     description:
-      "Wire the helpful bundle: pi-mcp-adapter, allowlisted pi-agent-extensions (sessions, ask_user, todos, handoff, context, analytics — no review/loop/footer, no files picker so Ctrl+Shift+O stays unambiguous for the UI), and pi-web-access when neither --search nor --browse is on. Set to false (--no-helpers) for pi-subagents + gh-router-pi only.",
+      "Wire the helpful bundle: allowlisted pi-agent-extensions (sessions, ask_user, todos, handoff, context, analytics — no review/loop/footer, no files picker so Ctrl+Shift+O stays unambiguous for the UI), and pi-web-access when neither --search nor --browse is on. MCP is native Pi MCP now, so no adapter package is bundled. Set to false (--no-helpers) for pi-subagents + gh-router-pi only.",
   },
   ui: {
     type: "boolean" as const,
@@ -362,14 +368,18 @@ export const pi = defineCommand({
     // Which Pi surfaces this launch emits, in one place. `codeSearch` is the
     // Bluebird seam: Bluebird answers the `code` tool without `--search`, so
     // the generated seam follows it, while `pi-web-access` and the ColBERT
-    // skill prose keep following `--search`. See `resolvePiSurfaces`.
+    // skill prose keep following `--search`. The group list mirrors the pinned
+    // branch of `src/claude.ts` so both clients see the same servers for the
+    // same profile. See `resolvePiSurfaces`.
     const surfaces = resolvePiSurfaces({
+      profileId,
       searchEnabled,
       bluebirdEnabled: state.bluebirdEnabled === true,
       adoEnabled: adoToolsEnabled(),
       kustoEnabled: kustoToolsEnabled(),
       cloudAgentEnabled: cloudAgentToolsEnabled(),
-      helpersEnabled,
+      browseAgentAvailable: browseAgentEnabled(),
+      directBrowserAvailable: browseEnabled,
       peersEnabled,
     })
 
@@ -520,20 +530,14 @@ export const pi = defineCommand({
         path.join(mirror, "extensions", "gh-router-pi", "index.ts"),
         buildPiExtensionSource({
           profileId,
-          searchEnabled: surfaces.codeSearch,
-          searchBackend: surfaces.codeSearchBackend,
-          browseEnabled,
-          peers: peersEnabled,
           bridge: bridgeStats ? { stats: bridgeStats, scopedRules: bridgeScoped } : undefined,
         }),
       )
-      // The Azure groups reach Pi through Pi's own `mcp.json` in the mirror,
-      // which `pi-mcp-adapter` reads (`<Pi agent dir>/mcp.json`, Pi 0.99+).
-      // Pi reaches `peers` / `search` / `browser` through the generated
-      // extension instead; these two have no extension seam, so the adapter is
-      // their only route. A user-owned `mcp.json` is merged over, never
-      // replaced, and a project file that would shadow an entry is reported
-      // rather than repaired.
+      // Every scoped group reaches Pi through Pi's own `mcp.json` in the
+      // mirror, which built-in MCP reads at session start
+      // (`<Pi agent dir>/mcp.json`, Pi 0.99+). A user-owned `mcp.json` is
+      // merged over, never replaced, and a project file that would shadow an
+      // entry is reported rather than repaired.
       if (surfaces.groups.length > 0) {
         const written = await writePiMcpJson({
           mirrorDir: mirror,
@@ -543,7 +547,7 @@ export const pi = defineCommand({
         })
         if (written.skippedReason) {
           consola.warn(
-            `Pi MCP: left ${written.path} alone (${written.skippedReason}); the Azure groups are not exposed to Pi this launch.`,
+            `Pi MCP: left ${written.path} alone (${written.skippedReason}); the scoped groups are not exposed to Pi this launch.`,
           )
         } else {
           for (const { key, file } of written.shadowed) {
@@ -714,7 +718,7 @@ export const pi = defineCommand({
         // From the resolved decision, not from `state`: the Azure groups only
         // reach the session through the helpers bundle, so the card must name
         // exactly what the mirror carries.
-        azureGroups: surfaces.groups.map((g) => g.group),
+        mcpGroups: surfaces.groups.map((g) => g.group),
         serverUrl,
       })}\n`,
     )

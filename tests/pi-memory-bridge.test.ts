@@ -131,8 +131,6 @@ describe("pi-memory-bridge extension", () => {
   test("emits lazy attach + /memory + /context only when bridge present", () => {
     const withBridge = buildPiExtensionSource({
       profileId: "cheapest",
-      searchEnabled: false,
-      browseEnabled: false,
       bridge: {
         stats: { staticFiles: 1, scopedRules: 1, imports: 0, skipped: 0 },
         scopedRules: [{ file: "f", body: "b", globs: ["**/*.ts"], source: "s" }],
@@ -142,7 +140,7 @@ describe("pi-memory-bridge extension", () => {
     expect(withBridge).toContain("memory")
     expect(withBridge).toContain("/context")
 
-    const bare = buildPiExtensionSource({ profileId: "cheapest", searchEnabled: false, browseEnabled: false })
+    const bare = buildPiExtensionSource({ profileId: "cheapest" })
     expect(bare).not.toContain("tool_result")
   })
 

@@ -14,7 +14,6 @@ import {
   buildPiSettingsJson,
   derivePiCompactionSettings,
   PI_HELPERS_AGENT_EXTENSIONS,
-  PI_HELPERS_MCP_ADAPTER,
   PI_HELPERS_WEB_ACCESS,
   PI_IMAGE_RESIZE_MAX_BYTES,
   piAdvisorModel,
@@ -94,11 +93,7 @@ describe("pi balanced profile", () => {
       ),
     ).toBe(false)
     expect(buildPiAppendSystem("balanced")).toContain("no advisor")
-    const ext = buildPiExtensionSource({
-      profileId: "balanced",
-      searchEnabled: true,
-      browseEnabled: true,
-    })
+    const ext = buildPiExtensionSource({ profileId: "balanced" })
     expect(ext).not.toContain("advisor")
   })
 
@@ -409,6 +404,69 @@ describe("pi cosmetic user overrides", () => {
     )
     expect(overrides).toEqual({ markdown: { mermaid: "off" }, collapseChangelog: false })
   })
+
+  test("a user who prefers fullscreen keeps it", () => {
+    // The regular-mode default is OUR choice, not a policy: a user who has
+    // set their own terminal mode must not have it overwritten at launch.
+    const overrides = applyCosmeticUserOverrides(
+      {
+        tuiMode: "fullscreen",
+        quietStartup: false,
+        fullscreenScrollbar: "always",
+        fullscreenCopyOnSelect: false,
+        fullscreenWheelScrollLines: 3,
+        fullscreenExitOutput: "resume-hint",
+      },
+      built(),
+    )
+    expect(overrides).toEqual({
+      tuiMode: "fullscreen",
+      quietStartup: false,
+      fullscreenScrollbar: "always",
+      fullscreenCopyOnSelect: false,
+      fullscreenWheelScrollLines: 3,
+      fullscreenExitOutput: "resume-hint",
+    })
+  })
+})
+
+describe("pi tui defaults", () => {
+  const built = () =>
+    buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: false,
+    })
+
+  test("regular mode is the launch default", () => {
+    // Pi's own default is "fullscreen". Regular keeps the terminal's native
+    // scrollback, so select/copy/scroll are the terminal's bindings rather
+    // than an app-level reimplementation of them.
+    expect(built().tuiMode).toBe("regular")
+  })
+
+  test("the startup banner is suppressed because the router prints its own", () => {
+    expect(built().quietStartup).toBe(true)
+  })
+
+  test("the fullscreen knobs are pinned so the opt-in path cannot regress", () => {
+    // Inert under `regular`, load-bearing the moment someone passes
+    // `--tui-mode fullscreen`: pinned to Pi's current defaults so a future Pi
+    // default change cannot silently alter a router launch.
+    const s = built()
+    expect(s.fullscreenExitOutput).toBe("transcript")
+    expect(s.fullscreenScrollbar).toBe("auto")
+    expect(s.fullscreenCopyOnSelect).toBe(true)
+    expect(s.fullscreenWheelScrollLines).toBe("auto")
+  })
+
+  test("project trust is never relaxed by the generated settings", () => {
+    // Auto-trust would let a cloned repository load its own extensions at
+    // startup. That is a security downgrade, not a convenience, so the key
+    // stays absent and Pi's "ask" default applies.
+    const raw = built() as unknown as Record<string, unknown>
+    expect("defaultProjectTrust" in raw).toBe(false)
+  })
 })
 
 describe("pi launch card", () => {
@@ -441,15 +499,27 @@ describe("pi launch card", () => {
     )
   })
 
-  test("Azure groups are named only when the resolved surface carries them", () => {
-    // The card receives the resolved decision, not `state`, because the Azure
-    // groups reach a Pi session only through the helpers bundle: naming one
-    // the mirror does not have would be the same invisible-tool confusion the
+  test("MCP groups are named only when the resolved surface carries them", () => {
+    // The card receives the resolved decision, not `state`, because a group
+    // reaches a Pi session only when the mirror carries it: naming one the
+    // mirror does not have would be the same invisible-tool confusion the
     // card exists to prevent.
     expect(buildPiLaunchCard(full)).not.toContain("kusto")
-    const card = buildPiLaunchCard({ ...full, browse: true, azureGroups: ["ado", "kusto"] })
+    const card = buildPiLaunchCard({ ...full, browse: true, mcpGroups: ["ado", "kusto"] })
     expect(card.split("\n")[2]).toBe(
       "  lead gpt-6-luna · 2 models · peers helpers ui search browse ado kusto · http://127.0.0.1:59088",
+    )
+  })
+
+  test("a group list carrying the flag-named groups does not repeat them", () => {
+    // The real list carries `peers` and `search` too, which the booleans above
+    // already printed.
+    const card = buildPiLaunchCard({
+      ...full,
+      mcpGroups: ["peers", "search", "workers", "ado"],
+    })
+    expect(card.split("\n")[2]).toBe(
+      "  lead gpt-6-luna · 2 models · peers helpers ui search workers ado · http://127.0.0.1:59088",
     )
   })
 
@@ -514,7 +584,10 @@ describe("pi settings.json", () => {
       prompts: [],
     })
     // Helpful bundle rides peers by default (extensions-only filters).
-    expect(settings.packages).toContainEqual(PI_HELPERS_MCP_ADAPTER)
+    // `pi-mcp-adapter` is gone: an extension that registers `/mcp` replaces
+    // built-in MCP for the session, so it would suppress the native servers
+    // the router publishes through `<mirror>/mcp.json`.
+    expect(JSON.stringify(settings.packages)).not.toContain("pi-mcp-adapter")
     expect(settings.packages).toContainEqual(PI_HELPERS_AGENT_EXTENSIONS)
     // No third-party statusline package: the footer is built into the
     // mode's own gh-router-pi extension (the community bridge never sees
@@ -658,91 +731,36 @@ describe("pi compaction derivation", () => {
 })
 
 describe("pi extension source", () => {
-  test("oracle always; advisor/search/browse gated", () => {
-    const base = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: false,
-      browseEnabled: false,
-    })
-    expect(base).toContain('"oracle"')
-    expect(base).toContain('"advisor"')
-    expect(base).not.toContain("code_search")
-    expect(base).not.toContain("open_tab")
-    expect(base).not.toContain("browser_open_tab")
-
-    const full = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: true,
-      browseEnabled: true,
-    })
-    expect(full).toContain("code_search")
-    // Browser tools use stripped MCP names (open_tab/navigate/...) so a
-    // `browser_*` wire name never reaches tools/call (which keys on the
-    // stripped toolNameHttp and would reject with -32601).
-    expect(full).toContain('"open_tab"')
-    expect(full).toContain('"navigate"')
-    expect(full).toContain('"screenshot"')
-    expect(full).toContain('"act"')
-    expect(full).toContain('"observe"')
-    expect(full).toContain('"extract"')
-    expect(full).not.toContain('"browser_open_tab"')
-    expect(full).not.toContain('"browser_navigate"')
-    // Compaction stays native; the hook only observes.
-    expect(full).toContain("session_before_compact")
-    // No [1m] accounting anywhere.
-    expect(full).not.toContain("[1m]")
+  test("is a seam, not a tool surface", () => {
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
+      const src = buildPiExtensionSource({ profileId })
+      // Model-facing tools come from native MCP (`<mirror>/mcp.json`) so the
+      // model gets `tool_search` and the `mcp_servers` roster. A registerTool
+      // here would shadow that and pay a definition per request.
+      expect(src).not.toContain("pi.registerTool")
+      expect(src).not.toContain('from "typebox"')
+      expect(src).not.toContain("code_search")
+      expect(src).not.toContain("browser_open_tab")
+      // What remains is executable: the footer and the compaction observer.
+      expect(src).toContain("session_before_compact")
+      // No [1m] accounting anywhere.
+      expect(src).not.toContain("[1m]")
+    }
   })
 
-  test("follows Pi's TypeBox registerTool contract", () => {
-    const src = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: true,
-      browseEnabled: true,
-    })
-    // TypeBox object schemas under `parameters` (Pi rejects plain JSON dicts).
-    expect(src).toContain('import { Type } from "typebox"')
-    expect(src).toContain("parameters: OracleParams")
-    expect(src).toContain("parameters: AdvisorParams")
-    expect(src).toContain("parameters: CodeSearchParams")
-    expect(src).toContain("parameters: OpenTabParams")
-    expect(src).toContain("parameters: NavigateParams")
-    expect(src).toContain("parameters: ScreenshotParams")
-    expect(src).toContain("parameters: ActParams")
-    expect(src).toContain("parameters: ObserveParams")
-    expect(src).toContain("parameters: ExtractParams")
-    expect(src).not.toContain("parameters: BrowserParams")
-    expect(src).not.toContain("inputSchema")
-    // execute(toolCallId, params, signal) returning { content, details }.
-    expect(src).toContain("async execute(_toolCallId, params, signal)")
-    expect(src).toContain("content: [{ type: \"text\", text")
-    expect(src).toContain("details: undefined")
-    expect(src).not.toContain("ctx.signal")
-    expect(src).not.toContain("async execute(args, ctx)")
-  })
-
-  test("pi bridge maps to MCP contracts (no schema drift)", () => {
-    const src = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: true,
-      browseEnabled: true,
-    })
-    // Oracle/advisor translate Pi-friendly keys to the MCP {query, context}
-    // contract. The old payload (decision/options/model/thinking) was
-    // rejected by tools/call with -32602.
-    expect(src).toContain('callMcp("peers", "oracle", { query, context }')
-    expect(src).not.toContain("decision: params.decision")
-    expect(src).not.toContain("model: ORACLE_MODEL")
-    expect(src).not.toContain("model: ADVISOR_MODEL")
-    // code_search always carries a workspace (explicit arg or launch env),
-    // plus the X-GH-Workspace session header fallback.
-    expect(src).toContain("PI_WORKSPACE")
-    expect(src).toContain("GH_ROUTER_WORKSPACE")
-    expect(src).toContain("X-GH-Workspace")
-    expect(src).toContain('callMcp("search", "code"')
-    expect(src).toContain("workspace")
+  test("the only MCP call left is the cheapest-family prompt brief", () => {
+    const cheapest = buildPiExtensionSource({ profileId: "cheapest" })
+    expect(cheapest).toContain('callMcp("search", "prompt_brief"')
+    // The brief is workspace-scoped: it reads the repository to ground the
+    // note, so the relay passes the workspace in the arguments and on the
+    // session header both.
+    expect(cheapest).toContain("PI_WORKSPACE")
+    expect(cheapest).toContain("GH_ROUTER_WORKSPACE")
+    expect(cheapest).toContain("X-GH-Workspace")
     // NUL bytes are stripped before crossing the MCP boundary so strict
     // downstream JSON consumers never see a literal U+0000.
-    expect(src).toContain("stripNul")
+    expect(cheapest).toContain("stripNul")
+    expect(buildPiExtensionSource({ profileId: "balanced" })).not.toContain("callMcp")
   })
 })
 
@@ -797,9 +815,9 @@ describe("pi derived -2 profiles", () => {
     )
     expect(
       plain(
-        buildPiExtensionSource({ profileId: "cheapest", searchEnabled: true, browseEnabled: true }),
+        buildPiExtensionSource({ profileId: "cheapest" }),
       ).replace("cheapest mode", "cheapest2 mode"),
-    ).toBe(buildPiExtensionSource({ profileId: "cheapest2", searchEnabled: true, browseEnabled: true }))
+    ).toBe(buildPiExtensionSource({ profileId: "cheapest2" }))
     // Skills and prompts carry no Sol identity at all, so they are identical.
     expect(
       buildPiSkills({ profileId: "cheapest2", peers: true, swe: true }),
@@ -838,7 +856,7 @@ describe("pi derived -2 profiles", () => {
     expect(
       plain(buildPiAppendSystem("balanced")).replace("balanced mode", "balanced2 mode"),
     ).toBe(buildPiAppendSystem("balanced2"))
-    const ext = buildPiExtensionSource({ profileId: "balanced2", searchEnabled: true, browseEnabled: true })
+    const ext = buildPiExtensionSource({ profileId: "balanced2" })
     expect(ext).not.toContain("advisor")
     for (const content of Object.values(buildPiAgentFiles("balanced2"))) {
       expect(content.toLowerCase()).not.toContain("advisor")
