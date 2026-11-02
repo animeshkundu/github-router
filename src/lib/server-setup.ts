@@ -45,6 +45,7 @@ import {
   generateRandomPort,
   isBudgetClaudeLead,
 } from "./port"
+import { resolvePiRegistry } from "./pi-version-check"
 import { initProxyFromEnv, initUpstreamTransport } from "./proxy"
 import { installBodySizeStatsExitHook } from "./request-log"
 import { state } from "./state"
@@ -1716,6 +1717,26 @@ export function getPiLaunchEnvVars(mirrorDir: string): Record<string, string> {
   // names as the correct home for the setting. Setting it only here keeps
   // the operator's export intact for their own npm use.
   vars.npm_config_allow_scripts = ""
+  // Point npm at the Pi registry and drop the publish-age gate, for this child
+  // only. The router already probes and installs Pi itself through
+  // `resolvePiRegistry()` because a corporate feed lags behind npmjs and the
+  // version floor becomes unreachable; without this the same feed comes back
+  // through the front door the moment the model runs `npm install` inside a
+  // session, which is the common case for a coding agent. Reproducing the
+  // operator's own `npm config set registry ... && npm config delete
+  // min-release-age` prefix in the child env keeps that recovery local to the
+  // session: nothing is written to the user's `.npmrc`, and the blast radius
+  // is exactly the processes Pi spawns.
+  //
+  // `npm_config_min_release_age=0` is the env form of deleting the setting.
+  // npm's `min-release-age` holds back freshly published versions for a
+  // cooldown window, which is a fine default for an application but breaks a
+  // package whose floor is newer than the window. Verified against npm 11.19:
+  // both keys are read from the environment and override the `.npmrc`
+  // cascade, and `npm config list` reports the user/global entries as
+  // "overridden by env".
+  vars.npm_config_registry = resolvePiRegistry()
+  vars.npm_config_min_release_age = "0"
   if (toolbeltEnabled()) {
     Object.assign(vars, toolbeltPathOverride(process.env, PATHS.TOOLBELT_BIN_DIR))
   }

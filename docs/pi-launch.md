@@ -452,3 +452,40 @@ allowlist, and their shell export still applies to their own npm use. The
 router's other npm invocations are `npm install -g` (Pi's own install and
 update), which the rule exempts because global installs have no project
 context to protect.
+
+## npm registry and publish-age, for the Pi child only
+
+The router installs Pi itself through `resolvePiRegistry()`
+(`src/lib/pi-version-check.ts`), which defaults to
+`https://registry.npmjs.org/` because a corporate feed lags behind npmjs and
+the version floor becomes unreachable. That covered the router's own install
+and nothing else: the moment the model ran `npm install` from Pi's bash tool
+the same feed came back through the front door, which for a coding agent is
+the common case rather than the exception.
+
+`getPiLaunchEnvVars` now emits both settings into the child env:
+
+| Variable | Value | Why |
+| --- | --- | --- |
+| `npm_config_registry` | `resolvePiRegistry()` | Same registry the router's own Pi install uses, so `GH_ROUTER_NPM_REGISTRY` (http(s)-validated, trailing slash normalized) stays the single override |
+| `npm_config_min_release_age` | `"0"` | npm's `min-release-age` holds fresh versions back for a cooldown window. Fine for an application, fatal for a package whose floor is newer than the window. `0` is the env form of deleting the setting |
+
+Both are read from the environment and override the `.npmrc` cascade. Verified
+on npm 11.19: `npm config list` reports the user and global entries as
+"overridden by env", and `npm config get min-release-age --json` returns `0`
+for a numeric value.
+
+**Blast radius, stated plainly.** `npm_config_registry` reaches every process
+the Pi child spawns, including anything the model runs through bash. That is
+the intent: it reproduces the operator's own
+`npm config set registry https://registry.npmjs.org/ && npm config delete
+min-release-age --location=global` prefix for the whole session. It is
+narrower than that prefix in one respect and wider in another. Narrower:
+nothing is written to the user's `.npmrc`, so their own npm keeps the
+corporate feed. Wider: an `npm publish` inside a Pi session also targets
+npmjs, which is why the setting lives only in this child and not in the
+parent env.
+
+Neither variable is gated on `GH_ROUTER_PI_VERBOSE_NPM`. That flag is about
+log noise; folding reachability into it would point an operator who asked for
+stock npm output back at the feed that cannot serve the install.
