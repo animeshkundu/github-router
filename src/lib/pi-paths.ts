@@ -33,6 +33,26 @@ export function piMirrorDir(): string {
 }
 
 /**
+ * Router-owned, durable Pi session store, shared by every launch.
+ *
+ * Pi's default session root is `<agent dir>/sessions/`, and the agent dir is
+ * the per-launch mirror we delete on shutdown, so quitting used to take the
+ * whole transcript history with it and `--continue` / `--resume` had nothing
+ * left to resume. One stable root, handed to the child as
+ * `PI_CODING_AGENT_SESSION_DIR`, outlives every launch. Pi groups sessions by
+ * working directory under that root, so per-workspace history stays separate
+ * and `--continue` still picks the right one.
+ *
+ * Deliberately outside `sweepStalePiAgentMirrors`: that sweep reaps mirrors by
+ * PID because they are scratch, and this directory is history. Nothing here
+ * ages it out either — Pi documents no retention policy, and the session
+ * picker's delete is the user-facing pruning surface.
+ */
+export function piSessionsDir(): string {
+  return path.join(appDir(), "pi-sessions")
+}
+
+/**
  * Provision the per-launch Pi mirror: snapshot-copy the user's real Pi
  * agent dir (settings, models, skills, prompts, extensions the user owns)
  * so the spawned `pi` starts from the user's own setup, then let the
@@ -45,6 +65,11 @@ export function piMirrorDir(): string {
 export async function ensurePiAgentMirror(): Promise<string> {
   const mirror = piMirrorDir()
   await fs.mkdir(mirror, { recursive: true })
+  // The session root sits outside the mirror and survives it, so it is not
+  // created by the copy below. Make it here rather than leaving Pi to create
+  // it on first save: `--continue` on a fresh install then resolves against a
+  // real (empty) directory instead of an absent one.
+  await fs.mkdir(piSessionsDir(), { recursive: true })
   const source = userPiAgentDir()
   let entries: Array<string>
   try {

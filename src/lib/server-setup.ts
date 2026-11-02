@@ -31,6 +31,7 @@ import {
   type LaunchProfileId,
 } from "./launch-profile"
 import { MAX_PROFILE_MODELS, maxOpusModel } from "./max-profile-contract"
+import { piSessionsDir } from "./pi-paths"
 import {
   balancedContractFor,
   cheapestContractFor,
@@ -1676,6 +1677,14 @@ export function getCodexEnvVars(serverUrl: string): Record<string, string> {
 export function getPiLaunchEnvVars(mirrorDir: string): Record<string, string> {
   const vars: Record<string, string> = {
     PI_CODING_AGENT_DIR: mirrorDir,
+    // Sessions outlive the launch. Pi's default root is `<agent dir>/sessions`,
+    // and the agent dir is the per-launch mirror removed on shutdown, so a
+    // quit used to erase the transcript history and leave `--continue` with
+    // nothing to resume. The stable root is router-owned rather than the
+    // user's own Pi store: `PI_CODING_AGENT_SESSION_DIR` is stripped from the
+    // parent env for exactly the isolation reason `PI_CODING_AGENT_DIR` is,
+    // and `--session-dir` remains the per-launch override.
+    PI_CODING_AGENT_SESSION_DIR: piSessionsDir(),
   }
   // Quiet npm inside the Pi session. Pi installs the mirror's `packages[]`
   // on every boot (fresh mirror dir each launch), and npm's default
