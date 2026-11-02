@@ -8,6 +8,7 @@ import { buildPiSettingsJson, PI_HELPERS_WEB_ACCESS } from "~/lib/pi-models-sett
 import {
   PI_MCP_NONCE_PLACEHOLDER,
   PI_MCP_SERVER_PREFIX,
+  PI_MCP_WORKSPACE_PLACEHOLDER,
   piMcpServerKey,
   readMcpServerKeys,
   resolvePiSurfaces,
@@ -15,17 +16,20 @@ import {
 } from "~/lib/pi-mcp-config"
 
 /**
- * Pi reaches the Azure MCP groups through Pi's own `mcp.json`, which
- * `pi-mcp-adapter` reads from the Pi agent dir (the per-launch mirror under
- * `PI_CODING_AGENT_DIR`). Two properties are load-bearing and neither is
+ * Pi reaches every scoped MCP group through Pi's own `mcp.json`, which
+ * built-in MCP reads from the Pi agent dir (the per-launch mirror under
+ * `PI_CODING_AGENT_DIR`). Three properties are load-bearing and none is
  * visible from the file we happen to write:
  *
- *  - every key is `gh-router-<group>`, because the adapter lets a project
- *    `.mcp.json` / `.pi/mcp.json` replace a same-named user-global server
- *    wholesale, so a bare `ado` key would be hijacked by the workspace's own;
+ *  - every key is `gh-router-<group>`, because a project `.pi/mcp.json`
+ *    replaces a same-named user-level server wholesale, so a bare `ado` key
+ *    would be hijacked by the workspace's own;
  *  - the bearer is the `${GH_ROUTER_HOOK_NONCE}` placeholder, not a token:
- *    the file outlives the token and the adapter interpolates from the child
- *    env at connect time.
+ *    the file outlives the token and Pi interpolates from the child env at
+ *    connect time;
+ *  - the `X-GH-Workspace` header rides the server entry, because native MCP
+ *    sends no workspace of its own and the worker tools refuse a call that
+ *    names neither one nor the header.
  */
 
 const tmpDirs: Array<string> = []
@@ -45,12 +49,14 @@ const KUSTO = { group: "kusto", description: "kusto group" }
 
 describe("resolvePiSurfaces", () => {
   const base = {
+    profileId: "cheapest" as const,
     searchEnabled: false,
     bluebirdEnabled: false,
     adoEnabled: false,
     kustoEnabled: false,
     cloudAgentEnabled: false,
-    helpersEnabled: true,
+    browseAgentAvailable: false,
+    directBrowserAvailable: false,
     peersEnabled: true,
   }
 
@@ -85,23 +91,76 @@ describe("resolvePiSurfaces", () => {
 
   test("groups follow their own gates, one entry each", () => {
     const both = resolvePiSurfaces({ ...base, adoEnabled: true, kustoEnabled: true })
-    expect(both.groups.map((g) => g.group)).toEqual(["ado", "kusto"])
-    expect(resolvePiSurfaces({ ...base, adoEnabled: true }).groups.map((g) => g.group)).toEqual(["ado"])
-    expect(resolvePiSurfaces({ ...base, kustoEnabled: true }).groups.map((g) => g.group)).toEqual(["kusto"])
+    expect(both.groups.map((g) => g.group)).toEqual(["peers", "search", "ado", "kusto"])
+    expect(resolvePiSurfaces({ ...base, adoEnabled: true }).groups.map((g) => g.group)).toEqual([
+      "peers",
+      "search",
+      "ado",
+    ])
+    expect(resolvePiSurfaces({ ...base, kustoEnabled: true }).groups.map((g) => g.group)).toEqual([
+      "peers",
+      "search",
+      "kusto",
+    ])
   })
 
-  test("no adapter, no groups: helpers and peers both gate it", () => {
-    expect(resolvePiSurfaces({ ...base, adoEnabled: true, kustoEnabled: true, helpersEnabled: false }).groups).toEqual([])
-    expect(resolvePiSurfaces({ ...base, adoEnabled: true, kustoEnabled: true, peersEnabled: false }).groups).toEqual([])
+  test("search is unconditional; peers and browser are not", () => {
+    // `search` is the one group every launch gets: `code` always answers (it
+    // falls back to lexical) and `web` is Copilot-backed, so there is no
+    // configuration in which the model should lack it.
+    expect(resolvePiSurfaces({ ...base, peersEnabled: false }).groups.map((g) => g.group)).toEqual([
+      "search",
+    ])
+    expect(resolvePiSurfaces({ ...base }).groups.map((g) => g.group)).toEqual(["peers", "search"])
+    expect(resolvePiSurfaces({ ...base, directBrowserAvailable: true }).groups.map((g) => g.group)).toEqual(
+      ["peers", "search", "browser"],
+    )
+    // Workers need the browse agent's model, not just the flag.
+    expect(resolvePiSurfaces({ ...base, browseAgentAvailable: true }).groups.map((g) => g.group)).toEqual(
+      ["peers", "search", "workers"],
+    )
+  })
+
+  test("each Pi profile publishes the same groups Claude does for it", () => {
+    // The pinned-profile branch of `src/claude.ts` and this function must not
+    // drift: all four Pi profiles carry the same `allowedGroups`, so the same
+    // flags produce the same seven groups on every one of them.
+    const everything = {
+      ...base,
+      adoEnabled: true,
+      kustoEnabled: true,
+      cloudAgentEnabled: true,
+      browseAgentAvailable: true,
+      directBrowserAvailable: true,
+    }
+    const expected = ["peers", "search", "workers", "browser", "ado", "kusto", "cloudagent"]
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
+      const groups = resolvePiSurfaces({ ...everything, profileId }).groups.map((g) => g.group)
+      expect(groups).toEqual(expected)
+      // The four standard-only groups are hard denies on every pinned
+      // profile, so no flag combination can surface them.
+      for (const denied of ["orchestrate", "decide", "fleet", "first-mate"]) {
+        expect(groups).not.toContain(denied)
+      }
+    }
   })
 
   test("every group key is prefixed and has a description", () => {
-    const s = resolvePiSurfaces({ ...base, adoEnabled: true, kustoEnabled: true })
-    expect(s.groups.length).toBe(2)
+    const s = resolvePiSurfaces({
+      ...base,
+      adoEnabled: true,
+      kustoEnabled: true,
+      cloudAgentEnabled: true,
+      browseAgentAvailable: true,
+      directBrowserAvailable: true,
+    })
+    expect(s.groups.length).toBe(7)
     for (const g of s.groups) {
       expect(piMcpServerKey(g.group)).toBe(`${PI_MCP_SERVER_PREFIX}${g.group}`)
       expect(piMcpServerKey(g.group)).not.toBe(g.group)
-      expect(g.description.length).toBeGreaterThan(10)
+      // Under `deferred` exposure this line is the model's only pre-search
+      // signal for what the server is, so it has to say something.
+      expect(g.description.length).toBeGreaterThan(40)
     }
   })
 })
@@ -124,13 +183,33 @@ describe("writePiMcpJson", () => {
     expect(written.mcpServers["gh-router-ado"]).toEqual({
       type: "http",
       url: "http://127.0.0.1:8787/mcp/ado",
-      headers: { Authorization: PI_MCP_NONCE_PLACEHOLDER },
+      headers: {
+        Authorization: PI_MCP_NONCE_PLACEHOLDER,
+        "X-GH-Workspace": PI_MCP_WORKSPACE_PLACEHOLDER,
+      },
+      exposure: "deferred",
       description: "ado group",
     })
     expect(written.mcpServers["gh-router-kusto"].url).toBe("http://127.0.0.1:8787/mcp/kusto")
-    // The placeholder is the whole point: a literal would put a live nonce on
-    // disk for the life of the mirror.
+    // The placeholders are the whole point: a literal would put a live nonce
+    // on disk for the life of the mirror, and native MCP sends no workspace
+    // header of its own for the worker tools to read.
     expect(PI_MCP_NONCE_PLACEHOLDER).toBe("Bearer ${GH_ROUTER_HOOK_NONCE}")
+    expect(PI_MCP_WORKSPACE_PLACEHOLDER).toBe("${GH_ROUTER_WORKSPACE}")
+  })
+
+  test("every entry is deferred, so no server can stall the first prompt", async () => {
+    const mirror = await tmpdir()
+    await writePiMcpJson({
+      mirrorDir: mirror,
+      workspace: await tmpdir(),
+      serverUrl: "http://127.0.0.1:8787",
+      groups: [ADO, KUSTO],
+    })
+    const written = JSON.parse(await fs.readFile(path.join(mirror, "mcp.json"), "utf8"))
+    for (const entry of Object.values<Record<string, unknown>>(written.mcpServers)) {
+      expect(entry["exposure"]).toBe("deferred")
+    }
   })
 
   test("merges over a user file instead of replacing it", async () => {
@@ -221,13 +300,9 @@ describe("writePiMcpJson", () => {
     expect(await fs.readFile(path.join(mirror, "mcp.json"), "utf8")).toBe(body)
   })
 
-  test("a project file declaring our key is reported, per file", async () => {
+  test("a project file declaring our key is reported", async () => {
     const workspace = await tmpdir()
     await fs.mkdir(path.join(workspace, ".pi"), { recursive: true })
-    await fs.writeFile(
-      path.join(workspace, ".mcp.json"),
-      JSON.stringify({ mcpServers: { "gh-router-ado": { url: "https://theirs.test" } } }),
-    )
     await fs.writeFile(
       path.join(workspace, ".pi", "mcp.json"),
       JSON.stringify({ mcpServers: { "gh-router-kusto": { url: "https://theirs.test" } } }),
@@ -241,19 +316,42 @@ describe("writePiMcpJson", () => {
     })
 
     expect(result.shadowed).toEqual([
-      { key: "gh-router-ado", file: path.join(workspace, ".mcp.json") },
       { key: "gh-router-kusto", file: path.join(workspace, ".pi", "mcp.json") },
     ])
   })
 
+  test("adapter-only project files are no longer scanned", async () => {
+    // Native Pi reads `.pi/mcp.json` and nothing else. Warning about
+    // `.mcp.json` or `.pi/mcp-adapter.json` would be a false positive about a
+    // file the running Pi never opens.
+    const workspace = await tmpdir()
+    await fs.mkdir(path.join(workspace, ".pi"), { recursive: true })
+    for (const file of [
+      path.join(workspace, ".mcp.json"),
+      path.join(workspace, ".pi", "mcp-adapter.json"),
+    ]) {
+      await fs.writeFile(
+        file,
+        JSON.stringify({ mcpServers: { "gh-router-ado": { url: "https://theirs.test" } } }),
+      )
+    }
+
+    const result = await writePiMcpJson({
+      mirrorDir: await tmpdir(),
+      workspace,
+      serverUrl: "http://127.0.0.1:8787",
+      groups: [ADO],
+    })
+
+    expect(result.shadowed).toEqual([])
+  })
+
   test("an unparseable project file produces no warning", async () => {
     const workspace = await tmpdir()
-    // `.pi/mcp-adapter.json` is written by the adapter's own editor, so a
-    // JSONC body is a real possibility. No evidence, no warning.
     await fs.mkdir(path.join(workspace, ".pi"), { recursive: true })
     await fs.writeFile(
-      path.join(workspace, ".pi", "mcp-adapter.json"),
-      '{\n  // adapter settings\n  "settings": {}\n}\n',
+      path.join(workspace, ".pi", "mcp.json"),
+      '{\n  // hand-edited, JSONC\n  "mcpServers": {}\n}\n',
     )
 
     const result = await writePiMcpJson({
@@ -280,12 +378,14 @@ describe("the seam does not move the other consumers", () => {
   // `searchEnabled` (the raw flag) to settings + skills, `surfaces.codeSearch`
   // to the extension. These two assertions are what makes that split safe.
   const surfaces = resolvePiSurfaces({
+    profileId: "cheapest",
     searchEnabled: false,
     bluebirdEnabled: true,
     adoEnabled: false,
     kustoEnabled: false,
     cloudAgentEnabled: false,
-    helpersEnabled: true,
+    browseAgentAvailable: false,
+    directBrowserAvailable: false,
     peersEnabled: true,
   })
 
@@ -315,36 +415,27 @@ describe("the seam does not move the other consumers", () => {
   })
 })
 
-describe("generated code_search description", () => {
-  const build = (searchBackend?: "colbert" | "bluebird") =>
-    buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: true,
-      ...(searchBackend ? { searchBackend } : {}),
-      browseEnabled: false,
-      peers: true,
-    })
-
-  test("Bluebird mode promises no local fallback", () => {
-    const src = build("bluebird")
-    expect(src).toContain("Azure DevOps")
-    expect(src).not.toContain("falls back to lexical")
-    // `source:"error"` is emitted as escaped quotes inside the generated
-    // string literal; the raw sequence is what a reader of the file sees.
-    expect(src).toContain('source \\"error\\"')
+describe("native MCP replaced the adapter package", () => {
+  test("no packages[] slice carries pi-mcp-adapter", () => {
+    // An installed extension that registers `/mcp` replaces built-in MCP for
+    // the session, and Pi then never reads `mcp.json` at all. The adapter is
+    // therefore not an alternative to native MCP but a blocker for it.
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
+      const settings = buildPiSettingsJson({
+        profileId,
+        searchEnabled: true,
+        browseEnabled: false,
+        catalog: [],
+      })
+      expect(JSON.stringify(settings.packages)).not.toContain("pi-mcp-adapter")
+    }
   })
 
-  test("the default description is unchanged", () => {
-    const src = build()
-    expect(src).toContain("falls back to lexical with a label")
-    expect(src).not.toContain("Azure DevOps")
-    expect(src).toBe(build("colbert"))
-  })
-
-  test("both variants are valid TypeScript", () => {
+  test("the generated extension is valid TypeScript for every profile", () => {
     const transpiler = new Bun.Transpiler({ loader: "ts" })
-    expect(() => transpiler.transformSync(build("bluebird"))).not.toThrow()
-    expect(() => transpiler.transformSync(build("colbert"))).not.toThrow()
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
+      expect(() => transpiler.transformSync(buildPiExtensionSource({ profileId }))).not.toThrow()
+    }
     // The checker can fail: an unescaped quote is what a bad template edit
     // produces, and it must not pass silently.
     expect(() => transpiler.transformSync('const a = "x "y"";\n')).toThrow()

@@ -74,13 +74,12 @@ describe("pi launch advertises only owned surfaces", () => {
       expect(buildPiPrompts({ profileId })).toEqual([])
     })
 
-    test(`${profileId}: extension carries consults but no search/browse`, () => {
-      const ext = buildPiExtensionSource({
-        profileId,
-        searchEnabled: false,
-        browseEnabled: false,
-      })
-      expect(ext).toContain('"oracle"')
+    test(`${profileId}: extension registers no model-facing tools`, () => {
+      // Every group reaches Pi as a native MCP server, so a hand-wrapped
+      // tool here would both shadow the native one and pay a definition per
+      // request for a surface `tool_search` already covers.
+      const ext = buildPiExtensionSource({ profileId })
+      expect(ext).not.toContain("pi.registerTool")
       expect(ext).not.toContain("code_search")
       expect(ext).not.toContain("browser_open_tab")
     })
@@ -112,17 +111,14 @@ describe("pi --no-peers shrinks the surface", () => {
     ])
   })
 
-  test("extension registers no consult tools", () => {
-    const ext = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: false,
-      browseEnabled: false,
-      peers: false,
-    })
-    expect(ext).not.toContain('"oracle"')
-    expect(ext).not.toContain('"advisor"')
+  test("extension registers no consult tools either way", () => {
+    // Consults are `mcp__gh-router-peers__oracle` and the `advisor` subagent
+    // now, so `--no-peers` shrinks the MCP surface and the agent roster, not
+    // the generated extension.
+    const ext = buildPiExtensionSource({ profileId: "cheapest" })
     expect(ext).not.toContain("OracleParams")
     expect(ext).not.toContain("AdvisorParams")
+    expect(ext).not.toContain("pi.registerTool")
   })
 
   test("settings drop pi-subagents but keep the built-in footer extension", () => {
@@ -226,34 +222,27 @@ describe("pi --swe owns the pipeline surface", () => {
   })
 })
 
-describe("pi --search owns search prose and tool together", () => {
-  test("skill and tool appear together or not at all", () => {
+describe("pi --search owns the search skill prose", () => {
+  test("the skill is opt-in; the code tool is not", () => {
+    // `code` is published on every launch: it always answers (semantic when
+    // the index is ready, labelled lexical otherwise) and `web` rides the
+    // same group, so there is no configuration where withholding the group
+    // buys anything. What `--search` still owns is the ColBERT-specific
+    // prose, which would be wrong advice on a Bluebird or lexical backend.
     const skillsOff = buildPiSkills({
       profileId: "cheapest",
       peers: false,
       search: false,
     })
-    const extOff = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: false,
-      browseEnabled: false,
-    })
     expect(skillsOff).toEqual([])
-    expect(extOff).not.toContain("code_search")
 
     const skillsOn = buildPiSkills({ profileId: "cheapest", search: true })
-    const extOn = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: true,
-      browseEnabled: false,
-    })
     // peers default ON, so gh-oracle rides along; the search skill is
     // the delta this flag owns.
     expect(skillsOn.map((s) => s.dir)).toEqual([
       "gh-oracle",
       "gh-search-first",
     ])
-    expect(extOn).toContain("code_search")
   })
 })
 

@@ -235,11 +235,7 @@ describe("Pi → Claude rendering parity", () => {
 describe("generated gh-router-pi extension footer", () => {
   for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
     test(`${profileId}: footer section present with shared runner wiring`, () => {
-      const source = buildPiExtensionSource({
-        profileId,
-        searchEnabled: false,
-        browseEnabled: false,
-      })
+      const source = buildPiExtensionSource({ profileId })
       // Embedded payload builder is verbatim (what's tested is what's shipped).
       expect(source).toContain(buildPiStatusPayload.toString())
       // Command arrives via env; kill-switch honored.
@@ -260,11 +256,7 @@ describe("generated gh-router-pi extension footer", () => {
     })
 
     test(`${profileId}: generated source is syntactically valid TypeScript`, () => {
-      const source = buildPiExtensionSource({
-        profileId,
-        searchEnabled: true,
-        browseEnabled: true,
-      })
+      const source = buildPiExtensionSource({ profileId })
       const transpiler = new Bun.Transpiler({ loader: "ts" })
       expect(() => transpiler.transformSync(source)).not.toThrow()
     })

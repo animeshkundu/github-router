@@ -8,49 +8,41 @@ import {
   mergeSubagentsSettings,
 } from "~/lib/pi-models-settings"
 
-describe("pi bridge MCP contracts", () => {
-  test("code_search carries workspace with launch-env fallback", () => {
-    const src = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: true,
-      browseEnabled: false,
-    })
-    expect(src).toContain("GH_ROUTER_WORKSPACE")
-    expect(src).toContain("X-GH-Workspace")
-    // Explicit arg wins, env is the fallback, empty refuses locally.
-    expect(src).toContain("params.workspace")
-    expect(src).toContain("PI_WORKSPACE")
-    expect(src).toContain("a workspace is required")
-  })
-
-  test("oracle/advisor send query+context only", () => {
-    const src = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: false,
-      browseEnabled: false,
-    })
-    expect(src).toContain('callMcp("peers", "oracle", { query, context }')
-    expect(src).not.toContain("model: ORACLE_MODEL")
-    expect(src).not.toContain("thinking: ORACLE_THINKING")
-    expect(src).not.toContain("model: ADVISOR_MODEL")
-    // Decision/options are merged into the MCP brief, not forwarded raw.
-    expect(src).toContain("Options considered:")
-    expect(src).toContain("Review this plan (advisory)")
-  })
-
-  test("browser uses stripped MCP names with tabId schemas", () => {
-    const src = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: false,
-      browseEnabled: true,
-    })
-    for (const name of ["open_tab", "navigate", "screenshot", "act", "observe", "extract"]) {
-      expect(src).toContain(`"${name}"`)
-      expect(src).toContain(`callMcp("browser", "${name}"`)
+describe("pi extension surface", () => {
+  test("registers no model-facing tools: native MCP owns that surface", () => {
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
+      const src = buildPiExtensionSource({ profileId })
+      // Every scoped group reaches Pi through native MCP (`<mirror>/mcp.json`),
+      // which is what brings tool_search and the mcp_servers roster. A
+      // registerTool here would shadow that and pay a definition per tool.
+      expect(src).not.toContain("pi.registerTool")
+      expect(src).not.toContain('from "typebox"')
     }
-    expect(src).not.toContain("browser_open_tab")
-    expect(src).not.toContain("parameters: BrowserParams")
-    expect(src).toContain("tabId is required")
+  })
+
+  test("cheapest family keeps the prompt-submit relay, balanced does not", () => {
+    for (const profileId of ["cheapest", "cheapest2"] as const) {
+      const src = buildPiExtensionSource({ profileId })
+      expect(src).toContain("before_agent_start")
+      expect(src).toContain('callMcp("search", "prompt_brief"')
+      expect(src).toContain("GH_ROUTER_WORKSPACE")
+      expect(src).toContain("X-GH-Workspace")
+    }
+    // Balanced is floor-free by design: no brief, and with it no MCP client
+    // at all, so the generated source carries no fetch seam to fail.
+    for (const profileId of ["balanced", "balanced2"] as const) {
+      const src = buildPiExtensionSource({ profileId })
+      expect(src).not.toContain("before_agent_start")
+      expect(src).not.toContain("callMcp")
+    }
+  })
+
+  test("the statusline footer is profile-independent", () => {
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
+      const src = buildPiExtensionSource({ profileId })
+      expect(src).toContain("ctx.ui.setFooter")
+      expect(src).toContain("session_before_compact")
+    }
   })
 })
 
@@ -72,13 +64,9 @@ describe("pi bridge NUL sanitization", () => {
   })
 
   test("generated bridge strips NUL on the return path", () => {
-    const src = buildPiExtensionSource({
-      profileId: "cheapest",
-      searchEnabled: true,
-      browseEnabled: false,
-    })
-    // stripNul covers outbound params and the inbound toolText join alike.
-    expect(src).toContain("stripNul(text)")
+    const src = buildPiExtensionSource({ profileId: "cheapest" })
+    // stripNul covers outbound params and the inbound brief reply alike.
+    expect(src).toContain("stripNul(String(reply")
   })
 })
 

@@ -394,41 +394,39 @@ authorization verdict, not a credential verdict.
 | --- | --- |
 | `github-router claude` | yes: scoped `mcpServers` entries injected into the mirrored `.claude.json` |
 | `github-router serve` | yes: same injection through `src/lib/serve/enhancements.ts` |
-| `github-router pi` | yes: entries written to `<mirror>/mcp.json`, read by `pi-mcp-adapter` |
+| `github-router pi` | yes: entries written to `<mirror>/mcp.json`, read by Pi's built-in MCP client |
 | `github-router codex` | no: nothing registers MCP servers for Codex today |
 | worker subagents (`explore` / `review` / `implement`) | no: the worker toolset is its own fixed list |
 
-The Pi route differs from the Claude one. Pi reaches `peers`, `search`, and
-`browser` through a generated extension that calls `/mcp/<group>` directly; the
-two Azure groups have no extension seam, so they ride **Pi's own `mcp.json`** in
-the per-launch mirror (`<Pi agent dir>/mcp.json`, which the adapter reads on Pi
-0.99+). Three consequences worth knowing:
+The Pi route differs from the Claude one in form, not in policy. Pi's groups all
+ride **Pi's own `mcp.json`** in the per-launch mirror (`<Pi agent dir>/mcp.json`,
+read by built-in MCP); the generated extension registers no model-facing tools.
+`ado` and `kusto` are two of the same seven groups that route, so they follow the
+same rules as `peers` and `search`. Three consequences worth knowing:
 
-- Every key is prefixed `gh-router-<group>`. In the adapter's precedence order
-  the mirror file is a user-global source, and `.mcp.json` / `.pi/mcp.json` /
-  `.pi/mcp-adapter.json` all outrank it and replace a same-named server
-  **wholesale**. A bare `ado` key would therefore hand the model the workspace's
-  own `ado` server under a name meant for ours. A project file that declares one
-  of our prefixed keys is reported at launch, never edited.
-- The bearer is written as `Bearer ${GH_ROUTER_HOOK_NONCE}`, which the adapter
+- Every key is prefixed `gh-router-<group>`. A project `.pi/mcp.json` outranks
+  the mirror file and replaces a same-named server **wholesale**, so a bare `ado`
+  key would hand the model the workspace's own `ado` server under a name meant
+  for ours. A project file that declares one of our prefixed keys is reported at
+  launch, never edited.
+- The bearer is written as `Bearer ${GH_ROUTER_HOOK_NONCE}`, which Pi
   interpolates from the child environment at connect time. The file never
-  contains a token.
-- The write is gated on `--helpers` **and** `--peers` (the adapter's own gates)
-  plus the group being enabled. `--no-helpers` and `--no-peers` therefore leave
-  Pi with no Azure MCP surface at all, and so does a failed offline install of
-  the adapter package. The gate is deliberately conservative in the other
-  direction too: the same file is Pi's *built-in* MCP config, so writing it
-  without the adapter would expose the groups through a backend this path has
-  never validated.
+  contains a token. The entry also carries `X-GH-Workspace`, since native MCP
+  sends no workspace header of its own.
+- The write is gated on the group's own predicate only, exactly as on the Claude
+  side: the `--ado` / `--kusto` / `--cloudagent` flags or the Azure DevOps git
+  remote that auto-enables them. Neither `--no-peers` nor `--no-helpers` removes
+  them, and nothing needs installing for them to work.
 
-Observed on a real launch (Pi 1.3.0 on Windows, adapter installed into the
-mirror): the adapter's own `mcp-cache.json` lists `gh-router-ado` with exactly
-20 tools (`repo_repository`, `repo_pull_request`, `wit_work_item`,
-`pipelines_build`, `wiki`, `repo_search_commits`, ...) - the read-only set, so
-`X-MCP-Readonly` holds through this route as well - and the session transcript
-shows a completed model turn, which is the end-to-end proof that the nonce
-interpolation and the scoped URL work from Pi. That cache file is the check to
-reach for, because it can only exist after the adapter has connected.
+Observed on a real launch (Pi 1.3.0 on Windows, under the previous
+`pi-mcp-adapter` route): the adapter's own `mcp-cache.json` listed
+`gh-router-ado` with exactly 20 tools (`repo_repository`, `repo_pull_request`,
+`wit_work_item`, `pipelines_build`, `wiki`, `repo_search_commits`, ...) - the
+read-only set, so `X-MCP-Readonly` holds through this route as well - and the
+session transcript showed a completed model turn, which is the end-to-end proof
+that the nonce interpolation and the scoped URL work from Pi. That cache file
+belonged to the adapter and no longer exists; with built-in MCP the equivalent
+check is `tool_search` finding an `ado` tool and the call returning results.
 
 The same launch surfaced a non-network way for the install to fail: npm >= 11.19
 rejects a CLI- or env-sourced `allow-scripts` for a project-scoped install, and
