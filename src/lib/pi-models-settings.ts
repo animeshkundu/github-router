@@ -681,8 +681,6 @@ export function applyCosmeticUserOverrides(
  * no statusline/footer package (built into `local:gh-router-pi`), no
  * compaction replacers, no provider/model overriders.
  *
- * - `pi-mcp-adapter`: MCP servers as one proxy tool instead of hundreds
- *   of definitions (context/cost win).
  * - `pi-web-access`: search/fetch/PDF-extract fallback. Only wired when
  *   the launch has neither `--search` nor `--browse`, otherwise it
  *   double-pays our ColBERT/browser surfaces.
@@ -697,12 +695,6 @@ export function applyCosmeticUserOverrides(
  *   shipping it only buys noise. `@file` mentions + the `context`
  *   dashboard + `read`/`ls`/`find` cover the need.
  */
-export const PI_HELPERS_MCP_ADAPTER: PiPackageEntry = {
-  source: "npm:pi-mcp-adapter",
-  skills: [],
-  prompts: [],
-}
-
 export const PI_HELPERS_WEB_ACCESS: PiPackageEntry = {
   source: "npm:pi-web-access",
   skills: [],
@@ -791,9 +783,13 @@ export const PI_DEFAULT_TOOLS: ReadonlyArray<string> = Object.freeze([
  * (skills/prompts filtered out — the mode's own skills/prompts cover
  * the roster, so the third-party sets never reach Ctrl+O).
  * The helpful bundle rides `helpers` (default on, peers-gated):
- * `pi-mcp-adapter` + allowlisted `pi-agent-extensions` always, plus
- * `pi-web-access` only when neither search nor browse is on (otherwise
- * it double-pays our ColBERT/browser surfaces). The `--ui` bundle
+ * allowlisted `pi-agent-extensions` always, plus `pi-web-access` only
+ * when neither search nor browse is on (otherwise it double-pays our
+ * ColBERT/browser surfaces). `pi-mcp-adapter` is deliberately NOT in the
+ * bundle any more: an installed extension that registers `/mcp` replaces
+ * Pi's built-in MCP, and the router's scoped groups are published through
+ * native MCP (`<mirror>/mcp.json`) precisely so the model gets
+ * `tool_search` and the `mcp_servers` roster. The `--ui` bundle
  * (`pi-code`, `pi-claude-code-ui`) is opt-in.
  * The statusline footer is built into `local:gh-router-pi` (no
  * third-party statusline package: the community bridge reads only the
@@ -859,7 +855,7 @@ export function buildPiSettingsJson(opts: {
       ...(peers
         ? [{ source: "npm:pi-subagents", skills: [], prompts: [] } as PiPackageEntry]
         : []),
-      ...(helpers ? [PI_HELPERS_MCP_ADAPTER, PI_HELPERS_AGENT_EXTENSIONS] : []),
+      ...(helpers ? [PI_HELPERS_AGENT_EXTENSIONS] : []),
       ...(webAccess ? [PI_HELPERS_WEB_ACCESS] : []),
       ...(ui ? [...PI_UI_PACKAGES, PI_CC_THEME_PACKAGE] : []),
       "local:gh-router-pi",
@@ -1164,14 +1160,12 @@ export interface PiLaunchCardOpts {
   search: boolean
   browse: boolean
   /**
-   * Azure MCP groups the launch actually wires into the Pi mirror, by their
-   * flag names (`ado`, `kusto`). Empty or absent means none, which is also
-   * what a peerless or helper-less launch resolves to: the groups travel
-   * through `pi-mcp-adapter`, so without that bundle they are not in the
-   * session at all. Passed from the resolved surface decision rather than
+   * MCP groups the launch actually publishes into the Pi mirror, by their
+   * bare group names (`ado`, `kusto`, `cloudagent`, `peers`, ...). Empty or
+   * absent means none. Passed from the resolved surface decision rather than
    * from `state`, so the card can never advertise a group the mirror lacks.
    */
-  azureGroups?: Array<string> | undefined
+  mcpGroups?: Array<string> | undefined
   serverUrl: string
 }
 
@@ -1189,7 +1183,12 @@ export function buildPiLaunchCard(opts: PiLaunchCardOpts): string {
   if (opts.swe) surface.push("swe")
   if (opts.search) surface.push("search")
   if (opts.browse) surface.push("browse")
-  for (const group of opts.azureGroups ?? []) surface.push(group)
+  // The group list is the mirror's own truth, so it also carries `peers` and
+  // `search`, which the flags above already named. Dedupe rather than drop
+  // them: a group the flags missed still has to appear.
+  for (const group of opts.mcpGroups ?? []) {
+    if (!surface.includes(group)) surface.push(group)
+  }
   const identity = [
     opts.accountType,
     opts.login,
