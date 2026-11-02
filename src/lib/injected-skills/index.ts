@@ -74,8 +74,8 @@ export interface InjectedSkillSelection {
  * 200K default context). The orchestrator (`/gh-swe-pipeline`) runs the
  * other three in strict sequence; the three stages stay individually
  * invokable for users who only want one stage. Profiles without a `Plan`
- * role (`cheapest`, `balanced`) get the lead-plans-directly `/gh-plan`
- * variant.
+ * role (`cheapest`, `balanced`, `local`) get the lead-plans-directly
+ * `/gh-plan` variant.
  */
 export function getPipelineSkills(
   searchEnabled: boolean,
@@ -83,7 +83,7 @@ export function getPipelineSkills(
   profile?: PlanSkillProfile,
 ): ReadonlyArray<InjectedSkill> {
   return [
-    buildGatherContextSkill(searchEnabled, bluebirdEnabled),
+    buildGatherContextSkill(searchEnabled, bluebirdEnabled, profile),
     buildPlanSkill(searchEnabled || bluebirdEnabled, profile),
     buildImplementSkill(searchEnabled || bluebirdEnabled, profile),
     buildSwePipelineSkill(searchEnabled || bluebirdEnabled, profile),

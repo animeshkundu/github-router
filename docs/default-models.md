@@ -286,7 +286,7 @@ Two deliberate divergences from the fast/cheap delegation graph:
 
 ## Local launch profiles (`-m local`, `-m local2`)
 
-The raw aliases `local` and `local2` point the MAIN agent loop at a model server running on the operator's machine instead of at Copilot. These profiles assume nothing about the endpoint beyond its base URL: not the stack serving it (LM Studio, Ollama, llama.cpp), not its model list, and no wire dialect beyond the Anthropic Messages API that Claude Code itself already speaks to it. `local` is Advisor-free; `local2` is `local` plus the server-side Advisor.
+The raw aliases `local` and `local2` point the MAIN agent loop at a local inference endpoint running on the operator's machine instead of at Copilot. These profiles assume nothing about the endpoint beyond its base URL: not what serves it, not which model answers, not its model list, and no wire dialect beyond the Anthropic Messages API that Claude Code itself already speaks to it. `local` is Advisor-free; `local2` is `local` plus the server-side Advisor.
 
 | Surface | `local` | `local2` |
 |---|---|---|
@@ -310,9 +310,9 @@ The default is `https://localhost:11111/v1`. Resolution order, highest first:
 4. `GH_ROUTER_LOCAL_PORT`
 5. the default
 
-`--localport` replaces only the port of the base URL resolved by the layers beneath it. `--localurl` sets scheme, host and path, keeps any path given, and appends `/v1` when the path is bare, so `--localurl http://localhost:11434` and `--localurl http://localhost:11434/v1` mean the same thing. Passing both flags is a launch error rather than a silent precedence; a non-integer or out-of-range port fails the launch. Both flags exist on `claude` and `pi` only (`start`, `codex` and `serve` never accept them), and on any other profile they are inert with one warning. **`GH_ROUTER_LOCAL_PORT` is the local model server's port, not the proxy's own listen port** (`-p/--port`, default 8787).
+`--localport` replaces only the port of the base URL resolved by the layers beneath it. `--localurl` sets scheme, host and path, keeps any path given, and appends `/v1` when the path is bare, so `--localurl http://localhost:11111` and `--localurl http://localhost:11111/v1` mean the same thing. Passing both flags is a launch error rather than a silent precedence; a non-integer or out-of-range port fails the launch. Both flags exist on `claude` and `pi` only (`start`, `codex` and `serve` never accept them), and on any other profile they are inert with one warning. **`GH_ROUTER_LOCAL_PORT` is the local model server's port, not the proxy's own listen port** (`-p/--port`, default 8787).
 
-The default scheme is https because that is the only endpoint measured. A plain-HTTP server (a stock Ollama on 11434, LM Studio on its own port) needs an explicit `--localurl http://...`; inferring the scheme from the port number would be exactly the stack guess these profiles refuse to make. At launch the router prints `[local] upstream <resolved base URL>`, so a wrong spelling is visible immediately instead of as a TLS or connection error.
+The default scheme is https because that is the only endpoint measured. A plain-HTTP server needs an explicit `--localurl http://...`; inferring the scheme from the port number would be exactly the guess these profiles refuse to make. At launch the router prints `[local] upstream <resolved base URL>`, so a wrong spelling is visible immediately instead of as a TLS or connection error.
 
 No request is issued to the endpoint other than the client's own turns: no `/models` fetch, no reachability probe, no capability check. A wrong port therefore surfaces as the upstream failure Claude Code already reports, and the proxy adds no second failure channel.
 
@@ -344,7 +344,7 @@ A local lead turn costs nothing, and the ledger says so rather than staying sile
 
 Written down so a later change does not "improve" these profiles into guessing:
 
-- **No stack detection.** Never read a `/props`, `/api/tags`, or version header to decide whether the endpoint is LM Studio, Ollama, or llama.cpp. The only configured fact is the base URL.
+- **No endpoint detection.** Never probe the endpoint (capability, model-list, or version routes) to decide what is serving it or which model answers. The only configured fact is the base URL.
 - **No model discovery, and no launch-time call of any kind.** The proxy never issues `GET /models`. The launched ids are the fixed `opus` / `sonnet` / `haiku`; whatever the server's own list says is never read.
 - **No capability probing** for vision, structured output, effort, or 1M context. If the server supports something, it supports it silently; the proxy neither advertises nor strips for it.
 - **No fallback to Copilot** when the local endpoint is unreachable. A local profile that silently spent Copilot quota would be the worst failure mode available.

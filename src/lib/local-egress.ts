@@ -2,10 +2,10 @@
  * Local-model egress for the `-m local` / `-m local2` launch profiles.
  *
  * The only fact these profiles are allowed to know about the endpoint is its
- * base URL. Nothing here probes, sniffs, or branches on which stack is
- * serving it (LM Studio / Ollama / llama.cpp), and nothing issues a request:
- * a wrong port surfaces as the upstream failure the client already reports,
- * never as a second failure channel invented by the proxy.
+ * base URL. Nothing here probes, sniffs, or branches on what is serving it,
+ * and nothing issues a request: a wrong port surfaces as the upstream failure
+ * the client already reports, never as a second failure channel invented by
+ * the proxy.
  */
 
 import type { Context } from "hono"
@@ -41,8 +41,8 @@ function trimTrailingSlashes(value: string): string {
 /**
  * Validate an absolute http(s) base URL and normalize it to the form the
  * egress concatenates (`<base>/messages`). A bare origin gains the documented
- * `/v1` prefix so `--localurl http://localhost:11434` and
- * `--localurl http://localhost:11434/v1` mean the same thing.
+ * `/v1` prefix so `--localurl http://localhost:11111` and
+ * `--localurl http://localhost:11111/v1` mean the same thing.
  */
 function normalizeBaseUrl(raw: string, source: string): string {
   const trimmed = raw.trim()
@@ -93,9 +93,9 @@ function withPort(baseUrl: string, port: number): string {
  *   5. `https://localhost:11111/v1`
  *
  * The default scheme is `https` because that is the only endpoint measured.
- * A plain-HTTP server (stock Ollama, LM Studio) needs an explicit
- * `--localurl http://...`; inferring the scheme from the port number would be
- * exactly the stack guess this profile refuses to make.
+ * A plain-HTTP server needs an explicit `--localurl http://...`; inferring the
+ * scheme from the port number would be exactly the guess this profile refuses
+ * to make.
  */
 export function localBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
   if (cliOverride?.baseUrl !== undefined) {

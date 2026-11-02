@@ -1,11 +1,14 @@
-import { isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
+import { isBalancedFamily, isCheapestFamily, isLocalFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
 import type { PlanSkillProfile } from "./plan-skill"
 
 export function buildSwePipelineSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
-  // Profiles without a Plan role (cheapest, balanced): the lead plans
-  // directly, so stage wording names lead planning, not Plan dispatches.
-  const leadPlansDirectly = isCheapestFamily(profile) || isBalancedFamily(profile)
+  // Profiles without a Plan role (cheapest/balanced/local): the lead plans
+  // directly, so every stage mention names lead planning, not Plan
+  // dispatches. Local belongs here for the same reason and also has no
+  // `implementer`, which is why the roster never names one on that branch.
+  const leadPlansDirectly =
+    isCheapestFamily(profile) || isBalancedFamily(profile) || isLocalFamily(profile)
   const roster = leadPlansDirectly
     ? "Explore, General-Purpose, reviewer"
     : "Explore, Plan, General-Purpose, reviewer, implementer where provided"

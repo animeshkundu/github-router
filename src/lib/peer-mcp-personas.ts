@@ -784,14 +784,28 @@ export function buildPeerAwarenessSnippet(opts: {
     // search → Explore → Oracle (second opinion on a framed question, never
     // discovery), and the reviewer may invoke Explore for targeted discovery.
     // Cheapest, balanced and local have no Plan role: Oracle is lead-only there.
+    // Cost framing is a claim about the endpoint being billed, and a `local`
+    // launch bills the operator's own endpoint at a rate the profile knows
+    // nothing about, so it opens the ladder without the cost vocabulary.
+    const escalationOpener = isLocal
+      ? `This is the ${profileLabel} launch profile. Verify claims against real evidence first: settle factual claims with `
+      : `This is the ${profileLabel} launch profile. Funnel unknowns cheapest-first: settle factual claims with `
     const escalationClause = !hasAdvisor
-      ? `This is the ${profileLabel} launch profile. Funnel unknowns cheapest-first: settle factual claims with \`mcp__${fastSearchKey}__code\` + \`mcp__${fastSearchKey}__web\` search first (narrow scope, rule out hypotheses), then \`Explore\` for targeted breadth. \`mcp__${fastPeersKey}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle, available to the lead; \`reviewer\` and other subagents cannot call Oracle.${astraClause}`
+      ? escalationOpener + `\`mcp__${fastSearchKey}__code\` + \`mcp__${fastSearchKey}__web\` search first (narrow scope, rule out hypotheses), then \`Explore\` for targeted breadth. \`mcp__${fastPeersKey}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle, available to the lead; \`reviewer\` and other subagents cannot call Oracle.${astraClause}`
       : `This is the ${profileLabel} launch profile. Follow an evidence-first escalation ladder: settle factual claims directly through code, tests, and builds. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance, framing checks, or conflicting signals (direction, not dictation), not routine progress, waiting, verification, or completion. \`mcp__${fastPeersKey}__oracle\` is ${oracleDescriptor}, an expert consultant ${isCheapest || isLocal ? "available to the lead" : "available to the lead and `Plan`"}, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle.${astraClause}`
+    // `worker-browse` is emitted only when browse is on, so a delegation graph
+    // must not name it otherwise; same predicate as `workerBrowseClause`.
+    const leadLeaf = opts.browseAvailable
+      ? "`Explore`, `reviewer`, and `worker-browse`"
+      : "`Explore` and `reviewer`"
+    const balancedLeaf = opts.browseAvailable
+      ? "`Explore` and `worker-browse`"
+      : "`Explore`"
     const delegationClause = isBalanced
-      ? "Native delegation is ACL-scoped: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; `reviewer` may invoke `Explore` for targeted discovery; `Explore` and `worker-browse` cannot invoke native subagents."
+      ? "Native delegation is ACL-scoped: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; `reviewer` may invoke `Explore` for targeted discovery; " + balancedLeaf + " cannot invoke native subagents."
       : isCheapest || isLocal
-        ? "Native delegation is ACL-scoped: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents."
-        : "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents."
+        ? "Native delegation is ACL-scoped: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; " + leadLeaf + " cannot invoke native subagents."
+        : "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; " + leadLeaf + " cannot invoke native subagents."
     // 200K profiles: name the window once so every role prefers targeted
     // reads. cheap1m's lead is 1M; its subagents are still 200K.
     const rosterWindow = isCheapest || isBalanced || isLocal
@@ -799,8 +813,14 @@ export function buildPeerAwarenessSnippet(opts: {
       : isCheap
         ? " The lead runs at 200K on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — prefer targeted reads over full file reads."
         : ""
+    // The header names the section's capabilities. `local` carries no Advisor
+    // (only `local2` does), so keeping the shared title would name a surface
+    // this mode never wires; balanced keeps the shared title by long-standing
+    // choice, with the Advisor prose removed instead.
+    const sectionTitle =
+      isLocal && !hasAdvisor ? "## Peer review and Oracle" : "## Peer review and advisor"
     return [
-      "## Peer review and advisor",
+      sectionTitle,
       "",
       escalationClause,
       "",
@@ -1049,11 +1069,19 @@ export function buildPeerAwarenessSummary(opts: {
     const peerLine = !hasAdvisor
       ? `\`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle, for the lead.${astraClause} \`mcp__${key("search")}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search with visible no-fallback errors and local exact/regex/AST" : opts.semanticSearchAvailable === true ? "local ColBERT semantic search with lexical fallback" : "local lexical search"}; \`mcp__${key("search")}__web\` provides web search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`
       : `Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). \`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, an expert consultant for ${isCheapest || isLocal ? "the lead" : "the lead and `Plan`"}, preferred over advisor for substantive trade-offs.${astraClause} \`mcp__${key("search")}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search with visible no-fallback errors and local exact/regex/AST" : opts.semanticSearchAvailable === true ? "local ColBERT semantic search with lexical fallback" : "local lexical search"}; \`mcp__${key("search")}__web\` provides web search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`
+    // `worker-browse` is emitted only when browse is on, so the summary must
+    // not name it otherwise; same predicate as `workerBrowseClause` above.
+    const summaryLeadLeaf = opts.browseAvailable
+      ? "`Explore`, `reviewer`, and `worker-browse`"
+      : "`Explore` and `reviewer`"
+    const summaryBalancedLeaf = opts.browseAvailable
+      ? "`Explore` and `worker-browse`"
+      : "`Explore`"
     const summaryDelegation = isBalanced
-      ? "Native delegation is ACL-scoped: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; `reviewer` may invoke `Explore` for targeted discovery; `Explore` and `worker-browse` cannot invoke native subagents."
+      ? "Native delegation is ACL-scoped: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; `reviewer` may invoke `Explore` for targeted discovery; " + summaryBalancedLeaf + " cannot invoke native subagents."
       : isCheapest || isLocal
-        ? "Native delegation is ACL-scoped: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents."
-        : "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; `Explore`, `reviewer`, and `worker-browse` cannot invoke native subagents."
+        ? "Native delegation is ACL-scoped: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; " + summaryLeadLeaf + " cannot invoke native subagents."
+        : "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; " + summaryLeadLeaf + " cannot invoke native subagents."
     // 200K profiles mirror the snippet's roster window note.
     const summaryWindow = isCheapest || isBalanced || isLocal
       ? " All roles run at a 200K context window — prefer targeted reads over full file reads."

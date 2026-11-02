@@ -119,7 +119,7 @@ export const piArgs = {
   localurl: {
     type: "string" as const,
     description:
-      "Full base URL, including the /v1 prefix, of the local model server for `-m local` / `-m local2` (e.g. http://localhost:11434/v1). Sets scheme/host/path, which --localport cannot. Mutually exclusive with --localport. Inert on every other profile.",
+      "Full base URL, including the /v1 prefix, of the local inference endpoint for `-m local` / `-m local2` (e.g. http://localhost:11111/v1). Sets scheme/host/path, which --localport cannot. Mutually exclusive with --localport. Inert on every other profile.",
   },
   "update-check": {
     type: "boolean" as const,

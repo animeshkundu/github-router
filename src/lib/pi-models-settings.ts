@@ -427,7 +427,7 @@ export function piUsdCostFor(
 /**
  * Build the `models.json` provider entry pointing Pi at the running
  * proxy as an ordinary OpenAI-compatible endpoint (the documented
- * Ollama/vLLM pattern — no provider-override extension needed).
+ * provider-override pattern — no extension needed).
  *
  * The provider speaks `openai-responses`: every roster model is
  * Responses-only on Copilot, and Pi POSTs `{baseUrl}/responses` for

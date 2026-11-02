@@ -547,25 +547,56 @@ Treat the result as advisory guidance and direction, not dictation. Weigh it aga
  *  in the cheapest lead's injected operating-defaults prose
  *  (`claude-md-injection.ts`), not here — a process-heavy tool description
  *  narrows the model's search space. Sol sees a curated, bounded transcript
- *  plus the lead's brief, which is why the lead must write that brief. */
-export const CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS = `# Advisor Tool
+ *  plus the lead's brief, which is why the lead must write that brief.
+ *
+ *  `framing` is the ONE clause that varies by lead: a Copilot lead can be told
+ *  the consultant is the stronger model because both are metered on the same
+ *  catalog, while a local lead's endpoint model is unknown to the proxy, so
+ *  the only claim it can make is who serves the consultant. */
+export function buildCheapestAdvisorToolInstructions(framing: string): string {
+  return `# Advisor Tool
 
-You have access to an optional, transcript-aware \`advisor\` tool backed by Sol, a stronger model across the same session. It takes no parameters: when you call it, the proxy forwards a curated view of this conversation — the user's original ask, your most recent message text, and a bounded, tool-aware transcript — and Sol returns non-binding counsel. You remain responsible for every decision.
+You have access to an optional, transcript-aware \`advisor\` tool backed by Sol, ${framing}. It takes no parameters: when you call it, the proxy forwards a curated view of this conversation — the user's original ask, your most recent message text, and a bounded, tool-aware transcript — and Sol returns non-binding counsel. You remain responsible for every decision.
 
 Sol sees the summary you write, not your scrollback, so your last message before the call is what it works from. A short, self-contained brief makes the consult useful; a terse call wastes it.`
+}
 
-/** Protege-facing tool description for the cheapest Luna/max reviewer.
- *  Unlike the lead variants, this names the mentor relationship and the hard
- *  consult budget so the weaker model spends its calls carefully. */
-export const CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS = `# Advisor Tool
+export const CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS = buildCheapestAdvisorToolInstructions(
+  "a stronger model across the same session",
+)
 
-You have access to an \`advisor\` tool backed by Sol, a stronger cross-lab model that sees your full transcript. It takes no parameters and returns non-binding counsel. You own the verdict; the advisor never approves, vetoes, or decides for you.
+/** `local2` lead variant: same contract, framing restricted to what the proxy
+ *  actually knows about a local session. */
+export const LOCAL_ADVISOR_TOOL_INSTRUCTIONS = buildCheapestAdvisorToolInstructions(
+  "a Copilot-served model that sees a curated view of this session",
+)
+
+/** Protege-facing tool description for the cheapest reviewer. Unlike the lead
+ *  variants, this names the mentor relationship and the hard consult budget so
+ *  the reviewer spends its calls carefully. `framing` carries the same
+ *  lead-type distinction as the lead builder. */
+export function buildCheapestReviewerAdvisorToolInstructions(framing: string): string {
+  return `# Advisor Tool
+
+You have access to an \`advisor\` tool backed by Sol, ${framing}. It takes no parameters and returns non-binding counsel. You own the verdict; the advisor never approves, vetoes, or decides for you.
 
 Budget: at most 5 advisor rounds per review (one round is one back-and-forth exchange; the cap is enforced in code, so a sixth round halts). Each one costs latency, so spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle — a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences.
 
 Every consult must state: the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict.
 
 Never consult for routine verification, progress narration, reassurance, or completion ritual — run the check yourself. If the advisor disagrees with you, evaluate on the merits: adopt what is right with a one-line reason, defend what is verified with evidence, and record the disagreement in your result.`
+}
+
+export const CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS =
+  buildCheapestReviewerAdvisorToolInstructions(
+    "a stronger cross-lab model that sees your full transcript",
+  )
+
+/** `local2` reviewer variant. */
+export const LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS =
+  buildCheapestReviewerAdvisorToolInstructions(
+    "a Copilot-served model that sees your full transcript",
+  )
 
 /** Hard cap on Advisor loop rounds per cheapest-reviewer invocation (vs the
  *  lead-global `ADVISOR_MAX_TURNS`). Enforced in code, not merely prompted:

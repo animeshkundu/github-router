@@ -63,6 +63,8 @@ import {
   CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS,
   CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
   FAST_ADVISOR_TOOL_INSTRUCTIONS,
+  LOCAL_ADVISOR_TOOL_INSTRUCTIONS,
+  LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
   buildAdvisorStream,
   injectAdvisorTool,
   isAdvisorRequested,
@@ -828,12 +830,26 @@ export async function handleCompletion(c: Context) {
     // ADVISOR_TOOL_INSTRUCTIONS as description) so the model knows
     // when to call it. Tool name uses double-underscore prefix to
     // avoid collision with any user MCP server's `advisor`.
+    //
+    // `local2` shares the cheapest2 machinery but not its framing: the local
+    // lead is an unknown model on an unknown endpoint, so calling the
+    // Copilot-served Advisor "stronger" would be a claim the profile cannot
+    // make. Same behavioural contract, different framing sentence.
+    const curatedAdvisorInstructions = localAdvisorRequest
+      ? {
+          lead: LOCAL_ADVISOR_TOOL_INSTRUCTIONS,
+          reviewer: LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
+        }
+      : {
+          lead: CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS,
+          reviewer: CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
+        }
     finalBody = injectAdvisorTool(
       finalBody,
       curatedReviewerAdvisor
-        ? CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS
+        ? curatedAdvisorInstructions.reviewer
         : curatedLeadAdvisor
-          ? CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS
+          ? curatedAdvisorInstructions.lead
           : fastLeadAdvisor
             ? FAST_ADVISOR_TOOL_INSTRUCTIONS
             : maxLeadAdvisor

@@ -996,20 +996,42 @@ function pinnedReviewerDescription(explicit: boolean, isBalanced = false, is200K
     + (protegeAdvisor ? " May consult its Sol advisor (at most 5 advisor rounds per review) on consequential uncertainty it cannot settle by evidence." : "")
 }
 
-/** Protege appendix for the cheapest Luna/max reviewer: the capped Sol-advisor
+/** Protege appendix for the cheapest reviewer: the capped Sol-advisor
  *  protocol. Appended after the delegation paragraph so the adversarial core
- *  above stays byte-identical across profiles. */
-const PROTEGE_ADVISOR_APPENDIX =
-  "You have an `advisor` tool backed by Sol, a stronger cross-lab model that sees your full transcript. "
+ *  above stays byte-identical across profiles.
+ *
+ *  `framing` is the one clause that varies: a Copilot-served lead can be told
+ *  the consultant is the stronger cross-lab model, but a `local` launch bills
+ *  an endpoint whose model the proxy knows nothing about, so the only claim it
+ *  can make is who serves the consultant. Same builder, so the behavioural
+ *  contract cannot drift between the two. */
+function buildProtegeAdvisorAppendix(framing: string): string {
+  return "You have an `advisor` tool backed by Sol, " + framing + ". "
   + "You own the verdict; the advisor is counsel, never authority — it never approves, vetoes, or decides for you. "
   + "Budget: at most 5 advisor rounds per review (code-enforced; one round is one back-and-forth exchange). Spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle: a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences. "
   + "Every consult must state the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict. "
   + "Never consult for routine verification, progress narration, reassurance, or completion ritual — run the check yourself. "
   + "If the advisor disagrees with you, evaluate on the merits: adopt what is right with a one-line reason, defend what is verified with evidence, and record the disagreement in your result. "
+}
+
+const PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
+  "a stronger cross-lab model that sees your full transcript",
+)
+
+const LOCAL_PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
+  "a Copilot-served model that sees your full transcript",
+)
 
 function pinnedReviewerPrompt(
   semanticAvailable = true,
-  opts?: { allowExploreDelegation?: boolean; is200K?: boolean; protegeAdvisor?: boolean },
+  opts?: {
+    allowExploreDelegation?: boolean
+    is200K?: boolean
+    protegeAdvisor?: boolean
+    /** `local2`'s grant: same capped protocol, framing restricted to what the
+     *  proxy knows about a local session. */
+    localAdvisor?: boolean
+  },
 ): string {
   // Balanced-only: the reviewer narrows scope with search first, then
   // delegates targeted discovery to Explore (permitted by the balanced
@@ -1020,7 +1042,9 @@ function pinnedReviewerPrompt(
     : "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
   // Cheapest-only protege grant: the Luna reviewer may consult Sol. The core
   // stays identical; only this profile appends the capped-advisor protocol.
-  const protege = opts?.protegeAdvisor === true ? PROTEGE_ADVISOR_APPENDIX : ""
+  const protege = opts?.protegeAdvisor === true
+    ? (opts?.localAdvisor === true ? LOCAL_PROTEGE_ADVISOR_APPENDIX : PROTEGE_ADVISOR_APPENDIX)
+    : ""
   return "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
     + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
     + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
@@ -1450,7 +1474,11 @@ function buildLocalProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
     },
     reviewer: {
       description: pinnedReviewerDescription(false, false, true, protegeAdvisor),
-      prompt: pinnedReviewerPrompt(semanticAvailable, { is200K: true, protegeAdvisor }),
+      prompt: pinnedReviewerPrompt(semanticAvailable, {
+        is200K: true,
+        protegeAdvisor,
+        localAdvisor: protegeAdvisor,
+      }),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,

@@ -22,6 +22,8 @@ import {
   ADVISOR_INTERNAL_TOOL_NAME,
   CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS,
   CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
+  LOCAL_ADVISOR_TOOL_INSTRUCTIONS,
+  LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
 } from "~/services/advisor/advisor"
 import { clearLaunchRegistry, registerLaunch } from "~/lib/launch-registry"
 import { configureLocalEgress } from "~/lib/local-egress"
@@ -182,8 +184,14 @@ describe("local2 reviewer protege grant", () => {
     expect(captured[0]!.body.model).toBe("opus")
 
     const advisor = advisorToolOf(captured[0]!)
-    expect(advisor?.description).toBe(CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS)
+    expect(advisor?.description).toBe(LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS)
     expect(advisor?.description).toContain("at most 5 advisor rounds")
+    // The local profile knows nothing about the model behind its endpoint, so
+    // the description may not rank the Copilot-served Advisor against it. The
+    // comparison stays in the cheapest variant, which observes both models.
+    expect(advisor?.description).toContain("Copilot-served")
+    expect(advisor?.description).not.toContain("stronger")
+    expect(CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS).toContain("stronger")
   })
 
   test("teammate-style reviewer id is granted (Agent-team spawns)", async () => {
@@ -204,7 +212,7 @@ describe("local2 reviewer protege grant", () => {
 
     expect(captured).toHaveLength(1)
     expect(advisorToolOf(captured[0]!)?.description).toBe(
-      CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
+      LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
     )
   })
 
@@ -222,8 +230,11 @@ describe("local2 reviewer protege grant", () => {
     expect(captured).toHaveLength(1)
     expect(captured[0]!.url).toBe(`${LOCAL_BASE}/messages`)
     const advisor = advisorToolOf(captured[0]!)
-    expect(advisor?.description).toBe(CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS)
+    expect(advisor?.description).toBe(LOCAL_ADVISOR_TOOL_INSTRUCTIONS)
     expect(advisor?.description ?? "").not.toContain("at most 5 advisor rounds")
+    expect(advisor?.description ?? "").toContain("Copilot-served")
+    expect(advisor?.description ?? "").not.toContain("stronger")
+    expect(CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS).toContain("stronger")
   })
 
   test("a non-reviewer subagent gets no advisor tool of either form", async () => {

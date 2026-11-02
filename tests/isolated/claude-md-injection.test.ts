@@ -1342,7 +1342,7 @@ test("balanced directive funnels unknowns search-first with no Advisor", () => {
   // No Plan role: the lead owns planning directly.
   expect(directive).not.toContain("`Plan`")
   // Search-first GATHER + Oracle second-opinion framing + cost line.
-  expect(directive).toContain("narrow scope first with `code_search`")
+  expect(directive).toContain("narrow scope first with `code`")
   expect(directive).toContain("a second opinion for precise, self-contained architectural/spec trade-offs")
   expect(directive).toContain("Grok 4.6 (200K/medium)")
   expect(directive).toContain("available to the lead; `reviewer` and other subagents cannot call Oracle")
