@@ -347,13 +347,14 @@ describe("the tool surface", () => {
     // and a live session did exactly that: `list_jobs` with an empty
     // organization/project/repository triple and a `pageSize` of 0, every one
     // of which the service rejected. Marking an argument required makes it a
-    // hard call failure, so the required list stays at the one value a call
+    // hard call failure, so the required list stays at the values a call
     // cannot be expressed without: `jobId` for the job readers, and `prompt`
-    // for `create_pr_job`, whose whole purpose is to carry a task.
+    // plus `title` for `create_pr_job`, whose whole purpose is to carry a task
+    // and to name the pull request that task becomes.
     for (const tool of CLOUDAGENT_TOOLS) {
       const required = (tool.inputSchema.required ?? []) as string[]
       const expected = tool.toolNameHttp === "create_pr_job"
-        ? ["prompt"]
+        ? ["prompt", "title"]
         : "jobId" in propertiesOf(tool) ? ["jobId"] : []
       expect({ tool: tool.toolNameHttp, required: [...required].sort() }).toEqual({
         tool: tool.toolNameHttp,
@@ -415,6 +416,7 @@ describe("the tool surface", () => {
     expect(tool.description).toContain("can run for many hours")
     expect(tool.description).toContain("Confirm with the user")
     expect(tool.description).toContain("agency-coding")
+    expect(tool.description).toContain("agency-review")
     expect(tool.description).toContain("claude-opus-5.5 at max reasoning effort")
   })
 
@@ -637,58 +639,94 @@ describe("create_job", () => {
 
 describe("create_pr_job", () => {
   const TASK = "Add a /healthz endpoint that returns the build id, with a test."
+  const TITLE = "Add a /healthz endpoint"
 
-  test("composes the fixed workflow ahead of the task and sends no systemPrompt", async () => {
+  test("opens with the title, then the fixed workflow, then the task", async () => {
     const h = use([() => jsonResponse(CREATED_JOB, { status: 201 })])
-    await call("create_pr_job", { prompt: TASK, ...REPOSITORY })
+    await call("create_pr_job", { prompt: TASK, title: TITLE, ...REPOSITORY })
 
     const body = createJobBody(h)
     const prompt = body.prompt ?? ""
-    // The API has no system-prompt field, so the workflow and the caller's
-    // task share one string. The delimiter is what keeps them distinguishable:
-    // process first, the actual request last.
-    expect(prompt.startsWith("[github-router PR workflow v3]")).toBe(true)
+    // The API has no system-prompt field, so the title, the workflow and the
+    // caller's task share one string. The title opens it because that is what a
+    // human reading the job page sees first and what "# The request" means by
+    // "the title above"; the delimiter keeps the request distinguishable from
+    // the process that precedes it.
+    expect(prompt.startsWith(`# Title\n\n${TITLE}`)).toBe(true)
     expect(prompt).toContain(`<user_task>\n${TASK}\n</user_task>`)
-    expect(prompt.indexOf("[github-router PR workflow v3]")).toBeLessThan(prompt.indexOf("<user_task>"))
+    expect(prompt.indexOf("# Title")).toBeLessThan(prompt.indexOf("<user_task>"))
     expect(prompt.endsWith("</user_task>")).toBe(true)
     expect("systemPrompt" in body).toBe(false)
+    // The old marker opened the prompt, was the first thing list_jobs showed,
+    // and meant nothing to the agent. The title replaces it.
+    expect(prompt).not.toContain("[github-router PR workflow")
 
     // Structure, not prose: pinning these keeps a rewrite from silently
-    // dropping the request-fidelity guard, the unattended-run rules, the
-    // delegation rules, or the exit criteria.
+    // dropping the request-fidelity guard, the unattended-run constraints, the
+    // shape the pull request is judged on, or the route to it.
     for (const section of [
       "# The request",
-      "# Staying in motion",
-      "# Working style",
-      "# Definition of done",
+      "# Operating context",
+      "# What a good pull request looks like",
+      "# How to get there",
       "# Reporting",
+      "# Guardrails",
     ]) {
       expect(prompt).toContain(section)
     }
-    expect(prompt).toContain("## 3. Review the plan")
-    expect(prompt).toContain("## 6. Review the implementation")
-    expect(prompt).toContain("MSTeams")
+    for (const phase of [
+      "## 1. Search, read, understand",
+      "## 2. Research",
+      "## 3. Plan",
+      "## 4. Review the plan adversarially",
+      "## 5. Implement with verification, validation and testing",
+      "## 6. Create the pull request and link the work item",
+      "## 7. Review the implementation adversarially",
+      "## 8. Get to a green build",
+    ]) {
+      expect(prompt).toContain(phase)
+    }
+
+    // Each of these is a fact the model cannot infer, so a later edit that
+    // drops one fails here rather than on a nine-hour job.
+    // Durability: a 9.19 h run ended `Succeeded` having pushed nothing, so the
+    // branch is created and pushed before any edit exists.
+    expect(prompt).toContain("with an ephemeral clone")
+    expect(prompt).toContain("push it before you change anything")
+    expect(prompt).toContain("push at each coherent milestone and before anything long-running")
+    // Search guidance: `agency-coding` bundles no search product, so the
+    // pointer is conditional and claims nothing the environment may not have.
+    expect(prompt).toContain("use Bluebird semantic / vector search if available")
+    // The side-effect bound the change is judged on.
+    expect(prompt).toContain("no side effects on existing behavior where possible")
+    // A review that runs unbounded is the other half of the same failure.
+    expect(prompt).toContain("time matters")
   })
 
-  test("loads agency-coding and defaults to opus-5.5 at max", async () => {
+  test("loads agency-coding and agency-review, and defaults to opus-5.5 at max", async () => {
     const h = use([() => jsonResponse(CREATED_JOB, { status: 201 })])
-    const text = textOf(await call("create_pr_job", { prompt: TASK, ...REPOSITORY }))
+    const text = textOf(
+      await call("create_pr_job", { prompt: TASK, title: TITLE, ...REPOSITORY }),
+    )
     const body = createJobBody(h)
-    expect(body.plugins).toEqual([{ name: "agency-coding" }])
+    expect(body.plugins).toEqual([{ name: "agency-coding" }, { name: "agency-review" }])
     expect(body.modelConfiguration).toEqual({
       model: "claude-opus-5.5",
       reasoningEffort: "max",
     })
+    // The title rides in metadata as well, so list_jobs and the job page name
+    // the job without anyone reading the prompt.
+    expect(body.metadata).toEqual({ title: TITLE })
     // The echo is the only durable record: GET /jobs/{id} never returns
     // modelConfiguration.
-    expect(text).toContain("plugins: agency-coding")
+    expect(text).toContain("plugins: agency-coding, agency-review")
     expect(text).toContain("model claude-opus-5.5, effort max")
     expect(text).toContain("tier: complex, the default — supplied model claude-opus-5.5 and effort max.")
   })
 
   test("honors tier and model overrides", async () => {
     const easy = use([() => jsonResponse(CREATED_JOB, { status: 201 })])
-    await call("create_pr_job", { prompt: TASK, ...REPOSITORY, tier: "easy" })
+    await call("create_pr_job", { prompt: TASK, title: TITLE, ...REPOSITORY, tier: "easy" })
     expect(createJobBody(easy).modelConfiguration).toEqual({
       model: "claude-opus-4.8-fast",
       reasoningEffort: "max",
@@ -696,7 +734,12 @@ describe("create_pr_job", () => {
 
     const model = use([() => jsonResponse(CREATED_JOB, { status: 201 })])
     const text = textOf(
-      await call("create_pr_job", { prompt: TASK, ...REPOSITORY, model: "gpt-5.6-sol" }),
+      await call("create_pr_job", {
+        prompt: TASK,
+        title: TITLE,
+        ...REPOSITORY,
+        model: "gpt-5.6-sol",
+      }),
     )
     expect(createJobBody(model).modelConfiguration).toEqual({ model: "gpt-5.6-sol" })
     expect(text).toContain(
@@ -706,6 +749,7 @@ describe("create_pr_job", () => {
     const effort = use([() => jsonResponse(CREATED_JOB, { status: 201 })])
     await call("create_pr_job", {
       prompt: TASK,
+      title: TITLE,
       ...REPOSITORY,
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
@@ -721,7 +765,7 @@ describe("create_pr_job", () => {
     const text = textOf(
       await call(
         "create_pr_job",
-        { prompt: TASK, workspace: repoDir },
+        { prompt: TASK, title: TITLE, workspace: repoDir },
         { workspaceSource: "argument" },
       ),
     )
@@ -733,19 +777,51 @@ describe("create_pr_job", () => {
 
   test("a missing prompt fails before any request", async () => {
     const h = use()
-    await expect(call("create_pr_job", { ...REPOSITORY }))
+    await expect(call("create_pr_job", { title: TITLE, ...REPOSITORY }))
       .rejects.toThrow(/`prompt` is required/)
     expect(h.calls).toHaveLength(0)
   })
 
-  test("the effective request shows the plugin and the truncated composed prompt", async () => {
+  test("a missing, blank, multi-line or over-long title fails before any request", async () => {
+    // The title is the job's name, the prompt's opening line and the pull
+    // request title, so a value the service would accept but a human cannot
+    // read is rejected here rather than nine hours later.
+    for (const args of [
+      { prompt: TASK, ...REPOSITORY },
+      { prompt: TASK, title: "   ", ...REPOSITORY },
+      { prompt: TASK, title: "Two\nlines", ...REPOSITORY },
+      { prompt: TASK, title: `x${"y".repeat(100)}`, ...REPOSITORY },
+    ]) {
+      const h = use()
+      await expect(call("create_pr_job", args)).rejects.toThrow(/`title`/)
+      expect(h.calls).toHaveLength(0)
+    }
+  })
+
+  test("rejects a caller-supplied metadata.title instead of letting two sources drift", async () => {
+    const h = use()
+    await expect(
+      call("create_pr_job", {
+        prompt: TASK,
+        title: TITLE,
+        metadata: { title: "something else" },
+        ...REPOSITORY,
+      }),
+    ).rejects.toThrow(/`metadata\.title` is reserved/)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  test("the effective request shows the plugins, the title and the truncated prompt", async () => {
     use([() => jsonResponse(CREATED_JOB, { status: 201 })])
-    const text = textOf(await call("create_pr_job", { prompt: TASK, ...REPOSITORY }))
+    const text = textOf(
+      await call("create_pr_job", { prompt: TASK, title: TITLE, ...REPOSITORY }),
+    )
     expect(text).toContain("effective request (the normalized body the service received):")
     // renderEffectiveRequest clips at 300 chars, so the fixed directive can
     // never flood the tool result.
-    expect(text).toContain("prompt: [github-router PR workflow v3]")
-    expect(text).toContain("plugins: agency-coding")
+    expect(text).toContain("prompt: # Title")
+    expect(text).toContain(`metadata: title=${TITLE}`)
+    expect(text).toContain("plugins: agency-coding, agency-review")
   })
 })
 
