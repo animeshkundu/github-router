@@ -25,7 +25,11 @@ import path from "node:path"
 
 import { ARTIFACT_TOOLS } from "./artifact/tools"
 import { CHEAPEST_REWRITE_EFFORT } from "./cheapest-prompt-rewrite"
-import { runHookPromptBrief } from "./hook-prompt-brief"
+import {
+  PI_PROMPT_SCOPE_EFFORT,
+  PI_PROMPT_SCOPE_MODEL,
+  runPiPromptBrief,
+} from "./hook-prompt-brief"
 import { GEMINI_REVIEW_DEFAULT_MODEL } from "./gemini-review-model"
 import { MAX_PROFILE_MODELS } from "./max-profile-contract"
 import {
@@ -2112,27 +2116,35 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       },
     },
     // HOOK CHANNEL ONLY (`hookOnly`): the Pi extension's `before_agent_start`
-    // handler calls this to get the cheapest-profile EXECUTION BRIEF for the
-    // prompt the user just typed, and injects the text above the model's turn.
-    // The model never calls it and never sees it in `tools/list` — see the
-    // `hookOnly` field doc for why listing it would be worse than useless.
+    // handler calls this to get the advisory block for the prompt the user just
+    // typed, and injects the text above the model's turn. The model never calls
+    // it and never sees it in `tools/list` — see the `hookOnly` field doc for
+    // why listing it would be worse than useless.
     //
     // It lives in `search` because that group is the one every launch profile
     // enables (`resolveSearchFlags` writes `state.searchEnabled` for all of
     // them), so the Pi extension can always reach it at `/mcp/search` without a
-    // profile-specific carve-out. The rewrite itself is `runCheapestRewrite`
-    // over the same grounding search the `code` tool serves.
+    // profile-specific carve-out.
+    //
+    // This is the Pi front-end for the SAME decision Claude Code gets from its
+    // `UserPromptSubmit` hook: `decidePromptSubmitV2` — prior-turn findings,
+    // the search tip, the triviality gate, the cheapest-family Sol rewrite, and
+    // the Luna scope note with its fail-open goal. Only the prose differs
+    // (`PI_PROMPT_PROSE`), because Pi has no `/gh-research` or
+    // `/gh-orchestrate` skills and its MCP tool names carry a `gh-router-`
+    // prefix.
     //
     // WHY SERVER-SIDE, and not in the extension: the extension is a generated
     // STRING executed by the installed Pi CLI with no import surface, so it
-    // cannot reach `cheapest-prompt-rewrite`, `callInference`, or the repo. The
-    // brief has to be produced where that code lives.
+    // cannot reach `prompt-submit-hook`, `cheapest-prompt-rewrite`,
+    // `callInference`, or the repo. The brief has to be produced where that
+    // code lives.
     {
       toolNameHttp: "prompt_brief",
       group: "search",
       hookOnly: true,
       description:
-        "Internal hook channel: returns the cheapest-profile grounded execution brief for one user prompt. Called by the Pi extension's before_agent_start handler, never by the model. Returns an empty text block when the profile is not cheapest, the prompt is trivial, the session already spent its rewrite, or the rewrite missed.",
+        "Internal hook channel: returns the advisory block for one user prompt — pending review findings, a search tip, and a grounded scope note (plus the cheapest-profile Sol rewrite). Called by the Pi extension's before_agent_start handler, never by the model. Returns an empty text block when there is nothing to inject, which is the ordinary answer for a trivial prompt.",
       inputSchema: {
         type: "object",
         required: ["prompt", "session_id"],
@@ -2180,11 +2192,11 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
         }
         try {
           // `ctx.profileId` is the launch's registered profile, which is what
-          // eligibility keys on. Absent (a raw MCP client on the unscoped
-          // union) reads as not-cheapest, which is the correct default: the
-          // brief is a cheapest-profile contract.
+          // the cheapest-family rewrite branch keys on. Absent (a raw MCP
+          // client on the unscoped union) reads as not-cheapest, so the rewrite
+          // is skipped while the shared Luna scope path still runs.
           const profile = ctx?.profileId ?? "standard"
-          const result = await runHookPromptBrief({
+          const text = await runPiPromptBrief({
             prompt,
             sessionId,
             workspace,
@@ -2195,11 +2207,23 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
             searchEnabled: state.searchEnabled === true,
             bluebirdEnabled: state.bluebirdEnabled === true,
             signal,
+            // Luna scope inference: the same model + effort the Claude hook
+            // calls from `src/internal-prompt-submit.ts`.
             infer: (system, user, callSignal) =>
               dispatchModelCall({
-                // The family's Advisor-tier Sol: `gpt-5.6-sol` on `cheapest`,
-                // `gpt-6.1-sol` on `cheapest2`. Resolved per call because the
-                // profile is per connection, while the persona list is static.
+                model: PI_PROMPT_SCOPE_MODEL,
+                endpoint: "/v1/responses",
+                instructions: system,
+                userText: user,
+                effort: PI_PROMPT_SCOPE_EFFORT,
+                signal: callSignal,
+              }),
+            // Cheapest-family Sol rewrite. The family's Advisor-tier Sol:
+            // `gpt-5.6-sol` on `cheapest`, `gpt-6.1-sol` on `cheapest2`.
+            // Resolved per call because the profile is per connection, while
+            // the persona list is static.
+            inferSol: (system, user, callSignal) =>
+              dispatchModelCall({
                 model: cheapestRewriteModelFor(profile),
                 endpoint: "/v1/responses",
                 instructions: system,
@@ -2208,11 +2232,12 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
                 signal: callSignal,
               }),
           })
-          // An empty text block is the "no brief" answer the extension treats as
-          // "inject nothing" — a MISS is not an error, and marking it `isError`
-          // would make the extension log a failure for the ordinary case.
+          // An empty text block is the "nothing to inject" answer the extension
+          // treats as a no-op. A trivial prompt, steer being off, and a clean
+          // miss are all ordinary; marking them `isError` would make the
+          // extension log a failure for the common case.
           return {
-            content: [{ type: "text", text: result.brief ?? "" }],
+            content: [{ type: "text", text }],
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
