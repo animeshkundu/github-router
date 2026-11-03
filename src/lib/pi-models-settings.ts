@@ -1,4 +1,5 @@
 import { CHEAPEST_CONSULT_CONTRACT } from "./claude-md-injection"
+import { profileDescriptor } from "./launch-profile"
 import { LOCAL_PROFILE_TIER_MODELS } from "./local-profile-contract"
 import { LAUNCH_SECRET_HEADER } from "./messages-identity-preflight"
 import {
@@ -147,12 +148,50 @@ export function piLeadThinking(profileId: PiProfileId): string {
     : piCopilotContractFor(profileId).leadEffort
 }
 
+/**
+ * The `peers` persona allow-list this profile registers with the launch
+ * registry, or `undefined` when every persona is reachable.
+ *
+ * Pi's discovery prose (a group's `mcp.json` description) and its skills are
+ * the model's only signal for what a group holds, so they have to be derived
+ * from the same list the MCP handler enforces. A group described with personas
+ * the launch filters out sends the model hunting for tools that answer
+ * -32601. `local` is the one Pi profile with an empty list: it keeps the group
+ * for the artifact review tools and nothing else.
+ */
+export function piPersonaAllowlist(
+  profileId: PiProfileId,
+): ReadonlySet<string> | undefined {
+  return profileDescriptor(profileId).personaAllowlist
+}
+
+/** Whether the Copilot-served `oracle` MCP tool is callable on this profile. */
+export function piOracleToolReachable(profileId: PiProfileId): boolean {
+  const allowlist = piPersonaAllowlist(profileId)
+  return allowlist === undefined || allowlist.has("oracle")
+}
+
+/**
+ * Which model answers the `oracle` subagent.
+ *
+ * Every Copilot profile's oracle is a Copilot-served consultant pinned by its
+ * family contract. `local` has no Copilot oracle at all, yet the subagent
+ * still has to be emitted: omitting the file would un-shadow Pi's builtin
+ * `oracle`, which also owns the `advisor` alias and is pinned to a model of
+ * its own choosing. Pinning our file to the local lead tier keeps the role,
+ * its nesting grant and the shadowing intact while running it on the one
+ * endpoint the profile is allowed to use.
+ */
 export function piOracleModel(profileId: PiProfileId): string {
-  return piContractFor(profileId).oracleModel
+  return profileId === "local"
+    ? piLeadModel(profileId)
+    : piContractFor(profileId).oracleModel
 }
 
 export function piOracleThinking(profileId: PiProfileId): string {
-  return piContractFor(profileId).oracleEffort
+  return profileId === "local"
+    ? piLeadThinking(profileId)
+    : piContractFor(profileId).oracleEffort
 }
 
 /**
@@ -454,9 +493,10 @@ export function piUsdCostFor(
  * LOCAL PROFILES speak `anthropic-messages` instead: the provider default
  * becomes Anthropic's wire format, the tier rows (`opus`/`sonnet`/`haiku`)
  * are the endpoint's own ids and stay on it, and every Copilot-served row
- * (the oracle on every profile, the local2 advisor) is pinned to
- * `openai-responses`. That split is load-bearing: a Copilot row left on the
- * provider default would send a real Copilot model id to the LOCAL server,
+ * (the local2 advisor, which is the only Copilot row a local profile has) is
+ * pinned to `openai-responses`. That split is load-bearing: a Copilot row
+ * left on the provider default would send a real Copilot model id to the
+ * LOCAL server,
  * while the tier rows must never be diverted to `/v1/responses` (that route
  * always leaves for Copilot). Catalog endpoint discovery cannot make this
  * call — a local id has no catalog entry, and a Copilot id's endpoints
@@ -1266,7 +1306,9 @@ export function buildPiAgentFiles(
   // Oracle consultant agent (both modes). Advisory only: challenges
   // assumptions, never edits. Cold-start fresh context matches the MCP
   // `peers/oracle` tool contract (stateless query + context, no transcript),
-  // deliberately unlike the builtin's forked decision-consistency role.
+  // deliberately unlike the builtin's forked decision-consistency role. On
+  // `local` there is no MCP oracle, so this file is the only oracle the
+  // session has, and its model is a local tier id (`piOracleModel`).
   const oracle = [
     "---",
     "name: oracle",

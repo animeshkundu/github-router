@@ -4,6 +4,7 @@ import {
   piAdvisorModel,
   piLeadModel,
   piLeadThinking,
+  piOracleToolReachable,
 } from "./pi-models-settings"
 import { isBalancedFamily, isCheapestFamily } from "./profile-family"
 import {
@@ -562,6 +563,29 @@ export function buildPiSkills(opts: {
   const peers = opts.peers !== false
   const skills: Array<PiSkillDoc> = []
   if (peers) {
+    // The oracle is reachable two ways, and the skill must name the one this
+    // profile actually has. Copilot profiles carry the stateless MCP persona
+    // (and the same-named subagent for follow-ups); `local` carries only the
+    // subagent, so naming the MCP tool there would send the model after a
+    // tool that answers -32601.
+    const oracleReachable = piOracleToolReachable(opts.profileId)
+    const oracleBody = oracleReachable
+      ? [
+          "Call `mcp__gh-router-peers__oracle` (load it with `tool_search` if it is",
+          "not in the tool list yet) with the decision, the options considered, and",
+          "the missing-context gaps. The oracle is cold-start: it sees only what you",
+          "pass. Its verdict is advisory — verify with tests and code, never",
+          "substitute votes for verification. (The MCP tool is the one-shot consult;",
+          "the `oracle` subagent is the same role for interactive follow-ups — same",
+          "name, different invocation. Prefer the tool for a single verdict.)",
+        ]
+      : [
+          "Delegate to the `oracle` subagent through the `subagent` tool with the",
+          "decision, the options considered, and the missing-context gaps. The",
+          "oracle is cold-start: it sees only what you pass, plus whatever it reads",
+          "itself. Its verdict is advisory — verify with tests and code, never",
+          "substitute votes for verification.",
+        ]
     skills.push({
       dir: "gh-oracle",
       content: [
@@ -572,13 +596,7 @@ export function buildPiSkills(opts: {
         "",
         "# Oracle consult",
         "",
-        "Call `mcp__gh-router-peers__oracle` (load it with `tool_search` if it is",
-        "not in the tool list yet) with the decision, the options considered, and",
-        "the missing-context gaps. The oracle is cold-start: it sees only what you",
-        "pass. Its verdict is advisory — verify with tests and code, never",
-        "substitute votes for verification. (The MCP tool is the one-shot consult;",
-        "the `oracle` subagent is the same role for interactive follow-ups — same",
-        "name, different invocation. Prefer the tool for a single verdict.)",
+        ...oracleBody,
       ].join("\n"),
     })
   }
@@ -602,10 +620,12 @@ export function buildPiSkills(opts: {
     })
   }
   if (opts.swe === true && peers) {
-    // Balanced is advisor-free: the roster line must not name a consultant
-    // that has neither tool nor agent file on that profile.
-    const consults =
-      isBalancedFamily(opts.profileId) ? "`oracle` for consults" : "`oracle`/`advisor` for consults"
+    // The roster line must not name a consultant this profile has neither a
+    // tool nor an agent file for: balanced and local are advisor-free, so
+    // they name the oracle alone.
+    const consults = piAdvisorModel(opts.profileId)
+      ? "`oracle`/`advisor` for consults"
+      : "`oracle` for consults"
     skills.push({
       dir: "gh-delegate",
       content: [

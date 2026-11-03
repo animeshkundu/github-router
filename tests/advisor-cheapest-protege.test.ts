@@ -358,9 +358,18 @@ describe("advisorSystemPrompt cheapest clause", () => {
       "less equipped",
       "will not reliably hold",
       "frontier",
+      // Behaviour predictions about the lead are claims too. A local endpoint
+      // may serve a model that revises quickly and holds current facts, and
+      // telling the Advisor otherwise would have it overrule correct knowledge.
+      "slow to revise",
+      "external push",
+      "stale or vague",
     ]) {
       expect(prompt).not.toContain(phrase)
     }
+    // The refusal to assume survives, so the absences above cannot be satisfied
+    // by deleting the lead clause outright.
+    expect(prompt).toContain("Do not assume its confidence matches its accuracy")
     // Duplicated shared text reads as correct and passes every absence
     // assertion, so count the shared fragment.
     expect(prompt.split("label each as external knowledge").length - 1).toBe(1)

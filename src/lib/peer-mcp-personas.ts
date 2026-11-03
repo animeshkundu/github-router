@@ -724,6 +724,9 @@ export function buildPeerAwarenessSnippet(opts: {
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one. Balanced has none.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
+    // `local` runs no Copilot model, so it has no Oracle either: its launch
+    // carries no `peers` group and nothing that could answer one.
+    const hasOracle = !(isLocal && opts.profile === "local")
     // Families label themselves by their own id so `cheapest2`/`balanced2`
     // never claim to be the base profile; the cheap pair stays on its shared
     // `cheap` label.
@@ -748,9 +751,15 @@ export function buildPeerAwarenessSnippet(opts: {
     const fastWorkersKey = key("workers")
     const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
     const browserClause = directBrowserAvailable ? ` \`mcp__${fastBrowserKey}__*\` is the opt-in browser surface.` : ""
-    const workerBrowseClause = opts.browseAvailable
+    // `worker-browse` is a Pi worker, so it only exists where the workers group
+    // does. Both local profiles drop that group, so naming it there would point
+    // the lead at an agent the session cannot reach.
+    const workerBrowseAvailable = opts.browseAvailable && !isLocal
+    const workerBrowseClause = workerBrowseAvailable
       ? ` \`worker-browse\` runs delegated browsing tasks through \`mcp__${fastWorkersKey}__browse\`.`
       : ""
+    // Artifact rows live in the `peers` group, which both local profiles
+    // register; human review is not Copilot model inference.
     const artifactClause = opts.artifactToolsAvailable
       ? ` \`mcp__${fastPeersKey}__artifact_*\` provides artifact review with auto-open on plan completion.`
       : ""
@@ -781,8 +790,9 @@ export function buildPeerAwarenessSnippet(opts: {
     // owns planning directly (no Plan role).
     const balancedRosterClause = "Native Task roster: the lead owns planning, implementation, and verification by default. `Explore` (targeted breadth only when search is insufficient, launch in parallel), `General-Purpose` (mixed execution; delegate FREELY for multi-step work and drive to a verified end state), and `reviewer` (repo-aware verification; invoke ONLY when genuinely behavior-changing, cross-boundary, or risk-sensitive, lead owns verification by default; narrows scope with search first and may invoke `Explore` for targeted discovery). Verify claims with concrete repository evidence and tests before declaring done."
     // Profiles without an Advisor surface (`balanced`, `local`) funnel unknowns
-    // search → Explore → Oracle (second opinion on a framed question, never
-    // discovery), and the reviewer may invoke Explore for targeted discovery.
+    // search → Explore; `balanced` then has Oracle (a second opinion on a framed
+    // question, never discovery), while `local` has no consultant at all and
+    // stops at Explore. The reviewer may invoke Explore for targeted discovery.
     // Cheapest, balanced and local have no Plan role: Oracle is lead-only there.
     // Cost framing is a claim about the endpoint being billed, and a `local`
     // launch bills the operator's own endpoint at a rate the profile knows
@@ -790,15 +800,21 @@ export function buildPeerAwarenessSnippet(opts: {
     const escalationOpener = isLocal
       ? `This is the ${profileLabel} launch profile. Verify claims against real evidence first: settle factual claims with `
       : `This is the ${profileLabel} launch profile. Funnel unknowns cheapest-first: settle factual claims with `
+    // `local` carries neither consultant, so the sentence that names Oracle is
+    // omitted rather than pointed at a tool the session cannot reach.
+    const escalationOracle = hasOracle
+      ? ` \`mcp__${fastPeersKey}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle, available to the lead; \`reviewer\` and other subagents cannot call Oracle.`
+      : ""
     const escalationClause = !hasAdvisor
-      ? escalationOpener + `\`mcp__${fastSearchKey}__code\` + \`mcp__${fastSearchKey}__web\` search first (narrow scope, rule out hypotheses), then \`Explore\` for targeted breadth. \`mcp__${fastPeersKey}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle, available to the lead; \`reviewer\` and other subagents cannot call Oracle.${astraClause}`
+      ? escalationOpener + `\`mcp__${fastSearchKey}__code\` + \`mcp__${fastSearchKey}__web\` search first (narrow scope, rule out hypotheses), then \`Explore\` for targeted breadth.` + escalationOracle + astraClause
       : `This is the ${profileLabel} launch profile. Follow an evidence-first escalation ladder: settle factual claims directly through code, tests, and builds. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance, framing checks, or conflicting signals (direction, not dictation), not routine progress, waiting, verification, or completion. \`mcp__${fastPeersKey}__oracle\` is ${oracleDescriptor}, an expert consultant ${isCheapest || isLocal ? "available to the lead" : "available to the lead and `Plan`"}, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle.${astraClause}`
-    // `worker-browse` is emitted only when browse is on, so a delegation graph
-    // must not name it otherwise; same predicate as `workerBrowseClause`.
-    const leadLeaf = opts.browseAvailable
+    // `worker-browse` is emitted only when browse is on AND the launch carries
+    // the workers group, so a delegation graph must not name it otherwise; same
+    // predicate as `workerBrowseClause`.
+    const leadLeaf = workerBrowseAvailable
       ? "`Explore`, `reviewer`, and `worker-browse`"
       : "`Explore` and `reviewer`"
-    const balancedLeaf = opts.browseAvailable
+    const balancedLeaf = workerBrowseAvailable
       ? "`Explore` and `worker-browse`"
       : "`Explore`"
     const delegationClause = isBalanced
@@ -813,12 +829,16 @@ export function buildPeerAwarenessSnippet(opts: {
       : isCheap
         ? " The lead runs at 200K on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — prefer targeted reads over full file reads."
         : ""
-    // The header names the section's capabilities. `local` carries no Advisor
-    // (only `local2` does), so keeping the shared title would name a surface
-    // this mode never wires; balanced keeps the shared title by long-standing
-    // choice, with the Advisor prose removed instead.
+    // The header names the section's capabilities. `local` carries neither a
+    // peer group nor an Advisor, so neither title fits it; balanced keeps the
+    // shared title by long-standing choice, with the Advisor prose removed
+    // instead.
     const sectionTitle =
-      isLocal && !hasAdvisor ? "## Peer review and Oracle" : "## Peer review and advisor"
+      isLocal && !hasOracle
+        ? "## Native roster and search"
+        : isLocal && !hasAdvisor
+          ? "## Peer review and Oracle"
+          : "## Peer review and advisor"
     return [
       sectionTitle,
       "",
@@ -1032,6 +1052,9 @@ export function buildPeerAwarenessSummary(opts: {
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one. Balanced has none.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
+    // `local` runs no Copilot model, so it has no Oracle either: its launch
+    // carries no `peers` group and nothing that could answer one.
+    const hasOracle = !(isLocal && opts.profile === "local")
     const profileLabel =
       isCheapest || isBalanced || isLocal
         ? opts.profile.charAt(0).toUpperCase() + opts.profile.slice(1)
@@ -1053,7 +1076,14 @@ export function buildPeerAwarenessSummary(opts: {
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
     const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
     const browserClause = directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""
-    const workerBrowseClause = opts.browseAvailable ? ` \`worker-browse\` runs delegated browsing tasks through \`mcp__${key("workers")}__browse\`.` : ""
+    // Same predicate as the snippet above: `worker-browse` rides on the workers
+    // group, which neither local profile carries.
+    const workerBrowseAvailable = opts.browseAvailable && !isLocal
+    const workerBrowseClause = workerBrowseAvailable ? ` \`worker-browse\` runs delegated browsing tasks through \`mcp__${key("workers")}__browse\`.` : ""
+    // Artifact rows live in the `peers` group, which both local profiles register.
+    const artifactClause = opts.artifactToolsAvailable
+      ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.`
+      : ""
     const astraClause = opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? ` \`mcp__${key("peers")}__astra\` is GPT-6 Astra (${astraDescriptor}), lead-only escalation for hardest dead ends.`
       : ""
@@ -1063,18 +1093,23 @@ export function buildPeerAwarenessSummary(opts: {
     // Balanced: lead owns planning, implementation, verification by default
     // (no Plan role).
     const balancedRosterLine = `${profileLabel} launch profile. The lead owns planning, implementation, and verification by default. Task roster: \`Explore\` (targeted breadth when search is insufficient), \`General-Purpose\` (delegate FREELY for multi-step work), \`reviewer\` (invoke ONLY when genuinely behavior-changing, cross-boundary, or risk-sensitive). Verify claims with concrete repository evidence and tests before declaring done.`
-    // `balanced` and `local` expose Oracle but no Advisor: the peer line names
-    // Oracle as a second opinion and omits Advisor entirely. Cheapest,
-    // balanced and local have no Plan role: Oracle is lead-only there.
+    // Balanced exposes Oracle but no Advisor: its peer line names Oracle as a
+    // second opinion and omits Advisor. `local` carries neither, so its peer
+    // line opens on search. Neither has a Plan role, so Oracle is lead-only
+    // there.
+    const summaryOracle = hasOracle
+      ? `\`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle, for the lead.${astraClause} `
+      : ""
     const peerLine = !hasAdvisor
-      ? `\`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle, for the lead.${astraClause} \`mcp__${key("search")}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search with visible no-fallback errors and local exact/regex/AST" : opts.semanticSearchAvailable === true ? "local ColBERT semantic search with lexical fallback" : "local lexical search"}; \`mcp__${key("search")}__web\` provides web search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`
-      : `Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). \`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, an expert consultant for ${isCheapest || isLocal ? "the lead" : "the lead and `Plan`"}, preferred over advisor for substantive trade-offs.${astraClause} \`mcp__${key("search")}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search with visible no-fallback errors and local exact/regex/AST" : opts.semanticSearchAvailable === true ? "local ColBERT semantic search with lexical fallback" : "local lexical search"}; \`mcp__${key("search")}__web\` provides web search.${browserClause}${workerBrowseClause}${opts.artifactToolsAvailable ? ` \`mcp__${key("peers")}__artifact_*\` provides human review with plan auto-open.` : ""}`
-    // `worker-browse` is emitted only when browse is on, so the summary must
-    // not name it otherwise; same predicate as `workerBrowseClause` above.
-    const summaryLeadLeaf = opts.browseAvailable
+      ? summaryOracle + `\`mcp__${key("search")}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search with visible no-fallback errors and local exact/regex/AST" : opts.semanticSearchAvailable === true ? "local ColBERT semantic search with lexical fallback" : "local lexical search"}; \`mcp__${key("search")}__web\` provides web search.${browserClause}${workerBrowseClause}${artifactClause}`
+      : `Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). \`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, an expert consultant for ${isCheapest || isLocal ? "the lead" : "the lead and `Plan`"}, preferred over advisor for substantive trade-offs.${astraClause} \`mcp__${key("search")}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search with visible no-fallback errors and local exact/regex/AST" : opts.semanticSearchAvailable === true ? "local ColBERT semantic search with lexical fallback" : "local lexical search"}; \`mcp__${key("search")}__web\` provides web search.${browserClause}${workerBrowseClause}${artifactClause}`
+    // `worker-browse` is emitted only when browse is on AND the launch carries
+    // the workers group, so the summary must not name it otherwise; same
+    // predicate as `workerBrowseClause` above.
+    const summaryLeadLeaf = workerBrowseAvailable
       ? "`Explore`, `reviewer`, and `worker-browse`"
       : "`Explore` and `reviewer`"
-    const summaryBalancedLeaf = opts.browseAvailable
+    const summaryBalancedLeaf = workerBrowseAvailable
       ? "`Explore` and `worker-browse`"
       : "`Explore`"
     const summaryDelegation = isBalanced

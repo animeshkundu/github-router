@@ -304,15 +304,18 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
     // Local: same three-role roster and the same split of duty as cheapest, but
     // the model labels are the local endpoint's OWN tier ids rather than Copilot
     // slugs. Those ids are whatever the server maps them to, so the clause names
-    // the tier and what it is for, never a model family. `Plan` is deliberately
-    // absent: the local roster does not emit it.
+    // the tier and what it is for, never a model family. It also drops
+    // cheapest's `heavy … tier` appositives: with three different ids those read
+    // as a strength ordering across tiers, and only the server knows what its
+    // ids map to. `Plan` is deliberately absent: the local roster does not emit
+    // it.
     if (isLocalFamily(opts.profile)) {
       const models = localContractFor(opts.profile).nativeModels
       return joinClauses([
-        `\`Explore\` (${models.Explore} tier, wide breadth) for discovery, dependency mapping, and convention tracking spanning more than a couple of files`,
-        `\`General-Purpose\` (${models["General-Purpose"]} tier, the heavy execution tier) for mixed, iterative, or multi-step execution`,
-        `\`reviewer\` (${models.reviewer} tier, the heavy verification tier) for independent adversarial verification, reproduction, and root-causing`,
-      ]) + ". Delegate by value — wide breadth to `Explore`, heavy execution to `General-Purpose`, verification to `reviewer`. All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
+        `\`Explore\` (${models.Explore} tier) for discovery, dependency mapping, and convention tracking spanning more than a couple of files`,
+        `\`General-Purpose\` (${models["General-Purpose"]} tier) for mixed, iterative, or multi-step execution`,
+        `\`reviewer\` (${models.reviewer} tier) for independent adversarial verification, reproduction, and root-causing`,
+      ]) + ". Delegate by value — wide breadth to `Explore`, execution to `General-Purpose`, verification to `reviewer`. All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
     }
     // Balanced: lead owns planning, implementation, verification by default —
     // only the reviewer is gated behind genuine need.
@@ -500,6 +503,23 @@ export const ORACLE_ONLY_CONSULT_CONTRACT_POINTER =
   "Consulting `oracle` (small budget, ~8-10 calls — choose wisely): use it for how/what — shortest path, what to consider, planning, strategy, direction — never for anything a search, read, or run settles, nor for routine progress, reassurance, or completion ritual; do not spend one where `reviewer` owns the moment. Full how-to (when to spend, the call brief) is in your CLAUDE.md project instructions.\n\n"
 
 /**
+ * Contract for a launch that carries neither consultant.
+ *
+ * `-m local` exposes no `peers` group at all, so neither the Advisor nor the
+ * Oracle exists on its surface. Both siblings above are written around a budget
+ * of consults and a discriminator between the two roles, and naming either role
+ * here would point the lead at a tool the session cannot reach. What survives
+ * is the part that was never about them: settle what evidence can settle, and
+ * make the reasoning explicit where it cannot.
+ */
+export const DIRECT_EVIDENCE_CONTRACT =
+  "Consultation budget: this launch has no consultant, so every unresolved question is settled by direct evidence: a search, a read, a build, a test, or a run. Where you would otherwise want a second opinion, state the competing hypotheses explicitly, choose the one the evidence supports, and record your confidence and what being wrong would cost so the user can correct course early. Counsel is never a substitute for verification you can perform yourself.\n\n"
+
+/** Short, always-resident pointer to `DIRECT_EVIDENCE_CONTRACT`. */
+export const DIRECT_EVIDENCE_CONTRACT_POINTER =
+  "This launch has no consultant: settle unresolved questions with direct evidence (search, read, build, test, or run) and state competing hypotheses explicitly before choosing. Full how-to is in your CLAUDE.md project instructions.\n\n"
+
+/**
  * Build the operating-defaults directive for one launch, naming only the
  * natives that launch actually emitted.
  *
@@ -535,6 +555,9 @@ export function buildOperatingDefaultsDirective(
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
+    // `local` runs no Copilot model, so it has no Oracle either: its launch
+    // carries no `peers` group and nothing that could answer one.
+    const hasOracle = !(isLocal && opts.profile === "local")
     const profileLabel = isLocal
       ? "Local"
       : isCheapest
@@ -568,9 +591,11 @@ export function buildOperatingDefaultsDirective(
     // A local launch must not price the roles it delegates to: `reviewer` runs
     // on the operator's own endpoint, on a tier the profile knows nothing
     // about, so the only defensible subject is the role names themselves.
-    const subsetSubject = isLocal
-      ? "`reviewer` and Oracle"
-      : `expensive models ${expensiveModels}`
+    // With no Oracle on the launch the only delegate left is `reviewer`, so
+    // the sentence carries its own verb rather than a shared plural one.
+    const subsetTail = isLocal && !hasOracle
+      ? "`reviewer` sees only the synthesized subset, never raw search output."
+      : `${isLocal ? "`reviewer` and Oracle" : `expensive models ${expensiveModels}`} see only the synthesized subset, never raw search output.`
     // Same reasoning for the ladder's cost framing. "Most direct first" keeps
     // the ordering advice (search before fan-out) without asserting that
     // searching is cheaper than the model answering.
@@ -582,10 +607,10 @@ export function buildOperatingDefaultsDirective(
     // word; the mode names still carry the meaning.
     const lexicalLabel = isLocal ? "LEXICAL" : "LOCAL LEXICAL"
     const searchGuidance = opts.bluebirdEnabled === true
-      ? "Search strategy: use Bluebird `code` search in `lexical` mode for indexed keyword queries and `semantic` mode for intent/concept questions. Bluebird failures remain visible and never fall back locally; `exact`, `regex`, and `ast` stay on the local live tree. `Explore` subagents read the narrowed files and return file:line conclusions; " + subsetSubject + " see only the synthesized subset, never raw search output. "
+      ? "Search strategy: use Bluebird `code` search in `lexical` mode for indexed keyword queries and `semantic` mode for intent/concept questions. Bluebird failures remain visible and never fall back locally; `exact`, `regex`, and `ast` stay on the local live tree. `Explore` subagents read the narrowed files and return file:line conclusions; " + subsetTail + " "
       : opts.semanticSearchAvailable === true
-        ? strategyOpener + "(1) " + lexicalLabel + " `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys; (2) local ColBERT SEMANTIC `code` search for intent/concept questions where literal keywords may not appear, with lexical fallback while its index is unavailable; (3) `Explore` subagents read the narrowed files and return file:line conclusions — " + subsetSubject + " see only the synthesized subset, never raw search output. "
-        : strategyOpener + lexicalLabel + " `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys. `Explore` subagents read the narrowed files and return file:line conclusions — " + subsetSubject + " see only the synthesized subset, never raw search output. "
+        ? strategyOpener + "(1) " + lexicalLabel + " `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys; (2) local ColBERT SEMANTIC `code` search for intent/concept questions where literal keywords may not appear, with lexical fallback while its index is unavailable; (3) `Explore` subagents read the narrowed files and return file:line conclusions — " + subsetTail + " "
+        : strategyOpener + lexicalLabel + " `code` search (mode:\"lexical\"/\"exact\", plus Grep/Glob) for symbols, filenames, errors, routes, flags, and config keys. `Explore` subagents read the narrowed files and return file:line conclusions — " + subsetTail + " "
     if (opts.fastRuntimeAvailable === false) {
       return (
         "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
@@ -598,9 +623,19 @@ export function buildOperatingDefaultsDirective(
     const workersKey = opts.groupKeys?.workers ?? "workers"
     const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
     const browserClause = directBrowserAvailable ? ` \`mcp__${browserKey}__*\` provides direct browser control.` : ""
-    const workerBrowseClause = opts.browseAvailable
+    // `worker-browse` is a Pi worker, so it only exists where the workers group
+    // does. Both local profiles drop that group (every subagent there is meant
+    // to run on the local model), so naming it would point the lead at an agent
+    // the session cannot reach. The launcher already reports `browseAvailable`
+    // false for them; this keeps the prose true even for a caller that does not.
+    const workerBrowseAvailable = opts.browseAvailable && !isLocal
+    const workerBrowseClause = workerBrowseAvailable
       ? ` \`worker-browse\` runs delegated autonomous browsing tasks through \`mcp__${workersKey}__browse\`.`
       : ""
+    // Artifact rows live in the `peers` group, which both local profiles
+    // register while the artifact panel is available even though neither admits
+    // a Copilot persona: human review is not model inference. Without that
+    // panel the group holds nothing and the launcher drops it.
     const artifactClause = opts.artifactAvailable
       ? ` \`mcp__${peersKey}__artifact_*\` provides human review in the artifact panel with auto-open on plan completion.`
       : ""
@@ -609,13 +644,13 @@ export function buildOperatingDefaultsDirective(
       ? ` \`mcp__${peersKey}__astra\` (GPT-6 Astra ${astraDescriptor}) is the terminal escalation consultant for the lead only, reserved strictly for the hardest dead ends when direct evidence, Advisor, and Oracle have all failed to produce a defensible path (consulted at most 1-2 times per decision with concise context and specific questions).`
       : ""
 
-    // `worker-browse` is emitted only when browse is on, so a delegation graph
-    // must not name it otherwise — that would point the lead at an agent this
-    // session cannot reach. Same predicate as the adjacent `workerBrowseClause`.
-    const leadLeaf = opts.browseAvailable
+    // `worker-browse` is emitted only when browse is on AND the launch carries
+    // the workers group, so a delegation graph must not name it otherwise; same
+    // predicate as the adjacent `workerBrowseClause`.
+    const leadLeaf = workerBrowseAvailable
       ? "`Explore`, `reviewer`, and `worker-browse`"
       : "`Explore` and `reviewer`"
-    const balancedLeaf = opts.browseAvailable
+    const balancedLeaf = workerBrowseAvailable
       ? "`Explore` and `worker-browse`"
       : "`Explore`"
     // A local lead runs on an endpoint whose model and speed the profile knows
@@ -647,7 +682,11 @@ export function buildOperatingDefaultsDirective(
         + disciplineOpener
         + "verify by execution rather than memory; before a non-trivial task, write a short plan (steps, files involved, the check settling each step) and execute it; persist through tool failures with a rephrased attempt before asking the user; stop searching when further results stop changing the answer; tag claims verified, inferred, or unverified — never state that something passes, compiles, or is covered without observed output. "
         + "Delegation graph: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; " + leadLeaf + " cannot invoke native subagents.\n\n"
-        + (hasAdvisor ? CHEAPEST_CONSULT_CONTRACT : ORACLE_ONLY_CONSULT_CONTRACT)
+        + (hasAdvisor
+          ? CHEAPEST_CONSULT_CONTRACT
+          : hasOracle
+            ? ORACLE_ONLY_CONSULT_CONTRACT
+            : DIRECT_EVIDENCE_CONTRACT)
       : isBalanced
         ? `${profileLabel} launch profile. The lead coordinates execution across specialized native roles: `
         + buildNativeReachClauses(opts)
@@ -687,11 +726,12 @@ export function buildOperatingDefaultsDirective(
     const swePipelineClause = opts.sweEnabled === false
       ? ""
       : `${isCheapest || isBalanced || isLocal ? PIPELINE_SKILLS_AWARENESS_NO_PLAN_AGENT : PIPELINE_SKILLS_AWARENESS}\n\n`
-    // Balanced and `local` have no Advisor: Oracle is the only consultant,
-    // framed as a second opinion on a precise question — never a discovery
-    // tool. For unknowns, only search (then Explore) helps. Cheapest,
-    // balanced, and local have no Plan role, so Oracle is lead-only there;
-    // fast/cheap/cheap1m keep lead-and-Plan Oracle access.
+    // Balanced has no Advisor, so Oracle is its only consultant, framed as a
+    // second opinion on a precise question — never a discovery tool. `local`
+    // has neither consultant and never reaches this branch. For unknowns, only
+    // search (then Explore) helps. Cheapest, balanced, and local have no Plan
+    // role, so Oracle is lead-only there; fast/cheap/cheap1m keep lead-and-Plan
+    // Oracle access.
     const oracleLeadOnly = isCheapest || isBalanced || isLocal
     // Cost framing is a claim about the endpoint being billed. A local launch
     // bills the operator's own endpoint at a rate this profile knows nothing
@@ -706,7 +746,10 @@ export function buildOperatingDefaultsDirective(
     const consultation = !hasAdvisor
       ? consultOpener
         + "(1) `code` and `web` search narrow scope and rule out hypotheses — always first. (2) `Explore` subagents for targeted breadth only when search is insufficient. "
-        + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle; available to the lead; \`reviewer\` and other subagents cannot call Oracle. ` + consultCostTail
+        + (hasOracle
+          ? `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle; available to the lead; \`reviewer\` and other subagents cannot call Oracle. `
+          : "")
+        + consultCostTail
       : "Consultation guidance: Follow an evidence-first escalation ladder. Direct empirical evidence (search, code, tests, builds) settles factual questions first. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance or framing checks (direction, not dictation), and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
         + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, an expert consultant ${oracleLeadOnly ? "available to the lead" : "available to the lead and `Plan`"}, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. Discriminator: transcript-aware trajectory/framing/momentum → advisor; a self-contained technical/architectural trade-off → Oracle.${isCheapest || isLocal ? "" : " `Plan` may consult Oracle on unresolved trade-offs, and reports any remaining tie-breaking gap to the lead."}${astraClause} `
     return (
@@ -793,6 +836,9 @@ export function buildOperatingDefaultsDigest(
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
+    // `local` runs no Copilot model, so it has no Oracle either: its launch
+    // carries no `peers` group and nothing that could answer one.
+    const hasOracle = !(isLocal && opts.profile === "local")
     const profileLabel = isLocal
       ? "Local"
       : isCheapest
@@ -839,7 +885,11 @@ export function buildOperatingDefaultsDigest(
       : "."
     const delegation = isCheapest || isLocal
       ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. In plan mode, produce the plan and acceptance criteria directly${hasAdvisor ? "; before presenting the final plan to the user, consult `advisor` once for a framing check." : "."} Plan briefly before non-trivial acts, verify by execution, tag unverified claims, and stop searching when results stop changing the answer. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
-        + (hasAdvisor ? CHEAPEST_CONSULT_CONTRACT_POINTER : ORACLE_ONLY_CONSULT_CONTRACT_POINTER)
+        + (hasAdvisor
+          ? CHEAPEST_CONSULT_CONTRACT_POINTER
+          : hasOracle
+            ? ORACLE_ONLY_CONSULT_CONTRACT_POINTER
+            : DIRECT_EVIDENCE_CONTRACT_POINTER)
       : isBalanced
         ? `${profileLabel} launch profile. The lead owns planning, implementation, and verification by default: narrow scope first with \`code\` and \`web\` search to rule out hypotheses (cheapest, always first); delegate to \`Explore\` in parallel only when search is insufficient (read directly only files you will act on); delegate to \`General-Purpose\` FREELY for multi-step work combining investigation, tool workflows, and code changes; invoke \`reviewer\` ONLY when the change is genuinely behavior-changing, cross-boundary, or risk-sensitive (\`reviewer\` narrows scope with search first and may invoke \`Explore\` for targeted discovery); handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
         : `${profileLabel} launch profile. The lead coordinates execution across specialized roles: delegate broad discovery to \`Explore\` in parallel and do not sweep the repo yourself (read directly only files you will act on); delegate to \`Plan\` in plan mode or when structuring complex multi-step sequencing (\`Plan\` is an advisory planning capability, not an approval gate, and writes handoff-ready steps for \`General-Purpose\`); delegate mixed multi-step execution and Plan handoffs to \`General-Purpose\` in a fresh context; delegate to \`reviewer\` after behavior-changing or risk-sensitive implementation to verify correctness before declaring done; handle trivial and surgical edits directly. Send independent subagent calls in parallel within a single turn. Stop named teammates when finished.\n\n`
@@ -855,10 +905,13 @@ export function buildOperatingDefaultsDigest(
       ? "Prefer direct evidence over delegation when the question is narrow."
       : "Optimize for accuracy, intelligence, and correctness at the lowest cost."
     const consultationLadder = !hasAdvisor
-      ? digestLadderOpener
-        + "`code` + `web` search narrow scope and rule out hypotheses first; (2) `Explore` for targeted breadth when search is insufficient; (3) `oracle` "
-        + oracleDescriptor
-        + " as a second opinion for precise, self-contained technical/architectural trade-offs that search and `Explore` cannot settle. " + digestLadderTail
+      ? !hasOracle
+        ? digestLadderOpener
+          + "`code` + `web` search narrow scope and rule out hypotheses first; (2) `Explore` for targeted breadth when search is insufficient. " + digestLadderTail
+        : digestLadderOpener
+          + "`code` + `web` search narrow scope and rule out hypotheses first; (2) `Explore` for targeted breadth when search is insufficient; (3) `oracle` "
+          + oracleDescriptor
+          + " as a second opinion for precise, self-contained technical/architectural trade-offs that search and `Explore` cannot settle. " + digestLadderTail
       : "Verify claims against real evidence: run relevant commands and tests. Follow a disciplined consultation ladder for unresolved decisions: (1) direct code inspection, search, builds, and tests settle factual questions; (2) `advisor` "
         + advisorDescriptor
         + " for transcript-aware framing checks or trajectory guidance (session momentum/trajectory); (3) `oracle` "

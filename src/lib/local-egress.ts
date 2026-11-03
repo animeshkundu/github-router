@@ -58,6 +58,16 @@ function normalizeBaseUrl(raw: string, source: string): string {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error(`${source} must be an http(s) URL (got "${parsed.protocol}")`)
   }
+  // The egress appends its own path (`<base>/messages`), so a query or
+  // fragment does not survive as one: `<base>?x=1` becomes
+  // `/v1?x=1/messages`, whose path is `/v1` and whose query is `x=1/messages`.
+  // That is a silent 404 several seconds into the session, which is exactly
+  // the failure this module exists to move to launch time.
+  if (parsed.search.length > 0 || parsed.hash.length > 0) {
+    throw new Error(
+      `${source} must not carry a query or fragment (got "${trimmed}")`,
+    )
+  }
   if (parsed.pathname === "/" || parsed.pathname === "") {
     parsed.pathname = "/v1"
   }
@@ -126,34 +136,44 @@ export function localBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
  * cannot be reinterpreted by something else downstream.
  */
 export function configureLocalEgress(override: LocalEgressOverride): void {
-  const baseUrlRaw = (override.baseUrl ?? "").trim()
-  const portRaw = override.port === undefined ? "" : String(override.port).trim()
-  const hasBase = baseUrlRaw.length > 0
-  const hasPort = portRaw.length > 0
+  // Presence is what the flag parser reports, not emptiness: a valueless
+  // `--localport` arrives as `""`, and treating that as "not passed" would
+  // silently fall back to the default endpoint with no diagnostic at all.
+  const baseProvided = override.baseUrl !== undefined
+  const portProvided = override.port !== undefined
 
-  if (hasBase && hasPort) {
+  if (!baseProvided && !portProvided) {
+    cliOverride = undefined
+    warnedInert = false
+    return
+  }
+
+  if (baseProvided && portProvided) {
     throw new Error(
       "--localurl and --localport cannot be combined; pass one endpoint spelling",
     )
   }
 
-  if (hasBase || hasPort) {
-    if (!warnedInert && override.profileId !== undefined && !isLocalFamily(override.profileId)) {
+  // "Inert on every other profile" is the documented contract, so this
+  // returns BEFORE validation. Validating first meant a typo in a flag we had
+  // just called ignored could still fail the launch, and stored an override
+  // the warning said was being discarded.
+  if (override.profileId !== undefined && !isLocalFamily(override.profileId)) {
+    if (!warnedInert) {
       warnedInert = true
       consola.warn(
         `--localurl/--localport only apply to the local launch profiles (profile: ${override.profileId}); ignoring`,
       )
     }
     cliOverride = undefined
-    if (hasBase) {
-      cliOverride = { baseUrl: normalizeBaseUrl(baseUrlRaw, "--localurl") }
-      return
-    }
-    cliOverride = { port: parseLocalPort(portRaw, "--localport") }
     return
   }
 
-  cliOverride = undefined
+  if (override.baseUrl !== undefined) {
+    cliOverride = { baseUrl: normalizeBaseUrl(override.baseUrl, "--localurl") }
+    return
+  }
+  cliOverride = { port: parseLocalPort(String(override.port), "--localport") }
 }
 
 /**

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto"
 import consola from "consola"
 
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
+import { assertCopilotMessagesBodyAllowed } from "~/lib/copilot-model-policy"
 import { HTTPError } from "~/lib/error"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
@@ -214,6 +215,7 @@ export async function createMessages(
 ): Promise<Response> {
   // A local session needs no Copilot credential for its lead turns, and
   // demanding one would make `-m local` unusable with a dead GitHub token.
+  if (!local) assertCopilotMessagesBodyAllowed(body)
   if (!local && !state.copilotToken) throw new Error("Copilot token not found")
 
   const url = local ?
@@ -318,6 +320,7 @@ export async function countTokens(
   retryTransient = false,
   local?: LocalMessagesEgress,
 ): Promise<Response> {
+  if (!local) assertCopilotMessagesBodyAllowed(body)
   if (!local && !state.copilotToken) throw new Error("Copilot token not found")
 
   const url = local ?

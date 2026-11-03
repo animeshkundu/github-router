@@ -41,15 +41,17 @@ type LocalProfile = "local" | "local2"
 
 const LOCAL_PROFILES: ReadonlyArray<LocalProfile> = ["local", "local2"]
 
-/** Availability as a realistic local launch reports it: worker tools and the
- *  Oracle peer are wired, direct browser and the standard-only natives are
- *  not. `local`/`local2` enable exactly the cheapest groups, so anything not
- *  listed here is genuinely absent from the session. */
+/** Availability as a realistic local launch reports it. Both local profiles
+ *  drop the `workers` group: a Pi worker answers on a Copilot model, and the
+ *  point of these profiles is that no subagent does. So the worker surface,
+ *  the Oracle peer on `local`, and every standard-only native are absent.
+ *  `local`/`local2` enable exactly the cheapest groups, so anything not listed
+ *  here is genuinely absent from the session. */
 function availability(profile: LocalProfile, overrides: Record<string, unknown> = {}) {
   return {
     codexCli: false,
     geminiAvailable: false,
-    workerToolsAvailable: true,
+    workerToolsAvailable: false,
     standInAvailable: false,
     browseAvailable: false,
     browserToolsAvailable: false,
@@ -96,10 +98,11 @@ function word(name: string): RegExp {
 }
 
 /** Blocks (blank-line separated paragraphs) that name `Sol` without also
- *  describing a Copilot-served peer. `oracle` and the `local2` Advisor really
- *  do run on Sol, so naming it beside them is a fact about that tool. A block
+ *  describing a Copilot-served peer. `local2`'s Oracle and Advisor really do
+ *  run on Sol, so naming it beside them is a fact about that tool. A block
  *  that says "Sol" with no Oracle/Advisor in it is a claim about the local
- *  endpoint, which this profile cannot make. */
+ *  endpoint, which this profile cannot make. `local` has no Copilot-served
+ *  surface at all, so it may not name Sol anywhere. */
 function straySolBlocks(surface: string): Array<string> {
   return surface
     .split(/\n{2,}/)
@@ -119,6 +122,11 @@ describe.each(LOCAL_PROFILES)("%s injects no claim about the endpoint", (profile
       "cheap broad",
       "cost several times",
       "a stronger",
+      // Strength appositives inherited from cheapest. With three different tier
+      // ids they read as a ranking across the ids, which only the server knows.
+      "the heavy execution tier",
+      "the heavy verification tier",
+      "heavy execution to",
     ]) {
       expect(all).not.toContain(phrase)
     }
@@ -163,12 +171,28 @@ describe.each(LOCAL_PROFILES)("%s injects no claim about the endpoint", (profile
     expect(all).toContain("200K")
   })
 
-  test("Oracle stays named in every surface", () => {
+  test("the Oracle is named only where the launch can reach it", () => {
     const surfaces = text(profile)
-    expect(surfaces.directive).toContain("mcp__peers__oracle")
-    expect(surfaces.digest).toContain("`oracle`")
-    expect(surfaces.snippet).toContain("mcp__peers__oracle")
-    expect(surfaces.summary).toContain("mcp__peers__oracle")
+    if (profile === "local2") {
+      expect(surfaces.directive).toContain("mcp__peers__oracle")
+      expect(surfaces.digest).toContain("`oracle`")
+      expect(surfaces.snippet).toContain("mcp__peers__oracle")
+      expect(surfaces.summary).toContain("mcp__peers__oracle")
+    } else {
+      // `local` admits no `peers` persona and, with the artifact panel off,
+      // registers no `peers` group at all, so naming Oracle would point the
+      // lead at a tool the session lacks.
+      for (const surface of SURFACE_NAMES) {
+        expect(surfaces[surface].toLowerCase()).not.toContain("oracle")
+      }
+    }
+  })
+
+  test("`local` names no Copilot model anywhere", () => {
+    if (profile !== "local") return
+    const all = joined(profile)
+    expect(all).not.toMatch(/\bSol\b/)
+    expect(all.toLowerCase()).not.toContain("copilot")
   })
 
   test("no stale `code_search` tool name", () => {
@@ -222,19 +246,32 @@ describe("search guidance matches the launch's backend", () => {
   })
 })
 
-describe("worker-browse is named only when browse is on", () => {
+describe("worker-browse is named only when the launch can reach it", () => {
   test("absent from every surface when browse is off", () => {
     expect(joined("local")).not.toContain("worker-browse")
     expect(joined("local2")).not.toContain("worker-browse")
   })
 
-  test("present in the delegation graphs when browse is on", () => {
+  // `worker-browse` is a Pi worker, and both local profiles drop the workers
+  // group. The builder therefore has to ignore a `browseAvailable: true` it is
+  // handed by a caller that reports the process-wide browse gate rather than
+  // this launch's groups; otherwise the prose names an agent with no `.md`.
+  test("absent from the delegation graphs even when browse is on", () => {
     for (const profile of LOCAL_PROFILES) {
       const surfaces = text(profile, { browseAvailable: true })
-      expect(surfaces.directive).toContain("worker-browse")
-      expect(surfaces.snippet).toContain("worker-browse")
-      expect(surfaces.summary).toContain("worker-browse")
+      expect(surfaces.directive).not.toContain("worker-browse")
+      expect(surfaces.snippet).not.toContain("worker-browse")
+      expect(surfaces.summary).not.toContain("worker-browse")
     }
+  })
+
+  test("still named for a non-local profile with browse on", () => {
+    const opts = { ...availability("local"), profile: "cheapest2", browseAvailable: true }
+    const snippet = buildPeerAwarenessSnippet(opts as never)
+    const summary = buildPeerAwarenessSummary(opts as never)
+    expect(buildOperatingDefaultsDirective({ ...opts, profile: "cheapest2" } as never)).toContain("worker-browse")
+    expect(snippet).toContain("worker-browse")
+    expect(summary).toContain("worker-browse")
   })
 })
 

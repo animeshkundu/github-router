@@ -220,34 +220,41 @@ export const BALANCED2_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
- * The `-m local` roster: the cheapest surface (same three-agent roster, same
- * groups, Oracle-only peer set, no coordinator), with every role's model
- * swapped for the local endpoint's tier id.
+ * The `-m local` roster: the cheapest surface (same three-agent roster, no
+ * coordinator), with every role's model swapped for the local endpoint's tier
+ * id.
  *
- * Its MCP surface is retained deliberately: `search`, `workers`, `browser`
- * and the Azure groups all talk to Copilot or to local filesystem/remote
- * services rather than to the lead model, so a local lead can still use them.
- * The Oracle persona likewise stays on Copilot (`gpt-6.1-sol`) because it is
- * an MCP consult the local lead makes, not a local turn.
+ * A local launch runs no Copilot model at all, so every group whose tools
+ * spawn one is absent: `workers` (the Pi workers resolve Copilot models) and
+ * every group built for model ties. `peers` is permitted only because the
+ * artifact tools live there and human review is not model inference, and the
+ * empty allow-list means no persona is listed or callable: with the artifact
+ * panel off the group holds nothing and neither launcher publishes it. What remains is the
+ * surface that is not a model call — `search` (in-process lexical/ColBERT plus
+ * the PAT-backed web search), `browser` (a local extension), and the three
+ * Azure data groups. The egress guard in `copilot-model-policy.ts` enforces the
+ * same rule from the other side, so a path that somehow reaches Copilot still
+ * refuses.
  */
 export const LOCAL_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "local",
   nativeRoster: new Set(localContractFor("local").nativeAgentNames),
-  personaAllowlist: new Set(["oracle"]),
-  allowedGroups: new Set(["peers", "search", "workers", "browser", "ado", "kusto", "cloudagent"]),
+  personaAllowlist: new Set<string>(),
+  allowedGroups: new Set(["peers", "search", "browser", "ado", "kusto", "cloudagent"]),
   hasCoordinator: false,
 })
 
 /**
- * The `-m local2` roster: `local` plus the curated `gpt-6.1-sol`/high Advisor,
- * which is the only difference between the two profiles. Roster, groups and
- * peer set are unchanged, so they come from the same contract.
+ * The `-m local2` roster: `local` plus the curated `gpt-6.1-sol`/high Advisor.
+ * The Advisor and the Oracle are the only two Copilot consumers the profile
+ * has, so `peers` returns for the Oracle while `workers` stays absent with
+ * `local` — a Pi worker is neither of the two exceptions.
  */
 export const LOCAL2_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "local2",
   nativeRoster: new Set(localContractFor("local2").nativeAgentNames),
   personaAllowlist: new Set(["oracle"]),
-  allowedGroups: new Set(["peers", "search", "workers", "browser", "ado", "kusto", "cloudagent"]),
+  allowedGroups: new Set(["peers", "search", "browser", "ado", "kusto", "cloudagent"]),
   hasCoordinator: false,
 })
 

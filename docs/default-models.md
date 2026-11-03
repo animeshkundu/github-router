@@ -286,7 +286,7 @@ Two deliberate divergences from the fast/cheap delegation graph:
 
 ## Local launch profiles (`-m local`, `-m local2`)
 
-The raw aliases `local` and `local2` point the MAIN agent loop at a local inference endpoint running on the operator's machine instead of at Copilot. These profiles assume nothing about the endpoint beyond its base URL: not what serves it, not which model answers, not its model list, and no wire dialect beyond the Anthropic Messages API that Claude Code itself already speaks to it. `local` is Advisor-free; `local2` is `local` plus the server-side Advisor.
+The raw aliases `local` and `local2` point the MAIN agent loop at a local inference endpoint running on the operator's machine instead of at Copilot. These profiles assume nothing about the endpoint beyond its base URL: not what serves it, not which model answers, not its model list, and no wire dialect beyond the Anthropic Messages API that Claude Code itself already speaks to it.
 
 | Surface | `local` | `local2` |
 |---|---|---|
@@ -294,11 +294,22 @@ The raw aliases `local` and `local2` point the MAIN agent loop at a local infere
 | `Explore` | `haiku` | same |
 | `General-Purpose` | `sonnet` | same |
 | Advisor | none (the tool is disabled, see below) | `gpt-6.1-sol` / high, served by Copilot |
-| Oracle peer | `gpt-6.1-sol` / high, served by Copilot | same |
-| Window / roster / groups / graph | 200K / the cheapest three natives (no `Plan`) / the `cheapest2` MCP groups / the cheapest delegation graph | same |
-| Prompts | the cheapest profile's, verbatim | same |
+| Oracle peer | none | `gpt-6.1-sol` / high, served by Copilot |
+| Window / roster | 200K / the three natives above, no `Plan`, no coordinator | same |
+| MCP groups | `peers` (artifact tools only), `search`, `browser`, `ado`, `kusto`, `cloudagent` | same, and `peers` also answers the Oracle |
+| Prompts | the local family's own, assumption-free | same |
 
-Local is a third family, not a cheapest sibling: its egress and model ids differ, while its prose, roster, per-role efforts and delegation graph are inherited from `CHEAPEST_PROFILE_CONTRACT` by reference rather than copied, so "the prompts are the same as cheapest" holds by construction.
+Local is a third family, not a cheapest sibling: its egress and model ids differ, its roster and per-role efforts are inherited from `CHEAPEST_PROFILE_CONTRACT`, and its prompt surfaces are rendered for the local family so they name only the agents and tools it emits and make no claim about the endpoint, the model behind it, its speed or its cost.
+
+### What may reach Copilot
+
+`local` runs no Copilot model inference at all. Every Claude Code surface funnels to the local endpoint: the lead, the native Task subagents, and agent-team teammates. A teammate cannot read `ANTHROPIC_CUSTOM_HEADERS` (the agent-teams env allowlist drops it), so the per-launch synthetic credential's bearer is the channel that binds it to the launch and therefore to the local egress.
+
+`local2` adds exactly two Copilot consumers: the Advisor and the Oracle, both `gpt-6.1-sol`.
+
+That is a runtime guard, not prompt guidance. `src/lib/copilot-model-policy.ts` derives a process policy from the launch registry (`activeCopilotModelPolicy`, most restrictive wins) and every Copilot egress asserts it: `createChatCompletions`, `createResponses`, `createMessages`/`countTokens` (via `assertCopilotMessagesBodyAllowed`), and the MCP `dispatchModelCall`. Under `local` the verdict is `forbidden`, and under `local2` it is the hardcoded family set `{sol, luna}` (`LOCAL2_COPILOT_MODEL_FAMILIES`). `forbidden` admits one named surface carve-out, `browse`: the `--browse` extension's page compressor runs a Copilot model over page text, which is a browser feature rather than a subagent, and it stays available on both profiles. Everything else that is Copilot-backed carries no model and is untouched: `web` search (GitHub PAT), the `browser_*` tools' own mechanics, and the `ado`/`kusto`/`cloudagent` data groups.
+
+The `workers` group is absent on both, because a worker subagent resolves and runs a Copilot model. `peers` stays permitted for the artifact review tools (human review, not inference) and is published only while the artifact panel is enabled; `local2`'s Oracle rides the same group.
 
 ### Endpoint configuration
 

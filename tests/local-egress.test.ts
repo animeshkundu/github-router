@@ -33,13 +33,13 @@ describe("localBaseUrl", () => {
 
   test("GH_ROUTER_LOCAL_BASE_URL is used verbatim (trailing slashes trimmed)", () => {
     expect(
-      localBaseUrl({ GH_ROUTER_LOCAL_BASE_URL: "http://localhost:11434/v1/" }),
-    ).toBe("http://localhost:11434/v1")
+      localBaseUrl({ GH_ROUTER_LOCAL_BASE_URL: "http://localhost:11111/v1/" }),
+    ).toBe("http://localhost:11111/v1")
   })
 
   test("a bare origin gains the /v1 prefix", () => {
-    expect(localBaseUrl({ GH_ROUTER_LOCAL_BASE_URL: "http://localhost:11434" }))
-      .toBe("http://localhost:11434/v1")
+    expect(localBaseUrl({ GH_ROUTER_LOCAL_BASE_URL: "http://localhost:11111" }))
+      .toBe("http://localhost:11111/v1")
   })
 
   test("a path and its case survive normalization", () => {
@@ -50,7 +50,7 @@ describe("localBaseUrl", () => {
   test("GH_ROUTER_LOCAL_PORT replaces only the port of the base URL", () => {
     expect(
       localBaseUrl({
-        GH_ROUTER_LOCAL_BASE_URL: "http://localhost:11434/v1",
+        GH_ROUTER_LOCAL_BASE_URL: "http://localhost:11111/v1",
         GH_ROUTER_LOCAL_PORT: "9999",
       }),
     ).toBe("http://localhost:9999/v1")
@@ -70,32 +70,32 @@ describe("localBaseUrl", () => {
 
 describe("configureLocalEgress", () => {
   test("--localurl wins over every env layer", () => {
-    configureLocalEgress({ baseUrl: "http://localhost:11434/v1" })
+    configureLocalEgress({ baseUrl: "http://localhost:11111/v1" })
     expect(
       localBaseUrl({
         GH_ROUTER_LOCAL_BASE_URL: "https://elsewhere:1/v1",
         GH_ROUTER_LOCAL_PORT: "2",
       }),
-    ).toBe("http://localhost:11434/v1")
+    ).toBe("http://localhost:11111/v1")
   })
 
   test("--localport replaces the port and keeps the default scheme", () => {
-    configureLocalEgress({ port: "11434" })
-    expect(localBaseUrl({})).toBe("https://localhost:11434/v1")
+    configureLocalEgress({ port: "11111" })
+    expect(localBaseUrl({})).toBe("https://localhost:11111/v1")
   })
 
   test("--localport wins over GH_ROUTER_LOCAL_PORT", () => {
-    configureLocalEgress({ port: 11434 })
+    configureLocalEgress({ port: 11111 })
     expect(localBaseUrl({ GH_ROUTER_LOCAL_PORT: "9999" })).toBe(
-      "https://localhost:11434/v1",
+      "https://localhost:11111/v1",
     )
   })
 
   test("passing both spellings is a launch error, not silent precedence", () => {
     expect(() =>
       configureLocalEgress({
-        baseUrl: "http://localhost:11434/v1",
-        port: "11434",
+        baseUrl: "http://localhost:11111/v1",
+        port: "11111",
       }),
     ).toThrow(/cannot be combined/)
   })
@@ -106,16 +106,56 @@ describe("configureLocalEgress", () => {
     expect(() => configureLocalEgress({ port: "abc" })).toThrow(/integer/)
   })
 
+  test("a valueless --localurl or --localport is a launch error, not the default", () => {
+    // citty reports a flag given without a value as `""`, and `typeof ""` is
+    // "string", so the call sites DO pass it. Treating emptiness as "absent"
+    // silently sent the launch at https://localhost:11111/v1 with no
+    // diagnostic at all.
+    expect(() => configureLocalEgress({ baseUrl: "", profileId: "local" })).toThrow(
+      /must not be empty/,
+    )
+    expect(() => configureLocalEgress({ port: "", profileId: "local" })).toThrow(
+      /integer port/,
+    )
+  })
+
   test("a non-local profile is inert, not fatal", () => {
-    // The flags are parsed by every launch; on a non-local profile they only
-    // warn. Reaching the endpoint resolution must not throw.
+    // The flags are parsed by every launch; on a non-local profile they are
+    // documented as inert. That has to hold for an unparsable value too:
+    // "ignoring" followed by a launch failure is not inert.
     expect(() =>
-      configureLocalEgress({ port: "11434", profileId: "cheapest2" }),
+      configureLocalEgress({ port: "11111", profileId: "cheapest2" }),
+    ).not.toThrow()
+    expect(() =>
+      configureLocalEgress({ port: "abc", profileId: "cheapest2" }),
+    ).not.toThrow()
+    expect(() =>
+      configureLocalEgress({ baseUrl: "not a url", profileId: "balanced" }),
     ).not.toThrow()
   })
 
+  test("an inert non-local override is discarded, not stored", () => {
+    configureLocalEgress({ port: "11111", profileId: "cheapest2" })
+    // Nothing was stored, so the next local resolution is the default.
+    expect(localBaseUrl({})).toBe(LOCAL_DEFAULT_BASE_URL)
+  })
+
+  test("a base URL query or fragment fails the launch", () => {
+    // The egress concatenates `<base>/messages`, so a query does not survive
+    // as one: `?x=1` becomes `x=1/messages` and the session 404s.
+    expect(() =>
+      configureLocalEgress({ baseUrl: "http://localhost:11111/v1?x=1" }),
+    ).toThrow(/query or fragment/)
+    expect(() =>
+      configureLocalEgress({ baseUrl: "http://localhost:11111/v1#frag" }),
+    ).toThrow(/query or fragment/)
+    expect(() =>
+      localBaseUrl({ GH_ROUTER_LOCAL_BASE_URL: "http://localhost:11111/v1?x=1" }),
+    ).toThrow(/query or fragment/)
+  })
+
   test("clearing restores the default", () => {
-    configureLocalEgress({ baseUrl: "http://localhost:11434/v1" })
+    configureLocalEgress({ baseUrl: "http://localhost:11111/v1" })
     configureLocalEgress({})
     expect(localBaseUrl({})).toBe("https://localhost:11111/v1")
   })

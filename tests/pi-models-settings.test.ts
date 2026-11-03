@@ -23,6 +23,7 @@ import {
   piLeadThinking,
   piNativeRoles,
   piOracleModel,
+  piOracleThinking,
   piProfileModelIds,
   piThinkingLevelMapFor,
   piUsdCostFor,
@@ -274,15 +275,20 @@ describe("pi models.json local profiles", () => {
         expect(row.cost).toBeUndefined()
         expect(row.thinkingLevelMap).toBeUndefined()
       }
-      // gpt-6.1-sol is Copilot-served (oracle on both profiles, advisor too
-      // on local2) and must not be sent down the Anthropic wire.
+      // Only local2 has a Copilot-served row (its advisor and oracle on Sol),
+      // and that row must not be sent down the Anthropic wire. `local` allows
+      // no Copilot model at all, so the id must not appear.
       const sol = rows["gpt-6.1-sol"]
-      expect(sol).toBeDefined()
-      expect(sol.api).toBe("openai-responses")
-      expect(sol.headers).toBeUndefined()
-      // Pi's OpenAI client POSTs `{baseUrl}/responses`, so the Copilot-served
-      // rows carry the `/v1` root the provider no longer supplies.
-      expect(sol.baseUrl).toBe("http://127.0.0.1:8787/v1")
+      if (profile === "local2") {
+        expect(sol).toBeDefined()
+        expect(sol.api).toBe("openai-responses")
+        expect(sol.headers).toBeUndefined()
+        // Pi's OpenAI client POSTs `{baseUrl}/responses`, so the Copilot-served
+        // rows carry the `/v1` root the provider no longer supplies.
+        expect(sol.baseUrl).toBe("http://127.0.0.1:8787/v1")
+      } else {
+        expect(sol).toBeUndefined()
+      }
       // The local tier rows inherit the bare origin and must NOT carry one.
       for (const id of ["opus", "sonnet", "haiku"]) {
         expect(rows[id].baseUrl).toBeUndefined()
@@ -303,12 +309,12 @@ describe("pi models.json local profiles", () => {
   test("each header is emitted only when its value is supplied", () => {
     const secretOnly = buildPiModelsJson({
       serverUrl: "http://127.0.0.1:8787",
-      profileId: "local",
+      profileId: "local2",
       launchSecret: LAUNCH_SECRET,
     })
     const sessionOnly = buildPiModelsJson({
       serverUrl: "http://127.0.0.1:8787",
-      profileId: "local",
+      profileId: "local2",
       sessionId: SESSION,
     })
     for (const [json, expected] of [
@@ -326,14 +332,16 @@ describe("pi models.json local profiles", () => {
     }
   })
 
-  test("roster: bare tier ids, Copilot oracle, advisor only on local2", () => {
+  test("roster: bare tier ids, oracle on the lead tier for local", () => {
     const json = buildPiModelsJson({
       serverUrl: "http://127.0.0.1:8787",
       profileId: "local",
     })
+    // No Copilot-served row at all: local allows no Copilot model, so its
+    // oracle runs on the same local tier as the lead.
     expect(
       json.providers["gh-router"].models.map((m) => m.id).sort(),
-    ).toEqual(["gpt-6.1-sol", "haiku", "opus", "sonnet"])
+    ).toEqual(["haiku", "opus", "sonnet"])
 
     expect(piLeadModel("local")).toBe("opus")
     expect(piNativeRoles("local").map((r) => `${r.name}:${r.model}`)).toEqual([
@@ -346,6 +354,17 @@ describe("pi models.json local profiles", () => {
       model: "gpt-6.1-sol",
       thinking: "high",
     })
+    expect(piOracleModel("local")).toBe(piLeadModel("local"))
+    expect(piOracleThinking("local")).toBe("high")
+  })
+
+  test("the local oracle file stays emitted, pinned to the local tier", () => {
+    // Omitting the file would un-shadow Pi's builtin `oracle`, which also owns
+    // the `advisor` alias and is pinned to a model of its own choosing. The
+    // role, its nesting grant and the shadowing stay; only the model moves.
+    const derived = buildPiAgentFiles("local")
+    expect(derived["agents/oracle.md"]).toContain("model: gh-router/opus")
+    expect(derived["agents/oracle.md"]).not.toContain("gpt-6.1-sol")
   })
 })
 

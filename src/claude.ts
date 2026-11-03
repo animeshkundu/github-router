@@ -23,7 +23,7 @@ import {
 import { getCodexVersion, launchChild } from "./lib/launch"
 import { injectAllowRules, planModeAllowRules } from "./lib/mcp-permissions-settings"
 import { listModelsForEndpoint } from "./lib/model-validation"
-import { ensureClaudeConfigMirror, PATHS, purgeNonRouterAgentsFromMirror, removeOwnClaudeConfigMirror, writeArtifactCredsToMirror } from "./lib/paths"
+import { ensureClaudeConfigMirror, PATHS, purgeNonRouterAgentsFromMirror, removeOwnClaudeConfigMirror, writeArtifactCredsToMirror, writeLaunchBoundSyntheticCredential } from "./lib/paths"
 import { injectModelPickerSettingsFile } from "./lib/model-picker-settings"
 import {
   buildArtifactOpenHookCommand,
@@ -207,7 +207,7 @@ import {
   local2AdvisorContract,
   localContractFor,
 } from "./lib/profile-family"
-import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
+import { launchBoundAccessToken, registerLaunch, unregisterLaunch } from "./lib/launch-registry"
 import { LAUNCH_SECRET_HEADER } from "./lib/messages-identity-preflight"
 import { state } from "./lib/state"
 import { resolveModel } from "./lib/utils"
@@ -1167,7 +1167,11 @@ export const claude = defineCommand({
     let fastWiringComplete = launchProfileId !== "fast" && !isCheapLaunch
     const astraAvailable = (launchProfileId === "fast" || launchProfileId === "cheap1m")
       && Boolean(fastAstraModel())
-    const browseAgentAvailable = browseAgentEnabled()
+    // A local launch keeps the direct browser tools — they drive a local
+    // extension — but not `worker-browse`, which is a Pi worker running on a
+    // Copilot model. `--browse` therefore means the `browser` group alone
+    // here, and every downstream predicate reads this one flag.
+    const browseAgentAvailable = browseAgentEnabled() && !isLocalFamily(launchProfileId)
     const directBrowserAvailable = browserToolsEnabled()
     const artifactAvailable = artifactToolsEnabled()
     const resolvedMaxReviewerModel = launchProfileId === "max"
@@ -1344,6 +1348,19 @@ export const claude = defineCommand({
         const enabledGroups: Array<McpGroup> = fastDescriptor.allowedGroups
           ? baseGroups.filter((g) => fastDescriptor.allowedGroups!.has(g))
           : baseGroups
+        // A profile can register an EMPTY persona allow-list, which keeps the
+        // peers group only for the artifact tools that live in it. Without the
+        // artifact gate the server would connect and answer `tools/list` with
+        // nothing, so it is dropped rather than published empty — the same rule
+        // `resolvePiSurfaces` applies on the Pi side.
+        if (
+          fastDescriptor.personaAllowlist
+          && fastDescriptor.personaAllowlist.size === 0
+          && !artifactAvailable
+        ) {
+          const peersIndex = enabledGroups.indexOf("peers")
+          if (peersIndex >= 0) enabledGroups.splice(peersIndex, 1)
+        }
         if (!isPinnedProfile && standInToolEnabled()) enabledGroups.push("decide")
         if (
           isMaxProfile
@@ -1566,6 +1583,26 @@ export const claude = defineCommand({
           allowedPersonas: fastDescriptor.personaAllowlist,
         })
         if (isPinnedProfile) fastLaunchId = launchEntry.launchId
+
+        // A local launch exists so that its traffic reaches the operator's own
+        // endpoint and nothing else. Teammates spawned by the agent-teams
+        // primitive inherit CLAUDE_CONFIG_DIR but not ANTHROPIC_CUSTOM_HEADERS,
+        // so without this they arrive unbound, resolve their bare tier ids
+        // against the Copilot catalog, and are billed there. Mirroring the
+        // secret into the per-launch credential gives them the one channel they
+        // do carry; `runMessagesIdentityPreflight` turns it back into the same
+        // launch binding. Best-effort: the lead session works either way.
+        if (isLocalFamily(launchProfileId)) {
+          try {
+            await writeLaunchBoundSyntheticCredential(launchBoundAccessToken(launchSecret))
+          } catch (err) {
+            consola.warn(
+              `Could not bind this local launch's synthetic credential (${
+                err instanceof Error ? err.message : String(err)
+              }). Agent-team teammates would send unbound traffic for this session.`,
+            )
+          }
+        }
 
         // Delivered via `ANTHROPIC_CUSTOM_HEADERS` (an Anthropic SDK env var
         // Claude Code already forwards on every `/v1/messages` request) so

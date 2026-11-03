@@ -61,8 +61,11 @@ describe("recordZeroCostRequest", () => {
     expect(snap.requests).toBe(1)
     expect(snap.totalNanoAiu).toBe(0)
     expect(snap.perModel.opus).toEqual({ nanoAiu: 0, requests: 1 })
-    // The whole point: `resolveModel("opus")` would say `claude-opus-5.5`, and
-    // a free local turn must never be attributed to a billed Copilot model.
+    // The whole point: `resolveModel("opus")` runs the Copilot family
+    // preference, so on a catalog carrying an `-1m` opus sibling it answers
+    // with that billed sibling and a free local turn would be filed against
+    // it. On a catalog with no such sibling it warns and returns "opus"
+    // unchanged, which is only accidentally right.
     expect(snap.perModel["claude-opus-5.5"]).toBeUndefined()
   })
 

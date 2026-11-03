@@ -1228,19 +1228,23 @@ export function advisorSystemPrompt(
  * Reviewer-mentor clause for the curated protege grant.
  *
  * `localProfile` swaps the sentence group that names and grades the reviewer.
- * A `-m local2` launch cannot observe which model answers its endpoint, so it
- * may not be told its reviewer is "weaker", "faster", or "small", and the
- * advisor is asked to withhold those assumptions rather than being handed
- * them. Everything after the swapped group is shared verbatim, so the verdict
- * shape and the round cap cannot drift between the two families.
+ * A `-m local2` launch cannot observe which model answers its endpoint, so the
+ * local branch states no fact about that model at all: not a name, not a
+ * strength or speed comparison, and not a predicted behaviour ("slow to revise
+ * its own conclusions", "holds stale facts"), which is as much an unverifiable
+ * claim as the name would be. What survives is the refusal to assume — verify
+ * rather than trust, treat confidence as a claim, keep the limits in view —
+ * because a refusal to assume is not itself an assumption. Everything after the
+ * swapped group is shared verbatim, so the verdict shape and the round cap
+ * cannot drift between the two families.
  */
 function reviewerMentorClause(localProfile: boolean): string {
   return (
     (localProfile
       ? " You are the senior mentor to a reviewer model performing adversarial code review. "
         + "Do not assume it can reliably verify facts, versions, or calculations from memory; "
-        + "treat its stated confidence as uncalibrated; expect it not to revise its own conclusions "
-        + "without an external push; and keep the limits of its knowledge in view. You exist to "
+        + "treat its stated confidence as a claim to verify rather than a measurement; "
+        + "and keep the limits of its knowledge in view. You exist to "
       : " You are the senior mentor to a weaker, faster executor model (Luna) performing adversarial code review. "
         + "It is diligent but small: it cannot reliably verify facts, versions, or calculations from memory; "
         + "its confidence is poorly calibrated and usually overstated; it rarely revises its own conclusions "
@@ -1268,9 +1272,14 @@ function reviewerMentorClause(localProfile: boolean): string {
  *
  * `localProfile` drops the model name and every speed, cost, and capability
  * claim about the lead, for the same reason as `reviewerMentorClause`: the
- * profile knows only that a local endpoint answers. The layered-prompt
- * description, the untrusted-transcript rule, and the JUDGMENT…CONFIDENCE
- * reply shape are identical in both variants.
+ * profile knows only that a local endpoint answers, so the local branch asserts
+ * nothing about that model's behaviour. "Expect it to be slow to revise" and
+ * "treat stale facts as likely" were the same kind of unverifiable claim as a
+ * model name, just phrased as guidance; a local endpoint may be serving a model
+ * that is quick to revise and current, and the Advisor would then be told to
+ * overrule correct knowledge. The layered-prompt description, the
+ * untrusted-transcript rule, and the JUDGMENT…CONFIDENCE reply shape are
+ * identical in both variants.
  */
 function protegeLeadClause(localProfile: boolean): string {
   const subject = localProfile ? "the lead" : "Luna"
@@ -1278,8 +1287,7 @@ function protegeLeadClause(localProfile: boolean): string {
     (localProfile
       ? " You are advising the lead model on a machine. "
         + "It consults you only on judgment calls that execution — a search, a read, a build, a test — cannot settle. "
-        + "Do not assume its confidence matches its accuracy, expect it to be slow to revise its own conclusions "
-        + "without an external push, and treat stale or vague facts about versions, APIs, and security patterns as likely. "
+        + "Do not assume its confidence matches its accuracy. "
       : " You are advising a faster, cheaper lead model (Luna) on a machine. "
         + "Luna is fast and cost-efficient for clear, repeatable work, and it consults you only on judgment calls that execution — a search, a read, a build, a test — cannot settle. "
         + "Its known failure modes are the reason you exist: it is overconfident relative to its accuracy, slow to revise its own conclusions without an external push, and it holds stale or vague facts about versions, APIs, and security patterns. ")

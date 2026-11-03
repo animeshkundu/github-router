@@ -120,6 +120,39 @@ const GROUP_DESCRIPTIONS: Record<string, string> = {
   cloudagent: "Microsoft Cloud Agent jobs: hand a prompt plus an Azure DevOps repository to a cloud coding agent, then poll it for hours and collect the answer. create_job, create_pr_job and cancel_job spend compute; confirm with the user before creating a job the user did not ask for.",
 }
 
+/** The `peers` half of `GROUP_DESCRIPTIONS.peers`, split out so the oracle's
+ *  availability can be stated rather than assumed. */
+const PEERS_ORACLE_SENTENCE =
+  "oracle, a stateless expert consultant. Reach for oracle when repository evidence alone cannot settle a self-contained technical trade-off."
+
+/** What the artifact tools do, in the same one-line voice. */
+const PEERS_ARTIFACT_SENTENCE =
+  "The artifact_* tools open a workspace file in the human review panel and drain the reviewer's comments and actions; reach for them when a human has to look at the result before work continues."
+
+/**
+ * The `peers` description for a profile's persona allow-list.
+ *
+ * `deferred` exposure makes this line the model's only pre-search signal, so
+ * it may name only personas the MCP handler will actually answer: every
+ * pinned profile registers a list (`undefined` means unrestricted), and
+ * naming a critic a filtered launch answers with -32601 wastes the model's
+ * turn. The critics are named only on an unrestricted surface; the oracle
+ * and the artifact tools are named when their own gates admit them.
+ *
+ * Returns `""` when the group would hold nothing, so the caller can leave the
+ * server unpublished rather than advertise an empty one.
+ */
+export function peersGroupDescription(
+  personas: ReadonlySet<string> | undefined,
+  artifactAvailable: boolean,
+): string {
+  if (personas === undefined) return GROUP_DESCRIPTIONS.peers
+  const parts: Array<string> = []
+  if (personas.has("oracle")) parts.push(PEERS_ORACLE_SENTENCE)
+  if (artifactAvailable) parts.push(PEERS_ARTIFACT_SENTENCE)
+  return parts.join(" ")
+}
+
 export interface PiSurfaceDecision {
   /** ColBERT / `--search` surfaces: `pi-web-access`, the semantic skill, the launch card. */
   search: boolean
@@ -150,8 +183,9 @@ export interface PiSurfaceDecision {
  * is available, `browser` under `--browse`, and the three Azure groups under
  * their own predicates. Everything is then filtered through
  * `profileDescriptor(profileId).allowedGroups`, which is
- * `{peers, search, workers, browser, ado, kusto, cloudagent}` for all four Pi
- * profiles — so `orchestrate`, `decide`, `fleet` and `first-mate` stay off.
+ * `{peers, search, browser, ado, kusto, cloudagent}` for `local`/`local2` and
+ * adds `workers` for the other four Pi profiles — so `orchestrate`, `decide`,
+ * `fleet` and `first-mate` stay off everywhere.
  */
 export function resolvePiSurfaces(opts: {
   profileId: PiProfileId
@@ -164,19 +198,26 @@ export function resolvePiSurfaces(opts: {
   browseAgentAvailable: boolean
   /** Direct browser-control gate (`browserToolsEnabled()`), the `--browse` opt-in. */
   directBrowserAvailable: boolean
+  /** Artifact review gate (`artifactToolsEnabled()`), which lives in `peers`. */
+  artifactToolsAvailable: boolean
   peersEnabled: boolean
 }): PiSurfaceDecision {
   const codeSearchBackend = opts.bluebirdEnabled ? "bluebird" : "colbert"
-  const allowed = profileDescriptor(opts.profileId).allowedGroups
+  const descriptor = profileDescriptor(opts.profileId)
+  const allowed = descriptor.allowedGroups
   const groups: Array<PiMcpGroupEntry> = []
-  const push = (group: string): void => {
+  const push = (group: string, description = GROUP_DESCRIPTIONS[group]): void => {
     if (allowed && !allowed.has(group)) return
-    const description = GROUP_DESCRIPTIONS[group]
     if (!description) return
     groups.push({ group, description })
   }
 
-  if (opts.peersEnabled) push("peers")
+  if (opts.peersEnabled) {
+    // `local` registers an empty persona allow-list and keeps the group for
+    // the artifact tools, so the description follows the allow-list and the
+    // group is published only when it will hold at least one tool.
+    push("peers", peersGroupDescription(descriptor.personaAllowlist, opts.artifactToolsAvailable))
+  }
   push("search")
   if (opts.browseAgentAvailable) push("workers")
   if (opts.directBrowserAvailable) push("browser")

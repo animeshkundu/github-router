@@ -222,6 +222,35 @@ describe("pi --swe owns the pipeline surface", () => {
   })
 })
 
+describe("pi local profiles route consults to the endpoint they can reach", () => {
+  test("the default oracle skill follows whether the MCP tool exists", () => {
+    for (const profileId of ["local", "local2"] as const) {
+      expect(buildPiSkills({ profileId }).map((s) => s.dir)).toEqual(["gh-oracle"])
+    }
+    // `local` filters the peers group down to the artifact tools, so
+    // `mcp__gh-router-peers__oracle` answers -32601 there. The skill routes to
+    // the agent file instead of naming a tool that would waste a turn.
+    const local = buildPiSkills({ profileId: "local" })[0]
+    expect(local.content).not.toContain("mcp__gh-router-peers__oracle")
+    expect(local.content).toContain("`oracle` subagent")
+    const local2 = buildPiSkills({ profileId: "local2" })[0]
+    expect(local2.content).toContain("mcp__gh-router-peers__oracle")
+  })
+
+  test("--swe names only the consultant the profile actually has", () => {
+    const local = buildPiSkills({ profileId: "local", swe: true })
+    expect(local.map((s) => s.dir)).toEqual(["gh-oracle", "gh-delegate"])
+    const localDelegate = local.find((s) => s.dir === "gh-delegate")
+    expect(localDelegate?.content).toContain("`oracle` for consults")
+    expect(localDelegate?.content).not.toContain("`advisor`")
+
+    const local2 = buildPiSkills({ profileId: "local2", swe: true })
+    expect(local2.map((s) => s.dir)).toEqual(["gh-oracle", "gh-delegate", "gh-advisor"])
+    const local2Delegate = local2.find((s) => s.dir === "gh-delegate")
+    expect(local2Delegate?.content).toContain("`oracle`/`advisor` for consults")
+  })
+})
+
 describe("pi --search owns the search skill prose", () => {
   test("the skill is opt-in; the code tool is not", () => {
     // `code` is published on every launch: it always answers (semantic when

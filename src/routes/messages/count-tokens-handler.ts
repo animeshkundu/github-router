@@ -15,7 +15,7 @@ import {
   identityPreflightErrorResponse,
   runMessagesIdentityPreflight,
 } from "~/lib/messages-identity-preflight"
-import { isLocalFamily } from "~/lib/profile-family"
+import { effectiveLocalProfile } from "~/lib/copilot-model-policy"
 import { localBaseUrl, localSessionId } from "~/lib/local-egress"
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -132,7 +132,9 @@ export async function handleCountTokens(c: Context) {
     }
   }
 
-  const localProfileRequest = isLocalFamily(identity.launch?.profileId)
+  // Same resolution as the main handler: a bound local identity, or an
+  // identity-less request while a local launch owns this process.
+  const localProfileRequest = effectiveLocalProfile(identity.launch?.profileId) !== undefined
 
   // A local profile forwards the body VERBATIM, for the same reasons as the
   // main `/v1/messages` handler: `resolveModel` would rewrite the bare `opus`

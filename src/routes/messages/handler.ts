@@ -41,7 +41,8 @@ import { maxRequestError } from "~/lib/max-request-preprocess"
 import { FAST_PROFILE_ADVISOR_MODEL } from "~/lib/fast-profile-contract"
 import { CHEAP_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheap-profile-contract"
 import { CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheapest-profile-contract"
-import { cheapestContractFor, isBalancedFamily, isCheapestFamily, isLocalFamily, local2AdvisorContract } from "~/lib/profile-family"
+import { effectiveLocalProfile } from "~/lib/copilot-model-policy"
+import { cheapestContractFor, isBalancedFamily, isCheapestFamily, local2AdvisorContract } from "~/lib/profile-family"
 import { localBaseUrl, localSessionId } from "~/lib/local-egress"
 import {
   MAX_PROFILE_ADVISOR_INSTRUCTIONS,
@@ -489,7 +490,11 @@ export async function handleCompletion(c: Context) {
     await awaitApproval()
   }
 
-  const localProfileRequest = isLocalFamily(identity.launch?.profileId)
+  // Bound identity first; otherwise fall back to the launch this process is
+  // serving. A spawned teammate keeps `CLAUDE_CONFIG_DIR` but can lose the
+  // launch header, and it still belongs to the local session — answering it
+  // from Copilot would bill a model that session exists to avoid.
+  const localProfileRequest = effectiveLocalProfile(identity.launch?.profileId) !== undefined
   // A local profile forwards the client's beta header VERBATIM: its allowlist
   // is a statement about Copilot's capabilities, and this profile assumes
   // nothing about the server behind the endpoint.

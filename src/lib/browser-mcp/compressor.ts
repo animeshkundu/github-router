@@ -20,6 +20,12 @@
 // lifetime of the proxy session; `callCompressor` routes to the matching
 // client (gpt-5.4-mini is `/responses`-only).
 //
+// The chain is adjusted by `compressorCandidates()` when a launch profile
+// restricts Copilot inference: `-m local2` filters it down to the `sol`/
+// `luna` families its Advisor and Oracle bill, and `-m local` keeps it
+// because the browse surface is the one Copilot egress that profile
+// carves out. See `~/lib/copilot-model-policy`.
+//
 // Concurrency: every compressor call acquires from the shared
 // `MAX_INFLIGHT_TOOLS_CALL` budget (cap = 32), same pool as peer-MCP
 // and worker tools. A wedged compressor can't starve operator traffic.
@@ -31,6 +37,10 @@ import consola from "consola"
 import { deterministicResolve } from "./matcher"
 import { parseIntent } from "./parse-intent"
 import { acquireInFlightSlot } from "~/lib/mcp-inflight"
+import {
+  activeCopilotModelPolicy,
+  isCopilotModelAllowedUnder,
+} from "~/lib/copilot-model-policy"
 import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { applyResponsesCachePolicy } from "~/lib/prompt-cache"
 import { state } from "~/lib/state"
@@ -74,6 +84,22 @@ interface CompressorBackend {
 let selectedBackend: CompressorBackend | undefined
 
 /**
+ * The fallback chain for this process, adjusted for an active launch policy.
+ *
+ * `-m local2` limits Copilot to the `sol` and `luna` families, and none of the
+ * generic chain entries is in either, so the compressor asks for the cheap
+ * tier those profiles can bill instead. `-m local` forbids Copilot inference
+ * outright but carves the browser surface out (see `CopilotEgressSurface`), so
+ * it keeps the generic chain.
+ */
+function compressorCandidates(): ReadonlyArray<string> {
+  const policy = activeCopilotModelPolicy()
+  if (policy.kind !== "families") return COMPRESSOR_FALLBACK_CHAIN
+  const allowed = COMPRESSOR_FALLBACK_CHAIN.filter((id) => isCopilotModelAllowedUnder(policy, id))
+  return allowed.length > 0 ? allowed : ["gpt-6-luna"]
+}
+
+/**
  * Walk the fallback chain against the live Copilot catalog. Returns the
  * first entry present, advertising `tool_calls`, AND reachable via one of
  * our two clients (`pickEndpoint` !== undefined), or undefined when none
@@ -85,7 +111,7 @@ function pickBackend(): CompressorBackend | undefined {
   if (selectedBackend) return selectedBackend
   const models = state.models?.data
   if (!models) return undefined
-  for (const candidate of COMPRESSOR_FALLBACK_CHAIN) {
+  for (const candidate of compressorCandidates()) {
     const found = models.find((m: Model) => m.id === candidate)
     if (!found) continue
     if (found.capabilities?.supports?.tool_calls !== true) continue
@@ -148,7 +174,7 @@ async function callCompressor(
   const backend = pickBackend()
   if (!backend) {
     throw new Error(
-      `browser-mcp compressor: no backend available in catalog. Checked: ${COMPRESSOR_FALLBACK_CHAIN.join(", ")}`,
+      `browser-mcp compressor: no backend available in catalog. Checked: ${compressorCandidates().join(", ")}`,
     )
   }
   const release = acquireInFlightSlot()
@@ -190,7 +216,10 @@ async function callViaChat(
   } as ChatCompletionsPayload
   // retryTransient: true: non-streaming (stream:false), so the whole call is
   // pre-first-byte and a transient network/5xx retry is safe.
-  const resp = (await createChatCompletions(payload, undefined, signal, true)) as ChatCompletionResponse
+  // `"browse"`: the surface `-m local` carves out of its Copilot ban. The
+  // compound browser tools are the only reason the compressor exists, and a
+  // listed-but-refused tool is worse than the model call.
+  const resp = (await createChatCompletions(payload, undefined, signal, true, "browse")) as ChatCompletionResponse
   // Browser compression calls are billed Copilot usage on this instance.
   extractAndRecordAic(model, resp)
   const msg = resp.choices?.[0]?.message as
@@ -236,7 +265,7 @@ async function callViaResponses(
     stablePrefix: systemPrompt,
   })
   // retryTransient: true: non-streaming (stream:false), pre-first-byte, safe.
-  const resp = (await createResponses(payload, undefined, signal, true)) as ResponsesApiResponse
+  const resp = (await createResponses(payload, undefined, signal, true, "browse")) as ResponsesApiResponse
   extractAndRecordAic(model, resp)
   const output = Array.isArray(resp.output) ? resp.output : []
   for (const item of output) {

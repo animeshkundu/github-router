@@ -53,7 +53,7 @@ describe("local profile identity", () => {
     expect(isPinnedLaunchProfile(undefined)).toBe(false)
   })
 
-  test("the descriptors carry the cheapest roster, the Oracle peer and no coordinator", () => {
+  test("the descriptors carry the cheapest roster and no coordinator", () => {
     const local = profileDescriptor("local")
     expect(local.id).toBe("local")
     expect(local.hasCoordinator).toBe(false)
@@ -62,11 +62,32 @@ describe("local profile identity", () => {
       "General-Purpose",
       "reviewer",
     ])
-    // The Oracle is a Copilot-served MCP consult, not a local turn, so it is
-    // the one persona a local launch keeps.
-    expect([...local.personaAllowlist!]).toEqual(["oracle"])
     expect(profileDescriptor("local2").id).toBe("local2")
     expect(profileDescriptor("local2").nativeRoster).toEqual(local.nativeRoster)
+  })
+
+  test("local keeps the `peers` group for artifacts but no persona", () => {
+    const local = profileDescriptor("local")
+    // The group has to be registered for the artifact tools to list at all
+    // (`ARTIFACT_GROUP` is `peers`), while an empty persona allow-list keeps
+    // every Copilot-served critic out.
+    expect(local.allowedGroups!.has("peers")).toBe(true)
+    expect([...local.personaAllowlist!]).toEqual([])
+  })
+
+  test("local2 adds exactly the Oracle on top of local's groups", () => {
+    const local = profileDescriptor("local")
+    const local2 = profileDescriptor("local2")
+    expect([...local2.personaAllowlist!]).toEqual(["oracle"])
+    expect([...local2.allowedGroups!].sort()).toEqual([...local.allowedGroups!].sort())
+  })
+
+  test("neither profile can reach a Pi worker", () => {
+    // A worker answers on a Copilot model, which is exactly what these
+    // profiles exist to avoid.
+    for (const id of ["local", "local2"] as const) {
+      expect(profileDescriptor(id).allowedGroups!.has("workers")).toBe(false)
+    }
   })
 
   test("the contract maps roles onto the three tier ids", () => {
@@ -163,7 +184,7 @@ describe("child argv passthrough", () => {
   test("claude consumes --localport and its value", () => {
     expect(
       collectChildPassthroughArgs(
-        ["-m", "local", "--localport", "11434", "--print", "hi"],
+        ["-m", "local", "--localport", "11111", "--print", "hi"],
         claudeArgs,
       ),
     ).toEqual(["--print", "hi"])
@@ -172,7 +193,7 @@ describe("child argv passthrough", () => {
   test("claude consumes --localurl and its value", () => {
     expect(
       collectChildPassthroughArgs(
-        ["-m", "local", "--localurl", "http://localhost:11434/v1", "--print"],
+        ["-m", "local", "--localurl", "http://localhost:11111/v1", "--print"],
         claudeArgs,
       ),
     ).toEqual(["--print"])
@@ -181,13 +202,13 @@ describe("child argv passthrough", () => {
   test("pi consumes the same two flags", () => {
     expect(
       collectPiPassthroughArgs(
-        ["-m", "local", "--localport", "11434", "--print", "hi"],
+        ["-m", "local", "--localport", "11111", "--print", "hi"],
         piArgs,
       ),
     ).toEqual(["--print", "hi"])
     expect(
       collectPiPassthroughArgs(
-        ["-m", "local", "--localurl", "http://localhost:11434/v1"],
+        ["-m", "local", "--localurl", "http://localhost:11111/v1"],
         piArgs,
       ),
     ).toEqual([])

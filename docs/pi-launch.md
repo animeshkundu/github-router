@@ -11,8 +11,8 @@ identities named below:
 | `cheapest2` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol 6.1/high Advisor (plan review + capped reviewer rounds), Sol 6.1/high Oracle |
 | `balanced` | `gpt-5.6-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 5.6/high, may delegate Explore); no Plan | Grok 4.6/medium Oracle only — **advisor-free by design** |
 | `balanced2` | `gpt-6.1-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 6.1/high, may delegate Explore); no Plan | Grok 4.7/medium Oracle only — **advisor-free by design** |
-| `local` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/high); no Plan | Sol 6.1/high Oracle only — **advisor-free by design** |
-| `local2` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/high); no Plan | Sol 6.1/high Advisor (plan review + capped reviewer rounds), Sol 6.1/high Oracle |
+| `local` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | none: the `oracle` subagent is pinned to the local tier, so **nothing Copilot-served runs on this profile** |
+| `local2` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | Sol 6.1/high Advisor (plan review + capped reviewer rounds), Sol 6.1/high Oracle |
 
 Both `-2` profiles inherit everything else from their base: the delegation
 graph, the peer set, the prompt-rewrite brief (`cheapest` family only), the
@@ -30,8 +30,9 @@ accounting anywhere; see [Tier-priced context windows](#tier-priced-context-wind
 
 The two local aliases are the Pi counterpart of the Claude `-m local` /
 `-m local2` launch profiles: the main loop runs against a locally running
-server that already speaks Anthropic Messages, and Copilot keeps serving the
-Oracle (and, for `local2`, the Advisor). The endpoint is configured exactly
+server that already speaks Anthropic Messages. `local` sends every role
+there, subagents included; `local2` keeps two Copilot consumers, the Oracle
+and the Advisor, both on `gpt-6.1-sol`. The endpoint is configured exactly
 as the Claude launcher configures it — `--localurl <url>` > `--localport
 <port>` > `GH_ROUTER_LOCAL_BASE_URL` > `GH_ROUTER_LOCAL_PORT` > the default
 `https://localhost:11111/v1`; the two flags are a launch error together and
@@ -42,8 +43,9 @@ request, and no fallback to Copilot.
 On the Pi side that means these concrete differences from a Copilot profile:
 
 - The provider's `api` is `anthropic-messages` (every Copilot-served row —
-  the Oracle and `local2`'s Advisor — is pinned back to `openai-responses`,
-  so the two never mix).
+  `local2`'s Oracle and Advisor — is pinned back to `openai-responses`, so
+  the two never mix). On `local` the `oracle` subagent resolves to the local
+  lead tier and therefore rides the local provider like every other role.
 - The provider's `baseUrl` is the proxy ORIGIN, not `<proxy>/v1`: Pi's
   bundled Anthropic client POSTs `{baseUrl}/v1/messages`, so the `/v1` root
   produced `/v1/v1/messages` and a proxy 404 (measured against the installed
@@ -66,6 +68,15 @@ On the Pi side that means these concrete differences from a Copilot profile:
   `contextWindow`, with no `cost` and no `thinkingLevelMap`: a local id has
   no catalog entry to derive either from, and the server's effort ladder is
   unknown, so both are omitted rather than guessed.
+- `local` still emits an `oracle` agent file, pinned to the local lead tier.
+  Dropping it would un-shadow Pi's builtin `oracle`, which also owns the
+  `advisor` alias and carries a model of its own choosing; keeping the file
+  keeps the role, its nesting grant and the shadowing while running it on the
+  one endpoint the profile may use.
+- `workers` is not published on either local profile, because a worker
+  subagent resolves and runs a Copilot model. `peers` is published only while
+  it holds a tool: on `local` that means the artifact review panel, on
+  `local2` the Oracle and the artifact panel.
 
 Lead turns are recorded in the AIC ledger at zero (`recordZeroCostRequest`,
 keyed on the raw id), so the footer reads `[AIC 0.00]` / `~$0.00` while the
@@ -115,10 +126,10 @@ plus the mode identity. Each surface rides a flag:
 
 | Flag | Default | Surface |
 |---|---|---|
-| `--peers` / `--no-peers` | **on** | Native agent files, the `peers` MCP group (`mcp__gh-router-peers__oracle`, plus the `advisor` subagent on cheapest), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
+| `--peers` / `--no-peers` | **on** | Native agent files, the `peers` MCP group (`mcp__gh-router-peers__oracle`, plus the `advisor` subagent wherever the profile carries one), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
 | `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer and no `files` picker, whose `ctrl+shift+o` would collide with the UI's extra-detail toggle), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
 | `--ui` / `--no-ui` | **on** | Claude-Code look: genuine `claude-code-dark` theme (`#D77757` coral palette; all six CC variants pickable via `/settings`), fixed Claude palette in tool rows (`themeAdaptive: false`), one-line tool rows (`summary`/`count` modes), transparent tool backgrounds. Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag (the cc-ui `Thought for Xs` one-liner has no off switch upstream — it is the minimum). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
-| `--swe` | off | Pipeline surface: `gh-delegate` (+cheapest `gh-advisor`) skills, `review` / `parallel-review` (+cheapest `plan-review`) prompts |
+| `--swe` | off | Pipeline surface: `gh-delegate` (+`gh-advisor` wherever the profile carries an Advisor) skills, `review` / `parallel-review` (+`plan-review` on the same profiles) prompts |
 | `--search` | off | ColBERT provision + the `gh-search-first` skill prose. The `code` tool itself is published on every launch (see the MCP section), so this flag now owns only the ColBERT-specific advice, which would be wrong on a Bluebird or lexical backend |
 | `--browse` | off | Browser MCP group when a supported browser is installed |
 | `--bluebird` | auto on an Azure DevOps remote | Routes the `code` tool's `semantic` and `lexical` modes to Bluebird server-side. The tool is already on the `search` group, so nothing extra is emitted; the description and the runtime `source` label say which engine answered. `gh-search-first` prose and `pi-web-access` deliberately stay on `--search`: neither is Bluebird's job |
@@ -163,16 +174,17 @@ The consequence to know: the `description` string is the model's entire
 pre-search signal, which is why each one says what the group is for rather than
 just naming it.
 
-**Group set, per profile.** All six Pi profiles carry the same
+**Group set, per profile.** Every Pi profile carries the same
 `allowedGroups` (`peers`, `search`, `workers`, `browser`, `ado`, `kusto`,
-`cloudagent`), so they publish the same set Claude does for the same flags
-(the local family is deliberately the `cheapest2` group set):
+`cloudagent`) except the local family, which has no `workers` because a
+worker subagent is a Copilot-model consumer. Everywhere else the published
+set matches what Claude publishes for the same flags:
 
 | Group | Emitted when | Key |
 |---|---|---|
 | `peers` | `--peers` (default on) | `gh-router-peers` |
 | `search` | always | `gh-router-search` |
-| `workers` | the browse agent's model resolves | `gh-router-workers` |
+| `workers` | the browse agent's model resolves, on a non-local profile | `gh-router-workers` |
 | `browser` | `--browse` and a supported browser is installed | `gh-router-browser` |
 | `ado` | `--ado` / an Azure DevOps remote | `gh-router-ado` |
 | `kusto` | `--kusto` / an Azure DevOps remote | `gh-router-kusto` |
@@ -271,9 +283,9 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   `mcp__gh-router-search__code`, and the rest. The extension keeps two
   non-tool seams: the prompt-submit relay and the statusline footer.
   Guidance lives in skills (`gh-oracle`, `gh-search-first`,
-  `gh-delegate`, cheapest-only `gh-advisor`) and `/review`,
-  `/parallel-review` (+ cheapest-only `/plan-review`) prompts, all
-  pointing at those MCP tool names.
+  `gh-delegate`, plus `gh-advisor` on every profile that carries an
+  Advisor) and `/review`, `/parallel-review` (+ `/plan-review` on the same
+  profiles) prompts, all pointing at those MCP tool names.
 - **Per-prompt brief, full `UserPromptSubmit` parity.** The extension
   registers a `before_agent_start` handler that relays the user's prompt to a
   hook-only MCP tool, `prompt_brief` (group `search`, hook-nonce

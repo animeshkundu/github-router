@@ -1307,15 +1307,16 @@ export function getClaudeCodeEnvVars(
     modelKey: string,
     nameKey: string,
     bareSlug: string,
+    force = false,
   ): void => {
-    if (process.env[modelKey] !== undefined) return
+    if (!force && process.env[modelKey] !== undefined) return
     // Strict-200K profiles (cheap/cheapest/balanced) never decorate tier rows:
     // a `[1m]` value here would trip the pinned-profile guarantee check in
     // `claude.ts` and feed `applyAutoCompactWindow` a decorated candidate the
     // profile claims is unreachable. Under the seeded
     // CLAUDE_CODE_DISABLE_1M_CONTEXT=1 the bare row still budgets 200K.
     vars[modelKey] = pinStrict200K ? bareSlug : withOneMSuffixForLead(bareSlug)
-    if (process.env[nameKey] === undefined) vars[nameKey] = bareSlug
+    if (force || process.env[nameKey] === undefined) vars[nameKey] = bareSlug
   }
   // Fast profile: the Sonnet/Haiku tier rows are the router-owned Luna
   // aliases, decorated off the REAL Luna catalog entry's window (see the
@@ -1440,20 +1441,29 @@ export function getClaudeCodeEnvVars(
     // already suppresses the `[1m]` decoration, and the NAME seeds stay equal
     // to the value so the picker renders `opus` / `sonnet` / `haiku` rather
     // than a Copilot slug the server has never heard of.
+    //
+    // Forced, unlike every other profile's rows: the request that leaves here
+    // carries the model id verbatim to the local endpoint, so an inherited
+    // `ANTHROPIC_DEFAULT_*_MODEL` from the operator's shell would send a
+    // Copilot slug to a server that has no such model. A local launch's tier
+    // rows are not a preference to preserve.
     seedTierRow(
       "ANTHROPIC_DEFAULT_OPUS_MODEL",
       "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
       LOCAL_PROFILE_TIER_MODELS.opus,
+      routerWinsTiers,
     )
     seedTierRow(
       "ANTHROPIC_DEFAULT_SONNET_MODEL",
       "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
       LOCAL_PROFILE_TIER_MODELS.sonnet,
+      routerWinsTiers,
     )
     seedTierRow(
       "ANTHROPIC_DEFAULT_HAIKU_MODEL",
       "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
       LOCAL_PROFILE_TIER_MODELS.haiku,
+      routerWinsTiers,
     )
   } else {
     seedTierRow(

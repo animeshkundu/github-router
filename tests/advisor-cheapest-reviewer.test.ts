@@ -280,6 +280,16 @@ describe("advisorSystemPrompt reviewer profile", () => {
     expect(prompt).not.toContain("diligent but small")
     expect(prompt).not.toContain("ill-equipped")
     expect(prompt).not.toContain("frontier")
+    // A predicted behaviour is as much a claim about an unobservable model as
+    // a name is: a local endpoint may be serving one that revises quickly, and
+    // the mentor would then be told to discount correct work.
+    expect(prompt).not.toContain("slow to revise")
+    expect(prompt).not.toContain("external push")
+    expect(prompt).not.toContain("limits of its own knowledge")
+    // The refusal to assume is what survives, so the absence assertions above
+    // cannot be satisfied by deleting the clause entirely.
+    expect(prompt).toContain("Do not assume it can reliably verify facts")
+    expect(prompt).toContain("treat its stated confidence as a claim to verify")
     // A duplicated shared fragment reads as correct text and passes every
     // absence assertion, so count it. (This caught a real edit that spliced the
     // list twice.)

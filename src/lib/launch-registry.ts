@@ -14,6 +14,30 @@ export interface McpAuthContext {
 }
 
 /**
+ * Prefix marking a synthetic credential's `accessToken` as carrying a
+ * `/v1/messages` launch-binding secret.
+ *
+ * A launch normally proves its identity with `LAUNCH_SECRET_HEADER`, which
+ * rides on `ANTHROPIC_CUSTOM_HEADERS`. Claude Code's agent-teams spawn passes
+ * an environment allowlist that deliberately drops that variable, so a
+ * teammate cannot present the header. It DOES inherit `CLAUDE_CONFIG_DIR` and
+ * sends that directory's `.credentials.json` access token as
+ * `Authorization: Bearer`, so the local-family launch writes its secret here
+ * as the one channel that reaches teammates.
+ *
+ * The prefix is what keeps this separable from the untouched
+ * `github-router-synthetic` token every other launch writes: only a prefixed
+ * token asserts a launch identity, and only a prefixed token that fails to
+ * match is rejected. See `runMessagesIdentityPreflight`.
+ */
+export const LAUNCH_BOUND_TOKEN_PREFIX = "github-router-launch:"
+
+/** Build the launch-bound `accessToken` for a launch secret. */
+export function launchBoundAccessToken(secret: string): string {
+  return `${LAUNCH_BOUND_TOKEN_PREFIX}${secret}`
+}
+
+/**
  * Register a new authenticated launch (a `github-router claude` process, or
  * `serve`'s per-repo session) in the keyed registry. Returns the stored
  * entry, including the generated `launchId` when the caller didn't supply

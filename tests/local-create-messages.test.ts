@@ -53,7 +53,7 @@ function capture(): {
 }
 
 const EGRESS = {
-  baseUrl: "http://localhost:11434/v1",
+  baseUrl: "http://localhost:11111/v1",
   sessionId: "conversation-abc",
 }
 
@@ -61,7 +61,7 @@ describe("createMessages local egress", () => {
   test("posts to the local /messages URL, with no beta query", async () => {
     const seen = capture()
     await createMessages('{"model":"opus","messages":[]}', undefined, undefined, false, EGRESS)
-    expect(seen.url()).toBe("http://localhost:11434/v1/messages")
+    expect(seen.url()).toBe("http://localhost:11111/v1/messages")
     expect(seen.url()).not.toContain("beta=true")
   })
 
@@ -126,7 +126,7 @@ describe("countTokens local egress", () => {
   test("posts to the local count_tokens URL with the session id", async () => {
     const seen = capture()
     await countTokens('{"model":"opus","messages":[]}', undefined, undefined, false, EGRESS)
-    expect(seen.url()).toBe("http://localhost:11434/v1/messages/count_tokens")
+    expect(seen.url()).toBe("http://localhost:11111/v1/messages/count_tokens")
     expect(seen.headers()["x-claude-code-session-id"]).toBe("conversation-abc")
     expect(seen.headers().Authorization).toBeUndefined()
   })

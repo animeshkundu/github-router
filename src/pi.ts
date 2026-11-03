@@ -77,6 +77,7 @@ import { startKeepAwake, stopKeepAwake } from "./lib/keep-awake"
 import { warmTreeSitterPool } from "./lib/tree-sitter-pool/pool"
 import { provisionBrowserAssets } from "./lib/browser-mcp/provision"
 import {
+  artifactToolsEnabled,
   browseAgentEnabled,
   browserToolsEnabled,
   adoToolsEnabled,
@@ -109,7 +110,7 @@ export const piArgs = {
     alias: "m",
     type: "string",
     description:
-      "Pi launch profile: cheapest/cheapest2 (Luna-led, cheapest tier), balanced/balanced2 (Sol-led, most-complex-tasks tier), or local/local2 (main loop runs against a locally running Anthropic-compatible server instead of Copilot, which keeps serving the Oracle and local2's Advisor). The `-2` aliases move the Sol tier from 5.6 to 6.1; cheapest2 also raises the Advisor to high, and balanced2's Oracle is Grok 4.7. Only these six aliases are supported for `github-router pi`.",
+      "Pi launch profile: cheapest/cheapest2 (Luna-led, cheapest tier), balanced/balanced2 (Sol-led, most-complex-tasks tier), or local/local2 (the main loop and every subagent run against a local inference endpoint instead of Copilot; local allows no Copilot model at all, local2 allows only the Advisor and the Oracle, both on Sol). The `-2` aliases move the Sol tier from 5.6 to 6.1; cheapest2 also raises the Advisor to high, and balanced2's Oracle is Grok 4.7. Only these six aliases are supported for `github-router pi`.",
   },
   localport: {
     type: "string" as const,
@@ -143,7 +144,7 @@ export const piArgs = {
     type: "boolean" as const,
     default: true,
     description:
-      "Wire the peer/subagent floor: native agent files, the gh-oracle skill, the pi-subagents package, and the gh-router-peers MCP group (which carries oracle, plus the critics). Set to false (--no-peers) for a lead-only session; prereqs then validate the lead model only.",
+      "Wire the peer/subagent floor: native agent files, the gh-oracle skill, the pi-subagents package, and the gh-router-peers MCP group (the personas and artifact review tools the chosen profile allows). Set to false (--no-peers) for a lead-only session; prereqs then validate the lead model only.",
   },
   helpers: {
     type: "boolean" as const,
@@ -414,6 +415,7 @@ export const pi = defineCommand({
       cloudAgentEnabled: cloudAgentToolsEnabled(),
       browseAgentAvailable: browseAgentEnabled(),
       directBrowserAvailable: browseEnabled,
+      artifactToolsAvailable: artifactToolsEnabled(),
       peersEnabled,
     })
 

@@ -1,6 +1,6 @@
 import type { Context } from "hono"
 
-import { findLaunchBySecret } from "./launch-registry"
+import { findLaunchBySecret, LAUNCH_BOUND_TOKEN_PREFIX } from "./launch-registry"
 import type { LaunchRegistryEntry } from "./state"
 
 /**
@@ -39,23 +39,62 @@ export type MessagesIdentityPreflightResult =
  */
 export function runMessagesIdentityPreflight(c: Context): MessagesIdentityPreflightResult {
   const header = c.req.header(LAUNCH_SECRET_HEADER)
-  if (!header) {
+  if (header) {
+    const launch = findLaunchBySecret(header)
+    if (!launch) {
+      return {
+        ok: false,
+        reason:
+          "X-GH-Router-Launch-Secret header did not match any registered launch "
+          + "(the launch may have been restarted, or the header was tampered with)",
+      }
+    }
+    return { ok: true, launch }
+  }
+
+  // The header is the normal channel. A teammate spawned by the agent-teams
+  // primitive cannot send it (its env allowlist drops ANTHROPIC_CUSTOM_HEADERS),
+  // so the local-family launch also mirrors its secret into the per-launch
+  // synthetic credential, which the teammate reads and sends as this bearer.
+  // See `writeLaunchBoundSyntheticCredential` in paths.ts.
+  const bearerSecret = launchSecretFromBearer(c.req.header("authorization"))
+  if (bearerSecret === undefined) {
     // Unbound BYO traffic. Not an error — this is the separately-identified
     // route every `start`/`codex` client (and any raw API caller) has always
     // taken, and it stays exactly as permissive as before this preflight
-    // existed.
+    // existed. The shared `github-router-synthetic` token lands here too, so
+    // non-local launches keep their traffic unbound exactly as before.
     return { ok: true }
   }
-  const launch = findLaunchBySecret(header)
+  const launch = bearerSecret ? findLaunchBySecret(bearerSecret) : undefined
   if (!launch) {
     return {
       ok: false,
       reason:
-        "X-GH-Router-Launch-Secret header did not match any registered launch "
-        + "(the launch may have been restarted, or the header was tampered with)",
+        `Authorization bearer carried a ${LAUNCH_BOUND_TOKEN_PREFIX} launch token that did not match any `
+        + "registered launch (the launch may have been restarted, or the token was tampered with)",
     }
   }
   return { ok: true, launch }
+}
+
+/**
+ * Pull the launch secret out of an `Authorization: Bearer` value.
+ *
+ * Returns `undefined` for anything that does not assert a launch identity:
+ * a missing header, another scheme, or the shared `github-router-synthetic`
+ * token. Returns an empty string for a prefixed but empty token, which the
+ * caller treats as a failed match rather than as unbound traffic — a request
+ * that says "I am this launch" and names nobody is never silently downgraded
+ * to BYO.
+ */
+function launchSecretFromBearer(authorization: string | undefined): string | undefined {
+  if (!authorization) return undefined
+  const match = /^Bearer\s+(.+)$/i.exec(authorization.trim())
+  if (!match) return undefined
+  const token = match[1].trim()
+  if (!token.startsWith(LAUNCH_BOUND_TOKEN_PREFIX)) return undefined
+  return token.slice(LAUNCH_BOUND_TOKEN_PREFIX.length)
 }
 
 /**
