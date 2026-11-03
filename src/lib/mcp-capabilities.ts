@@ -621,8 +621,9 @@ export function cheapestOracleModel(profileId?: string): string | undefined {
  * Oracle gate for `cheaplocal`, whose Oracle is a local consult.
  *
  * Always true, and it says nothing about a catalog because there is nothing to
- * check: the persona resolves no Copilot slug, sends no effort, and routes no
- * `/responses` call. Running `familyOracleModelFor` here would DROP the tool on
+ * check: the persona resolves no Copilot slug, sends no catalog-derived
+ * effort, and routes no `/responses` call. Running `familyOracleModelFor`
+ * here would DROP the tool on
  * any catalog that happens not to carry an Opus row, and would gate a local
  * consult on a Copilot model's window, which is exactly the assumption this
  * profile refuses to make. The launch's own `allowedPersonas` still gates it.

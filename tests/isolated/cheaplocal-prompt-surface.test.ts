@@ -5,7 +5,9 @@
 // The lead, the three natives, the 200K window, the efforts, the curated digest
 // budget and the group set are the cheapest family's, unchanged. So this launch
 // DOES know its own models and may name and price them, and knows nothing about
-// the two consultants and may say only that they are local.
+// the two consultants except the tier the profile itself declares for them:
+// a 200K budget and `max` effort, both stated by the consult rather than
+// discovered from the endpoint.
 //
 // That asymmetry is the point of this file: the scrub is sentence-scoped rather
 // than surface-wide, because "Luna" is a true statement about the lead and a
@@ -94,12 +96,18 @@ function consultantSentences(surface: string): Array<string> {
     .filter((sentence) => /\b(?:advisor|oracle)\b/i.test(sentence))
 }
 
-/** The one window/effort mention a consultant sentence may carry: the explicit
- *  denial that the endpoint has a known one. */
-const NO_FIXED_WINDOW = "no fixed window or effort"
+/** The tier the profile itself declares for the two consultants: a 200K
+ *  budget and `max` effort, both properties of the consult request rather than
+ *  discoveries about the endpoint. The directive spells it out, the digest
+ *  abbreviates it. */
+const DECLARED_TIER_PHRASES = ["200K context, max effort", "200K/max"]
+
+function declaresTier(sentence: string): boolean {
+  return DECLARED_TIER_PHRASES.some((phrase) => sentence.includes(phrase))
+}
 
 describe("cheaplocal assumes nothing about the local consultants", () => {
-  test("no model, window, effort, cost or freshness claim sits in a consultant sentence", () => {
+  test("a consultant sentence carries no model, cost or freshness claim, and no tier beyond the declared one", () => {
     for (const surface of SURFACE_NAMES) {
       for (const sentence of consultantSentences(text()[surface])) {
         for (const pattern of [
@@ -110,8 +118,6 @@ describe("cheaplocal assumes nothing about the local consultants", () => {
           /gpt-/i,
           /claude-/i,
           /\bopus\b/i,
-          /\b200K\b/,
-          /\b1M\b/,
           /\bmoney\b/i,
           /\bpric(?:e|ed|ing)\b/i,
           /\bcheaper\b/i,
@@ -121,10 +127,13 @@ describe("cheaplocal assumes nothing about the local consultants", () => {
         ]) {
           expect(sentence).not.toMatch(pattern)
         }
-        // A window or effort may be mentioned only to say there is no fixed
-        // one. Any other mention is an assumption about an unknown endpoint.
-        if (!sentence.includes(NO_FIXED_WINDOW)) {
-          expect(sentence).not.toMatch(/\b(?:window|effort)\b/i)
+        // The declared tier is the one window/effort mention a consultant
+        // sentence may carry. Any other window or effort is a claim about an
+        // endpoint the profile knows nothing about.
+        if (!declaresTier(sentence)) {
+          for (const pattern of [/\b200K\b/, /\b1M\b/, /\b(?:window|effort)\b/i]) {
+            expect(sentence).not.toMatch(pattern)
+          }
         }
       }
     }
@@ -146,11 +155,11 @@ describe("cheaplocal assumes nothing about the local consultants", () => {
 
   test("the consultants are described by where they run, not by what runs them", () => {
     const surfaces = text()
-    expect(surfaces.directive).toContain("`mcp__peers__oracle` is the local model (no fixed window or effort)")
+    expect(surfaces.directive).toContain("`mcp__peers__oracle` is the local model (200K context, max effort)")
     expect(surfaces.snippet).toContain("`mcp__peers__oracle` is the local model")
     expect(surfaces.summary).toContain("`mcp__peers__oracle` is the local model")
-    expect(surfaces.digest).toContain("(2) `advisor` (local model, lead and `reviewer`, capped)")
-    expect(surfaces.digest).toContain("(3) `oracle` (local model, lead-only)")
+    expect(surfaces.digest).toContain("(2) `advisor` (local model 200K/max, lead and `reviewer`, capped)")
+    expect(surfaces.digest).toContain("(3) `oracle` (local model 200K/max, lead-only)")
     for (const surface of SURFACE_NAMES) {
       expect(surfaces[surface].toLowerCase()).toContain("local model")
     }
@@ -329,6 +338,14 @@ describe("advisor tool descriptions follow the consultant", () => {
       expect(description).not.toMatch(/\bSol\b/)
       expect(description).not.toContain("stronger")
       expect(description).not.toContain("Copilot-served")
+      // The caller-facing half of the redaction contract. This is the surface
+      // that reaches whoever writes the brief, so a consult that left Copilot
+      // for the operator's endpoint must carry it; the corresponding
+      // consultant-side note is pinned on the system prompts.
+      expect(description).toContain(
+        "Replace every credential, token, key, password",
+      )
+      expect(description).toContain("placeholder")
     }
     expect(CHEAPLOCAL_ADVISOR_TOOL_INSTRUCTIONS).toContain(
       "which sees a curated view of this session",

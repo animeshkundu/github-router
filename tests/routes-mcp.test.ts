@@ -6,7 +6,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { mcpRoutes } from "../src/routes/mcp/route"
-import { registerLaunch, unregisterLaunch } from "../src/lib/launch-registry"
+import {
+  registerLaunch,
+  rememberLaunchSessionId,
+  unregisterLaunch,
+} from "../src/lib/launch-registry"
 import {
   __getInFlightForTests,
   __resetInFlightForTests,
@@ -4271,14 +4275,21 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       expect(tools.map((t) => t.name)).toContain("oracle")
       expect(tools.map((t) => t.name)).not.toContain("astra")
       const oracleDesc = tools.find((t) => t.name === "oracle")?.description ?? ""
-      // No slug, no window, no effort: the descriptor is the one place the
-      // family's model identity is rendered, so a contract-derived claim
-      // would surface here as `opus` / `200K` / an effort word.
-      expect(oracleDesc).toContain("the local model (no fixed window or effort)")
+      // No slug and no catalog lookup: the descriptor is the one place the
+      // family's model identity is rendered, so a contract-derived claim would
+      // surface here as `opus` / `gpt-`. The window and effort ARE stated,
+      // because they are the profile's declared tier (the client's 200K
+      // default and the `max` effort the consult requests), and the lead sizes
+      // its brief against both.
+      expect(oracleDesc).toContain("the local model (200K context, max effort)")
       expect(oracleDesc).not.toMatch(/Opus/i)
       expect(oracleDesc).not.toContain("gpt-")
-      expect(oracleDesc).not.toContain("200K")
       expect(oracleDesc.toLowerCase()).toContain("advisor")
+      // The caller-facing half of the redaction contract. Both consultants
+      // carry it, because the brief is written by the lead or the reviewer
+      // before the transport is chosen.
+      expect(oracleDesc).toContain("Replace every credential, token, key, password")
+      expect(oracleDesc).toContain("placeholder")
       // Astra is not wired on this profile, so the dead-end clause must not
       // name it: the model would call a tool this session never exposes.
       expect(oracleDesc).not.toContain("consult Astra")
@@ -4344,29 +4355,36 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       // Straight to the operator's endpoint: the base URL already ends in
       // `/v1`, so `createMessages` appends a single `/messages`.
       expect(oracleUrl).toBe(`${LOCAL_BASE}/messages`)
-      // The whole wire contract. Anything else (reasoning, output_config,
-      // thinking, stream, tools) would be a claim about a model the profile
-      // has never been told anything about.
+      // The whole wire contract. Anything else (reasoning, thinking, stream,
+      // tools) would be a claim about a model the profile has never been told
+      // anything about. `output_config` is the one exception: `effort` is the
+      // operator's request, in the same Anthropic spelling the client itself
+      // sends, not an observation about what answers there.
       expect(Object.keys(oracleCapture.body ?? {}).sort()).toEqual([
         "max_tokens",
         "messages",
         "model",
+        "output_config",
         "system",
       ])
       expect(oracleCapture.body?.model).toBe("opus")
       expect(oracleCapture.body?.max_tokens).toBe(LOCAL_CONSULT_MAX_OUTPUT_TOKENS)
+      expect(oracleCapture.body?.output_config).toEqual({ effort: "max" })
       const messages = oracleCapture.body?.messages as Array<{ role: string; content: unknown }>
       expect(messages).toHaveLength(1)
       expect(messages[0]?.role).toBe("user")
       expect(String(messages[0]?.content)).toBe("Query:\nA or B?\n\nContext:\nEvidence E.")
 
       // The identity clause is dropped rather than guessed: a Copilot Oracle
-      // names its resolved model, but the proxy does not know this one.
+      // names its resolved model, but the proxy does not know this one. The
+      // consultant half of the redaction contract is present: without it a
+      // consultant could ask for the very value the caller was told to redact.
       const system = String(oracleCapture.body?.system)
       expect(system).toContain("You are Oracle")
       expect(system).not.toContain("running on")
       expect(system).not.toMatch(/Opus/i)
       expect(system).not.toContain("gpt-")
+      expect(system).toContain("replaced with a placeholder")
 
       // No Copilot credential leaves with the request; the session header is
       // mandatory at the local endpoint and doubles as the cache key.
@@ -4390,6 +4408,79 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
         requests: (beforeOpus?.requests ?? 0) + 1,
       })
       expect(aicSnapshot().perModel["claude-opus-4.6-1m"]).toBeUndefined()
+    } finally {
+      state.models = saved
+      state.sessionId = savedSessionId
+      configureLocalEgress({})
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
+  // The MCP client sends only its bearer and workspace, never a conversation
+  // header. So the consult's `x-claude-code-session-id` has to come from the
+  // id the launch learned on its `/v1/messages` traffic, which is what both
+  // Claude Code and Pi produce. Pi also writes the header into `mcp.json`, but
+  // the remembered id is the channel that works for both front-ends and
+  // survives `/clear` because the latest value wins.
+  test("cheaplocal Oracle: the id learned from /v1/messages keys the consult", async () => {
+    const SESSION_NONCE = "d".repeat(64)
+    const launch = registerLaunch({
+      profileId: "cheaplocal",
+      nonce: SESSION_NONCE,
+      secret: "cheaplocal-session-secret",
+      allowedGroups: new Set(["peers"]),
+      allowedPersonas: new Set(["oracle"]),
+    })
+    const saved = state.models
+    const savedSessionId = state.sessionId
+    try {
+      state.models = { object: "list", data: [fakeModel("gpt-6-luna")] } as never
+      state.sessionId = "process-default"
+      configureLocalEgress({ profileId: "cheaplocal", baseUrl: "http://127.0.0.1:9922/v1" })
+
+      const sent: Array<string | undefined> = []
+      globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+        const headers = (init?.headers ?? {}) as Record<string, string>
+        sent.push(headers["x-claude-code-session-id"])
+        return Response.json({
+          id: "msg-local-oracle",
+          type: "message",
+          role: "assistant",
+          model: "opus",
+          content: [{ type: "text", text: "Approach B." }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 2 },
+        })
+      }) as unknown as typeof fetch
+
+      const callOracle = async (id: number) =>
+        rpc(
+          {
+            jsonrpc: "2.0",
+            id,
+            method: "tools/call",
+            params: { name: "oracle", arguments: { query: "A or B?", context: "Evidence E." } },
+          },
+          { auth: `Bearer ${SESSION_NONCE}` },
+        )
+
+      // The `/v1/messages` preflight records the client's id on the launch.
+      rememberLaunchSessionId(launch, "conversation-one")
+      expect((await callOracle(60)).status).toBe(200)
+      expect(sent.at(-1)).toBe("conversation-one")
+
+      // `/clear` starts a new conversation and the latest id must win: pinning
+      // the first would send every later consult to a dead cache key.
+      rememberLaunchSessionId(launch, "conversation-two")
+      expect((await callOracle(61)).status).toBe(200)
+      expect(sent.at(-1)).toBe("conversation-two")
+
+      // A request without the header is not evidence that the conversation
+      // ended, so a blank value must not clear what was learned.
+      rememberLaunchSessionId(launch, "   ")
+      expect((await callOracle(62)).status).toBe(200)
+      expect(sent.at(-1)).toBe("conversation-two")
     } finally {
       state.models = saved
       state.sessionId = savedSessionId

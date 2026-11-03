@@ -8,6 +8,7 @@ import { buildPiSettingsJson, PI_HELPERS_WEB_ACCESS } from "~/lib/pi-models-sett
 import {
   PI_MCP_NONCE_PLACEHOLDER,
   PI_MCP_SERVER_PREFIX,
+  PI_MCP_SESSION_ID_HEADER,
   PI_MCP_WORKSPACE_PLACEHOLDER,
   peersGroupDescription,
   piMcpServerKey,
@@ -253,6 +254,39 @@ describe("writePiMcpJson", () => {
     // header of its own for the worker tools to read.
     expect(PI_MCP_NONCE_PLACEHOLDER).toBe("Bearer ${GH_ROUTER_HOOK_NONCE}")
     expect(PI_MCP_WORKSPACE_PLACEHOLDER).toBe("${GH_ROUTER_WORKSPACE}")
+  })
+
+  test("a launch session id rides every entry as a literal header", async () => {
+    // Unlike the bearer, this one is written out: it is a random UUID, not a
+    // secret, and the local consult needs a value Pi's env interpolation could
+    // not supply. Omission is the other half of the contract — a launch with no
+    // id must not leave an empty header behind.
+    const mirror = await tmpdir()
+    await writePiMcpJson({
+      mirrorDir: mirror,
+      workspace: await tmpdir(),
+      serverUrl: "http://127.0.0.1:8787",
+      groups: [ADO, KUSTO],
+      sessionId: "9d1f0f6e-6a0f-4c02-8a54-2f0f2f8bb111",
+    })
+    const written = JSON.parse(await fs.readFile(path.join(mirror, "mcp.json"), "utf8"))
+    for (const entry of Object.values<{ headers: Record<string, string> }>(written.mcpServers)) {
+      expect(entry.headers[PI_MCP_SESSION_ID_HEADER]).toBe("9d1f0f6e-6a0f-4c02-8a54-2f0f2f8bb111")
+    }
+
+    const bare = await tmpdir()
+    await writePiMcpJson({
+      mirrorDir: bare,
+      workspace: await tmpdir(),
+      serverUrl: "http://127.0.0.1:8787",
+      groups: [ADO],
+      sessionId: "   ",
+    })
+    const bareWritten = JSON.parse(await fs.readFile(path.join(bare, "mcp.json"), "utf8"))
+    expect(bareWritten.mcpServers["gh-router-ado"].headers).toEqual({
+      Authorization: PI_MCP_NONCE_PLACEHOLDER,
+      "X-GH-Workspace": PI_MCP_WORKSPACE_PLACEHOLDER,
+    })
   })
 
   test("every entry is deferred, so no server can stall the first prompt", async () => {

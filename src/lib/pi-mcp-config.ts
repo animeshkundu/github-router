@@ -55,6 +55,18 @@ export const PI_MCP_NONCE_PLACEHOLDER = "Bearer ${GH_ROUTER_HOOK_NONCE}"
 export const PI_MCP_WORKSPACE_PLACEHOLDER = "${GH_ROUTER_WORKSPACE}"
 
 /**
+ * Header carrying the launch's conversation id on the MCP connection.
+ *
+ * Pi's MCP client, like Claude Code's, sends no conversation header, and a
+ * `cheaplocal` Oracle call has nothing else to key the local endpoint's
+ * prompt-cache routing on. `cheaplocal` is the only profile that reads it, so
+ * on every other Pi launch the value is inert; writing it unconditionally
+ * keeps the entry shape uniform rather than making one profile's config look
+ * different for a header nobody else consumes.
+ */
+export const PI_MCP_SESSION_ID_HEADER = "x-claude-code-session-id"
+
+/**
  * Deferred, not direct.
  *
  * `deferred` keeps the tools out of the declared tool set until `tool_search`
@@ -278,6 +290,15 @@ export async function writePiMcpJson(opts: {
   workspace: string
   serverUrl: string
   groups: Array<PiMcpGroupEntry>
+  /**
+   * Conversation id to send as `x-claude-code-session-id` on every entry.
+   *
+   * A literal, unlike the bearer and workspace: this value is a random UUID,
+   * not a secret, and the mirror file it lands in is already per-launch and
+   * swept with it. Omitted means no header, which is what every launch did
+   * before `cheaplocal` needed one.
+   */
+  sessionId?: string
 }): Promise<PiMcpJsonResult> {
   const target = path.join(opts.mirrorDir, "mcp.json")
   let existing: Record<string, unknown> = {}
@@ -315,18 +336,23 @@ export async function writePiMcpJson(opts: {
 
   const added: Array<string> = []
   const nextServers: Record<string, unknown> = { ...existingServers }
+  const sessionId = opts.sessionId?.trim()
   for (const group of opts.groups) {
     const key = piMcpServerKey(group.group)
     added.push(key)
+    const headers: Record<string, string> = {
+      Authorization: PI_MCP_NONCE_PLACEHOLDER,
+      "X-GH-Workspace": PI_MCP_WORKSPACE_PLACEHOLDER,
+    }
+    if (sessionId !== undefined && sessionId.length > 0) {
+      headers[PI_MCP_SESSION_ID_HEADER] = sessionId
+    }
     // The key namespace is router-owned, so an existing entry under our own
     // name is a replacement, not a user asset. Anything else is left alone.
     nextServers[key] = {
       type: "http",
       url: `${opts.serverUrl}/mcp/${group.group}`,
-      headers: {
-        Authorization: PI_MCP_NONCE_PLACEHOLDER,
-        "X-GH-Workspace": PI_MCP_WORKSPACE_PLACEHOLDER,
-      },
+      headers,
       exposure: PI_MCP_EXPOSURE,
       description: group.description,
     }

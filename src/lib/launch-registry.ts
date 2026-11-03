@@ -74,6 +74,29 @@ export function registerLaunch(params: {
   return entry
 }
 
+/**
+ * Record the client's conversation id on its launch entry.
+ *
+ * The local consult egress needs an `x-claude-code-session-id` for prompt-cache
+ * routing, and the MCP client does not send one. `/v1/messages` does, and the
+ * identity preflight is the point where that request is tied to a launch, so
+ * the id is captured there and read back by the MCP route. Latest value wins
+ * because `/clear` begins a new conversation; keeping the first id would pin
+ * every later consult to a dead one.
+ *
+ * A missing or blank header is ignored rather than clearing the field: a
+ * request without the header is not evidence that the conversation ended.
+ */
+export function rememberLaunchSessionId(
+  launch: LaunchRegistryEntry | undefined,
+  sessionId: string | undefined,
+): void {
+  if (launch === undefined) return
+  const trimmed = sessionId?.trim()
+  if (trimmed === undefined || trimmed.length === 0) return
+  launch.sessionId = trimmed
+}
+
 /** Remove one launch's entry. Idempotent — removing an already-removed or
  *  never-registered id is a no-op. Called from the launch's own cleanup
  *  path so a torn-down session's credentials stop authenticating. */

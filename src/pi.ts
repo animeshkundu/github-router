@@ -625,6 +625,11 @@ export const pi = defineCommand({
           workspace: process.cwd(),
           serverUrl,
           groups: surfaces.groups,
+          // Same id the local tier rows carry. No Pi profile reaches the two
+          // local consultants today, so the header is inert on every launch it
+          // is written for; it exists so a consult issued over `/mcp` is keyed
+          // to this conversation the moment one does.
+          sessionId: state.sessionId,
         })
         if (written.skippedReason) {
           consola.warn(

@@ -34,6 +34,44 @@ export const LOCAL_DEFAULT_BASE_URL = `https://localhost:${LOCAL_DEFAULT_PORT}/v
  */
 export const LOCAL_CONSULT_MAX_OUTPUT_TOKENS = 4096
 
+/**
+ * Reasoning effort requested on every local consultant turn.
+ *
+ * This is the operator's setting for the two `cheaplocal` consults, not an
+ * observation about the endpoint. `output_config.effort` is the same Anthropic
+ * field Claude Code sends on its own requests, and `max` is its top rung. No
+ * catalog lookup and no clamp apply, because the profile has no reasoning
+ * ladder to clamp against and a guessed rung would be an assumption. An
+ * endpoint that rejects the field fails the consult visibly; the proxy does
+ * not quietly retry with a different body.
+ */
+export const LOCAL_CONSULT_EFFORT = "max" as const
+
+/**
+ * One line on every caller-facing local-consult surface: redact before you
+ * write.
+ *
+ * A prompt instruction, not a filter. The proxy cannot tell a credential from
+ * an identifier, so a mechanical scrub would either miss secrets or corrupt the
+ * code excerpts the consult depends on; the caller is the only party holding
+ * the context that distinguishes them. It names the shapes that matter and
+ * nothing about the endpoint, so it reads the same on the Advisor, the Oracle,
+ * and both of their consultants' own prompts.
+ */
+export const LOCAL_CONSULT_REDACTION_LINE =
+  "Replace every credential, token, key, password, and connection string with a placeholder, and keep secret file contents out of the transcript: the consultant needs the shape of the problem, never the value."
+
+/**
+ * The consultant half of {@link LOCAL_CONSULT_REDACTION_LINE}.
+ *
+ * Both sides carry it because the instruction is only half a contract on one
+ * side: a consultant that asks for the real value would undo the caller's care,
+ * and a consultant that treats a placeholder as a literal string would answer
+ * the wrong question.
+ */
+export const LOCAL_CONSULT_REDACTION_NOTE =
+  "Any credential in the material you receive has been replaced with a placeholder; treat it as an unknown value and do not ask for the real one."
+
 export interface LocalEgressOverride {
   /** `--localurl` — full base URL, including the `/v1` prefix. */
   baseUrl?: string
@@ -209,11 +247,23 @@ export function configureLocalEgress(override: LocalEgressOverride): void {
  * own value always wins and the process-level id is only a fallback for a
  * caller that sent none. Never synthesize a fresh value per request: the
  * header exists for prompt-cache routing, and a random value defeats it.
+ *
+ * `launchSessionId` is the second fallback, for the one route that carries no
+ * client header: the `cheaplocal` Oracle is called over `/mcp`, whose client
+ * (Claude Code or Pi) sends only its bearer and workspace. The launch entry
+ * learns the id from the lead's `/v1/messages` traffic, so passing it here
+ * gives the consult the same conversation key the lead's own turns use. The
+ * ordering matters on `/v1/messages` itself: its context DOES carry the
+ * header, and that live value must beat the remembered one after `/clear`.
  */
-export function localSessionId(c: Context): string {
+export function localSessionId(c: Context, launchSessionId?: string): string {
   const incoming = c.req.header("x-claude-code-session-id")?.trim()
   if (incoming !== undefined && incoming.length > 0) {
     return incoming
+  }
+  const remembered = launchSessionId?.trim()
+  if (remembered !== undefined && remembered.length > 0) {
+    return remembered
   }
   return state.sessionId
 }
@@ -222,17 +272,25 @@ export function localSessionId(c: Context): string {
  * One non-streaming consultant turn against the local endpoint.
  *
  * This is the whole wire contract the `cheaplocal` Advisor and Oracle share:
- * a bare model id, a system prompt, one user message, and an output cap. It is
- * deliberately the smallest Anthropic body that can carry the request — no
- * `thinking`, no `output_config`, no `cache_control`, no catalog lookup, and no
- * `stream` flag. Every one of those would be a claim about a model the proxy
- * has never been told anything about, and a server that does not implement one
- * of them fails the whole consult.
+ * a bare model id, a system prompt, one user message, an output cap, and one
+ * reasoning request. It is deliberately the smallest Anthropic body that can
+ * carry the request — no `thinking`, no `cache_control`, no catalog lookup, no
+ * `stream` flag, and no tools. Every one of those would be a claim about a
+ * model the proxy has never been told anything about, and a server that does
+ * not implement one of them fails the whole consult.
+ *
+ * `output_config.effort` is the exception, and it is not a claim: it is the
+ * same Anthropic spelling Claude Code itself sends, and it states what the
+ * operator asked for (`LOCAL_CONSULT_EFFORT`) rather than what the endpoint is.
+ * The proxy does not clamp it against a reasoning ladder it has never read.
  *
  * `maxTokens` is a caller decision rather than a constant here so the two
  * consultants can keep their own budgets; both pass the catalog-less fallback,
  * because a number read off a Copilot entry is exactly the assumption this
- * profile refuses to make.
+ * profile refuses to make. A server that counts reasoning tokens against
+ * `max_tokens` can spend this cap before it writes an answer; the cap is not
+ * raised here because a value above a small endpoint's own output limit would
+ * fail the request outright.
  *
  * The response is parsed for Anthropic `text` blocks. Callers own retry
  * policy: `createMessages` itself has no local retry, and the two consultant
@@ -251,6 +309,7 @@ export async function sendLocalMessages(req: {
     max_tokens: req.maxTokens,
     system: req.system,
     messages: [{ role: "user", content: req.userText }],
+    output_config: { effort: LOCAL_CONSULT_EFFORT },
   })
   const response = await createMessages(body, {}, req.signal, false, req.egress)
   const json = (await response.json()) as { content?: unknown }

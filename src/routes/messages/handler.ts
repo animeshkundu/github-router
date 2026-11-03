@@ -15,6 +15,7 @@ import {
   type ShimEndpoint,
 } from "~/lib/anthropic-translate"
 import { HTTPError } from "~/lib/error"
+import { rememberLaunchSessionId } from "~/lib/launch-registry"
 import {
   identityPreflightErrorResponse,
   runMessagesIdentityPreflight,
@@ -391,6 +392,11 @@ export async function handleCompletion(c: Context) {
   if (!identity.ok) {
     return identityPreflightErrorResponse(c, identity.reason)
   }
+  // A local consult issued from `/mcp` has no conversation header of its own
+  // (neither Claude Code's MCP client nor Pi's sends one), so the launch entry
+  // carries the id learned here. This is the only request path that has both
+  // the header and the authenticated launch.
+  rememberLaunchSessionId(identity.launch, c.req.header("x-claude-code-session-id"))
 
   await checkRateLimit(state)
 
@@ -533,9 +539,10 @@ export async function handleCompletion(c: Context) {
   // compared against a profile id: `cheaplocal` is the family member whose
   // Advisor and Oracle leave Copilot, and every branch below keys on this value.
   const curatedLocalConsult = curatedAdvisorContract?.consultTransport === "local"
-  // A local consult transmits no effort at all (the request body is the minimal
-  // Anthropic shape), so the contract's declared value rides through instead of
-  // being resolved. `resolveAdvisorEffort` would call `resolveModel("opus")` and
+  // A local consult transmits one fixed `max` request from the shared local
+  // body (`LOCAL_CONSULT_EFFORT`), not the contract's declared Copilot effort,
+  // so the declared value rides through for logging only instead of being
+  // resolved. `resolveAdvisorEffort` would call `resolveModel("opus")` and
   // clamp a local slug against a Copilot catalog row this profile has refused
   // to look up, producing a number that is both unreadable and irrelevant.
   const curatedAdvisorLocalEffort = curatedLocalConsult

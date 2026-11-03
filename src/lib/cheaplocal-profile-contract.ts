@@ -12,10 +12,12 @@
  * and the delegation graph.
  *
  * Nothing in this file may characterize the local model. The endpoint is the
- * only fact the profile carries about it, so no name, window, effort, price or
- * speed claim is made anywhere: the contract names a bare SLUG (`opus`) and a
+ * only fact the profile carries about it, so no name, window, price or speed
+ * claim is made anywhere: the contract names a bare SLUG (`opus`) and a
  * transport, and prose that reaches the model describes the consultants by
- * transport ("the local model"), never by identity.
+ * transport ("the local model"), never by identity. The one effort the consult
+ * requests (`LOCAL_CONSULT_EFFORT`) is the operator's setting, not a property
+ * of the model.
  *
  * Derived by spread rather than copied, so a field added to the cheapest family
  * later is inherited here automatically and the declared deltas below are the
@@ -112,9 +114,10 @@ export const CHEAPLOCAL_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_MAX =
   CHEAPEST_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_MAX
 
 /**
- * The declared effort is inherited but never transmitted: a local call carries
- * no `thinking` and no `output_config`, so the field exists only so the family
- * contract stays a complete object.
+ * The declared effort is inherited but never transmitted: the local transport
+ * sends one fixed `max` request (`LOCAL_CONSULT_EFFORT`) instead of the
+ * family's Copilot effort, so the field exists only so the family contract
+ * stays a complete object.
  */
 export const CHEAPLOCAL_PROFILE_ADVISOR_EFFORT =
   CHEAPEST_PROFILE_CONTRACT.advisorEffort

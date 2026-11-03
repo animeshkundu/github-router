@@ -206,7 +206,7 @@ the index is ready, labelled lexical otherwise) and `web` is Copilot-backed, so
 there is no configuration where withholding it buys anything.
 
 **Entry shape.** Each entry is `type: "http"` with the scoped URL
-`<serverUrl>/mcp/<group>`, `exposure: "deferred"`, a `description`, and two
+`<serverUrl>/mcp/<group>`, `exposure: "deferred"`, a `description`, and three
 headers:
 
 - `Authorization: Bearer ${GH_ROUTER_HOOK_NONCE}` — a placeholder Pi expands
@@ -215,6 +215,11 @@ headers:
   worker tools refuse a call that names no workspace, and native MCP sends no
   such header on its own (the old extension set it by hand). It rides every
   group and is ignored where unused.
+- `x-claude-code-session-id: <conversation id>` — a literal, not a placeholder:
+  the id is a random UUID rather than a secret, and the mirror file it lands in
+  is per-launch and swept with it. Native MCP sends no conversation header on
+  its own, and a consult keyed on the process id would lose prompt-cache
+  routing. Every other launch ignores the header.
 
 **Keys are always `gh-router-<group>`, never the bare name.** A project
 `.pi/mcp.json` outranks the user-level file and replaces a same-named server

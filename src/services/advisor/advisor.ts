@@ -57,7 +57,10 @@ import {
 
 import { isClaudeModel } from "~/lib/anthropic-translate/classifier"
 import {
+  LOCAL_CONSULT_EFFORT,
   LOCAL_CONSULT_MAX_OUTPUT_TOKENS,
+  LOCAL_CONSULT_REDACTION_LINE,
+  LOCAL_CONSULT_REDACTION_NOTE,
   sendLocalMessages,
 } from "~/lib/local-egress"
 import {
@@ -601,12 +604,13 @@ Treat the result as advisory guidance and direction, not dictation. Weigh it aga
 export function buildCheapestAdvisorToolInstructions(
   framing: string,
   consultant = "Sol",
+  redact = false,
 ): string {
   return `# Advisor Tool
 
 You have access to an optional, transcript-aware \`advisor\` tool backed by ${consultant}, ${framing}. It takes no parameters: when you call it, the proxy forwards a curated view of this conversation — the user's original ask, your most recent message text, and a bounded, tool-aware transcript — and ${consultant} returns non-binding counsel. You remain responsible for every decision.
 
-${consultant} sees the summary you write, not your scrollback, so your last message before the call is what it works from. A short, self-contained brief makes the consult useful; a terse call wastes it.`
+${consultant} sees the summary you write, not your scrollback, so your last message before the call is what it works from. A short, self-contained brief makes the consult useful; a terse call wastes it.${redact ? ` ${LOCAL_CONSULT_REDACTION_LINE}` : ""}`
 }
 
 export const CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS = buildCheapestAdvisorToolInstructions(
@@ -622,10 +626,13 @@ export const LOCAL_ADVISOR_TOOL_INSTRUCTIONS = buildCheapestAdvisorToolInstructi
 /** `cheaplocal` lead variant. The consult leaves Copilot, and this launch has
  *  been told nothing about what answers its local endpoint, so the prose names
  *  no model, no window, no effort and no cost: it states only that the
- *  consultant is local and what it is shown. */
+ *  consultant is local and what it is shown. It is also the only variant that
+ *  asks for a redacted brief: it is the only profile whose consult leaves
+ *  Copilot for an endpoint the proxy knows nothing about. */
 export const CHEAPLOCAL_ADVISOR_TOOL_INSTRUCTIONS = buildCheapestAdvisorToolInstructions(
   "which sees a curated view of this session",
   "the local model",
+  true,
 )
 
 /** Protege-facing tool description for the cheapest reviewer. Unlike the lead
@@ -635,6 +642,7 @@ export const CHEAPLOCAL_ADVISOR_TOOL_INSTRUCTIONS = buildCheapestAdvisorToolInst
 export function buildCheapestReviewerAdvisorToolInstructions(
   framing: string,
   consultant = "Sol",
+  redact = false,
 ): string {
   return `# Advisor Tool
 
@@ -642,7 +650,7 @@ You have access to an \`advisor\` tool backed by ${consultant}, ${framing}. It t
 
 Budget: at most 5 advisor rounds per review (one round is one back-and-forth exchange; the cap is enforced in code, so a sixth round halts). Each one costs latency, so spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle — a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences.
 
-Every consult must state: the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict.
+Every consult must state: the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict.${redact ? ` ${LOCAL_CONSULT_REDACTION_LINE}` : ""}
 
 Never consult for routine verification, progress narration, reassurance, or completion ritual — run the check yourself. If the advisor disagrees with you, evaluate on the merits: adopt what is right with a one-line reason, defend what is verified with evidence, and record the disagreement in your result.`
 }
@@ -658,11 +666,14 @@ export const LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS =
     "a Copilot-served model that sees the brief you write plus a bounded transcript",
   )
 
-/** `cheaplocal` reviewer variant: local consultant, no identity claim. */
+/** `cheaplocal` reviewer variant: local consultant, no identity claim, and the
+ *  same redaction ask the lead gets — the reviewer writes the brief and reads
+ *  secret files into its own transcript just as the lead does. */
 export const CHEAPLOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS =
   buildCheapestReviewerAdvisorToolInstructions(
     "which sees the brief you write plus a bounded transcript",
     "the local model",
+    true,
   )
 
 /** Hard cap on Advisor loop rounds per cheapest-reviewer invocation (vs the
@@ -1234,6 +1245,10 @@ export function advisorSystemPrompt(
     + "cite the parts of the transcript you're responding to. If the assistant "
     + "is on the right track, say so explicitly. If they're stuck or off-track, "
     + "name the specific assumption or step to revisit."
+    // The consultant half of the redaction contract. It lives in the shared
+    // base so every local-consult framing — lead consult and reviewer consult,
+    // which take different clauses below — carries the same promise.
+    + (localConsult ? ` ${LOCAL_CONSULT_REDACTION_NOTE}` : "")
     // The paragraph-count sentence is a FORMAT instruction, and the structured
     // clauses below (the cheapest lead's JUDGMENT/FLIPS_IF shape, the reviewer's
     // Verdict shape) each install a different one. Because it lived in the base
@@ -1647,9 +1662,14 @@ async function runAdvisor(
     advisorLocalEgress
       ? "local"
       : advisorTransport(resolvedAdvisorModel, fastProfile)
+  // Report the effort the request actually carries. A local consult ignores
+  // the Copilot-era `advisorEffort` in favour of the profile's declared
+  // `LOCAL_CONSULT_EFFORT`, so logging the former would describe a body that
+  // was never sent.
+  const dispatchEffort = advisorLocalEgress ? LOCAL_CONSULT_EFFORT : advisorEffort
   if (fastProfile) {
     consola.warn(
-      `fast Advisor dispatch: model=${resolvedAdvisorModel} transport=${transport} effort=${advisorEffort}`,
+      `fast Advisor dispatch: model=${resolvedAdvisorModel} transport=${transport} effort=${dispatchEffort}`,
     )
   }
   if (cheapProfile) {
@@ -1659,7 +1679,7 @@ async function runAdvisor(
       ? `${resolveCheapestAdvisorTranscriptTokens()} tokens (curated digest)`
       : "200K"
     consola.warn(
-      `cheap Advisor dispatch: model=${resolvedAdvisorModel} transport=${transport} effort=${advisorEffort} transcriptCap=${transcriptCap}`,
+      `cheap Advisor dispatch: model=${resolvedAdvisorModel} transport=${transport} effort=${dispatchEffort} transcriptCap=${transcriptCap}`,
     )
   }
 
@@ -1669,10 +1689,11 @@ async function runAdvisor(
     const egress = advisorLocalEgress as LocalMessagesEgress
     // Deliberately the smallest request this module can send: the layered
     // transcript prompt and the system prompt are unchanged (the curated
-    // budget is a property of the consult, not of the model), while every
-    // model-shaped knob is absent. `max_tokens` is the catalog-less fallback
-    // because reading a Copilot entry's limit would be a claim about a model
-    // this launch has never been told anything about.
+    // budget is a property of the consult, not of the model), while the only
+    // model-shaped field present is the fixed `output_config.effort` in
+    // `sendLocalMessages`. `max_tokens` is the catalog-less fallback because
+    // reading a Copilot entry's limit would be a claim about a model this
+    // launch has never been told anything about.
     //
     // No `extractAndRecordAic`: the response carries no `copilot_usage` and a
     // local call bills nobody. `recordZeroCostRequest` keeps the ledger honest

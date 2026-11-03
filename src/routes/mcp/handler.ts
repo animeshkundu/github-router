@@ -15,6 +15,8 @@ import {
 import { MCP_WORKSPACE_HEADER } from "~/lib/mcp-workspace-header"
 import {
   LOCAL_CONSULT_MAX_OUTPUT_TOKENS,
+  LOCAL_CONSULT_REDACTION_LINE,
+  LOCAL_CONSULT_REDACTION_NOTE,
   localBaseUrl,
   localSessionId,
   sendLocalMessages,
@@ -459,12 +461,15 @@ function activePersonas(launch?: LaunchRegistryEntry): Array<PersonaSpec> {
 /** Oracle descriptor derived from the family contract, so a model swap in the
  *  contract renames itself here instead of leaving stale prose behind. */
 function familyOracleDescriptor(profileId: string): string | undefined {
-  // Before the family branches: `cheaplocal` IS a cheapest-family member, but
-  // its Oracle is a local consult and this description must not make a claim
-  // about it. No slug, no window, no effort — the ceiling, the catalog
-  // presence and the reasoning ladder are all unknown, by design.
+  // Before the family branches: `cheaplocal` IS a cheapest-family member, and
+  // its Oracle is a local consult. No slug and no catalog lookup, so nothing
+  // here is read off Copilot's metadata. The window and effort ARE named
+  // because they are the profile's declared tier, not a discovered property:
+  // the consult budgets against the client's default 200K and sends `max`
+  // effort, and a caller choosing between a large digest and a small one needs
+  // both numbers.
   if (isCheaplocalProfile(profileId)) {
-    return "the local model (no fixed window or effort)"
+    return "the local model (200K context, max effort)"
   }
   if (isCheapestFamily(profileId)) {
     const contract = cheapestContractFor(profileId)
@@ -505,6 +510,7 @@ function oracleToolEntry(
   astraAvailable = true,
   oracleDescriptor?: string,
   advisorAvailable = true,
+  redactBrief = false,
 ): ToolEntry {
   const descriptor = oracleDescriptor
     ?? (isCheap
@@ -526,14 +532,14 @@ function oracleToolEntry(
   return {
     name: "oracle",
     description:
-      `Expert consultant backed by ${descriptor} for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them.${preferredOverAdvisor}\n\nWhen NOT to invoke: ${advisorExclusion}${deadEndClause}routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.`,
+      `Expert consultant backed by ${descriptor} for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them.${preferredOverAdvisor}\n\nWhen NOT to invoke: ${advisorExclusion}${deadEndClause}routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.${redactBrief ? ` ${LOCAL_CONSULT_REDACTION_LINE}` : ""}`,
     inputSchema: {
       type: "object",
       required: ["query", "context"],
       additionalProperties: false,
       properties: {
         query: { type: "string", description: "One precise, consequential unresolved question or architectural decision." },
-        context: { type: "string", description: "Complete self-contained evidence, constraints, code excerpts with path:line, and ruled-out alternatives needed to evaluate cold-start." },
+        context: { type: "string", description: `Complete self-contained evidence, constraints, code excerpts with path:line, and ruled-out alternatives needed to evaluate cold-start.${redactBrief ? " Redact every credential, token, key, password, and connection string to a placeholder." : ""}` },
       },
     },
   }
@@ -786,7 +792,15 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       && launch.allowedPersonas?.has("oracle")
       && oracleGate
     ) {
-      entries.push(oracleToolEntry(isCheap, astraAvailable, oracleDescriptor, advisorAvailable))
+      entries.push(
+        oracleToolEntry(
+          isCheap,
+          astraAvailable,
+          oracleDescriptor,
+          advisorAvailable,
+          isCheaplocalProfile(launch.profileId),
+        ),
+      )
     }
     if (
       (scope === "all" || scope === "peers")
@@ -1730,9 +1744,10 @@ async function handleToolsCall(
     // The Copilot branches can name the model because the catalog told us what
     // it is. A local consult cannot: the proxy has never been told anything
     // about what answers there, so the identity clause is dropped rather than
-    // guessed at.
+    // guessed at. The local branch also carries the consultant half of the
+    // redaction contract, because only this transport asks the caller to redact.
     const oracleInstructions = isCheaplocalOracle
-      ? "You are Oracle, an expert architectural and technical consultant. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action."
+      ? `You are Oracle, an expert architectural and technical consultant. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action. ${LOCAL_CONSULT_REDACTION_NOTE}`
       : `You are Oracle, an expert architectural and technical consultant running on ${displayModelName(oracleModel)}. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.`
     const oraclePersona: PersonaSpec = {
       agentName: "oracle",
@@ -1773,7 +1788,8 @@ async function handleToolsCall(
         // Bypass `dispatchModelCall`: it opens with `resolveModel(args.model)`
         // and would rewrite the bare `opus` onto a Copilot catalog id. Nothing
         // here reads the catalog — one model id, one system prompt, one user
-        // message, one output cap, exactly like the local Advisor.
+        // message, one output cap and one fixed reasoning request, exactly
+        // like the local Advisor.
         const egress: LocalMessagesEgress = localConsultEgress ?? {
           baseUrl: localBaseUrl(),
           sessionId: state.sessionId,
@@ -2506,8 +2522,13 @@ export async function handleMcpPost(
   // can read the client's session header, so the egress is resolved once here
   // and threaded into both tools/call paths. `undefined` on every other
   // profile, which is what keeps the Copilot branches untouched.
+  //
+  // No MCP client sends `x-claude-code-session-id`, so the launch entry's
+  // remembered value is the real source here: the lead's `/v1/messages`
+  // traffic recorded it, and using it keeps the consult in the same
+  // prompt-cache conversation as the turns that led to the call.
   const localConsultEgress: LocalMessagesEgress | undefined = isCheaplocalProfile(launch.profileId)
-    ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c) }
+    ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c, launch.sessionId) }
     : undefined
 
   // Diagnostic (opt-in, GH_ROUTER_LOG_PEER_MCP=1): log the ARRIVAL of each
@@ -2573,7 +2594,15 @@ export async function handleMcpPost(
   }
 
   try {
-    const { status, body: respBody } = await handleRpc(c, body, scope, launch, audience, sessionWorkspace)
+    const { status, body: respBody } = await handleRpc(
+      c,
+      body,
+      scope,
+      launch,
+      audience,
+      sessionWorkspace,
+      localConsultEgress,
+    )
     if (respBody === null) return c.body(null, status as 202)
     return c.json(respBody, status as 200)
   } catch (err) {

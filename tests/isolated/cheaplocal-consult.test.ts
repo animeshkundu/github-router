@@ -10,7 +10,12 @@
 //     continuation after an advisor round;
 //   - the CONSULT leaves for the operator's endpoint with the minimal Anthropic
 //     body and no Copilot credential, no catalog lookup and no model-shaped
-//     knob;
+//     knob. The one request-level setting it does carry is
+//     `output_config.effort: "max"`, which the profile declares for its two
+//     consultants rather than discovers from the endpoint;
+//   - both halves of the redaction contract hold: the caller is told to replace
+//     credentials with placeholders before writing a brief, and the consultant
+//     is told that a placeholder is an unknown value it must not ask to see;
 //   - the curated digest and the reviewer's mentor posture are unchanged: moving
 //     the consultant must not change what it is asked. What DOES change is the
 //     consultant's own framing: the system prompt still names the known advisee
@@ -30,7 +35,9 @@ import { CHEAPLOCAL_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheaplocal-profil
 import { clearLaunchRegistry, registerLaunch } from "~/lib/launch-registry"
 import {
   configureLocalEgress,
+  LOCAL_CONSULT_EFFORT,
   LOCAL_CONSULT_MAX_OUTPUT_TOKENS,
+  LOCAL_CONSULT_REDACTION_NOTE,
 } from "~/lib/local-egress"
 import { LAUNCH_SECRET_HEADER } from "~/lib/messages-identity-preflight"
 import { state } from "~/lib/state"
@@ -325,15 +332,22 @@ describe("the cheaplocal lead consult leaves Copilot", () => {
     await response.text()
 
     const consult = localCall(captured)
-    // Exactly these four fields. Every additional shape (thinking,
-    // output_config, cache_control, stream, tools) would be a claim about a
-    // model the profile has never been told anything about.
+    // Exactly these five fields. `output_config` is the one shape here that
+    // describes the REQUEST rather than the endpoint: the operator declared
+    // `max` effort for the two consults, so it is a setting, not a claim about
+    // what answers. Everything else an Anthropic request may carry (thinking,
+    // cache_control, stream, tools) would be exactly such a claim, and the
+    // profile has never been told anything about the model behind the
+    // endpoint.
     expect(Object.keys(consult.body).sort()).toEqual([
       "max_tokens",
       "messages",
       "model",
+      "output_config",
       "system",
     ])
+    expect(consult.body.output_config).toEqual({ effort: LOCAL_CONSULT_EFFORT })
+    expect(consult.body.output_config).toEqual({ effort: "max" })
     // The plan's bare id. Not `claude-opus-5.5`, not decorated: the proxy does
     // not resolve a local slug through the Copilot catalog.
     expect(consult.body.model).toBe("opus")
@@ -402,6 +416,10 @@ describe("the cheaplocal lead consult leaves Copilot", () => {
     // comparative framing calibrated against `gpt-5.6-sol` survives: "faster,
     // cheaper" and "less equipped" rank the consultant above Luna, and
     // "frontier" claims knowledge it was never shown to have.
+    // The consultant half of the redaction contract: a consultant that asked
+    // for a real credential would undo the caller's care, and one that read a
+    // placeholder as a literal would answer the wrong question.
+    expect(system).toContain(LOCAL_CONSULT_REDACTION_NOTE)
     expect(system).not.toMatch(/\bSol\b/)
     expect(system).not.toContain("gpt-")
     expect(system).not.toContain("faster, cheaper")
@@ -478,6 +496,9 @@ describe("the cheaplocal reviewer consult takes the same path", () => {
     // "senior mentor" ranks it above Luna, "weaker, faster" ranks Luna below
     // it, and "frontier" claims knowledge it was never shown to have.
     expect(system).toContain("fill exactly these gaps")
+    // The reviewer's consult carries the same redaction promise as the lead's,
+    // even though the two take different framing clauses.
+    expect(system).toContain(LOCAL_CONSULT_REDACTION_NOTE)
     expect(system).not.toContain("senior mentor")
     expect(system).not.toContain("weaker, faster")
     expect(system).not.toContain("frontier")

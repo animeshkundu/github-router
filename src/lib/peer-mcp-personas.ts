@@ -741,7 +741,8 @@ export function buildPeerAwarenessSnippet(opts: {
           : undefined
     // The transport is a contract field, so this file never branches on the
     // profile id. A local consult renders no identity at all: no slug, no
-    // window, no effort, because the profile was never told any of them.
+    // window, no catalog-derived effort, because the profile was never told
+    // any of them. The one effort it requests is the operator's setting.
     const consultIsLocal = familyContract?.consultTransport === "local"
     const oracleDescriptor = consultIsLocal
       ? "the local model"
@@ -1090,7 +1091,8 @@ export function buildPeerAwarenessSummary(opts: {
           : undefined
     // The transport is a contract field, so this file never branches on the
     // profile id. A local consult renders no identity at all: no slug, no
-    // window, no effort, because the profile was never told any of them.
+    // window, no catalog-derived effort, because the profile was never told
+    // any of them. The one effort it requests is the operator's setting.
     const consultIsLocal = familyContract?.consultTransport === "local"
     const oracleDescriptor = consultIsLocal
       ? "the local model"

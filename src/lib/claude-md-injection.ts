@@ -652,11 +652,14 @@ export function buildOperatingDefaultsDirective(
     // profile id: a future local-consult member inherits the prose for free.
     const consultIsLocal = familyContract?.consultTransport === "local"
     // A local consult renders no identity: the endpoint was never asked what
-    // answers there, so there is no slug, window or effort to name. Only the
-    // Oracle carries a descriptor in this builder (the Advisor's is written by
-    // the consultation ladder below, from the same contract).
+    // answers there, so there is no slug to name. The tier IS stated, because
+    // it is the profile's own declaration rather than a discovered property:
+    // the consult budgets against the client's default 200K and requests `max`
+    // effort, and the lead sizes its brief knowing both. Only the Oracle
+    // carries a descriptor in this builder (the Advisor's is written by the
+    // consultation ladder below, from the same contract).
     const oracleDescriptor = consultIsLocal
-      ? "the local model (no fixed window or effort)"
+      ? "the local model (200K context, max effort)"
       : familyContract
         ? `${displayModelName(familyContract.oracleModel)} (200K/${familyContract.oracleEffort})`
         : isCheap
@@ -963,9 +966,14 @@ export function buildOperatingDefaultsDigest(
     // contract-derived form serves them all: `balanced` Grok 4.6 →
     // `balanced2` Grok 4.7, `cheapest` GPT-5.6 Sol → `cheapest2` GPT-6.1 Sol,
     // and local's contract keeps Oracle on the same Copilot slug. A local
-    // consult contributes no identity at all: no slug, no window, no effort.
+    // consult contributes no identity at all: no slug and no catalog lookup.
+    // The window and effort ARE named, because they are the profile's declared
+    // tier rather than a discovered property: the consult budgets against the
+    // client's default 200K and requests `max` (`LOCAL_CONSULT_EFFORT` in
+    // `local-egress.ts`, deliberately not imported here so launch-time prose
+    // generation stays free of the egress module graph).
     const oracleDescriptor = consultIsLocal
-      ? "(local model, lead-only)"
+      ? "(local model 200K/max, lead-only)"
       : familyContract
         ? `(${displayModelName(familyContract.oracleModel)} 200K/${familyContract.oracleEffort}, lead-only)`
         : isCheap
@@ -984,8 +992,11 @@ export function buildOperatingDefaultsDigest(
         ? local2AdvisorContract()
         : undefined
     const advisorScope = advisorReviewerGranted ? "lead and `reviewer`, capped" : "lead-only"
+    // The Advisor's local tier is the same declaration as the Oracle's: 200K
+    // budget, `max` effort requested. Stating it keeps the lead's digest sizing
+    // honest, since it is the only number that bounds what the consult can read.
     const advisorDescriptor = consultIsLocal
-      ? `(local model, ${advisorScope})`
+      ? `(local model 200K/max, ${advisorScope})`
       : advisorContract
         ? `(${displayModelName(advisorContract.advisorModel)}/${advisorContract.advisorEffort}, ${advisorScope})`
         : `(Sol/high, ${advisorScope})`
