@@ -4274,14 +4274,16 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       const tools = (listJson.result as { tools: Array<{ name: string; description?: string }> }).tools
       expect(tools.map((t) => t.name)).toContain("oracle")
       expect(tools.map((t) => t.name)).not.toContain("astra")
-      const oracleDesc = tools.find((t) => t.name === "oracle")?.description ?? ""
+      const oracleTool = tools.find((t) => t.name === "oracle")
+      const oracleDesc = oracleTool?.description ?? ""
       // No slug and no catalog lookup: the descriptor is the one place the
       // family's model identity is rendered, so a contract-derived claim would
-      // surface here as `opus` / `gpt-`. The window and effort ARE stated,
-      // because they are the profile's declared tier (the client's 200K
-      // default and the `max` effort the consult requests), and the lead sizes
-      // its brief against both.
-      expect(oracleDesc).toContain("the local model (200K context, max effort)")
+      // surface here as `opus` / `gpt-`. Nothing else is claimed either: the
+      // consult body asks for `max` effort, but a window or an effort on this
+      // sentence would be a property of a model the proxy has never met.
+      expect(oracleDesc).toContain("the local model")
+      expect(oracleDesc).not.toMatch(/\b200K\b/)
+      expect(oracleDesc).not.toMatch(/\b(?:window|effort)\b/i)
       expect(oracleDesc).not.toMatch(/Opus/i)
       expect(oracleDesc).not.toContain("gpt-")
       expect(oracleDesc.toLowerCase()).toContain("advisor")
@@ -4290,6 +4292,12 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       // before the transport is chosen.
       expect(oracleDesc).toContain("Replace every credential, token, key, password")
       expect(oracleDesc).toContain("placeholder")
+      // One contract, one wording. The `context` parameter used to repeat an
+      // abridged copy of the same ask ("Redact every credential..."), so a
+      // model read two versions that could drift; the tool description is the
+      // surface it reads first. Counting the shared noun rather than either
+      // wording's first word is what makes the duplicate detectable.
+      expect(JSON.stringify(oracleTool).split("credential")).toHaveLength(2)
       // Astra is not wired on this profile, so the dead-end clause must not
       // name it: the model would call a tool this session never exposes.
       expect(oracleDesc).not.toContain("consult Astra")

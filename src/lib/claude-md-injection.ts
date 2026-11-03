@@ -4,6 +4,7 @@ import path from "node:path"
 
 import consola from "consola"
 
+import { LOCAL_CONSULT_REDACTION_LINE } from "./local-consult-redaction"
 import { MAX_PARALLELISM_RULE } from "./max-profile-prompts"
 import { isUnderClaudeConfigMirror, PATHS } from "./paths"
 import {
@@ -502,16 +503,19 @@ export const CHEAPEST_CONSULT_CONTRACT_POINTER =
  * profile, whose Advisor and Oracle answer from the local endpoint.
  *
  * The body is the cheapest contract's, with three consultant-facing claims
- * replaced: the reader is named by role instead of by model, the budget no
- * longer prices the consult in money, and the judgment-call anchor no longer
- * asserts that the consultant's knowledge may be stale. Those three are the
- * whole difference: the budget count, the anchors, the disqualifiers and the
+ * replaced and one instruction added: the reader is named by role instead of
+ * by model, the budget no longer prices the consult in money, the judgment-call
+ * anchor no longer asserts that the consultant's knowledge may be stale, and
+ * the brief-writing sentence gains the caller half of the redaction contract
+ * (`LOCAL_CONSULT_REDACTION_LINE`) because this is the profile whose briefs
+ * leave Copilot for an endpoint the operator runs. Those four are the whole
+ * difference: the budget count, the anchors, the disqualifiers and the
  * discriminator are all about the WORK and stay verbatim. A name, window,
  * effort, cost or knowledge claim here would be an assumption about an
  * endpoint this profile deliberately knows nothing about.
  *
  * Derived rather than retyped so the two contracts cannot drift: the only
- * sanctioned differences are these three `replace` calls (a test pins that,
+ * sanctioned differences are these four `replace` calls (a test pins that,
  * plus the absence of any model name in the result). The pointer above is
  * reused verbatim — it prices nothing and names no model.
  */
@@ -526,6 +530,10 @@ export const CHEAPLOCAL_CONSULT_CONTRACT = CHEAPEST_CONSULT_CONTRACT.replace(
   .replace(
     "a stale-knowledge / high-consequence risk or severity call",
     "a high-consequence risk or severity call",
+  )
+  .replace(
+    "Never paste raw tool output",
+    `${LOCAL_CONSULT_REDACTION_LINE} Never paste raw tool output`,
   )
 
 /**
@@ -651,15 +659,16 @@ export function buildOperatingDefaultsDirective(
     // The transport lives on the contract so this file never branches on the
     // profile id: a future local-consult member inherits the prose for free.
     const consultIsLocal = familyContract?.consultTransport === "local"
-    // A local consult renders no identity: the endpoint was never asked what
-    // answers there, so there is no slug to name. The tier IS stated, because
-    // it is the profile's own declaration rather than a discovered property:
-    // the consult budgets against the client's default 200K and requests `max`
-    // effort, and the lead sizes its brief knowing both. Only the Oracle
-    // carries a descriptor in this builder (the Advisor's is written by the
+    // A local consult renders no identity and no tier: the endpoint was never
+    // asked what answers there, and neither its window nor its effort is
+    // something this prose should claim. The profile does request `max` effort
+    // and a 4096 output budget, but that is a property of the request body
+    // (`LOCAL_CONSULT_EFFORT` / `LOCAL_CONSULT_MAX_OUTPUT_TOKENS` in
+    // `local-egress.ts`), not a fact to teach the lead. Only the Oracle carries
+    // a descriptor in this builder (the Advisor's is written by the
     // consultation ladder below, from the same contract).
     const oracleDescriptor = consultIsLocal
-      ? "the local model (200K context, max effort)"
+      ? "the local model"
       : familyContract
         ? `${displayModelName(familyContract.oracleModel)} (200K/${familyContract.oracleEffort})`
         : isCheap
@@ -966,14 +975,13 @@ export function buildOperatingDefaultsDigest(
     // contract-derived form serves them all: `balanced` Grok 4.6 →
     // `balanced2` Grok 4.7, `cheapest` GPT-5.6 Sol → `cheapest2` GPT-6.1 Sol,
     // and local's contract keeps Oracle on the same Copilot slug. A local
-    // consult contributes no identity at all: no slug and no catalog lookup.
-    // The window and effort ARE named, because they are the profile's declared
-    // tier rather than a discovered property: the consult budgets against the
-    // client's default 200K and requests `max` (`LOCAL_CONSULT_EFFORT` in
+    // consult contributes no identity at all: no slug, no catalog lookup and
+    // no tier. The consult still requests `max` (`LOCAL_CONSULT_EFFORT` in
     // `local-egress.ts`, deliberately not imported here so launch-time prose
-    // generation stays free of the egress module graph).
+    // generation stays free of the egress module graph), but that is a request
+    // field, not something to state as a property of the endpoint.
     const oracleDescriptor = consultIsLocal
-      ? "(local model 200K/max, lead-only)"
+      ? "(local model, lead-only)"
       : familyContract
         ? `(${displayModelName(familyContract.oracleModel)} 200K/${familyContract.oracleEffort}, lead-only)`
         : isCheap
@@ -992,11 +1000,9 @@ export function buildOperatingDefaultsDigest(
         ? local2AdvisorContract()
         : undefined
     const advisorScope = advisorReviewerGranted ? "lead and `reviewer`, capped" : "lead-only"
-    // The Advisor's local tier is the same declaration as the Oracle's: 200K
-    // budget, `max` effort requested. Stating it keeps the lead's digest sizing
-    // honest, since it is the only number that bounds what the consult can read.
+    // Same rule as the Oracle's: no identity and no tier, only the transport.
     const advisorDescriptor = consultIsLocal
-      ? `(local model 200K/max, ${advisorScope})`
+      ? `(local model, ${advisorScope})`
       : advisorContract
         ? `(${displayModelName(advisorContract.advisorModel)}/${advisorContract.advisorEffort}, ${advisorScope})`
         : `(Sol/high, ${advisorScope})`

@@ -44,6 +44,7 @@ import {
 
 import { type SelfInvocation } from "./hook-launcher/self-invocation"
 import { buildCodexProviderConfigFlags } from "./launch"
+import { LOCAL_CONSULT_REDACTION_LINE } from "./local-consult-redaction"
 import { buildWorkspaceHeaderHelperCommand } from "./mcp-workspace-header"
 import { oneMContextDisabled, withOneMSuffix } from "./one-m-context"
 import { PATHS, writeRuntimeFileSecure } from "./paths"
@@ -1045,12 +1046,19 @@ function pinnedReviewerDescription(
  *  All framings describe the curated transport, not a full transcript: the
  *  reviewer's consult is rendered by the curated path (24K transcript budget,
  *  tool-aware, layered under `<operator_focus>` / `<caller_context>`), so
- *  promising the whole transcript would overstate what the advisor sees. */
-function buildProtegeAdvisorAppendix(framing: string): string {
+ *  promising the whole transcript would overstate what the advisor sees.
+ *
+ *  `redact` carries the caller half of the redaction contract to the one
+ *  framing whose brief leaves Copilot for an endpoint the operator runs. It is
+ *  a boolean rather than part of `framing` because it describes the transport,
+ *  not the consultant: the same endpoint-backed reviewer would need it whether
+ *  or not the profile names a model. */
+function buildProtegeAdvisorAppendix(framing: string, redact = false): string {
   return "You have an `advisor` tool backed by " + framing + ". "
   + "You own the verdict; the advisor is counsel, never authority — it never approves, vetoes, or decides for you. "
   + "Budget: at most 5 advisor rounds per review (code-enforced; one round is one back-and-forth exchange). Spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle: a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences. "
   + "Every consult must state the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict. "
+  + (redact ? LOCAL_CONSULT_REDACTION_LINE + " " : "")
   + "Never consult for routine verification, progress narration, reassurance, or completion ritual — run the check yourself. "
   + "If the advisor disagrees with you, evaluate on the merits: adopt what is right with a one-line reason, defend what is verified with evidence, and record the disagreement in your result. "
 }
@@ -1065,6 +1073,7 @@ const LOCAL_PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
 
 const CHEAPLOCAL_PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
   "a model on your local endpoint that sees the ask, the brief you write, and a bounded transcript",
+  true,
 )
 
 /** The appendix per consultant kind. Indexed rather than branched at the two

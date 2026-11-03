@@ -32,7 +32,12 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
 import { __resetAicLedgerForTests, aicSnapshot } from "~/lib/aic-ledger"
 import { CHEAPLOCAL_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheaplocal-profile-contract"
-import { clearLaunchRegistry, registerLaunch } from "~/lib/launch-registry"
+import {
+  clearLaunchRegistry,
+  registerLaunch,
+  rememberLaunchSessionId,
+  type LaunchRegistryEntry,
+} from "~/lib/launch-registry"
 import {
   configureLocalEgress,
   LOCAL_CONSULT_EFFORT,
@@ -48,6 +53,7 @@ const originalFetch = globalThis.fetch
 const savedModels = state.models
 const savedCopilotToken = state.copilotToken
 const savedVsCodeVersion = state.vsCodeVersion
+const savedSessionId = state.sessionId
 
 const SECRET = "l".repeat(64)
 const NONCE = "n".repeat(64)
@@ -238,14 +244,18 @@ function requestBody(): string {
   })
 }
 
-function requestOptions(agentId?: string, body: string = requestBody()) {
+function requestOptions(
+  agentId?: string,
+  body: string = requestBody(),
+  sessionId: string | null = SESSION_ID,
+) {
   return {
     method: "POST" as const,
     headers: {
       "content-type": "application/json",
       "anthropic-beta": ADVISOR_BETA,
       [LAUNCH_SECRET_HEADER]: SECRET,
-      "x-claude-code-session-id": SESSION_ID,
+      ...(sessionId ? { "x-claude-code-session-id": sessionId } : {}),
       ...(agentId ? { "x-claude-code-agent-id": agentId } : {}),
     },
     body,
@@ -279,9 +289,11 @@ function lowerHeaders(headers: Record<string, string>): Record<string, string> {
   return lowered
 }
 
+let launch: LaunchRegistryEntry
+
 beforeEach(() => {
   clearLaunchRegistry()
-  registerLaunch({ profileId: "cheaplocal", nonce: NONCE, secret: SECRET })
+  launch = registerLaunch({ profileId: "cheaplocal", nonce: NONCE, secret: SECRET })
   configureLocalEgress({ baseUrl: LOCAL_BASE })
   __resetAicLedgerForTests()
   state.copilotToken = "test-token"
@@ -297,6 +309,7 @@ afterEach(() => {
   state.models = savedModels
   state.copilotToken = savedCopilotToken
   state.vsCodeVersion = savedVsCodeVersion
+  state.sessionId = savedSessionId
   clearLaunchRegistry()
   configureLocalEgress({})
 })
@@ -383,6 +396,28 @@ describe("the cheaplocal lead consult leaves Copilot", () => {
     // The local server requires this header (a request without it is a 400),
     // and it is the prompt-cache routing key, so a consult must not lose it.
     expect(headers["x-claude-code-session-id"]).toBe(SESSION_ID)
+  })
+
+  test("a remembered launch session id keys the consult when the header is absent", async () => {
+    // The MCP client sends no session header, and the launch remembers the id
+    // from its own `/v1/messages` traffic instead. That remembered value must
+    // win over the process-wide id, which can belong to an entirely different
+    // session than this launch's lead.
+    const REMEMBERED_ID = "remembered-session-cheaplocal"
+    rememberLaunchSessionId(launch, REMEMBERED_ID)
+    state.sessionId = "process-session-cheaplocal"
+    const captured = captureFetch()
+
+    const response = await server.request(
+      "/v1/messages",
+      requestOptions(undefined, requestBody(), null),
+    )
+    expect(response.status).toBe(200)
+    await response.text()
+
+    expect(lowerHeaders(localCall(captured).headers)["x-claude-code-session-id"]).toBe(
+      REMEMBERED_ID,
+    )
   })
 
   test("the consult is billed at zero under the raw local id", async () => {

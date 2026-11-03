@@ -5,9 +5,9 @@
 // The lead, the three natives, the 200K window, the efforts, the curated digest
 // budget and the group set are the cheapest family's, unchanged. So this launch
 // DOES know its own models and may name and price them, and knows nothing about
-// the two consultants except the tier the profile itself declares for them:
-// a 200K budget and `max` effort, both stated by the consult rather than
-// discovered from the endpoint.
+// the two consultants at all: no model, no window, no effort, no cost. The
+// consult request itself asks for `max` effort, but that is a field of the body,
+// never a sentence on a prompt surface.
 //
 // That asymmetry is the point of this file: the scrub is sentence-scoped rather
 // than surface-wide, because "Luna" is a true statement about the lead and a
@@ -26,6 +26,7 @@ import {
   CHEAPLOCAL_CONSULT_CONTRACT,
 } from "~/lib/claude-md-injection"
 import { buildPeerAgentDefinitions } from "~/lib/codex-mcp-config"
+import { LOCAL_CONSULT_REDACTION_LINE } from "~/lib/local-consult-redaction"
 import {
   getPipelineSkills,
   injectedSkillsForLaunch,
@@ -96,18 +97,8 @@ function consultantSentences(surface: string): Array<string> {
     .filter((sentence) => /\b(?:advisor|oracle)\b/i.test(sentence))
 }
 
-/** The tier the profile itself declares for the two consultants: a 200K
- *  budget and `max` effort, both properties of the consult request rather than
- *  discoveries about the endpoint. The directive spells it out, the digest
- *  abbreviates it. */
-const DECLARED_TIER_PHRASES = ["200K context, max effort", "200K/max"]
-
-function declaresTier(sentence: string): boolean {
-  return DECLARED_TIER_PHRASES.some((phrase) => sentence.includes(phrase))
-}
-
 describe("cheaplocal assumes nothing about the local consultants", () => {
-  test("a consultant sentence carries no model, cost or freshness claim, and no tier beyond the declared one", () => {
+  test("a consultant sentence carries no model, tier, cost or freshness claim", () => {
     for (const surface of SURFACE_NAMES) {
       for (const sentence of consultantSentences(text()[surface])) {
         for (const pattern of [
@@ -127,13 +118,11 @@ describe("cheaplocal assumes nothing about the local consultants", () => {
         ]) {
           expect(sentence).not.toMatch(pattern)
         }
-        // The declared tier is the one window/effort mention a consultant
-        // sentence may carry. Any other window or effort is a claim about an
-        // endpoint the profile knows nothing about.
-        if (!declaresTier(sentence)) {
-          for (const pattern of [/\b200K\b/, /\b1M\b/, /\b(?:window|effort)\b/i]) {
-            expect(sentence).not.toMatch(pattern)
-          }
+        // No window and no effort either, not even the one the request asks
+        // for: a sentence about a consultant must not state a size or a
+        // reasoning level for an endpoint the profile knows nothing about.
+        for (const pattern of [/\b200K\b/, /\b1M\b/, /\b(?:window|effort)\b/i]) {
+          expect(sentence).not.toMatch(pattern)
         }
       }
     }
@@ -155,11 +144,13 @@ describe("cheaplocal assumes nothing about the local consultants", () => {
 
   test("the consultants are described by where they run, not by what runs them", () => {
     const surfaces = text()
-    expect(surfaces.directive).toContain("`mcp__peers__oracle` is the local model (200K context, max effort)")
+    // The descriptor is the transport and nothing else. A parenthetical would
+    // be a claim about a model this profile has never met.
+    expect(surfaces.directive).toContain("`mcp__peers__oracle` is the local model,")
     expect(surfaces.snippet).toContain("`mcp__peers__oracle` is the local model")
     expect(surfaces.summary).toContain("`mcp__peers__oracle` is the local model")
-    expect(surfaces.digest).toContain("(2) `advisor` (local model 200K/max, lead and `reviewer`, capped)")
-    expect(surfaces.digest).toContain("(3) `oracle` (local model 200K/max, lead-only)")
+    expect(surfaces.digest).toContain("(2) `advisor` (local model, lead and `reviewer`, capped)")
+    expect(surfaces.digest).toContain("(3) `oracle` (local model, lead-only)")
     for (const surface of SURFACE_NAMES) {
       expect(surfaces[surface].toLowerCase()).toContain("local model")
     }
@@ -167,10 +158,10 @@ describe("cheaplocal assumes nothing about the local consultants", () => {
 })
 
 describe("the consult contract is the cheapest one minus its consultant claims", () => {
-  test("exactly three replacements separate the two contracts", () => {
+  test("exactly four replacements separate the two contracts", () => {
     // Retyping the block would let the two transports drift. The round trip
-    // below IS the pin: if a fourth difference is added to the constant, this
-    // fails; if one of the three is dropped, the negative assertions below
+    // below IS the pin: if a fifth difference is added to the constant, this
+    // fails; if one of the four is dropped, the negative assertions below
     // fail.
     const roundTripped = CHEAPLOCAL_CONSULT_CONTRACT.replace(
       "the Advisor reads a curated view of this session",
@@ -181,6 +172,7 @@ describe("the consult contract is the cheapest one minus its consultant claims",
         "a high-consequence risk or severity call",
         "a stale-knowledge / high-consequence risk or severity call",
       )
+      .replace(`${LOCAL_CONSULT_REDACTION_LINE} `, "")
     expect(roundTripped).toBe(CHEAPEST_CONSULT_CONTRACT)
 
     expect(CHEAPLOCAL_CONSULT_CONTRACT).not.toContain("Sol")
@@ -190,6 +182,9 @@ describe("the consult contract is the cheapest one minus its consultant claims",
     expect(CHEAPLOCAL_CONSULT_CONTRACT).toContain("the Advisor reads a curated view of this session")
     expect(CHEAPLOCAL_CONSULT_CONTRACT).toContain("each costs real time, so spend them only")
     expect(CHEAPLOCAL_CONSULT_CONTRACT).toContain("a high-consequence risk or severity call")
+    // The caller-facing redaction ask, in the contract the mirrored CLAUDE.md
+    // teaches. It is the only addition rather than a scrub.
+    expect(CHEAPLOCAL_CONSULT_CONTRACT).toContain(LOCAL_CONSULT_REDACTION_LINE)
     // The budget count, the anchors, the disqualifiers and the discriminator
     // are about the WORK, so they stay verbatim.
     expect(CHEAPLOCAL_CONSULT_CONTRACT).toContain("you have roughly 8-10 advisor calls")
@@ -310,12 +305,18 @@ describe("the reviewer's protege grant names a consultant without describing one
     // budget and the verdict ownership must survive the scrub.
     expect(agent.prompt).toContain("at most 5 advisor rounds per review")
     expect(agent.prompt).toContain("You own the verdict; the advisor is counsel, never authority")
+    // The reviewer writes its own brief, so it is a caller surface and carries
+    // the redaction ask next to the instruction that says what a brief holds.
+    expect(agent.prompt).toContain(LOCAL_CONSULT_REDACTION_LINE)
   })
 
   test("the Copilot-served cheapest reviewer keeps its named consultant", () => {
     const agent = reviewer({ cheaplocalProfile: false })
     expect(agent.prompt).toContain("backed by Sol, a stronger cross-lab model")
     expect(agent.description).toContain("Sol advisor")
+    // A Copilot consult never leaves the proxy's own trust boundary, so the ask
+    // must not leak into the profiles that do not need it.
+    expect(agent.prompt).not.toContain(LOCAL_CONSULT_REDACTION_LINE)
   })
 
   test("emits exactly the three cheaplocal natives", () => {

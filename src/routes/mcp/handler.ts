@@ -463,13 +463,13 @@ function activePersonas(launch?: LaunchRegistryEntry): Array<PersonaSpec> {
 function familyOracleDescriptor(profileId: string): string | undefined {
   // Before the family branches: `cheaplocal` IS a cheapest-family member, and
   // its Oracle is a local consult. No slug and no catalog lookup, so nothing
-  // here is read off Copilot's metadata. The window and effort ARE named
-  // because they are the profile's declared tier, not a discovered property:
-  // the consult budgets against the client's default 200K and sends `max`
-  // effort, and a caller choosing between a large digest and a small one needs
-  // both numbers.
+  // here is read off Copilot's metadata. No window and no effort either: the
+  // consult's `output_config: { effort: "max" }` is a field of the request
+  // (`LOCAL_CONSULT_EFFORT`), not a property this description may assert about
+  // an endpoint nobody has asked about. The descriptor names the transport and
+  // stops there.
   if (isCheaplocalProfile(profileId)) {
-    return "the local model (200K context, max effort)"
+    return "the local model"
   }
   if (isCheapestFamily(profileId)) {
     const contract = cheapestContractFor(profileId)
@@ -539,7 +539,10 @@ function oracleToolEntry(
       additionalProperties: false,
       properties: {
         query: { type: "string", description: "One precise, consequential unresolved question or architectural decision." },
-        context: { type: "string", description: `Complete self-contained evidence, constraints, code excerpts with path:line, and ruled-out alternatives needed to evaluate cold-start.${redactBrief ? " Redact every credential, token, key, password, and connection string to a placeholder." : ""}` },
+        // The redaction ask rides on the tool description only. Repeating an
+        // abridged copy here gave one contract two wordings that could drift,
+        // and the tool description is the surface a model reads first.
+        context: { type: "string", description: "Complete self-contained evidence, constraints, code excerpts with path:line, and ruled-out alternatives needed to evaluate cold-start." },
       },
     },
   }
@@ -1790,9 +1793,15 @@ async function handleToolsCall(
         // here reads the catalog — one model id, one system prompt, one user
         // message, one output cap and one fixed reasoning request, exactly
         // like the local Advisor.
+        // The route threads `localConsultEgress` for every cheaplocal launch,
+        // so this fallback is defensive. It still prefers what the launch
+        // remembered over the process-wide id, because those are different
+        // values whenever the lead is a different session than the first one
+        // this proxy saw, and a silent degrade here would key the consult's
+        // prompt cache on the wrong session.
         const egress: LocalMessagesEgress = localConsultEgress ?? {
           baseUrl: localBaseUrl(),
-          sessionId: state.sessionId,
+          sessionId: launch.sessionId?.trim() || state.sessionId,
         }
         text = await withTransientRetry(
           () =>

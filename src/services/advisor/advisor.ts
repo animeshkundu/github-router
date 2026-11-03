@@ -626,9 +626,12 @@ export const LOCAL_ADVISOR_TOOL_INSTRUCTIONS = buildCheapestAdvisorToolInstructi
 /** `cheaplocal` lead variant. The consult leaves Copilot, and this launch has
  *  been told nothing about what answers its local endpoint, so the prose names
  *  no model, no window, no effort and no cost: it states only that the
- *  consultant is local and what it is shown. It is also the only variant that
- *  asks for a redacted brief: it is the only profile whose consult leaves
- *  Copilot for an endpoint the proxy knows nothing about. */
+ *  consultant is local and what it is shown. The request still asks for `max`
+ *  effort (`LOCAL_CONSULT_EFFORT`), but that is a field of the consult body,
+ *  not a property to teach the lead; every surface states the transport and
+ *  stops there. It is also the only variant that asks for a redacted brief: it
+ *  is the only profile whose consult leaves Copilot for an endpoint the proxy
+ *  knows nothing about. */
 export const CHEAPLOCAL_ADVISOR_TOOL_INSTRUCTIONS = buildCheapestAdvisorToolInstructions(
   "which sees a curated view of this session",
   "the local model",

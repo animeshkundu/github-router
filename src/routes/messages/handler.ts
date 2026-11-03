@@ -1097,8 +1097,10 @@ export async function handleCompletion(c: Context) {
           // The CONSULTANT's egress, separate from `localEgress` (the LEAD's).
           // On `cheaplocal` the lead turn is a Copilot call and only the
           // consult leaves, so the two must never be derived from one another.
+          // The remembered launch id is the fallback when the client sends no
+          // session header, matching the MCP route's Oracle egress.
           advisorLocalEgress: curatedLocalConsult
-            ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c) }
+            ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c, identity.launch?.sessionId) }
             : undefined,
           advisorMaxTurns: curatedReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: advisorChoice.effort,
@@ -1408,9 +1410,9 @@ export async function handleCompletion(c: Context) {
           // The CONSULTANT's egress. On `cheaplocal` this site is reached after
           // a mid-session `/model` switch to a Claude lead: the lead turn is
           // still a Copilot call (`localEgress` above stays undefined) and only
-          // the consult leaves.
+          // the consult leaves. Same remembered-id fallback as the shim site.
           advisorLocalEgress: curatedLocalConsult
-            ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c) }
+            ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c, identity.launch?.sessionId) }
             : undefined,
           advisorMaxTurns: curatedReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: maxAdvisorChoice
