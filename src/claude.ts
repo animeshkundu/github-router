@@ -236,7 +236,7 @@ export const claudeArgs = {
     alias: "m",
     type: "string",
     description:
-      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, cheapest, cheapest2, balanced, balanced2, max, local, local2), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog. `local` / `local2` send the main loop to a locally running Anthropic-compatible server instead of Copilot.",
+      "Override the default model for Claude Code. Accepts a profile alias (fast, cheap, cheap1m, cheapest, cheapest2, cheaplocal, balanced, balanced2, max, local, local2), a full slug (e.g. claude-opus-4-7), or an Opus family shorthand (e.g. 4.7, 4.8, 4.6) which expands to the best variant for that family — adding the [1m] suffix when a 1M-context backend is in the catalog. `local` / `local2` send the main loop to a locally running Anthropic-compatible server instead of Copilot; `cheaplocal` keeps the main loop on Copilot and sends only its Advisor and Oracle there.",
   },
   localport: {
     type: "string" as const,
@@ -1420,29 +1420,39 @@ export const claude = defineCommand({
             )
           }
         }
+        // A local consult transport (`cheaplocal`) moves the Advisor and
+        // Oracle off Copilot, so neither has a catalog entry to resolve and
+        // neither can drift. The reviewer check below still applies: it is a
+        // Copilot native either way.
+        const consultIsLocal =
+          isCheapestFamily(launchProfileId)
+          && cheapestContractFor(launchProfileId).consultTransport === "local"
         if (
           isPinnedProfile
           && !isLocalProfile
-          && ((isCheapestFamily(launchProfileId)
-            ? cheapestOracleModel(launchProfileId)
-            : isBalancedFamily(launchProfileId)
-              ? balancedOracleModel(launchProfileId)
-              : isCheapProfile
-                ? cheapOracleModel()
-                : fastOracleModel()) == null
-            || (isBalancedFamily(launchProfileId)
-              ? false
-              : (isCheapestFamily(launchProfileId)
-                ? cheapestAdvisorModel(launchProfileId)
+          && ((!consultIsLocal
+            && ((isCheapestFamily(launchProfileId)
+              ? cheapestOracleModel(launchProfileId)
+              : isBalancedFamily(launchProfileId)
+                ? balancedOracleModel(launchProfileId)
                 : isCheapProfile
-                  ? cheapAdvisorModel()
-                  : fastAdvisorModel()) == null)
+                  ? cheapOracleModel()
+                  : fastOracleModel()) == null
+              || (isBalancedFamily(launchProfileId)
+                ? false
+                : (isCheapestFamily(launchProfileId)
+                  ? cheapestAdvisorModel(launchProfileId)
+                  : isCheapProfile
+                    ? cheapAdvisorModel()
+                    : fastAdvisorModel()) == null)))
             || nativeAgentModels.reviewer == null)
         ) {
           if (isCheapestFamily(launchProfileId)) {
             const contract = cheapestContractFor(launchProfileId)
             throw new Error(
-              `${launchProfileId} profile prerequisite drift: exact reviewer (${displayModelName(contract.nativeModels.reviewer)}), oracle (${displayModelName(contract.oracleModel)}), or advisor (${displayModelName(contract.advisorModel)}) model no longer resolves`,
+              consultIsLocal
+                ? `${launchProfileId} profile prerequisite drift: exact reviewer (${displayModelName(contract.nativeModels.reviewer)}) model no longer resolves`
+                : `${launchProfileId} profile prerequisite drift: exact reviewer (${displayModelName(contract.nativeModels.reviewer)}), oracle (${displayModelName(contract.oracleModel)}), or advisor (${displayModelName(contract.advisorModel)}) model no longer resolves`,
             )
           }
           if (isBalancedFamily(launchProfileId)) {
@@ -1508,6 +1518,9 @@ export const claude = defineCommand({
             : isCheapestFamily(launchProfileId)
               ? {
                   cheapestProfile: true,
+                  // The reviewer's protege prose names a consultant, so it
+                  // must know whether that consult left Copilot.
+                  cheaplocalProfile: consultIsLocal,
                   cheapestExploreModel: nativeAgentModels.Explore,
                   cheapestGeneralPurposeModel: nativeAgentModels["General-Purpose"],
                   cheapestReviewerModel: nativeAgentModels.reviewer,

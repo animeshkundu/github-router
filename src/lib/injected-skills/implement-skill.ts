@@ -1,6 +1,6 @@
 import { isBalancedFamily, isCheapestFamily, isLocalFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
-import type { PlanSkillProfile } from "./plan-skill"
+import { rosterEmitsImplementer, type PlanSkillProfile } from "./plan-skill"
 
 export function buildImplementSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
   // Profiles without a Plan role (cheapest/balanced/local): the lead plans
@@ -8,15 +8,14 @@ export function buildImplementSkill(_searchEnabled?: boolean, profile?: PlanSkil
   const planDispatches = isCheapestFamily(profile) || isBalancedFamily(profile) || isLocalFamily(profile)
     ? "planning work"
     : "Plan dispatches"
-  // Only the max/standard rosters emit an `implementer` native. Local never
-  // does, so naming it (even conditionally) would route the model at an agent
-  // that is not there.
-  const implementerFirst = isLocalFamily(profile)
-    ? "Use General-Purpose for every implementation task and handoff"
-    : "If an implementer subagent exists (max profile), use it first for implementation tasks, then General-Purpose for handoffs; otherwise use General-Purpose for all tasks"
-  const implementerDispatch = isLocalFamily(profile)
-    ? "Use subagent_type General-Purpose for every task"
-    : "Use subagent_type implementer first where the profile provides one (max), otherwise subagent_type General-Purpose for every task"
+  // No pipeline-skill roster emits an `implementer` native. Naming it (even
+  // conditionally) would route the model at an agent that is not there.
+  const implementerFirst = rosterEmitsImplementer(profile)
+    ? "If an implementer subagent exists (max profile), use it first for implementation tasks, then General-Purpose for handoffs; otherwise use General-Purpose for all tasks"
+    : "Use General-Purpose for every implementation task and handoff"
+  const implementerDispatch = rosterEmitsImplementer(profile)
+    ? "Use subagent_type implementer first where the profile provides one (max), otherwise subagent_type General-Purpose for every task"
+    : "Use subagent_type General-Purpose for every task"
   // The suppression behaviour is a property of the subagent model a profile
   // runs. Local runs an unknown model, so the claim cannot be made there; the
   // plain-directive instruction it justifies stays for every profile.

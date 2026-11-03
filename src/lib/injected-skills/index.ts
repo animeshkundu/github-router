@@ -47,7 +47,7 @@ export interface InjectedSkill {
 }
 
 export interface InjectedSkillSelection {
-  profileId: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "local" | "local2" | "max"
+  profileId: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "cheaplocal" | "balanced" | "balanced2" | "local" | "local2" | "max"
   workerSkillsActive: boolean
   firstMateEnabled: boolean
   /**

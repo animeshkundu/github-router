@@ -1,15 +1,22 @@
 /**
- * The `cheapest`/`cheapest2` and `balanced`/`balanced2` launch-profile families.
+ * The `cheapest`/`cheapest2`/`cheaplocal` and `balanced`/`balanced2`
+ * launch-profile families.
  *
  * The `-2` aliases are not separate tiers: each is its base profile with a
  * declared set of Sol identities replaced (`cheapest2`: Advisor + Oracle at
  * `gpt-6.1-sol`, Advisor effort `high`; `balanced2`: lead + reviewer at
  * `gpt-6.1-sol`, Oracle `grok-4.7`). Every consumer therefore asks the family
  * helpers below rather than comparing against one literal id, which is what
- * keeps the two siblings from drifting: a check written for `cheapest` covers
+ * keeps the siblings from drifting: a check written for `cheapest` covers
  * `cheapest2` by construction instead of needing a parallel branch.
  *
- * This module imports only the four contract modules — never
+ * `cheaplocal` is a third cheapest sibling, not a local-family member: its lead
+ * and natives stay on Copilot and only its two consultants move to the local
+ * endpoint. It joins the family because every lead/native/window decision is
+ * identical to `cheapest`; the transport difference rides on the contract's
+ * `consultTransport`, so consumers branch on data rather than on this id.
+ *
+ * This module imports only the five contract modules — never
  * `launch-profile.ts` — so it can be imported from anywhere in `src/lib`
  * without creating a cycle.
  */
@@ -27,18 +34,34 @@ import {
   CHEAPEST2_PROFILE_CONTRACT,
 } from "./cheapest2-profile-contract"
 import {
+  CHEAPLOCAL_PROFILE_CONTRACT,
+} from "./cheaplocal-profile-contract"
+import {
   LOCAL_PROFILE_CONTRACT,
   LOCAL2_PROFILE_CONTRACT,
 } from "./local-profile-contract"
 
-export type CheapestProfileId = "cheapest" | "cheapest2"
+export type CheapestProfileId = "cheapest" | "cheapest2" | "cheaplocal"
 export type BalancedProfileId = "balanced" | "balanced2"
 export type LocalProfileId = "local" | "local2"
 
 export function isCheapestFamily(
   profileId: string | null | undefined,
 ): profileId is CheapestProfileId {
-  return profileId === "cheapest" || profileId === "cheapest2"
+  return (
+    profileId === "cheapest"
+    || profileId === "cheapest2"
+    || profileId === "cheaplocal"
+  )
+}
+
+/** The one cheapest sibling whose consultants leave Copilot. The predicate
+ *  form matters at call sites that must EXCLUDE the id: Pi rejects it, and a
+ *  plain `boolean` would leave `CheapestProfileId` intact after the refusal. */
+export function isCheaplocalProfile(
+  profileId: string | null | undefined,
+): profileId is "cheaplocal" {
+  return profileId === "cheaplocal"
 }
 
 export function isBalancedFamily(
@@ -54,9 +77,10 @@ export function isLocalFamily(
 }
 
 /**
- * Every FIXED-ROSTER launch profile: `fast`, the cheap pair, both families,
- * and the local pair. These are the launches whose MCP surface, picker rows,
- * mirror purge and status line the router owns outright.
+ * Every FIXED-ROSTER launch profile: `fast`, the cheap pair, the three cheapest
+ * siblings, the balanced pair, and the local pair. These are the launches whose
+ * MCP surface, picker rows, mirror purge and status line the router owns
+ * outright.
  *
  * `max` is deliberately absent. It shares some of the same wiring, but it
  * has its own reviewer/roster path rather than the shared fast-style
@@ -68,6 +92,7 @@ const PINNED_PROFILE_IDS: ReadonlySet<string> = new Set([
   "cheap1m",
   "cheapest",
   "cheapest2",
+  "cheaplocal",
   "balanced",
   "balanced2",
   "local",
@@ -86,10 +111,13 @@ export function isPinnedLaunchProfile(
  *  `undefined`. */
 export function cheapestContractFor(
   profileId: string | null | undefined,
-): typeof CHEAPEST_PROFILE_CONTRACT | typeof CHEAPEST2_PROFILE_CONTRACT {
-  return profileId === "cheapest2"
-    ? CHEAPEST2_PROFILE_CONTRACT
-    : CHEAPEST_PROFILE_CONTRACT
+):
+  | typeof CHEAPEST_PROFILE_CONTRACT
+  | typeof CHEAPEST2_PROFILE_CONTRACT
+  | typeof CHEAPLOCAL_PROFILE_CONTRACT {
+  if (profileId === "cheapest2") return CHEAPEST2_PROFILE_CONTRACT
+  if (profileId === "cheaplocal") return CHEAPLOCAL_PROFILE_CONTRACT
+  return CHEAPEST_PROFILE_CONTRACT
 }
 
 /** The contract for a balanced-family profile (base fallback, as above). */
@@ -152,12 +180,15 @@ export function displayModelName(modelId: string): string {
 }
 
 /**
- * The model the cheapest-family prompt rewrite runs on. Both siblings rewrite
- * with their own advisor-tier Sol, so one call site serves both and a future
- * tier only has to change its contract.
+ * The model the cheapest-family prompt rewrite runs on.
+ *
+ * Read from `rewriteModel`, NOT `advisorModel`: the rewrite is always a Copilot
+ * dispatch, so a sibling whose consultants moved to the local endpoint must not
+ * hand a local slug to it. One call site serves every member and a future tier
+ * only has to change its contract.
  */
 export function cheapestRewriteModelFor(
   profileId: string | null | undefined,
 ): string {
-  return cheapestContractFor(profileId).advisorModel
+  return cheapestContractFor(profileId).rewriteModel
 }

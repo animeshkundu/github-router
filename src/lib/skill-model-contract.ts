@@ -108,6 +108,7 @@ export const PIPELINE_SKILL_PROFILES = [
   "cheap1m",
   "cheapest",
   "cheapest2",
+  "cheaplocal",
   "balanced",
   "balanced2",
   "local",

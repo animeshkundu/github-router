@@ -65,14 +65,18 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  `./balanced2-profile-contract`): the roster, groups, windows and delegation
  *  graph are inherited, never copied. `cheapest2` moves the Advisor/Oracle to
  *  `gpt-6.1-sol` and the Advisor effort to `high`; `balanced2` moves the
- *  lead/reviewer to `gpt-6.1-sol` and the Oracle to `grok-4.7`. Consumers
+ *  lead/reviewer to `gpt-6.1-sol` and the Oracle to `grok-4.7`. `"cheaplocal"`
+ *  is the third cheapest sibling: the same roster, groups, windows and graph,
+ *  with the Advisor and Oracle served by the local Anthropic-Messages endpoint
+ *  instead of a Copilot model (see `./cheaplocal-profile-contract`). Consumers
  *  therefore ask `./profile-family` rather than comparing literal ids.
  *
  *  Selected from the RAW `-m` argument (see `resolveLaunchProfile`), never
  *  from the resolved lead model id — so `-m gpt-6-luna` (a direct pin of
  *  the same model the fast profile drives) stays a standard-surface launch,
  *  and only the literal `fast`/`cheap`/`cheap1m`/`cheapest`/`cheapest2`/
- *  `balanced`/`balanced2`/`local`/`local2`/`max` aliases narrow the surface.
+ *  `cheaplocal`/`balanced`/`balanced2`/`local`/`local2`/`max` aliases narrow
+ *  the surface.
  */
 export type LaunchProfileId =
   | "standard"
@@ -82,6 +86,7 @@ export type LaunchProfileId =
   | "cheap1m"
   | "cheapest"
   | "cheapest2"
+  | "cheaplocal"
   | "balanced"
   | "balanced2"
   | "local"
@@ -209,6 +214,23 @@ export const CHEAPEST2_PROFILE: LaunchProfileDescriptor = Object.freeze({
   hasCoordinator: false,
 })
 
+/**
+ * The `-m cheaplocal` roster: `cheapest` exactly, with its Advisor and Oracle
+ * served by the local Anthropic-Messages endpoint rather than Copilot.
+ *
+ * The surface is inherited from the family contract and the group set is the
+ * cheapest one unchanged: the lead and natives are still Copilot calls, and the
+ * `workers` group works as it does on `cheapest` (subject to the profile's
+ * Copilot family ceiling, enforced at egress).
+ */
+export const CHEAPLOCAL_PROFILE: LaunchProfileDescriptor = Object.freeze({
+  id: "cheaplocal",
+  nativeRoster: new Set(cheapestContractFor("cheaplocal").nativeAgentNames),
+  personaAllowlist: new Set(["oracle"]),
+  allowedGroups: new Set(["peers", "search", "workers", "browser", "ado", "kusto", "cloudagent"]),
+  hasCoordinator: false,
+})
+
 /** The `-m balanced2` roster: `balanced` with the Sol lead/reviewer at
  *  `gpt-6.1-sol` and the Oracle at `grok-4.7`. Roster unchanged. */
 export const BALANCED2_PROFILE: LaunchProfileDescriptor = Object.freeze({
@@ -290,6 +312,7 @@ export function profileDescriptor(id: LaunchProfileId): LaunchProfileDescriptor 
   if (id === "cheap") return CHEAP_PROFILE
   if (id === "cheapest") return CHEAPEST_PROFILE
   if (id === "cheapest2") return CHEAPEST2_PROFILE
+  if (id === "cheaplocal") return CHEAPLOCAL_PROFILE
   if (id === "balanced") return BALANCED_PROFILE
   if (id === "balanced2") return BALANCED2_PROFILE
   if (id === "local") return LOCAL_PROFILE
@@ -316,6 +339,7 @@ export function resolveLaunchProfile(modelArg: string | undefined): LaunchProfil
   if (arg === "cheap") return "cheap"
   if (arg === "cheapest") return "cheapest"
   if (arg === "cheapest2") return "cheapest2"
+  if (arg === "cheaplocal") return "cheaplocal"
   if (arg === "balanced") return "balanced"
   if (arg === "balanced2") return "balanced2"
   if (arg === "local") return "local"
@@ -1150,8 +1174,12 @@ export function validateCheapestProfilePrerequisites(
   // The Sol Oracle: the lead's only consultant besides the Advisor. The
   // reviewer block below covers Sol tool-calling; this block covers the
   // Oracle brief's prompt-metadata requirement. Skipped under `peers: false`
-  // — a peerless launch consumes neither.
-  if (peers) {
+  // (a peerless launch consumes neither) AND when the consultants are served
+  // locally: every requirement below (catalog presence, window, effort,
+  // Responses endpoint, prompt metadata) is a Copilot fact the local endpoint
+  // was never asked to satisfy. The lead and reviewer blocks stay, because
+  // those are the Copilot calls the profile still makes.
+  if (peers && contract.consultTransport !== "local") {
     const oracle = findModel(catalog, contract.oracleModel)
     if (!oracle) {
       missing.push(`${contract.oracleModel}: absent from the live catalog`)
@@ -1171,7 +1199,11 @@ export function validateCheapestProfilePrerequisites(
         missing.push(`${contract.oracleModel}: no usable max_prompt_tokens metadata (Oracle brief)`)
       }
     }
+  }
 
+  // The reviewer is a Copilot call on every family member, the local-consult
+  // sibling included, so this block is skipped only under `peers: false`.
+  if (peers) {
     const reviewer = findModel(catalog, contract.models.reviewer)
     if (!reviewer) {
       missing.push(`${contract.models.reviewer}: absent from the live catalog`)

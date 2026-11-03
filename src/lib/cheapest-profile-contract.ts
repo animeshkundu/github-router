@@ -103,6 +103,16 @@ export const CHEAPEST_PROFILE_ORACLE_MODEL = CHEAPEST_PROFILE_MODELS.oracle
 export const CHEAPEST_PROFILE_ORACLE_EFFORT = "high" as const
 
 /**
+ * The Copilot model the prompt-rewrite hooks dispatch on.
+ *
+ * Separate from `advisorModel` because the two are only incidentally the same
+ * tier today: a rewrite is always a Copilot call, so a family member whose
+ * consultants move to another transport must not drag the rewrite along with
+ * them (see `cheaplocal-profile-contract.ts`).
+ */
+export const CHEAPEST_PROFILE_REWRITE_MODEL = CHEAPEST_PROFILE_MODELS.advisor
+
+/**
  * Lead reasoning effort for `-m cheapest`. The launcher seeds it as
  * `CLAUDE_CODE_EFFORT_LEVEL` (the client stamps it on lead requests instead of
  * its own `high` default), the request preprocessor applies it to bare-Luna
@@ -159,6 +169,13 @@ export const CHEAPEST_PROFILE_CONTRACT = Object.freeze({
   advisorEffort: CHEAPEST_PROFILE_ADVISOR_EFFORT,
   oracleModel: CHEAPEST_PROFILE_ORACLE_MODEL,
   oracleEffort: CHEAPEST_PROFILE_ORACLE_EFFORT,
+  rewriteModel: CHEAPEST_PROFILE_REWRITE_MODEL,
+  /**
+   * Where the Advisor and Oracle are served. `cheapest` and `cheapest2` both
+   * consult Copilot; `cheaplocal` is the family member that consults the local
+   * endpoint. Consumers branch on this value, never on a profile id.
+   */
+  consultTransport: "copilot" as const,
   synthesizedPeers: CHEAPEST_PROFILE_SYNTHESIZED_PEERS,
   delegationGraph: CHEAPEST_PROFILE_DELEGATION_GRAPH,
 })

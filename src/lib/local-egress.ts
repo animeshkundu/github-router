@@ -1,5 +1,6 @@
 /**
- * Local-model egress for the `-m local` / `-m local2` launch profiles.
+ * Local-model egress for the `-m local` / `-m local2` launch profiles, and for
+ * the `-m cheaplocal` consultants.
  *
  * The only fact these profiles are allowed to know about the endpoint is its
  * base URL. Nothing here probes, sniffs, or branches on what is serving it,
@@ -11,11 +12,27 @@
 import type { Context } from "hono"
 import consola from "consola"
 
-import { isLocalFamily } from "~/lib/profile-family"
+import { isCheaplocalProfile, isLocalFamily } from "~/lib/profile-family"
 import { state } from "~/lib/state"
+import {
+  createMessages,
+  type LocalMessagesEgress,
+} from "~/services/copilot/create-messages"
 
 export const LOCAL_DEFAULT_PORT = 11111
 export const LOCAL_DEFAULT_BASE_URL = `https://localhost:${LOCAL_DEFAULT_PORT}/v1`
+
+/**
+ * Output cap for a local consultant turn (Advisor and Oracle).
+ *
+ * One number for both, and deliberately a small one: a consultant answers a
+ * single question, and every larger value would be a claim about how much room
+ * the model behind the endpoint has. The Copilot paths keep their own
+ * catalog-derived budgets; this is only ever the catalog-less fallback, so a
+ * launch whose consultants left Copilot is no worse off than the branch that
+ * existed before it.
+ */
+export const LOCAL_CONSULT_MAX_OUTPUT_TOKENS = 4096
 
 export interface LocalEgressOverride {
   /** `--localurl` — full base URL, including the `/v1` prefix. */
@@ -158,11 +175,19 @@ export function configureLocalEgress(override: LocalEgressOverride): void {
   // returns BEFORE validation. Validating first meant a typo in a flag we had
   // just called ignored could still fail the launch, and stored an override
   // the warning said was being discarded.
-  if (override.profileId !== undefined && !isLocalFamily(override.profileId)) {
+  //
+  // `cheaplocal` is not a local-family member (its lead and natives stay on
+  // Copilot) but its Advisor and Oracle DO use this endpoint, so the flags are
+  // live for it.
+  if (
+    override.profileId !== undefined
+    && !isLocalFamily(override.profileId)
+    && !isCheaplocalProfile(override.profileId)
+  ) {
     if (!warnedInert) {
       warnedInert = true
       consola.warn(
-        `--localurl/--localport only apply to the local launch profiles (profile: ${override.profileId}); ignoring`,
+        `--localurl/--localport only apply to the local and cheaplocal launch profiles (profile: ${override.profileId}); ignoring`,
       )
     }
     cliOverride = undefined
@@ -191,4 +216,56 @@ export function localSessionId(c: Context): string {
     return incoming
   }
   return state.sessionId
+}
+
+/**
+ * One non-streaming consultant turn against the local endpoint.
+ *
+ * This is the whole wire contract the `cheaplocal` Advisor and Oracle share:
+ * a bare model id, a system prompt, one user message, and an output cap. It is
+ * deliberately the smallest Anthropic body that can carry the request — no
+ * `thinking`, no `output_config`, no `cache_control`, no catalog lookup, and no
+ * `stream` flag. Every one of those would be a claim about a model the proxy
+ * has never been told anything about, and a server that does not implement one
+ * of them fails the whole consult.
+ *
+ * `maxTokens` is a caller decision rather than a constant here so the two
+ * consultants can keep their own budgets; both pass the catalog-less fallback,
+ * because a number read off a Copilot entry is exactly the assumption this
+ * profile refuses to make.
+ *
+ * The response is parsed for Anthropic `text` blocks. Callers own retry
+ * policy: `createMessages` itself has no local retry, and the two consultant
+ * paths wrap this in `withTransientRetry` the same way the Copilot branches do.
+ */
+export async function sendLocalMessages(req: {
+  egress: LocalMessagesEgress
+  model: string
+  system: string
+  userText: string
+  maxTokens: number
+  signal?: AbortSignal
+}): Promise<string> {
+  const body = JSON.stringify({
+    model: req.model,
+    max_tokens: req.maxTokens,
+    system: req.system,
+    messages: [{ role: "user", content: req.userText }],
+  })
+  const response = await createMessages(body, {}, req.signal, false, req.egress)
+  const json = (await response.json()) as { content?: unknown }
+  const blocks = Array.isArray(json.content) ? json.content : []
+  const texts: Array<string> = []
+  for (const block of blocks) {
+    if (typeof block !== "object" || block === null) continue
+    const b = block as { type?: unknown; text?: unknown }
+    if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) {
+      texts.push(b.text)
+    }
+  }
+  const text = texts.join("\n\n")
+  if (text.length === 0) {
+    throw new Error(`Local model returned empty response (model: ${req.model})`)
+  }
+  return text
 }

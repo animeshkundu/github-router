@@ -12,6 +12,7 @@ import {
   displayModelName,
   isBalancedFamily,
   isCheapestFamily,
+  isCheaplocalProfile,
   isLocalFamily,
   isPinnedLaunchProfile,
   local2AdvisorContract,
@@ -253,7 +254,7 @@ export interface NativeAgentAvailability {
    *  or `stand_in`, since none of those are registered in this profile
    *  regardless of catalog state.
    *  Absent/`"standard"` is today's catalog-driven full roster. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "local" | "local2" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "cheaplocal" | "balanced" | "balanced2" | "local" | "local2" | "max"
   /** False when a fast launch disabled or failed its MCP/native runtime wiring.
    *  The fallback directive must not advertise agents/tools that do not exist. */
   fastRuntimeAvailable?: boolean
@@ -497,6 +498,37 @@ export const CHEAPEST_CONSULT_CONTRACT_POINTER =
   "Consulting `advisor`/`oracle` (small budget, ~8-10 calls — choose wisely): use them for how/what — shortest path, what to consider, planning, strategy, direction — never for anything a search, read, or run settles, nor for routine progress, reassurance, or completion ritual; do not spend one where `reviewer` (verification) or `oracle` (a self-contained technical trade-off) owns the moment. Full how-to (when to spend, the call brief, the discriminator) is in your CLAUDE.md project instructions.\n\n"
 
 /**
+ * Transport sibling of `CHEAPEST_CONSULT_CONTRACT` for the `cheaplocal`
+ * profile, whose Advisor and Oracle answer from the local endpoint.
+ *
+ * The body is the cheapest contract's, with three consultant-facing claims
+ * replaced: the reader is named by role instead of by model, the budget no
+ * longer prices the consult in money, and the judgment-call anchor no longer
+ * asserts that the consultant's knowledge may be stale. Those three are the
+ * whole difference: the budget count, the anchors, the disqualifiers and the
+ * discriminator are all about the WORK and stay verbatim. A name, window,
+ * effort, cost or knowledge claim here would be an assumption about an
+ * endpoint this profile deliberately knows nothing about.
+ *
+ * Derived rather than retyped so the two contracts cannot drift: the only
+ * sanctioned differences are these three `replace` calls (a test pins that,
+ * plus the absence of any model name in the result). The pointer above is
+ * reused verbatim — it prices nothing and names no model.
+ */
+export const CHEAPLOCAL_CONSULT_CONTRACT = CHEAPEST_CONSULT_CONTRACT.replace(
+  "Sol reads a curated view of this session",
+  "the Advisor reads a curated view of this session",
+)
+  .replace(
+    "each costs real time and money",
+    "each costs real time",
+  )
+  .replace(
+    "a stale-knowledge / high-consequence risk or severity call",
+    "a high-consequence risk or severity call",
+  )
+
+/**
  * Transport sibling of `CHEAPEST_CONSULT_CONTRACT` for a front-end whose
  * consultant receives no transcript at all.
  *
@@ -596,13 +628,15 @@ export function buildOperatingDefaultsDirective(
     const advisorReviewerGranted = hasAdvisor && (isCheapest || isLocal)
     const profileLabel = isLocal
       ? "Local"
-      : isCheapest
-        ? "Cheapest"
-        : isCheap
-          ? "Cheap"
-          : isBalanced
-            ? "Balanced"
-            : "Fast"
+      : isCheaplocalProfile(opts.profile)
+        ? "Cheap local"
+        : isCheapest
+          ? "Cheapest"
+          : isCheap
+            ? "Cheap"
+            : isBalanced
+              ? "Balanced"
+              : "Fast"
     // The family contract names the Oracle identity, so `balanced` renders
     // Grok 4.6 and `balanced2` Grok 4.7 without a parallel literal here. Local
     // resolves through its own contract: `cheapestContractFor` hands back a
@@ -614,24 +648,34 @@ export function buildOperatingDefaultsDirective(
         : isLocal
           ? localContractFor(opts.profile)
           : undefined
-    const oracleDescriptor = familyContract
-      ? `${displayModelName(familyContract.oracleModel)} (200K/${familyContract.oracleEffort})`
-      : isCheap
-        ? "Grok 4.6 (200K/medium)"
-        : "exact Opus 5.5 (1M/high)"
+    // The transport lives on the contract so this file never branches on the
+    // profile id: a future local-consult member inherits the prose for free.
+    const consultIsLocal = familyContract?.consultTransport === "local"
+    // A local consult renders no identity: the endpoint was never asked what
+    // answers there, so there is no slug, window or effort to name. Only the
+    // Oracle carries a descriptor in this builder (the Advisor's is written by
+    // the consultation ladder below, from the same contract).
+    const oracleDescriptor = consultIsLocal
+      ? "the local model (no fixed window or effort)"
+      : familyContract
+        ? `${displayModelName(familyContract.oracleModel)} (200K/${familyContract.oracleEffort})`
+        : isCheap
+          ? "Grok 4.6 (200K/medium)"
+          : "exact Opus 5.5 (1M/high)"
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
     // Cheapest/balanced/local have no Plan role; fast/cheap/cheap1m still do.
     const expensiveModels = isCheapest || isBalanced || isLocal
       ? "(reviewer, Oracle)"
       : "(Plan, reviewer, Oracle)"
-    // A local launch must not price the roles it delegates to: `reviewer` runs
-    // on the operator's own endpoint, on a tier the profile knows nothing
-    // about, so the only defensible subject is the role names themselves.
+    // A launch whose consultants are not catalog models must not price the
+    // roles it delegates to: `cheaplocal`'s delegates stay on Copilot, but its
+    // two consults leave it, so "expensive models" would be a claim about an
+    // endpoint the profile knows nothing about. Name the roles instead.
     // With no Oracle on the launch the only delegate left is `reviewer`, so
     // the sentence carries its own verb rather than a shared plural one.
     const subsetTail = isLocal && !hasOracle
       ? "`reviewer` sees only the synthesized subset, never raw search output."
-      : `${isLocal ? "`reviewer` and Oracle" : `expensive models ${expensiveModels}`} see only the synthesized subset, never raw search output.`
+      : `${isLocal || consultIsLocal ? "`reviewer` and Oracle" : `expensive models ${expensiveModels}`} see only the synthesized subset, never raw search output.`
     // Same reasoning for the ladder's cost framing. "Most direct first" keeps
     // the ordering advice (search before fan-out) without asserting that
     // searching is cheaper than the model answering.
@@ -719,7 +763,9 @@ export function buildOperatingDefaultsDirective(
         + "verify by execution rather than memory; before a non-trivial task, write a short plan (steps, files involved, the check settling each step) and execute it; persist through tool failures with a rephrased attempt before asking the user; stop searching when further results stop changing the answer; tag claims verified, inferred, or unverified — never state that something passes, compiles, or is covered without observed output. "
         + "Delegation graph: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; " + leadLeaf + " cannot invoke native subagents.\n\n"
         + (hasAdvisor
-          ? CHEAPEST_CONSULT_CONTRACT
+          ? consultIsLocal
+            ? CHEAPLOCAL_CONSULT_CONTRACT
+            : CHEAPEST_CONSULT_CONTRACT
           : hasOracle
             ? ORACLE_ONLY_CONSULT_CONTRACT
             : DIRECT_EVIDENCE_CONTRACT)
@@ -749,9 +795,14 @@ export function buildOperatingDefaultsDirective(
 
     // 200K profiles: every role the lead can reach runs at the 200K default
     // window (cheap1m's lead excepted at 1M), so the directive names targeted
-    // reads once instead of repeating it per role.
+    // reads once instead of repeating it per role. `cheaplocal`'s consultants
+    // answer from an endpoint whose window this profile never asked about, so
+    // its note names the roles the window is actually known for.
     const windowNote = isCheapest || isBalanced || isLocal
-      ? "All roles run at a 200K context window — use targeted reads (search, Grep, Read specific files) over full file reads.\n\n"
+      ? (isCheaplocalProfile(opts.profile)
+          ? "The lead and every native subagent run at a 200K context window"
+          : "All roles run at a 200K context window")
+        + " — use targeted reads (search, Grep, Read specific files) over full file reads.\n\n"
       : isCheap
         ? "The lead runs at a 200K context window on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — use targeted reads (search, Grep, Read specific files) over full file reads.\n\n"
         : ""
@@ -850,7 +901,7 @@ const STANDARD_OPERATING_DEFAULTS_DIGEST =
   + "without a lookup."
 
 export function buildOperatingDefaultsDigest(
-  opts: { profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "local" | "local2" | "max"; astraAvailable?: boolean; sweEnabled?: boolean } = {},
+  opts: { profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "cheaplocal" | "balanced" | "balanced2" | "local" | "local2" | "max"; astraAvailable?: boolean; sweEnabled?: boolean } = {},
 ): string {
   // --swe-gated pipeline sentence: without the flag the skill files are not
   // written, so the digest must not name them. Absent keeps the legacy text
@@ -889,13 +940,15 @@ export function buildOperatingDefaultsDigest(
     const advisorReviewerGranted = hasAdvisor && (isCheapest || isLocal)
     const profileLabel = isLocal
       ? "Local"
-      : isCheapest
-        ? "Cheapest"
-        : isCheap
-          ? "Cheap"
-          : isBalanced
-            ? "Balanced"
-            : "Fast"
+      : isCheaplocalProfile(opts.profile)
+        ? "Cheap local"
+        : isCheapest
+          ? "Cheapest"
+          : isCheap
+            ? "Cheap"
+            : isBalanced
+              ? "Balanced"
+              : "Fast"
     const familyContract = isCheapest
       ? cheapestContractFor(opts.profile)
       : isBalanced
@@ -903,15 +956,21 @@ export function buildOperatingDefaultsDigest(
         : isLocal
           ? localContractFor(opts.profile)
           : undefined
+    // The transport is a contract field, so neither builder branches on the
+    // profile id: a future local-consult member inherits this rendering.
+    const consultIsLocal = familyContract?.consultTransport === "local"
     // Every family here is lead-only on Oracle (none has a Plan role), so one
     // contract-derived form serves them all: `balanced` Grok 4.6 →
     // `balanced2` Grok 4.7, `cheapest` GPT-5.6 Sol → `cheapest2` GPT-6.1 Sol,
-    // and local's contract keeps Oracle on the same Copilot slug.
-    const oracleDescriptor = familyContract
-      ? `(${displayModelName(familyContract.oracleModel)} 200K/${familyContract.oracleEffort}, lead-only)`
-      : isCheap
-        ? "(Grok 4.6 200K/medium, lead and Plan)"
-        : "(Opus 5 1M/high, lead and Plan)"
+    // and local's contract keeps Oracle on the same Copilot slug. A local
+    // consult contributes no identity at all: no slug, no window, no effort.
+    const oracleDescriptor = consultIsLocal
+      ? "(local model, lead-only)"
+      : familyContract
+        ? `(${displayModelName(familyContract.oracleModel)} 200K/${familyContract.oracleEffort}, lead-only)`
+        : isCheap
+          ? "(Grok 4.6 200K/medium, lead and Plan)"
+          : "(Opus 5 1M/high, lead and Plan)"
     // Only the two Advisor-carrying contracts describe the Advisor step. The
     // base local contract has no advisor fields at the type level and balanced
     // has no Advisor at all, so neither can be read here: `local` renders this
@@ -925,9 +984,11 @@ export function buildOperatingDefaultsDigest(
         ? local2AdvisorContract()
         : undefined
     const advisorScope = advisorReviewerGranted ? "lead and `reviewer`, capped" : "lead-only"
-    const advisorDescriptor = advisorContract
-      ? `(${displayModelName(advisorContract.advisorModel)}/${advisorContract.advisorEffort}, ${advisorScope})`
-      : `(Sol/high, ${advisorScope})`
+    const advisorDescriptor = consultIsLocal
+      ? `(local model, ${advisorScope})`
+      : advisorContract
+        ? `(${displayModelName(advisorContract.advisorModel)}/${advisorContract.advisorEffort}, ${advisorScope})`
+        : `(Sol/high, ${advisorScope})`
     const astraStep =
     opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? `; (4) \`astra\` (GPT-6 Astra 200K/${isCheap ? "medium" : "high"}, lead-only) only as a last resort when direct evidence, Advisor, and Oracle cannot produce a defensible path (at most 1-2 calls per decision).`
@@ -969,7 +1030,10 @@ export function buildOperatingDefaultsDigest(
         + astraStep
     // Mirror of the directive's windowNote, condensed for the digest.
     const digestWindowNote = isCheapest || isBalanced || isLocal
-      ? "All roles run at a 200K context window — use targeted reads over full file reads.\n\n"
+      ? (isCheaplocalProfile(opts.profile)
+          ? "The lead and every native subagent run at a 200K context window"
+          : "All roles run at a 200K context window")
+        + " — use targeted reads over full file reads.\n\n"
       : isCheap
         ? "The lead runs at 200K on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — use targeted reads over full file reads.\n\n"
         : ""

@@ -61,6 +61,10 @@ describe("cheapest2 derives from cheapest", () => {
     advisorClientModel: "gpt-6.1-sol",
     advisorEffort: "high",
     oracleModel: "gpt-6.1-sol",
+    // The rewrite follows this sibling's Sol tier, not the base one: it was
+    // the advisor slug before `rewriteModel` existed, and keeping it here
+    // pins that the base `gpt-5.6-sol` default does not leak through a spread.
+    rewriteModel: "gpt-6.1-sol",
   }
 
   test("the whole aggregate equals the base with only the declared deltas", () => {

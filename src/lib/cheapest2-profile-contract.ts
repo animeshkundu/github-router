@@ -83,6 +83,9 @@ export const CHEAPEST2_PROFILE_ADVISOR_EFFORT = "high" as const
 export const CHEAPEST2_PROFILE_ORACLE_MODEL = CHEAPEST2_PROFILE_MODELS.oracle
 export const CHEAPEST2_PROFILE_ORACLE_EFFORT = CHEAPEST_PROFILE_ORACLE_EFFORT
 
+/** The rewrite stays on this sibling's own Sol tier. */
+export const CHEAPEST2_PROFILE_REWRITE_MODEL = CHEAPEST2_PROFILE_MODELS.advisor
+
 export const CHEAPEST2_PROFILE_SYNTHESIZED_PEERS =
   CHEAPEST_PROFILE_SYNTHESIZED_PEERS
 export type Cheapest2ProfileSynthesizedPeer =
@@ -101,6 +104,7 @@ export const CHEAPEST2_PROFILE_CONTRACT = Object.freeze({
   advisorClientModel: CHEAPEST2_PROFILE_ADVISOR_CLIENT_MODEL,
   advisorEffort: CHEAPEST2_PROFILE_ADVISOR_EFFORT,
   oracleModel: CHEAPEST2_PROFILE_ORACLE_MODEL,
+  rewriteModel: CHEAPEST2_PROFILE_REWRITE_MODEL,
 })
 
 export type Cheapest2ProfileContract = typeof CHEAPEST2_PROFILE_CONTRACT

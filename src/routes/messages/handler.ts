@@ -63,6 +63,8 @@ import {
   ADVISOR_REVIEWER_MAX_TURNS,
   CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS,
   CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
+  CHEAPLOCAL_ADVISOR_TOOL_INSTRUCTIONS,
+  CHEAPLOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
   FAST_ADVISOR_TOOL_INSTRUCTIONS,
   LOCAL_ADVISOR_TOOL_INSTRUCTIONS,
   LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
@@ -71,7 +73,7 @@ import {
   isAdvisorRequested,
   resolveAdvisorEffort,
   resolveAdvisorModel,
-  resolveCheapestAdvisorModel,
+  resolveCuratedAdvisorModel,
 } from "~/services/advisor/advisor"
 import { createMessages } from "~/services/copilot/create-messages"
 import type { Model } from "~/services/copilot/get-models"
@@ -527,6 +529,18 @@ export async function handleCompletion(c: Context) {
   // wire model are the same bare 200K slug for both siblings.
   const curatedAdvisorModel = curatedAdvisorContract?.advisorModel
   const curatedAdvisorClientModel = curatedAdvisorContract?.advisorClientModel
+  // Where the curated consultants are served. Read from the contract rather than
+  // compared against a profile id: `cheaplocal` is the family member whose
+  // Advisor and Oracle leave Copilot, and every branch below keys on this value.
+  const curatedLocalConsult = curatedAdvisorContract?.consultTransport === "local"
+  // A local consult transmits no effort at all (the request body is the minimal
+  // Anthropic shape), so the contract's declared value rides through instead of
+  // being resolved. `resolveAdvisorEffort` would call `resolveModel("opus")` and
+  // clamp a local slug against a Copilot catalog row this profile has refused
+  // to look up, producing a number that is both unreadable and irrelevant.
+  const curatedAdvisorLocalEffort = curatedLocalConsult
+    ? curatedAdvisorContract?.advisorEffort
+    : undefined
   const subagentAgentId = (c.req.header("x-claude-code-agent-id") ?? "").trim()
   const subagentRequest = subagentAgentId.length > 0
   const fastSubagentRequest = fastProfileRequest && subagentRequest
@@ -695,11 +709,20 @@ export async function handleCompletion(c: Context) {
 
     if (mismatch) {
       // Name the profile the launch actually is. `local2` shares this
-      // machinery but its lead runs on the operator's own server, so telling
-      // it to restore "the fixed cheapest profile" would point at the wrong
-      // model entirely.
-      const curatedLabel = localAdvisorRequest ? "Local Advisor" : "Cheapest Advisor"
-      const curatedAlias = localAdvisorRequest ? "local2" : "cheapest"
+      // machinery but its lead runs on the operator's own server, and
+      // `cheaplocal` shares it while its Advisor does, so telling either to
+      // restore "the fixed cheapest profile" would point at the wrong model
+      // entirely.
+      const curatedLabel = localAdvisorRequest
+        ? "Local Advisor"
+        : curatedLocalConsult
+          ? "Cheap local Advisor"
+          : "Cheapest Advisor"
+      const curatedAlias = localAdvisorRequest
+        ? "local2"
+        : curatedLocalConsult
+          ? "cheaplocal"
+          : "cheapest"
       return c.json(
         {
           type: "error",
@@ -714,7 +737,10 @@ export async function handleCompletion(c: Context) {
       )
     }
     try {
-      fastAdvisorChoice = resolveCheapestAdvisorModel(curatedAdvisorModel)
+      fastAdvisorChoice = resolveCuratedAdvisorModel(
+        curatedAdvisorModel,
+        curatedAdvisorContract?.consultTransport ?? "copilot",
+      )
     } catch (error) {
       return c.json(
         {
@@ -733,7 +759,10 @@ export async function handleCompletion(c: Context) {
     // proxy injects the tool itself), so skip the mismatch check and resolve
     // the same fixed Sol advisor. Throws -> 503 like the lead path.
     try {
-      fastAdvisorChoice = resolveCheapestAdvisorModel(curatedAdvisorModel)
+      fastAdvisorChoice = resolveCuratedAdvisorModel(
+        curatedAdvisorModel,
+        curatedAdvisorContract?.consultTransport ?? "copilot",
+      )
     } catch (error) {
       return c.json(
         {
@@ -840,15 +869,23 @@ export async function handleCompletion(c: Context) {
     // lead is an unknown model on an unknown endpoint, so calling the
     // Copilot-served Advisor "stronger" would be a claim the profile cannot
     // make. Same behavioural contract, different framing sentence.
+    // `cheaplocal` shares the cheapest machinery, the curated digest and the
+    // protege grant, but its consultant is served elsewhere, so the framing
+    // names the transport rather than a Copilot model.
     const curatedAdvisorInstructions = localAdvisorRequest
       ? {
           lead: LOCAL_ADVISOR_TOOL_INSTRUCTIONS,
           reviewer: LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
         }
-      : {
-          lead: CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS,
-          reviewer: CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
-        }
+      : curatedLocalConsult
+        ? {
+            lead: CHEAPLOCAL_ADVISOR_TOOL_INSTRUCTIONS,
+            reviewer: CHEAPLOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
+          }
+        : {
+            lead: CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS,
+            reviewer: CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
+          }
     finalBody = injectAdvisorTool(
       finalBody,
       curatedReviewerAdvisor
@@ -1015,7 +1052,8 @@ export async function handleCompletion(c: Context) {
               // cap) are carried by `advisorCheapProfile` below and the
               // client's own pinned tool.
               model: fastAdvisorChoice!.model,
-              effort: resolveAdvisorEffort(rawBody, fastAdvisorChoice!.model, true),
+              effort: curatedAdvisorLocalEffort
+                ?? resolveAdvisorEffort(rawBody, fastAdvisorChoice!.model, true),
               escalated: fastAdvisorChoice!.escalated,
               fastProfile: true,
             }
@@ -1049,6 +1087,12 @@ export async function handleCompletion(c: Context) {
           advisorCheapestProfile: curatedAdvisorEnabled || curatedReviewerEnabled,
           advisorReviewerProfile: curatedReviewerEnabled,
           advisorLocalProfile: localAdvisorRequest,
+          // The CONSULTANT's egress, separate from `localEgress` (the LEAD's).
+          // On `cheaplocal` the lead turn is a Copilot call and only the
+          // consult leaves, so the two must never be derived from one another.
+          advisorLocalEgress: curatedLocalConsult
+            ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c) }
+            : undefined,
           advisorMaxTurns: curatedReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: advisorChoice.effort,
           externalAborter: translatedAdvisorAborter,
@@ -1354,10 +1398,18 @@ export async function handleCompletion(c: Context) {
           localEgress: localProfileRequest
             ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c) }
             : undefined,
+          // The CONSULTANT's egress. On `cheaplocal` this site is reached after
+          // a mid-session `/model` switch to a Claude lead: the lead turn is
+          // still a Copilot call (`localEgress` above stays undefined) and only
+          // the consult leaves.
+          advisorLocalEgress: curatedLocalConsult
+            ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c) }
+            : undefined,
           advisorMaxTurns: curatedReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: maxAdvisorChoice
             ? maxAdvisorChoice.effort
-            : resolveAdvisorEffort(
+            : curatedAdvisorLocalEffort
+              ?? resolveAdvisorEffort(
                 rawBody,
                 advisorChoice.model,
                 fastLeadAdvisor || cheapLeadAdvisor || curatedLeadAdvisor,

@@ -96,7 +96,12 @@ import {
   validateLocalProfilePrerequisites,
 } from "./lib/launch-profile"
 import { configureLocalEgress, localBaseUrl } from "./lib/local-egress"
-import { isBalancedFamily, isCheapestFamily, isLocalFamily } from "./lib/profile-family"
+import {
+  isBalancedFamily,
+  isCheapestFamily,
+  isCheaplocalProfile,
+  isLocalFamily,
+} from "./lib/profile-family"
 import {
   getPiLaunchEnvVars,
   parseSharedArgs,
@@ -248,6 +253,17 @@ export const pi = defineCommand({
 
     const parsed = parseSharedArgs(args as unknown as Record<string, unknown>)
     const launchProfileId = resolveLaunchProfile(args.model)
+    // `cheaplocal` is a cheapest-family member, so the family check below
+    // would accept it and then build a cheapest-shaped launch that names no
+    // local provider at all. Pi support would need its model settings to
+    // declare two providers for one profile; until then this is a refusal,
+    // not a silent downgrade to `cheapest`.
+    if (isCheaplocalProfile(launchProfileId)) {
+      process.stderr.write(
+        "github-router pi does not support -m cheaplocal: Pi's model settings bind one provider per profile, and cheaplocal's Advisor and Oracle are served by the local endpoint. Use -m cheapest or -m cheapest2 on Pi, or run `github-router claude -m cheaplocal`.\n",
+      )
+      process.exit(1)
+    }
     if (
       !isCheapestFamily(launchProfileId) &&
       !isBalancedFamily(launchProfileId) &&

@@ -19,6 +19,13 @@ graph, the peer set, the prompt-rewrite brief (`cheapest` family only), the
 compaction reserves, and the bare-200K accounting. `balanced2` keeps the
 declarative `astra` slot (`gpt-6-astra`, not callable on this family).
 
+`-m cheaplocal` exists on `github-router claude` but is deliberately not a Pi
+profile. Pi binds one provider per profile in its models file, while cheaplocal
+needs the lead and the natives on the Copilot provider and the Advisor and
+Oracle on the local `anthropic-messages` one. The launcher rejects the alias
+with a message pointing at `-m cheapest` / `-m cheapest2` for Pi and
+`github-router claude -m cheaplocal` for the two-provider layout.
+
 No Copilot-served role runs above its **Default-tier** window (Luna/Sol
 272K, Grok 200K, anything else 200K) — that is the whole cost lever here,
 the Pi counterpart of the bare-200K default window the Claude `cheap` family
