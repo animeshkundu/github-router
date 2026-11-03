@@ -220,6 +220,30 @@ describe("advisor vocabulary follows the profile", () => {
     }
   })
 
+  // `local2` grants `reviewer` a capped Advisor, so the exclusivity adjective
+  // is false on the one local profile that carries an Advisor at all. Fast and
+  // the standard surface keep the claim; that half is pinned in
+  // `tests/peer-mcp-personas.test.ts`.
+  test("local2 grants the reviewer the capped Advisor and says so", () => {
+    const surfaces = text("local2")
+    for (const surface of SURFACE_NAMES) {
+      expect(surfaces[surface]).not.toContain("lead-only transcript-aware")
+    }
+    for (const surface of ["directive", "snippet", "summary"] as const) {
+      expect(surfaces[surface]).toContain("available to the lead and `reviewer`")
+    }
+    // The digest carries the grant in its escalation ladder rather than in the
+    // prose above. Its own "lead-only" belongs to the Oracle, which really is
+    // lead-only on this profile.
+    expect(surfaces.digest).toContain("lead and `reviewer`, capped")
+  })
+
+  test("local makes no Advisor-exclusivity claim because it carries no Advisor", () => {
+    const all = joined("local")
+    expect(all).not.toContain("lead-only transcript-aware")
+    expect(all).not.toContain("available to the lead and `reviewer`")
+  })
+
   test("the local advisor descriptions name a Copilot-served model, not a stronger one", () => {
     for (const description of [LOCAL_ADVISOR_TOOL_INSTRUCTIONS, LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS]) {
       expect(description).toContain("Sol")
@@ -281,6 +305,29 @@ describe("worker-browse is named only when the launch can reach it", () => {
     expect(buildOperatingDefaultsDirective({ ...opts, profile: "cheapest2" } as never)).toContain("worker-browse")
     expect(snippet).toContain("worker-browse")
     expect(summary).toContain("worker-browse")
+  })
+})
+
+// The Artifact panel is available on both local profiles, and the awareness
+// surfaces are the only place the model is told so. `availability()` models
+// the panel OFF by default because that is the common launch; these exercise
+// the ON case so the gh-router group publication and the prose stay in step.
+describe.each(LOCAL_PROFILES)("%s describes the Artifact loop only when the panel is on", (profile) => {
+  test("the awareness surfaces advertise the review loop", () => {
+    const surfaces = text(profile, { artifactToolsAvailable: true })
+    // The wildcard names the tool family rather than one member, so a profile
+    // that emits a subset of the artifact tools is still described correctly.
+    expect(surfaces.snippet).toContain("artifact_*")
+    expect(surfaces.summary).toContain("artifact_*")
+    expect(surfaces.snippet.toLowerCase()).toContain("review")
+    expect(surfaces.summary.toLowerCase()).toContain("review")
+  })
+
+  test("no surface names an Artifact tool when the panel is off", () => {
+    const surfaces = text(profile)
+    for (const surface of SURFACE_NAMES) {
+      expect(surfaces[surface]).not.toContain("artifact_")
+    }
   })
 })
 

@@ -4233,6 +4233,169 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
   })
 })
 
+// The local pair keeps the full Claude Code feature surface, and the Artifact
+// panel is part of it. The artifact tools are non-persona entries that live in
+// the `peers` group, so on a pinned profile they pass through `fastAllowsTool`
+// and are governed by the panel gate alone. `local` registers that group with
+// an EMPTY persona allow-list (the group exists for the artifact tools, not for
+// a Copilot critic), while `local2` adds the Oracle.
+describe("local profiles keep the Artifact surface and the Oracle split", () => {
+  const LOCAL_NONCE = "a".repeat(64)
+  const LOCAL2_NONCE = "b".repeat(64)
+  const launchIds: string[] = []
+
+  beforeEach(() => {
+    launchIds.push(
+      registerLaunch({
+        profileId: "local",
+        nonce: LOCAL_NONCE,
+        secret: "local-launch-secret",
+        allowedGroups: new Set(["peers", "search", "browser"]),
+        allowedPersonas: new Set(),
+      }).launchId,
+      registerLaunch({
+        profileId: "local2",
+        nonce: LOCAL2_NONCE,
+        secret: "local2-launch-secret",
+        allowedGroups: new Set(["peers", "search", "browser"]),
+        allowedPersonas: new Set(["oracle"]),
+      }).launchId,
+    )
+  })
+
+  afterEach(() => {
+    for (const id of launchIds.splice(0)) unregisterLaunch(id)
+  })
+
+  test("both profiles list and dispatch Artifact while the panel gate passes", async () => {
+    process.env.AIORDIE_BASE_URL = "https://ai.example"
+    process.env.AIORDIE_TOKEN = "artifact-token"
+    process.env.AIORDIE_SESSION_ID = "session-1"
+    const calls: string[] = []
+    globalThis.fetch = mock(async (input: string | URL | Request) => {
+      calls.push(input.toString())
+      return Response.json({
+        ok: true,
+        status: "open",
+        visibility: "visible",
+        viewUrl: "https://ai.example/artifact/session-1/view",
+        panelUrl: "https://ai.example/panel/session-1",
+      })
+    }) as unknown as typeof fetch
+
+    for (const [nonce, id] of [
+      [LOCAL_NONCE, 60],
+      [LOCAL2_NONCE, 61],
+    ] as const) {
+      const listed = await scopedRpc(
+        "peers",
+        { jsonrpc: "2.0", id, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const names = (listed.json.result as { tools: Array<{ name: string }> }).tools.map(
+        (tool) => tool.name,
+      )
+      expect(names).toContain("artifact_refresh")
+
+      const called = await scopedRpc(
+        "peers",
+        {
+          jsonrpc: "2.0",
+          id: id + 10,
+          method: "tools/call",
+          params: { name: "artifact_refresh", arguments: {} },
+        },
+        { auth: `Bearer ${nonce}` },
+      )
+      expect(called.json.error).toBeUndefined()
+    }
+    expect(calls).toEqual([
+      "https://ai.example/api/artifact/session-1/refresh",
+      "https://ai.example/api/artifact/session-1/refresh",
+    ])
+  })
+
+  test("both profiles hide Artifact symmetrically when the panel gate is off", async () => {
+    for (const [nonce, id] of [
+      [LOCAL_NONCE, 70],
+      [LOCAL2_NONCE, 71],
+    ] as const) {
+      const listed = await scopedRpc(
+        "peers",
+        { jsonrpc: "2.0", id, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const names = (listed.json.result as { tools: Array<{ name: string }> }).tools.map(
+        (tool) => tool.name,
+      )
+      expect(names).not.toContain("artifact_refresh")
+
+      const called = await scopedRpc(
+        "peers",
+        {
+          jsonrpc: "2.0",
+          id: id + 10,
+          method: "tools/call",
+          params: { name: "artifact_refresh", arguments: {} },
+        },
+        { auth: `Bearer ${nonce}` },
+      )
+      expect((called.json.error as { code: number }).code).toBe(-32601)
+    }
+  })
+
+  test("the Oracle reaches local2 only, even with the model present in the catalog", async () => {
+    // The empty persona allow-list, not a catalog miss, is what keeps the
+    // Oracle off `local`: a local launch may not consult a Copilot model at
+    // all, so the same catalog that satisfies local2 must not leak the tool
+    // onto its sibling.
+    const saved = state.models
+    try {
+      state.models = {
+        object: "list",
+        data: [{
+          id: "gpt-6.1-sol",
+          name: "gpt-6.1-sol",
+          object: "model",
+          vendor: "openai",
+          version: "1",
+          preview: false,
+          model_picker_enabled: true,
+          supported_endpoints: ["/responses"],
+          capabilities: {
+            family: "gpt-6.1-sol",
+            object: "model_capabilities",
+            tokenizer: "o200k_base",
+            type: "chat",
+            limits: { max_context_window_tokens: 500_000, max_prompt_tokens: 372_000 },
+            supports: { reasoning_effort: ["medium", "high"] },
+          },
+        }],
+      } as never
+
+      const localList = await rpc(
+        { jsonrpc: "2.0", id: 80, method: "tools/list" },
+        { auth: `Bearer ${LOCAL_NONCE}` },
+      )
+      const localNames = (localList.json.result as { tools: Array<{ name: string }> }).tools.map(
+        (tool) => tool.name,
+      )
+      expect(localNames).not.toContain("oracle")
+
+      const local2List = await rpc(
+        { jsonrpc: "2.0", id: 81, method: "tools/list" },
+        { auth: `Bearer ${LOCAL2_NONCE}` },
+      )
+      const local2Names = (local2List.json.result as { tools: Array<{ name: string }> }).tools.map(
+        (tool) => tool.name,
+      )
+      expect(local2Names).toContain("oracle")
+    } finally {
+      state.models = saved
+    }
+  })
+})
+
 describe("/mcp ado + kusto groups — scoping and gating", () => {
   const SYNTHETIC_ADO_TOOLS = [
     {

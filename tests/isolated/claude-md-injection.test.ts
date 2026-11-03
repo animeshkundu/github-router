@@ -1276,14 +1276,16 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   // (advisory) before presenting it.
   expect(cheapestDigest).toContain("produce the plan and acceptance criteria directly")
   expect(cheapestDigest).toContain("consult `advisor` once for a framing check")
-  expect(cheapestDigest).toContain("(GPT-5.6 Sol/medium, lead-only)")
+  // The reviewer holds the capped protege grant on this profile, so the
+  // Advisor's own descriptor cannot say "lead-only"; the Oracle's can.
+  expect(cheapestDigest).toContain("(GPT-5.6 Sol/medium, lead and `reviewer`, capped)")
   expect(cheapestDigest).toContain("(GPT-5.6 Sol 200K/high, lead-only)")
 
   // `-m cheapest2`: identical prose, contract-derived Sol-6.1 Advisor (high)
   // and Oracle labels. Nothing else may change.
   const cheapest2Digest = buildOperatingDefaultsDigest({ profile: "cheapest2" })
   expect(cheapest2Digest).toContain("Cheapest launch profile")
-  expect(cheapest2Digest).toContain("(GPT-6.1 Sol/high, lead-only)")
+  expect(cheapest2Digest).toContain("(GPT-6.1 Sol/high, lead and `reviewer`, capped)")
   expect(cheapest2Digest).toContain("(GPT-6.1 Sol 200K/high, lead-only)")
   expect(cheapest2Digest).not.toContain("GPT-5.6 Sol")
   expect(cheapest2Digest).not.toContain("`Plan`")
@@ -1295,7 +1297,10 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   expect(cheapest2Digest).toBe(
     cheapestDigest
       .replaceAll("GPT-5.6 Sol", "GPT-6.1 Sol")
-      .replace("(GPT-6.1 Sol/medium, lead-only)", "(GPT-6.1 Sol/high, lead-only)"),
+      .replace(
+        "(GPT-6.1 Sol/medium, lead and `reviewer`, capped)",
+        "(GPT-6.1 Sol/high, lead and `reviewer`, capped)",
+      ),
   )
 
   // `-m cheap` deliberately runs without astra even if the caller hints the

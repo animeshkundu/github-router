@@ -90,6 +90,17 @@ describe("local profile identity", () => {
     }
   })
 
+  test("both profiles keep the browser group", () => {
+    // Browse is a capability, not an agent model call: the `browser_*` tools
+    // drive a local extension, and the page compressor that backs the
+    // compound tools carries its own fixed chain rather than a lead model.
+    // Dropping the group here would silently remove browse from the modes
+    // that most need a cheap way to look at a page.
+    for (const id of ["local", "local2"] as const) {
+      expect(profileDescriptor(id).allowedGroups!.has("browser")).toBe(true)
+    }
+  })
+
   test("the contract maps roles onto the three tier ids", () => {
     const contract = localContractFor("local")
     expect(contract.models.lead).toBe("opus")

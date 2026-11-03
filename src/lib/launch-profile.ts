@@ -33,12 +33,12 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 /**
  * Which launch surface a `github-router claude` session is running under.
  *
- * `"standard"` is every launch today: the ordinary Opus/Sonnet/Haiku lead,
- * the full native-agent roster, every peer persona, and every scoped MCP
-*  group (`peers`/`search`/`workers`/`orchestrate`, plus the independently
- *  opted-in `browser`/`fleet`/`first-mate`/`decide` groups under their own
- *  predicates). `"fast"` is the deliberately lean `-m fast` profile: a
- *  Gemini lead, exactly four native agents, the fast-only Oracle,
+ * `"standard"` is the launch with no profile alias: the ordinary
+ * Opus/Sonnet/Haiku lead, the full native-agent roster, every peer persona,
+ * and every scoped MCP group (`peers`/`search`/`workers`/`orchestrate`, plus
+ * the independently opted-in `browser`/`fleet`/`first-mate`/`decide` groups
+ * under their own predicates). `"fast"` is the deliberately lean `-m fast`
+ * profile: a Gemini lead, exactly four native agents, the fast-only Oracle,
  *  Artifact/search tools, and optional direct-browser plus browse-worker groups.
  *  `"cheap"` is the cost-lean `-m cheap` variant of `fast`: the same exact
  *  four-agent surface, but the Gemini leader also runs at the 200K default
@@ -72,7 +72,7 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  from the resolved lead model id — so `-m gpt-6-luna` (a direct pin of
  *  the same model the fast profile drives) stays a standard-surface launch,
  *  and only the literal `fast`/`cheap`/`cheap1m`/`cheapest`/`cheapest2`/
- *  `balanced`/`balanced2` aliases narrow the surface.
+ *  `balanced`/`balanced2`/`local`/`local2`/`max` aliases narrow the surface.
  */
 export type LaunchProfileId =
   | "standard"
@@ -224,17 +224,18 @@ export const BALANCED2_PROFILE: LaunchProfileDescriptor = Object.freeze({
  * coordinator), with every role's model swapped for the local endpoint's tier
  * id.
  *
- * A local launch runs no Copilot model at all, so every group whose tools
- * spawn one is absent: `workers` (the Pi workers resolve Copilot models) and
- * every group built for model ties. `peers` is permitted only because the
- * artifact tools live there and human review is not model inference, and the
- * empty allow-list means no persona is listed or callable: with the artifact
- * panel off the group holds nothing and neither launcher publishes it. What remains is the
- * surface that is not a model call — `search` (in-process lexical/ColBERT plus
- * the PAT-backed web search), `browser` (a local extension), and the three
- * Azure data groups. The egress guard in `copilot-model-policy.ts` enforces the
- * same rule from the other side, so a path that somehow reaches Copilot still
- * refuses.
+ * No agent turn on a local launch reaches a Copilot model, so every group
+ * whose tools spawn one is absent: `workers` (the Pi workers resolve Copilot
+ * models) and every group built for model ties. `peers` is permitted only
+ * because the artifact tools live there and human review is not model
+ * inference, and the empty allow-list means no persona is listed or callable:
+ * with the artifact panel off the group holds nothing and neither launcher
+ * publishes it. What remains is the surface that is not an agent model call —
+ * `search` (in-process lexical/ColBERT plus the PAT-backed web search),
+ * `browser` (a local extension, whose page compressor is the one model-backed
+ * exception and carries its own fixed chain), and the three Azure data groups.
+ * The egress guard in `copilot-model-policy.ts` enforces the same rule from
+ * the other side, so a path that somehow reaches Copilot still refuses.
  */
 export const LOCAL_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "local",
@@ -247,8 +248,9 @@ export const LOCAL_PROFILE: LaunchProfileDescriptor = Object.freeze({
 /**
  * The `-m local2` roster: `local` plus the curated `gpt-6.1-sol`/high Advisor.
  * The Advisor and the Oracle are the only two Copilot consumers the profile
- * has, so `peers` returns for the Oracle while `workers` stays absent with
- * `local` — a Pi worker is neither of the two exceptions.
+ * has, so `peers` gains the Oracle persona next to the model-free artifact
+ * tools. `workers` stays absent as on `local`: a Pi worker is neither of the
+ * two exceptions.
  */
 export const LOCAL2_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "local2",

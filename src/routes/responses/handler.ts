@@ -6,6 +6,7 @@ import consola from "consola"
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { extractAndRecordAic, extractAndRecordPricedAic } from "~/lib/aic-ledger"
 import { awaitApproval } from "~/lib/approval"
+import { assertCopilotModelAllowed } from "~/lib/copilot-model-policy"
 import { HTTPError } from "~/lib/error"
 import { logEndpointMismatch } from "~/lib/model-validation"
 import { normalizeOpenAIUsage } from "~/lib/prompt-cache"
@@ -522,6 +523,12 @@ export async function handleResponsesCompact(c: Context) {
   if (state.manualApprove) await awaitApproval()
 
   const body = await c.req.json<CompactRequestPayload>()
+
+  // The native compact endpoint is an inference egress like any other, so it
+  // answers to the process-wide profile policy. The 404 fallback needs no
+  // separate check: `syntheticCompact` goes through `createResponses`, which
+  // asserts already.
+  assertCopilotModelAllowed(body.model)
 
   // Try Copilot's native compact endpoint first (future-proofs for when they add support)
   const compactUrl = `${copilotBaseUrl(state)}/responses/compact`

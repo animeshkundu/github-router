@@ -1687,7 +1687,7 @@ async function handleToolsCall(
       toolNameHttp: "oracle",
       model: oracleModel,
       endpoint: oracleEndpoint,
-      description: "Fast/cheap-profile Oracle",
+      description: "Oracle: self-contained consultant",
       baseInstructions: `You are Oracle, an expert architectural and technical consultant running on ${displayModelName(oracleModel)}. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.`,
       agentPrompt: "",
       writeCapable: false,

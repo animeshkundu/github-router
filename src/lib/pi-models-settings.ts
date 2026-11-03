@@ -1,4 +1,4 @@
-import { CHEAPEST_CONSULT_CONTRACT } from "./claude-md-injection"
+import { FRESH_CONSULT_CONTRACT } from "./claude-md-injection"
 import { profileDescriptor } from "./launch-profile"
 import { LOCAL_PROFILE_TIER_MODELS } from "./local-profile-contract"
 import { LAUNCH_SECRET_HEADER } from "./messages-identity-preflight"
@@ -1459,10 +1459,14 @@ export function buildPiAppendSystem(
     // the launcher owns — APPEND_SYSTEM.md IS the digest, and the mirror's
     // AGENTS.md is bridge-synthesized PROJECT guidance, not ours — so a
     // pointer here would send the lead looking for a file that does not
-    // exist. The full contract rides the digest instead; it is the same
-    // exported constant the Claude directive uses, which is the property that
-    // actually matters: the two front-ends cannot drift.
-    lines.push("", CHEAPEST_CONSULT_CONTRACT.trimEnd());
+    // exist. The full contract rides the digest instead; it is the FRESH
+    // variant of the same text the Claude directive uses, which is the
+    // property that actually matters: the consult policy cannot drift
+    // between the two front-ends. What does differ is the transport, and it
+    // has to: Pi's `advisor` subagent is `defaultContext: fresh` with a
+    // read-only toolset, so it reads only the brief the lead writes, while
+    // the Claude path forwards a curated transcript view.
+    lines.push("", FRESH_CONSULT_CONTRACT.trimEnd());
   }
   lines.push("", `(${PI_MIN_VERSION_NOTE})`, "");
   return lines.join("\n");

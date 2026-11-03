@@ -475,7 +475,40 @@ function captureStreamFetch(): StreamCaptured[] {
   return captured
 }
 
-function streamingRequestOptions(agentId?: string) {
+// The curated "small digest" prompt: a brief assistant turn gives it a
+// `<caller_context>` layer, and a large tool result gives it something to
+// truncate.
+const OVERSIZED_TOOL_RESULT = "tool-output ".repeat(200_000)
+
+function curatedDigestBody(): string {
+  return JSON.stringify({
+    model: "opus",
+    max_tokens: 100,
+    stream: true,
+    messages: [
+      { role: "user", content: "Review this change." },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "BRIEF: check the retry loop." }],
+      },
+      {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_big", content: OVERSIZED_TOOL_RESULT },
+        ],
+      },
+    ],
+    tools: [
+      {
+        name: "Read",
+        description: "Read a file",
+        input_schema: { type: "object", properties: {} },
+      },
+    ],
+  })
+}
+
+function streamingRequestOptions(agentId?: string, body: string = streamingLeadBody()) {
   return {
     method: "POST" as const,
     headers: {
@@ -485,7 +518,7 @@ function streamingRequestOptions(agentId?: string) {
       "x-claude-code-session-id": SESSION_ID,
       ...(agentId ? { "x-claude-code-agent-id": agentId } : {}),
     },
-    body: streamingLeadBody(),
+    body,
   }
 }
 
@@ -530,6 +563,41 @@ describe("local2 advisor dispatch", () => {
       if (call.url.includes("/responses")) {
         expect(call.url.startsWith(LOCAL_BASE)).toBe(false)
       }
+    }
+  })
+
+  test("lead and reviewer both consult the curated digest, not a transcript dump", async () => {
+    // Requirement F: `local2` is `cheapest2`'s Advisor on a local lead, so both
+    // grants go through the same small-digest path - the layered
+    // `<operator_focus>` / `<caller_context>` wrapper over a bounded,
+    // tool-aware transcript. Without this pin the reviewer could quietly fall
+    // back to the raw transcript while the lead kept the digest.
+    for (const agentId of [undefined, "reviewer"]) {
+      register("local2")
+      const captured = captureStreamFetch()
+
+      const response = await server.request(
+        "/v1/messages",
+        streamingRequestOptions(agentId, curatedDigestBody()),
+      )
+      expect(response.status).toBe(200)
+      expect(await response.text()).toContain("advisor_tool_result")
+
+      const advisorCall = captured.find((call) => call.url.includes("/responses"))
+      expect(advisorCall).toBeDefined()
+      const input = advisorCall!.body.input as Array<{
+        content: Array<{ text?: string }>
+      }>
+      const text = String(input[0]?.content[0]?.text ?? "")
+
+      expect(text).toContain("<operator_focus>\nReview this change.\n</operator_focus>")
+      expect(text).toContain("<caller_context>\nBRIEF: check the retry loop.\n</caller_context>")
+      expect(text).toContain("<session_transcript")
+      expect(text).toContain("<operator_focus_restated>")
+      // The transcript is budgeted, so the oversized tool result cannot ride
+      // along whole: the consult is a digest, not a dump.
+      expect(OVERSIZED_TOOL_RESULT.length).toBeGreaterThan(2_000_000)
+      expect(text.length).toBeLessThan(400_000)
     }
   })
 

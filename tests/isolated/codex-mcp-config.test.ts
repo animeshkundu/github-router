@@ -1149,18 +1149,19 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents.reviewer!.effort).toBe("max")
     })
 
-    test("no emitted role carries a router-owned alias, browse worker included", () => {
+    test("no emitted role carries a router-owned alias, and no browse worker at all", () => {
       // Local egress forwards the body model verbatim, so a `gh-router-*`
       // alias would reach the local server unresolved. Cheapest pins
-      // BROWSE_LOW_ALIAS_ID for worker-browse; local must not.
+      // BROWSE_LOW_ALIAS_ID for worker-browse; local emits no such agent.
       const agents = buildLocalAgents({ browseAvailable: true })
-      expect(agents["worker-browse"]).toBeDefined()
       for (const [name, def] of Object.entries(agents)) {
         expect(`${name}:${def.model ?? ""}`).not.toContain("gh-router-")
       }
-      expect(agents["worker-browse"]!.model).toBe("haiku")
-      expect(agents["worker-browse"]!.effort).toBe("low")
-      expect(agents["worker-browse"]!.tools).toEqual(["mcp__workers__*"])
+      // `worker-browse` is a Pi worker, and a worker answers on a Copilot
+      // model, which these profiles forbid a subagent to do. The browser
+      // capability itself is the `browser` group's model-free tools, so
+      // browse being enabled must not resurrect the worker.
+      expect(agents["worker-browse"]).toBeUndefined()
     })
 
     test("protege advisor appendix only when the launch has an Advisor", () => {

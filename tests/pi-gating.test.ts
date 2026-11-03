@@ -18,6 +18,7 @@ import {
 import {
   CHEAPEST_CONSULT_CONTRACT,
   CHEAPEST_CONSULT_CONTRACT_POINTER,
+  FRESH_CONSULT_CONTRACT,
 } from "~/lib/claude-md-injection"
 import type { ModelsResponse } from "~/services/copilot/get-models"
 
@@ -275,14 +276,20 @@ describe("pi --search owns the search skill prose", () => {
   })
 })
 
-describe("pi cheapest digest carries the shared consult contract", () => {
-  test("the contract text is the same constant the Claude directive uses", () => {
+describe("pi cheapest digest carries the fresh consult contract", () => {
+  test("the digest carries the fresh variant and not the curated-transcript one", () => {
     const digest = buildPiAppendSystem("cheapest")
     // Asserting the IMPORT rather than a copy: the two front-ends must not be
     // able to drift, and a re-typed sentence here would pass a containment
     // check while quietly diverging from the Claude side.
-    expect(digest).toContain(CHEAPEST_CONSULT_CONTRACT.trimEnd())
+    expect(digest).toContain(FRESH_CONSULT_CONTRACT.trimEnd())
     expect(digest).toContain("the shortest path, what to consider")
+    // Pi's `advisor` subagent is `defaultContext: fresh` with a read-only
+    // toolset, so it never sees the lead's conversation. Promising a curated
+    // view of the session would tell the lead to under-write the brief.
+    expect(digest).not.toContain(CHEAPEST_CONSULT_CONTRACT)
+    expect(digest).not.toContain("reads a curated view of this session")
+    expect(digest).toContain("the Advisor reads only what you write")
     // The pointer is Claude-specific: it ends by telling the reader the full
     // how-to is in their CLAUDE.md, which Pi does not load. If it ever appears
     // in a Pi digest, the lead is being sent after a file that is not there.
@@ -293,12 +300,12 @@ describe("pi cheapest digest carries the shared consult contract", () => {
     // The balanced family has no advisor, so it has no consult budget to
     // describe — balanced2 derives that property rather than re-declaring it.
     for (const profileId of ["balanced", "balanced2"] as const) {
-      expect(buildPiAppendSystem(profileId)).not.toContain(CHEAPEST_CONSULT_CONTRACT)
+      expect(buildPiAppendSystem(profileId)).not.toContain(FRESH_CONSULT_CONTRACT)
     }
     // Peerless cheapest has no advisor either.
     for (const profileId of ["cheapest", "cheapest2"] as const) {
       expect(buildPiAppendSystem(profileId, { peers: false })).not.toContain(
-        CHEAPEST_CONSULT_CONTRACT,
+        FRESH_CONSULT_CONTRACT,
       )
     }
   })

@@ -15,7 +15,8 @@
 //     that lost its launch header still routes local;
 //   - the `browse` carve-out is exactly one surface and does not widen agent
 //     turns;
-//   - each of the four Copilot egress functions refuses before any fetch.
+//   - every Copilot egress refuses before any fetch, the two ad-hoc ones
+//     (`/v1/embeddings`, `/v1/responses/compact`) included.
 //
 // The bearer channel (`writeLaunchBoundSyntheticCredential` →
 // `Authorization: Bearer github-router-launch:<secret>`) is the only identity
@@ -49,7 +50,9 @@ import {
   runMessagesIdentityPreflight,
 } from "~/lib/messages-identity-preflight"
 import { state } from "~/lib/state"
+import { handleResponsesCompact } from "~/routes/responses/handler"
 import { createChatCompletions } from "~/services/copilot/create-chat-completions"
+import { createEmbeddings } from "~/services/copilot/create-embeddings"
 import { countTokens, createMessages } from "~/services/copilot/create-messages"
 import { createResponses } from "~/services/copilot/create-responses"
 import {
@@ -66,6 +69,15 @@ function body(model: string) {
 
 function chatPayload(model: string) {
   return { model, messages: [{ role: "user" as const, content: "hi" }] }
+}
+
+/** The slice of a Hono context `handleResponsesCompact` touches before it
+ *  reaches its first fetch. */
+function compactContext(payload: unknown) {
+  return {
+    req: { json: async () => payload, path: "/v1/responses/compact" },
+    json: (value: unknown, status = 200) => new Response(JSON.stringify(value), { status }),
+  } as never
 }
 
 beforeEach(() => {
@@ -216,11 +228,14 @@ describe("isCopilotModelAllowedUnder", () => {
     }
   })
 
-  test("the browse surface does not widen the family ceiling", () => {
-    // `local`'s carve-out is about the browser compressor answering at all;
-    // `local2` still bills Copilot, so a browse call is held to sol/luna.
-    expect(isCopilotModelAllowedUnder(families, "claude-opus-5.5", "browse")).toBe(false)
-    expect(isCopilotModelAllowedUnder(families, "gpt-6-luna", "browse")).toBe(true)
+  test("the browse surface is exempt from the family ceiling too", () => {
+    // The exemption is complete rather than a narrowing of the ban: the page
+    // compressor's chain is fixed and short, so a browse call may name any
+    // entry in it on either local profile. Binding it to the ceiling would
+    // make the backend depend on which launch happens to be registered.
+    expect(isCopilotModelAllowedUnder(families, "claude-opus-5.5", "browse")).toBe(true)
+    expect(isCopilotModelAllowedUnder(families, "gpt-5.4-mini", "browse")).toBe(true)
+    expect(isCopilotModelAllowedUnder(forbidden, "gpt-5.4-mini", "browse")).toBe(true)
   })
 })
 
@@ -285,6 +300,14 @@ describe("Copilot egress refuses before it fetches", () => {
     ).rejects.toThrow(CopilotModelRestrictedError)
     await expect(createMessages(body("claude-opus-5.5"))).rejects.toThrow(CopilotModelRestrictedError)
     await expect(countTokens(body("claude-opus-5.5"))).rejects.toThrow(CopilotModelRestrictedError)
+    await expect(
+      createEmbeddings({ model: "text-embedding-3-small", input: "hi" }),
+    ).rejects.toThrow(CopilotModelRestrictedError)
+    // `/v1/responses/compact` talks to Copilot through a raw fetch of its own,
+    // so it carries its own assert rather than inheriting one from a service.
+    await expect(
+      handleResponsesCompact(compactContext({ model: "claude-opus-5.5", input: [] })),
+    ).rejects.toThrow(CopilotModelRestrictedError)
 
     // Not one of them reached the network.
     expect(fetchCalls).toBe(0)
@@ -359,26 +382,34 @@ function catalogModel(id: string, endpoints: Array<string>) {
   }
 }
 
-describe("browser compressor picks a policy-legal backend", () => {
-  const genericChain = [
+describe("browser compressor picks the same backend on every launch profile", () => {
+  const catalog = [
     catalogModel("gpt-5.4-mini", ["/v1/responses"]),
     catalogModel("claude-sonnet-4.6", ["/v1/chat/completions"]),
-    catalogModel("claude-haiku-4.5", ["/v1/chat/completions"]),
     catalogModel("gpt-6-luna", ["/v1/chat/completions"]),
   ]
 
-  test("`local` keeps the generic chain: the browse surface is carved out", () => {
-    registerLaunch({ profileId: "local", nonce: "t".repeat(64), secret: "st" })
-    state.models = { object: "list", data: genericChain } as never
-    expect(pickBackendFromCatalog()).toBe("gpt-5.4-mini")
+  test("every profile, local pair included, prefers gpt-5.4-mini", () => {
+    for (const profileId of [undefined, "fast", "cheapest2", "balanced2", "local", "local2"] as const) {
+      clearLaunchRegistry()
+      __resetCompressorBackendForTests()
+      if (profileId) registerLaunch({ profileId, nonce: "t".repeat(64), secret: `s-${profileId}` })
+      state.models = { object: "list", data: catalog } as never
+      expect(pickBackendFromCatalog()).toBe("gpt-5.4-mini")
+    }
   })
 
-  test("`local2` skips every out-of-family entry", () => {
-    registerLaunch({ profileId: "local2", nonce: "s".repeat(64), secret: "ss" })
-    state.models = { object: "list", data: genericChain } as never
-    // None of the generic chain is sol/luna, so the filtered list falls back
-    // to the cheap tier the profile can bill.
-    expect(pickBackendFromCatalog()).toBe("gpt-6-luna")
+  test("the chain falls back to gpt-6-luna when mini is absent from the catalog", () => {
+    for (const profileId of [undefined, "local", "local2"] as const) {
+      clearLaunchRegistry()
+      __resetCompressorBackendForTests()
+      if (profileId) registerLaunch({ profileId, nonce: "u".repeat(64), secret: `s2-${profileId}` })
+      state.models = {
+        object: "list",
+        data: catalog.filter((model) => model.id !== "gpt-5.4-mini"),
+      } as never
+      expect(pickBackendFromCatalog()).toBe("gpt-6-luna")
+    }
   })
 })
 

@@ -805,9 +805,15 @@ export function buildPeerAwarenessSnippet(opts: {
     const escalationOracle = hasOracle
       ? ` \`mcp__${fastPeersKey}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle, available to the lead; \`reviewer\` and other subagents cannot call Oracle.`
       : ""
+    // The cheapest family and `local2` grant `reviewer` a capped Advisor (at
+    // most 5 rounds per review), so "lead-only" is false on those launches.
+    const advisorReviewerGranted = hasAdvisor && (isCheapest || isLocal)
+    const advisorSoundboard = advisorReviewerGranted
+      ? "Advisor is an optional, non-binding, transcript-aware sounding board available to the lead and `reviewer` (at most 5 rounds per review) for trajectory guidance, framing checks, or conflicting signals (direction, not dictation), not routine progress, waiting, verification, or completion."
+      : "Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance, framing checks, or conflicting signals (direction, not dictation), not routine progress, waiting, verification, or completion."
     const escalationClause = !hasAdvisor
       ? escalationOpener + `\`mcp__${fastSearchKey}__code\` + \`mcp__${fastSearchKey}__web\` search first (narrow scope, rule out hypotheses), then \`Explore\` for targeted breadth.` + escalationOracle + astraClause
-      : `This is the ${profileLabel} launch profile. Follow an evidence-first escalation ladder: settle factual claims directly through code, tests, and builds. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance, framing checks, or conflicting signals (direction, not dictation), not routine progress, waiting, verification, or completion. \`mcp__${fastPeersKey}__oracle\` is ${oracleDescriptor}, an expert consultant ${isCheapest || isLocal ? "available to the lead" : "available to the lead and `Plan`"}, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle.${astraClause}`
+      : `This is the ${profileLabel} launch profile. Follow an evidence-first escalation ladder: settle factual claims directly through code, tests, and builds. ${advisorSoundboard} \`mcp__${fastPeersKey}__oracle\` is ${oracleDescriptor}, an expert consultant ${isCheapest || isLocal ? "available to the lead" : "available to the lead and `Plan`"}, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle.${astraClause}`
     // `worker-browse` is emitted only when browse is on AND the launch carries
     // the workers group, so a delegation graph must not name it otherwise; same
     // predicate as `workerBrowseClause`.
@@ -1055,6 +1061,9 @@ export function buildPeerAwarenessSummary(opts: {
     // `local` runs no Copilot model, so it has no Oracle either: its launch
     // carries no `peers` group and nothing that could answer one.
     const hasOracle = !(isLocal && opts.profile === "local")
+    // The cheapest family and `local2` grant `reviewer` a capped Advisor (at
+    // most 5 rounds per review), so "lead-only" is false on those launches.
+    const advisorReviewerGranted = hasAdvisor && (isCheapest || isLocal)
     const profileLabel =
       isCheapest || isBalanced || isLocal
         ? opts.profile.charAt(0).toUpperCase() + opts.profile.slice(1)
@@ -1102,7 +1111,7 @@ export function buildPeerAwarenessSummary(opts: {
       : ""
     const peerLine = !hasAdvisor
       ? summaryOracle + `\`mcp__${key("search")}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search with visible no-fallback errors and local exact/regex/AST" : opts.semanticSearchAvailable === true ? "local ColBERT semantic search with lexical fallback" : "local lexical search"}; \`mcp__${key("search")}__web\` provides web search.${browserClause}${workerBrowseClause}${artifactClause}`
-      : `Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation). \`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, an expert consultant for ${isCheapest || isLocal ? "the lead" : "the lead and `Plan`"}, preferred over advisor for substantive trade-offs.${astraClause} \`mcp__${key("search")}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search with visible no-fallback errors and local exact/regex/AST" : opts.semanticSearchAvailable === true ? "local ColBERT semantic search with lexical fallback" : "local lexical search"}; \`mcp__${key("search")}__web\` provides web search.${browserClause}${workerBrowseClause}${artifactClause}`
+      : `${advisorReviewerGranted ? "Advisor is optional, non-binding, transcript-aware, and available to the lead and `reviewer` (at most 5 rounds per review) for trajectory guidance or framing checks (direction, not dictation)." : "Advisor is optional, non-binding, transcript-aware, and lead-only for trajectory guidance or framing checks (direction, not dictation)."} \`mcp__${key("peers")}__oracle\` is ${oracleDescriptor}, an expert consultant for ${isCheapest || isLocal ? "the lead" : "the lead and `Plan`"}, preferred over advisor for substantive trade-offs.${astraClause} \`mcp__${key("search")}__code\` provides ${opts.bluebirdEnabled === true ? "Bluebird semantic + lexical search with visible no-fallback errors and local exact/regex/AST" : opts.semanticSearchAvailable === true ? "local ColBERT semantic search with lexical fallback" : "local lexical search"}; \`mcp__${key("search")}__web\` provides web search.${browserClause}${workerBrowseClause}${artifactClause}`
     // `worker-browse` is emitted only when browse is on AND the launch carries
     // the workers group, so the summary must not name it otherwise; same
     // predicate as `workerBrowseClause` above.

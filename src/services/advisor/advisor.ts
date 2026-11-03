@@ -592,13 +592,13 @@ Never consult for routine verification, progress narration, reassurance, or comp
 
 export const CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS =
   buildCheapestReviewerAdvisorToolInstructions(
-    "a stronger cross-lab model that sees your full transcript",
+    "a stronger cross-lab model that sees the brief you write plus a bounded transcript",
   )
 
 /** `local2` reviewer variant. */
 export const LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS =
   buildCheapestReviewerAdvisorToolInstructions(
-    "a Copilot-served model that sees your full transcript",
+    "a Copilot-served model that sees the brief you write plus a bounded transcript",
   )
 
 /** Hard cap on Advisor loop rounds per cheapest-reviewer invocation (vs the
@@ -1534,8 +1534,13 @@ async function runAdvisor(
     )
   }
   if (cheapProfile) {
+    // The curated protégé consult overrides the cheap profile's 200K cap with
+    // its own budget below, so report what this call actually used.
+    const transcriptCap = cheapestProfile
+      ? `${resolveCheapestAdvisorTranscriptTokens()} tokens (curated digest)`
+      : "200K"
     consola.warn(
-      `cheap Advisor dispatch: model=${resolvedAdvisorModel} transport=${transport} effort=${advisorEffort} transcriptCap=200K`,
+      `cheap Advisor dispatch: model=${resolvedAdvisorModel} transport=${transport} effort=${advisorEffort} transcriptCap=${transcriptCap}`,
     )
   }
 

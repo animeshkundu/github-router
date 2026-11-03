@@ -21,7 +21,6 @@ import {
 import {
   LOCAL_PROFILE_NATIVE_AGENT_NAMES,
   LOCAL_PROFILE_NATIVE_MODELS,
-  LOCAL_PROFILE_TIER_MODELS,
 } from "./local-profile-contract"
 import {
   BALANCED_PROFILE_NATIVE_AGENT_NAMES,
@@ -1018,7 +1017,12 @@ function pinnedReviewerDescription(explicit: boolean, isBalanced = false, is200K
  *  the consultant is the stronger cross-lab model, but a `local` launch bills
  *  an endpoint whose model the proxy knows nothing about, so the only claim it
  *  can make is who serves the consultant. Same builder, so the behavioural
- *  contract cannot drift between the two. */
+ *  contract cannot drift between the two.
+ *
+ *  Both framings describe the curated transport, not a full transcript: the
+ *  reviewer's consult is rendered by the curated path (24K transcript budget,
+ *  tool-aware, layered under `<operator_focus>` / `<caller_context>`), so
+ *  promising the whole transcript would overstate what the advisor sees. */
 function buildProtegeAdvisorAppendix(framing: string): string {
   return "You have an `advisor` tool backed by Sol, " + framing + ". "
   + "You own the verdict; the advisor is counsel, never authority — it never approves, vetoes, or decides for you. "
@@ -1029,11 +1033,11 @@ function buildProtegeAdvisorAppendix(framing: string): string {
 }
 
 const PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
-  "a stronger cross-lab model that sees your full transcript",
+  "a stronger cross-lab model that sees the ask, the brief you write, and a bounded transcript",
 )
 
 const LOCAL_PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
-  "a Copilot-served model that sees your full transcript",
+  "a Copilot-served model that sees the ask, the brief you write, and a bounded transcript",
 )
 
 function pinnedReviewerPrompt(
@@ -1445,6 +1449,12 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
  * appendix, which names an `advisor` tool. It is emitted only when the launch
  * actually has an Advisor (`local2`): naming a tool that does not exist is the
  * failure mode the droppable-agent rule exists to prevent.
+ *
+ * Unlike cheapest, this roster never includes `worker-browse`, even when browse
+ * is enabled. `worker-browse` is a Pi worker and a worker answers on a Copilot
+ * model, which is the one thing these profiles forbid a subagent to do. The
+ * browser CAPABILITY does not depend on it: the `browser` group's own
+ * `browser_*` tools are model-free and are published on both profiles.
  */
 function buildLocalProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
   const exploreModel = opts.localExploreModel ?? LOCAL_PROFILE_NATIVE_MODELS.Explore
@@ -1500,39 +1510,13 @@ function buildLocalProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
     },
   }
 
-  if (opts.browseAvailable && opts.groupKeys.workers) {
-    const workersKey = workersKeyOf(opts.groupKeys)
-    out["worker-browse"] = {
-      description: dispatcherDescription("browse"),
-      prompt: dispatcherPrompt("browse", workersKey),
-      // Amended from cheapest, which pins BROWSE_LOW_ALIAS_ID: local egress is
-      // byte-faithful, so the alias would be forwarded verbatim and the local
-      // server has never heard of it. The cheapest tier is the local haiku.
-      model: LOCAL_PROFILE_TIER_MODELS.haiku,
-      effort: "low",
-      tools: dispatcherTools("browse", workersKey),
-      ...(opts.serverUrl
-        ? {
-            mcpServers: {
-              [workersKey]: httpEntryFor(
-                opts.serverUrl,
-                "workers",
-                opts.nonce,
-                opts.workspaceHeaderCmd,
-              ),
-            },
-          }
-        : {}),
-    }
-  }
-
   const roster = opts.nativeRoster == null
     ? new Set<string>(LOCAL_PROFILE_NATIVE_AGENT_NAMES)
     : opts.nativeRoster instanceof Set
       ? opts.nativeRoster
       : new Set(opts.nativeRoster)
   for (const name of Object.keys(out)) {
-    if (name !== "worker-browse" && !roster.has(name)) delete out[name]
+    if (!roster.has(name)) delete out[name]
   }
   return out
 }

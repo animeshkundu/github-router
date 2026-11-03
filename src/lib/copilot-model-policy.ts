@@ -16,12 +16,15 @@
  * `stand_in`, the orchestration tools, and the Pi worker runtime (whose
  * `stream-fn` imports the same services).
  *
- * `local` allows no Copilot model inference at all. `local2` allows the two
- * families its Advisor and Oracle use, `sol` and `luna`. The non-model Copilot
- * services are untouched: `web` search goes through Copilot's MCP endpoint with
- * the GitHub PAT, and the browser tools drive a local extension. The one
- * model-backed exception is the browser compressor, which `local` keeps so the
- * compound browse tools can answer at all; see `CopilotEgressSurface`.
+ * `local` allows no Copilot model inference on an agent turn at all. `local2`
+ * allows the two families `sol` and `luna`. The non-model Copilot services are
+ * untouched: `web` search goes through Copilot's MCP endpoint with the GitHub
+ * PAT, and the browser tools drive a local extension.
+ *
+ * The one model-backed exception is the browser page compressor, which runs on
+ * both profiles so the compound browse tools can answer at all. It is exempt
+ * from the profile ceiling entirely and bounded by its own fixed chain instead;
+ * see `CopilotEgressSurface`.
  */
 
 import { isLocalFamily, type LocalProfileId } from "./profile-family"
@@ -39,9 +42,16 @@ export type CopilotModelPolicy =
 
 /**
  * The hardcoded Copilot allow-list for `-m local2`: the Advisor and the Oracle
- * both run on `gpt-6.1-sol`, and `luna` is admitted so the worker tools and the
- * Pi runtime have a cheap tier to fall back to. Anything else a teammate or a
- * `/model` switch names is refused.
+ * both run on `gpt-6.1-sol`, and `luna` is the cheap tier of the same declared
+ * ceiling. Anything else a teammate or a `/model` switch names is refused.
+ *
+ * `luna`'s one Copilot consumer on this profile is the browser page
+ * compressor, whose fixed chain falls back to `gpt-6-luna` when
+ * `gpt-5.4-mini` is absent from the catalog. That surface is exempt from the
+ * ceiling, so the entry is not what admits it; it keeps the two lists agreeing
+ * if the exemption ever narrows. No other local surface selects Luna: no local
+ * launch publishes the `workers` group. The ceiling stays an operator
+ * decision, so moving it later is a policy change rather than a code change.
  */
 export const LOCAL2_COPILOT_MODEL_FAMILIES: ReadonlySet<string> = new Set(["sol", "luna"])
 
@@ -123,19 +133,23 @@ export function copilotModelFamily(modelId: string): string {
 }
 
 /**
- * The one non-agent surface `-m local` carves out of the ban.
+ * The one non-agent surface carved out of the profile policy entirely.
  *
  * The browser tools drive a local extension, but the compound ones (`find`,
  * `act`, `observe`, `extract`) hand page content to a Copilot model and ask for
  * a structured result. Without the carve-out those tools would be listed on a
  * `local` launch and then refuse every call, which is a worse outcome than the
  * model call itself: the surface would advertise a capability it cannot serve.
- * The carve-out is deliberately a named surface rather than an unconditional
- * bypass, so any future caller has to state that it is the browser surface.
  *
- * `local2`'s family ceiling still applies here: a browse call may only name a
- * model in `LOCAL2_COPILOT_MODEL_FAMILIES`, which is why the compressor picks
- * its backend against the active policy.
+ * The exemption is complete, not a narrowing of the ban: a browse call may name
+ * any model in the compressor's own chain, on `local` and `local2` alike. Two
+ * reasons. The chain is fixed and short (see `COMPRESSOR_FALLBACK_CHAIN`), so
+ * the blast radius is a single cheap model rather than "whatever a teammate
+ * names"; and binding the page compressor to a per-profile ceiling made the
+ * backend depend on which launch happened to be registered, which is not a
+ * property the browser surface should have. This is deliberately a named
+ * surface rather than an unconditional bypass, so any future caller has to
+ * state that it is the browser surface.
  */
 export type CopilotEgressSurface = "browse"
 
@@ -145,8 +159,9 @@ export function isCopilotModelAllowedUnder(
   modelId: string,
   surface?: CopilotEgressSurface,
 ): boolean {
+  if (surface === "browse") return true
   if (policy.kind === "unrestricted") return true
-  if (policy.kind === "forbidden") return surface === "browse"
+  if (policy.kind === "forbidden") return false
   return policy.families.has(copilotModelFamily(modelId))
 }
 

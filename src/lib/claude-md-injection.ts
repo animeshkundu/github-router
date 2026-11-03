@@ -314,7 +314,7 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
         "`Explore` (Luna/high, cheap breadth) for discovery, dependency mapping, and convention tracking spanning more than a couple of files",
         "`General-Purpose` (Luna/max, the heavy execution tier) for mixed, iterative, or multi-step execution",
         "`reviewer` (Luna/max, the heavy verification tier) for independent adversarial verification, reproduction, and root-causing",
-      ]) + ". Delegate by value — cheap breadth to `Explore`, heavy execution to `General-Purpose`, verification to `reviewer`. All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
+      ]) + ". Delegate by value — cheap breadth to `Explore`, heavy execution to `General-Purpose`, verification to `reviewer`"
     }
     // Local: same three-role roster and the same split of duty as cheapest, but
     // the model labels are the local endpoint's OWN tier ids rather than Copilot
@@ -330,7 +330,7 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
         `\`Explore\` (${models.Explore} tier) for discovery, dependency mapping, and convention tracking spanning more than a couple of files`,
         `\`General-Purpose\` (${models["General-Purpose"]} tier) for mixed, iterative, or multi-step execution`,
         `\`reviewer\` (${models.reviewer} tier) for independent adversarial verification, reproduction, and root-causing`,
-      ]) + ". Delegate by value — wide breadth to `Explore`, execution to `General-Purpose`, verification to `reviewer`. All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
+      ]) + ". Delegate by value — wide breadth to `Explore`, execution to `General-Purpose`, verification to `reviewer`"
     }
     // Balanced: lead owns planning, implementation, verification by default —
     // only the reviewer is gated behind genuine need.
@@ -339,7 +339,7 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
         "`Explore` for broad repository discovery, dependency mapping, and convention tracking (launch in parallel)",
         "`General-Purpose` for mixed, iterative, or multi-step execution tasks (delegate freely)",
         "`reviewer` for independent adversarial verification, reproduction, and root-causing ONLY when genuinely behavior-changing (lead owns verification by default)",
-      ]) + ". All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads"
+      ])
     }
     const shared = joinClauses([
       "`Explore` for broad repository discovery, dependency mapping, and convention tracking (launch in parallel)",
@@ -348,13 +348,9 @@ function buildNativeReachClauses(opts: NativeAgentAvailability): string {
       "`reviewer` for independent adversarial verification, reproduction, and root-causing after non-trivial changes",
     ])
     // 200K profiles only: fast keeps 1M throughout. cheap1m's lead is 1M
-    // but every subagent is 200K, so it gets the subagent-scoped variant.
-    if (opts.profile === "cheap") {
-      return `${shared}. All roles run at a 200K context window — prefer targeted reads (search, Grep, Read specific files) over full file reads`
-    }
-    if (opts.profile === "cheap1m") {
-      return `${shared}. Subagents run at a 200K context window — brief them with targeted evidence and prefer targeted reads over full file reads`
-    }
+    // but every subagent is 200K. The window statement itself lives in
+    // `windowNote`, which every pinned directive appends right after this
+    // clause, so restating it here would print it twice in one paragraph pair.
     return shared
   }
   const clauses: Array<string> = []
@@ -501,14 +497,34 @@ export const CHEAPEST_CONSULT_CONTRACT_POINTER =
   "Consulting `advisor`/`oracle` (small budget, ~8-10 calls — choose wisely): use them for how/what — shortest path, what to consider, planning, strategy, direction — never for anything a search, read, or run settles, nor for routine progress, reassurance, or completion ritual; do not spend one where `reviewer` (verification) or `oracle` (a self-contained technical trade-off) owns the moment. Full how-to (when to spend, the call brief, the discriminator) is in your CLAUDE.md project instructions.\n\n"
 
 /**
- * Oracle-only sibling of `CHEAPEST_CONSULT_CONTRACT` for the `-m local` launch
- * profile, which is Advisor-free by design.
+ * Transport sibling of `CHEAPEST_CONSULT_CONTRACT` for a front-end whose
+ * consultant receives no transcript at all.
+ *
+ * The body is the cheapest contract's, with the one transport sentence
+ * replaced: instead of "Sol reads a curated view of this session", the lead is
+ * told to make the brief self-contained because the Advisor reads only what
+ * the lead writes. Everything else — budget, anchors, disqualifiers,
+ * discriminator — is identical, so the consult policy cannot drift between
+ * the two front-ends.
+ *
+ * Used by the Pi launcher, whose `advisor` subagent is `defaultContext:
+ * fresh` with a read-only toolset: it never sees the lead's conversation, so
+ * the curated-view sentence would be false there. The Claude launcher keeps
+ * `CHEAPEST_CONSULT_CONTRACT`, which describes what its curated path really
+ * sends.
+ */
+export const FRESH_CONSULT_CONTRACT =
+  "Consulting `advisor` and `oracle` (a small budget — choose wisely): you have roughly 8-10 advisor calls for this session, and each costs real time and money, so spend them only where direction changes the outcome. Advisor and Oracle give you COUNSEL on HOW — and sometimes WHAT — to do: the shortest path, what to consider or look at, planning, strategy, and direction. They never replace evidence you can gather yourself: anything a search, read, build, test, or run can settle, settle it yourself — never spend a consult on it. Spend a consult on: (1) a pre-commit framing check, after you have oriented but before you lock an approach on a non-trivial task; (2) an unresolvable judgment call — conflicting evidence, or a stale-knowledge / high-consequence risk or severity call; (3) a pre-presentation framing check on the final plan. Do NOT spend one on routine progress, reassurance, completion ritual, or a moment that belongs to `reviewer` (verify/reproduce a change) or `oracle` (a self-contained technical/algorithmic/spec/architectural trade-off). Discriminator: session-trajectory / framing / momentum questions and how-to-approach go to `advisor`; self-contained technical/architectural trade-offs go to `oracle`; verification and reproduction go to `reviewer`; facts go to direct evidence. How to call: make the brief self-contained — the Advisor reads only what you write — so state the objective, your current job, what you verified / suspect is missing / ruled irrelevant, your confidence and what being wrong would cost, and one neutral question phrased with any competing hypotheses. Never paste raw tool output or ask it to \"review the whole thing\". State your confidence after you have committed to a position, not before, and weigh the reply against verified repository evidence — counsel is direction, not dictation, and you own the decision.\n\n"
+
+/**
+ * Oracle-only sibling of `CHEAPEST_CONSULT_CONTRACT` for a launch that carries
+ * an Oracle but no Advisor: the `balanced` family, whose consultant ladder
+ * exposes `oracle` alone.
  *
  * Naming the Advisor there would point the lead at a tool the session cannot
  * reach, so the budget, the anchors and the disqualifiers are restated against
  * `oracle` alone. Everything that is not about the Advisor is the cheapest
- * contract's wording, and `local2` — which does carry an Advisor — keeps the
- * original.
+ * contract's wording, and a launch that carries both keeps the original.
  */
 export const ORACLE_ONLY_CONSULT_CONTRACT =
   "Consulting `oracle` (a small budget — choose wisely): you have roughly 8-10 oracle calls for this session, and each costs real time and money, so spend them only where direction changes the outcome. Oracle gives you COUNSEL on HOW — and sometimes WHAT — to do: the shortest path, what to consider or look at, planning, strategy, and direction. It never replaces evidence you can gather yourself: anything a search, read, build, test, or run can settle, settle it yourself — never spend a consult on it. Spend a consult on: (1) a pre-commit framing check, after you have oriented but before you lock an approach on a non-trivial task; (2) an unresolvable judgment call — conflicting evidence, or a stale-knowledge / high-consequence risk or severity call; (3) a pre-presentation framing check on the final plan. Do NOT spend one on routine progress, reassurance, completion ritual, or a moment that belongs to `reviewer` (verify/reproduce a change). Make the brief self-contained: Oracle reads only what you write, so state the objective, your current job, what you verified / suspect is missing / ruled irrelevant, your confidence and what being wrong would cost, and one neutral question phrased with any competing hypotheses. Never paste raw tool output or ask it to \"review the whole thing\". State your confidence after you have committed to a position, not before, and weigh the reply against verified repository evidence — counsel is direction, not dictation, and you own the decision.\n\n"
@@ -570,9 +586,14 @@ export function buildOperatingDefaultsDirective(
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
-    // `local` runs no Copilot model, so it has no Oracle either: its launch
-    // carries no `peers` group and nothing that could answer one.
+    // `local` runs no Copilot model, so it has no Oracle either: its `peers`
+    // group, when the artifact panel publishes it, carries the human-review
+    // tools only, and nothing else on that launch could answer a consult.
     const hasOracle = !(isLocal && opts.profile === "local")
+    // The cheapest family and `local2` grant `reviewer` a capped Advisor
+    // (at most 5 rounds per review), so "lead-only" is false on those
+    // launches; the surfaces below say who else may consult instead.
+    const advisorReviewerGranted = hasAdvisor && (isCheapest || isLocal)
     const profileLabel = isLocal
       ? "Local"
       : isCheapest
@@ -769,7 +790,10 @@ export function buildOperatingDefaultsDirective(
           ? `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, a second opinion for precise, self-contained architectural/spec trade-offs that search and \`Explore\` cannot settle; available to the lead; \`reviewer\` and other subagents cannot call Oracle. `
           : "")
         + consultCostTail
-      : "Consultation guidance: Follow an evidence-first escalation ladder. Direct empirical evidence (search, code, tests, builds) settles factual questions first. Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance or framing checks (direction, not dictation), and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
+      : "Consultation guidance: Follow an evidence-first escalation ladder. Direct empirical evidence (search, code, tests, builds) settles factual questions first. "
+        + (advisorReviewerGranted
+          ? "Advisor is an optional, non-binding, transcript-aware sounding board available to the lead and `reviewer` (at most 5 rounds per review) for trajectory guidance or framing checks (direction, not dictation), and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. "
+          : "Advisor is an optional, non-binding, lead-only transcript-aware sounding board for trajectory guidance or framing checks (direction, not dictation), and never use it for routine progress, waiting, directly verifiable facts, or completion ritual. ")
         + `\`mcp__${peersKey}__oracle\` is ${oracleDescriptor}, an expert consultant ${oracleLeadOnly ? "available to the lead" : "available to the lead and `Plan`"}, preferred over advisor for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs evaluated in a self-contained brief; \`reviewer\` and other subagents cannot call Oracle. Discriminator: transcript-aware trajectory/framing/momentum → advisor; a self-contained technical/architectural trade-off → Oracle.${isCheapest || isLocal ? "" : " `Plan` may consult Oracle on unresolved trade-offs, and reports any remaining tie-breaking gap to the lead."}${astraClause} `
     return (
       "## Operating defaults (these layer with the user's explicit direction and the domain's own standards as addons, not replacements: follow all three together; on a direct conflict the user's direction wins, then the domain standard, then the default below)\n\n"
@@ -855,9 +879,14 @@ export function buildOperatingDefaultsDigest(
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
-    // `local` runs no Copilot model, so it has no Oracle either: its launch
-    // carries no `peers` group and nothing that could answer one.
+    // `local` runs no Copilot model, so it has no Oracle either: its `peers`
+    // group, when the artifact panel publishes it, carries the human-review
+    // tools only, and nothing else on that launch could answer a consult.
     const hasOracle = !(isLocal && opts.profile === "local")
+    // The cheapest family and `local2` grant `reviewer` a capped Advisor
+    // (at most 5 rounds per review), so "lead-only" is false on those
+    // launches; the surfaces below say who else may consult instead.
+    const advisorReviewerGranted = hasAdvisor && (isCheapest || isLocal)
     const profileLabel = isLocal
       ? "Local"
       : isCheapest
@@ -895,9 +924,10 @@ export function buildOperatingDefaultsDigest(
       : opts.profile === "local2"
         ? local2AdvisorContract()
         : undefined
+    const advisorScope = advisorReviewerGranted ? "lead and `reviewer`, capped" : "lead-only"
     const advisorDescriptor = advisorContract
-      ? `(${displayModelName(advisorContract.advisorModel)}/${advisorContract.advisorEffort}, lead-only)`
-      : "(Sol/high, lead-only)"
+      ? `(${displayModelName(advisorContract.advisorModel)}/${advisorContract.advisorEffort}, ${advisorScope})`
+      : `(Sol/high, ${advisorScope})`
     const astraStep =
     opts.astraAvailable && (opts.profile === "fast" || opts.profile === "cheap1m")
       ? `; (4) \`astra\` (GPT-6 Astra 200K/${isCheap ? "medium" : "high"}, lead-only) only as a last resort when direct evidence, Advisor, and Oracle cannot produce a defensible path (at most 1-2 calls per decision).`

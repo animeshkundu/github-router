@@ -13,18 +13,20 @@
 //
 // Backend selection is catalog-time: at startup (and on catalog
 // refresh) `pickBackendFromCatalog` walks a static fallback chain
-// (gpt-5.4-mini → Claude Sonnet 4.6 → Claude Haiku 4.5) and picks the
-// first entry present in `state.models` with `tool_calls` AND a
-// reachable endpoint (`/chat/completions` or `/responses`). The picked
-// id + endpoint are stored in `selectedBackend` and reused for the
-// lifetime of the proxy session; `callCompressor` routes to the matching
-// client (gpt-5.4-mini is `/responses`-only).
+// (gpt-5.4-mini → gpt-6-luna) and picks the first entry present in
+// `state.models` with `tool_calls` AND a reachable endpoint
+// (`/chat/completions` or `/responses`). The picked id + endpoint are
+// stored in `selectedBackend` and reused for the lifetime of the proxy
+// session; `callCompressor` routes to the matching client (gpt-5.4-mini is
+// `/responses`-only).
 //
-// The chain is adjusted by `compressorCandidates()` when a launch profile
-// restricts Copilot inference: `-m local2` filters it down to the `sol`/
-// `luna` families its Advisor and Oracle bill, and `-m local` keeps it
-// because the browse surface is the one Copilot egress that profile
-// carves out. See `~/lib/copilot-model-policy`.
+// The chain is the same on every launch profile. It is deliberately short and
+// deliberately outside the profile model policy: the browser surface is the one
+// Copilot egress `-m local` carves out, and `-m local2`'s family ceiling is
+// about the agent turns it serves, not about the page compressor. Adding a
+// third entry here is not free - every profile would then bill it - so prefer
+// fixing a gap by changing which of these two wins. See
+// `~/lib/copilot-model-policy`.
 //
 // Concurrency: every compressor call acquires from the shared
 // `MAX_INFLIGHT_TOOLS_CALL` budget (cap = 32), same pool as peer-MCP
@@ -37,10 +39,6 @@ import consola from "consola"
 import { deterministicResolve } from "./matcher"
 import { parseIntent } from "./parse-intent"
 import { acquireInFlightSlot } from "~/lib/mcp-inflight"
-import {
-  activeCopilotModelPolicy,
-  isCopilotModelAllowedUnder,
-} from "~/lib/copilot-model-policy"
 import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { applyResponsesCachePolicy } from "~/lib/prompt-cache"
 import { state } from "~/lib/state"
@@ -59,21 +57,21 @@ import { pickEndpoint, type CopilotEndpoint } from "~/services/copilot/endpoint"
 import type { Model } from "~/services/copilot/get-models"
 
 /**
- * Static fallback chain for the inner compressor. Order is preference:
- * faster + cheaper near the top, with vision (required for the Phase D
- * visual fallback) and reliable forced-tool-calling. The compressor is
- * endpoint-aware: a backend may serve `/chat/completions` (the claudes)
- * or `/responses` (gpt-5.4-mini and the rest of the `/responses`-only
- * gpt-5.x family) — `callCompressor` routes to the right client per the
- * `pickEndpoint` verdict cached at selection time. A model serving
- * NEITHER endpoint is skipped rather than cached as a dead backend (the
- * regression that shipped when gpt-5.4-mini was put on the chat-only path
- * and 400'd every call with `unsupported_api_for_model`).
+ * Static fallback chain for the inner compressor, identical on every launch
+ * profile. Order is preference, with vision (required for the Phase D visual
+ * fallback) and reliable forced-tool-calling. The compressor is endpoint-aware:
+ * a backend may serve `/chat/completions` or `/responses` — `callCompressor`
+ * routes to the right client per the `pickEndpoint` verdict cached at selection
+ * time. A model serving NEITHER endpoint is skipped rather than cached as a
+ * dead backend (the regression that shipped when gpt-5.4-mini was put on the
+ * chat-only path and 400'd every call with `unsupported_api_for_model`).
+ *
+ * `gpt-6-luna` is the tail so a catalog without mini still has a backend; both
+ * entries exist on every tier we support, so the list is not a tier probe.
  */
 const COMPRESSOR_FALLBACK_CHAIN: ReadonlyArray<string> = [
   "gpt-5.4-mini",
-  "claude-sonnet-4.6",
-  "claude-haiku-4.5",
+  "gpt-6-luna",
 ]
 
 interface CompressorBackend {
@@ -84,34 +82,22 @@ interface CompressorBackend {
 let selectedBackend: CompressorBackend | undefined
 
 /**
- * The fallback chain for this process, adjusted for an active launch policy.
- *
- * `-m local2` limits Copilot to the `sol` and `luna` families, and none of the
- * generic chain entries is in either, so the compressor asks for the cheap
- * tier those profiles can bill instead. `-m local` forbids Copilot inference
- * outright but carves the browser surface out (see `CopilotEgressSurface`), so
- * it keeps the generic chain.
- */
-function compressorCandidates(): ReadonlyArray<string> {
-  const policy = activeCopilotModelPolicy()
-  if (policy.kind !== "families") return COMPRESSOR_FALLBACK_CHAIN
-  const allowed = COMPRESSOR_FALLBACK_CHAIN.filter((id) => isCopilotModelAllowedUnder(policy, id))
-  return allowed.length > 0 ? allowed : ["gpt-6-luna"]
-}
-
-/**
  * Walk the fallback chain against the live Copilot catalog. Returns the
  * first entry present, advertising `tool_calls`, AND reachable via one of
  * our two clients (`pickEndpoint` !== undefined), or undefined when none
  * match. Cached after first successful selection so all compressor calls
  * in a session hit the same backend + endpoint; clear via
  * `__resetCompressorBackendForTests`.
+ *
+ * No launch-policy filter here: the browser surface is exempt from the profile
+ * policy (see `CopilotEgressSurface`), so the same two candidates apply whether
+ * the process serves a standard, `local` or `local2` launch.
  */
 function pickBackend(): CompressorBackend | undefined {
   if (selectedBackend) return selectedBackend
   const models = state.models?.data
   if (!models) return undefined
-  for (const candidate of compressorCandidates()) {
+  for (const candidate of COMPRESSOR_FALLBACK_CHAIN) {
     const found = models.find((m: Model) => m.id === candidate)
     if (!found) continue
     if (found.capabilities?.supports?.tool_calls !== true) continue
@@ -174,7 +160,7 @@ async function callCompressor(
   const backend = pickBackend()
   if (!backend) {
     throw new Error(
-      `browser-mcp compressor: no backend available in catalog. Checked: ${compressorCandidates().join(", ")}`,
+      `browser-mcp compressor: no backend available in catalog. Checked: ${COMPRESSOR_FALLBACK_CHAIN.join(", ")}`,
     )
   }
   const release = acquireInFlightSlot()

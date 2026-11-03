@@ -303,7 +303,7 @@ Local is a third family, not a cheapest sibling: its egress and model ids differ
 
 ### What may reach Copilot
 
-`local` runs no Copilot model inference at all. Every Claude Code surface funnels to the local endpoint: the lead, the native Task subagents, and agent-team teammates. A teammate cannot read `ANTHROPIC_CUSTOM_HEADERS` (the agent-teams env allowlist drops it), so the per-launch synthetic credential's bearer is the channel that binds it to the launch and therefore to the local egress.
+`local` runs no Copilot model inference on an agent turn. Every Claude Code surface funnels to the local endpoint: the lead, the native Task subagents, and agent-team teammates. A teammate cannot read `ANTHROPIC_CUSTOM_HEADERS` (the agent-teams env allowlist drops it), so the per-launch synthetic credential's bearer is the channel that binds it to the launch and therefore to the local egress.
 
 `local2` adds exactly two Copilot consumers: the Advisor and the Oracle, both `gpt-6.1-sol`.
 
