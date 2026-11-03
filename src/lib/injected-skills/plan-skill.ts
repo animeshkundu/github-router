@@ -37,6 +37,10 @@ export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProf
   const compactionNote = isLocalFamily(profile)
     ? "Output volume dominates."
     : "Output tokens cost several times input on every profile."
+  // Local carries no `workers` group, so contrasting its dispatchers would name
+  // a tool the profile does not inject.
+  const dispatchBoundary = isLocalFamily(profile) ? "" : ", never via worker-* MCP dispatchers"
+  const planDispatchBoundary = isLocalFamily(profile) ? "" : ", never worker-* MCP dispatchers"
   const dispatchStep = leadPlansDirectly
     ? `3. Compose the plan directly with that brief, then validate it against
    the same bar: every task names files, states the change and its done
@@ -90,7 +94,7 @@ Use this skill after /gh-gather-context (or when equivalent context is already
 available) and before any implementation. For non-trivial work, ${planningMeans}.
 The plan must be scoped, modular, non-overlapping, and ordered, with
 enough detail for ${downstreamAgent} to execute each task in isolation. User approval is
-mandatory before implementation. ${leadPlansDirectly ? "This skill plans directly (plus scoped Explore discovery where the delegation graph permits), never via worker-* MCP dispatchers." : "This skill dispatches ONLY the native Plan subagent via the Agent tool, never worker-* MCP dispatchers."} ${leadPlansDirectly ? "The lead self-serves Explore follow-ups per its delegation graph; the skill does not dispatch Explore directly." : "Plan self-serves Explore follow-ups per its delegation graph; the skill does not dispatch Explore directly."}
+mandatory before implementation. ${leadPlansDirectly ? `This skill plans directly (plus scoped Explore discovery where the delegation graph permits)${dispatchBoundary}.` : `This skill dispatches ONLY the native Plan subagent via the Agent tool${planDispatchBoundary}.`} ${leadPlansDirectly ? "The lead self-serves Explore follow-ups per its delegation graph; the skill does not dispatch Explore directly." : "Plan self-serves Explore follow-ups per its delegation graph; the skill does not dispatch Explore directly."}
 
 ## Prerequisites
 

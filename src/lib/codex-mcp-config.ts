@@ -955,19 +955,33 @@ function pinnedPlanPrompt(opts: { semanticAvailable: boolean; oracleTool?: strin
 const GENERAL_PURPOSE_DESC_TAIL =
   "Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore) or verification-only (use reviewer)."
 
-function pinnedGeneralPurposeDescription(explicit: boolean, isBalanced = false, is200K = false): string {
+function pinnedGeneralPurposeDescription(
+  explicit: boolean,
+  isBalanced = false,
+  is200K = false,
+  planAgent = true,
+): string {
+  // Only the profiles that emit a `Plan` subagent may promise to follow its
+  // handoff. Balanced, cheapest and local plan in the lead, so naming a Plan
+  // handoff would route the model at an agent with no `.md` in that session.
+  const planClause = planAgent
+    ? " Follows a Plan handoff when one exists and otherwise investigates before acting."
+    : " Investigates before acting when the lead has not already supplied a plan."
   const head = explicit
     ? isBalanced
-      ? "Autonomous multi-step execution agent. Use proactively and FREELY for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Follows a Plan handoff when one exists and otherwise investigates before acting. "
-      : "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Follows a Plan handoff when one exists and otherwise investigates before acting. "
+      ? "Autonomous multi-step execution agent. Use proactively and FREELY for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work." + planClause + " "
+      : "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work." + planClause + " "
     : "Autonomous multi-step execution agent for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. "
   return head + GENERAL_PURPOSE_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
 }
 
-function pinnedGeneralPurposePrompt(opts?: { is200K?: boolean }): string {
+function pinnedGeneralPurposePrompt(opts?: { is200K?: boolean; planAgent?: boolean }): string {
   return "You are an autonomous execution specialist for mixed, multi-step work. Your mission is to take an open-ended task from investigation through implementation to a verified end state within this turn. "
     + "Keep going until the task is genuinely done. Do not stop at a diagnosis, a partial fix, or a plan when the request asked for a change. Ground discovery in repository truth. For low-risk ambiguities, choose the interpretation most consistent with the repository, proceed, and record it as an assumption in your report. For material intent gaps that would alter product behavior or security, surface concrete options and a recommendation to the lead. "
-    + "When a Plan handoff exists, follow its ordered steps and acceptance criteria; do not rediscover what the plan already settled — read the critical files it names, execute each step's done condition, and report any step whose premise proves wrong instead of silently replanning. "
+    + (opts?.planAgent === false
+      ? "When the lead hands you a plan, follow its ordered steps and acceptance criteria; do not rediscover what the plan already settled — read the critical files it names, execute each step's done condition, and report any step whose premise proves wrong instead of silently replanning. "
+      : "When a Plan handoff exists, follow its ordered steps and acceptance criteria; do not rediscover what the plan already settled — read the critical files it names, execute each step's done condition, and report any step whose premise proves wrong instead of silently replanning. "
+    )
     + "Investigate before you act. Confirm your assumptions against the actual code rather than against the request's description of it. After every command, read the real output and let it decide the next step. When something fails, diagnose the specific cause before trying again. If repeated attempts fail for the same reason and no new information has emerged, stop retrying: re-examine the underlying assumption and take a different path. "
     + "Escalate rather than expand. If the task turns out to require a change the lead did not sanction, complete the sanctioned part and report the rest as a recommendation. If the task collapses to pure discovery or a single settled edit, do that slice and report the remainder as a recommendation. Do not expand scope. Match the conventions, structure, and test style already present in the files you touch. The lead owns final integration. "
     + "Verify before you report. Run the builds, linters, or test commands relevant to what you changed. Quote the command run, exit status, and concise decisive output verbatim; if output is long, summarize the middle and quote the pass/fail lines. "
@@ -1362,8 +1376,8 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     "General-Purpose": {
-      description: pinnedGeneralPurposeDescription(false, false, true),
-      prompt: pinnedGeneralPurposePrompt({ is200K: true }),
+      description: pinnedGeneralPurposeDescription(false, false, true, false),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true, planAgent: false }),
       model: generalModel,
       effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
@@ -1466,8 +1480,8 @@ function buildLocalProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     "General-Purpose": {
-      description: pinnedGeneralPurposeDescription(false, false, true),
-      prompt: pinnedGeneralPurposePrompt({ is200K: true }),
+      description: pinnedGeneralPurposeDescription(false, false, true, false),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true, planAgent: false }),
       model: generalModel,
       effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
@@ -1569,8 +1583,8 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     "General-Purpose": {
-      description: pinnedGeneralPurposeDescription(true, true, true),
-      prompt: pinnedGeneralPurposePrompt({ is200K: true }),
+      description: pinnedGeneralPurposeDescription(true, true, true, false),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true, planAgent: false }),
       model: generalModel,
       effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),

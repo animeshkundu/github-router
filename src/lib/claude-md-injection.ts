@@ -169,26 +169,41 @@ const STYLE_DIRECTIVE =
  * and risky changes, plus a General-Purpose fix pass for major reviewer
  * findings.
  */
-export const PIPELINE_SKILLS_AWARENESS =
-  "Pipeline skills (all 200K default context, native subagents only, never worker-*). "
-  + "Prefer `/gh-swe-pipeline`: strict sequence, each stage completing before the next starts, user approval before implementation. Stages in order: "
-  + "(1) `/gh-gather-context` BEFORE planning when grounded context is needed: lexical search plus bounded Explore subagents (~3 min each, 3 rounds max), writes context.md plus context.compact.md; "
-  + "(2) `/gh-plan` AFTER context and BEFORE implementation: native Plan subagent plans non-trivial asks (trivial exits planless), ordered plan.md (~5 min), open questions, waits for user approval; "
-  + "(3) `/gh-implement` AFTER plan approval: bounded parallel General-Purpose subagents (implementer first on max; worktree:true if parallel tasks need isolation), reviewer only on low-confidence or risky changes, plus fix pass for major findings. "
-  + "Skip for trivial work. Never implement without an approved plan. Never overlap stages."
+/** One builder for every profile's pipeline-skills block: only the Plan stage
+ *  wording and the dispatcher contrast vary, so the shared stages cannot drift
+ *  between the exported constants. */
+function pipelineSkillsAwareness(opts: { planAgent: boolean; workersAvailable: boolean }): string {
+  // A local launch carries no `workers` group, so contrasting its dispatchers
+  // would name a tool the mode does not expose.
+  const boundary = opts.workersAvailable
+    ? ", native subagents only, never worker-*"
+    : ", native subagents only"
+  const planStage = opts.planAgent
+    ? "native Plan subagent plans non-trivial asks (trivial exits planless)"
+    : "the lead plans directly (no separate planning subagent on this profile; trivial exits planless)"
+  const implementStage = opts.planAgent
+    ? "(implementer first on max; worktree:true if parallel tasks need isolation)"
+    : "(worktree:true if parallel tasks need isolation)"
+  return `Pipeline skills (all 200K default context${boundary}). `
+    + "Prefer `/gh-swe-pipeline`: strict sequence, each stage completing before the next starts, user approval before implementation. Stages in order: "
+    + "(1) `/gh-gather-context` BEFORE planning when grounded context is needed: lexical search plus bounded Explore subagents (~3 min each, 3 rounds max), writes context.md plus context.compact.md; "
+    + `(2) \`/gh-plan\` AFTER context and BEFORE implementation: ${planStage}, ordered plan.md (~5 min), open questions, waits for user approval; `
+    + `(3) \`/gh-implement\` AFTER plan approval: bounded parallel General-Purpose subagents ${implementStage}, reviewer only on low-confidence or risky changes, plus fix pass for major findings. `
+    + "Skip for trivial work. Never implement without an approved plan. Never overlap stages."
+}
+
+export const PIPELINE_SKILLS_AWARENESS = pipelineSkillsAwareness({ planAgent: true, workersAvailable: true })
 
 /**
  * Pipeline-skills awareness for the profiles without a `Plan` role
- * (cheapest, balanced, local): the lead plans directly, so `/gh-plan` names
- * the lead instead of a Plan dispatch. Every other stage is identical.
+ * (cheapest, balanced): the lead plans directly, so `/gh-plan` names the lead
+ * instead of a Plan dispatch. Every other stage is identical.
  */
-export const PIPELINE_SKILLS_AWARENESS_NO_PLAN_AGENT =
-  "Pipeline skills (all 200K default context, native subagents only, never worker-*). "
-  + "Prefer `/gh-swe-pipeline`: strict sequence, each stage completing before the next starts, user approval before implementation. Stages in order: "
-  + "(1) `/gh-gather-context` BEFORE planning when grounded context is needed: lexical search plus bounded Explore subagents (~3 min each, 3 rounds max), writes context.md plus context.compact.md; "
-  + "(2) `/gh-plan` AFTER context and BEFORE implementation: the lead plans directly (no separate planning subagent on this profile; trivial exits planless), ordered plan.md (~5 min), open questions, waits for user approval; "
-  + "(3) `/gh-implement` AFTER plan approval: bounded parallel General-Purpose subagents (worktree:true if parallel tasks need isolation), reviewer only on low-confidence or risky changes, plus fix pass for major findings. "
-  + "Skip for trivial work. Never implement without an approved plan. Never overlap stages."
+export const PIPELINE_SKILLS_AWARENESS_NO_PLAN_AGENT = pipelineSkillsAwareness({ planAgent: false, workersAvailable: true })
+
+/** Local is the no-Plan form without the `worker-*` contrast, which names a
+ *  dispatcher the profile does not inject. */
+export const PIPELINE_SKILLS_AWARENESS_LOCAL = pipelineSkillsAwareness({ planAgent: false, workersAvailable: false })
 
 /** Which of the conditionally-emitted natives this launch actually wrote.
  *  `undefined` means available, matching `buildPeerAwarenessSnippet`'s
@@ -725,7 +740,11 @@ export function buildOperatingDefaultsDirective(
     // legacy text for callers without a flag concept (serve path).
     const swePipelineClause = opts.sweEnabled === false
       ? ""
-      : `${isCheapest || isBalanced || isLocal ? PIPELINE_SKILLS_AWARENESS_NO_PLAN_AGENT : PIPELINE_SKILLS_AWARENESS}\n\n`
+      : `${isLocal
+        ? PIPELINE_SKILLS_AWARENESS_LOCAL
+        : isCheapest || isBalanced
+          ? PIPELINE_SKILLS_AWARENESS_NO_PLAN_AGENT
+          : PIPELINE_SKILLS_AWARENESS}\n\n`
     // Balanced has no Advisor, so Oracle is its only consultant, framed as a
     // second opinion on a precise question — never a discovery tool. `local`
     // has neither consultant and never reaches this branch. For unknowns, only

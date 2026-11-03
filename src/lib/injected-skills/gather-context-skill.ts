@@ -35,6 +35,9 @@ export function buildGatherContextSkill(
    - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.`
 
   const searchCap = semanticAvailable ? "Maximum searches per round: 10." : "Maximum lexical searches per round: 10."
+  // Local carries no `workers` group, so contrasting its dispatchers would name
+  // a tool the profile does not inject.
+  const dispatchBoundary = isLocalFamily(profile) ? "" : ", never worker-* MCP dispatchers"
 
   return {
     name: "gh-gather-context",
@@ -54,7 +57,7 @@ Use this skill when a non-trivial ask needs grounded context before planning.
 ${modelNote}
 Output is a durable full brief plus a compact downstream version. This skill
 dispatches ONLY native subagents present on the profile roster (Explore) via
-the Agent tool, never worker-* MCP dispatchers. No reviewer dispatch in this
+the Agent tool${dispatchBoundary}. No reviewer dispatch in this
 stage: Explore evidence plus targeted follow-up reads is the verification path.
 
 ## Hard bounds

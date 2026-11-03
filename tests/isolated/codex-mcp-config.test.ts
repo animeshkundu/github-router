@@ -1230,7 +1230,10 @@ describe("buildPeerAgentDefinitions", () => {
       // Explicit delegation tuning (complex tasks): proactive parallel
       // Explore and reviewer verification; the lead owns planning directly.
       expect(agents.Explore!.description).toContain("Use proactively")
-      expect(agents["General-Purpose"]!.prompt).toContain("Plan handoff")
+      // Balanced emits no `Plan` agent, so there is no handoff to promise; the
+      // lead still supplies a plan directly and General-Purpose follows it.
+      expect(agents["General-Purpose"]!.prompt).not.toContain("Plan handoff")
+      expect(agents["General-Purpose"]!.prompt).toContain("When the lead hands you a plan")
       expect(agents["General-Purpose"]!.description).not.toContain("implementer")
       expect(agents.reviewer!.description).toContain("Use proactively")
       // Balanced: reviewer delegates ONLY when genuinely needed (lead

@@ -43,8 +43,8 @@ describe("localBaseUrl", () => {
   })
 
   test("a path and its case survive normalization", () => {
-    expect(localBaseUrl({ GH_ROUTER_LOCAL_BASE_URL: "http://LocalHost:1234/V1/" }))
-      .toBe("http://localhost:1234/V1")
+    expect(localBaseUrl({ GH_ROUTER_LOCAL_BASE_URL: "http://LocalHost:8080/V1/" }))
+      .toBe("http://localhost:8080/V1")
   })
 
   test("GH_ROUTER_LOCAL_PORT replaces only the port of the base URL", () => {

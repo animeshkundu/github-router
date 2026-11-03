@@ -25,6 +25,7 @@ import {
   buildPeerAwarenessSnippet,
   buildPeerAwarenessSummary,
 } from "~/lib/peer-mcp-personas"
+import { buildPeerAgentDefinitions } from "~/lib/codex-mcp-config"
 import {
   getPipelineSkills,
   injectedSkillsForLaunch,
@@ -161,6 +162,14 @@ describe.each(LOCAL_PROFILES)("%s injects no claim about the endpoint", (profile
     ]) {
       expect(all).not.toContain(name)
     }
+  })
+
+  // Both local profiles drop the `workers` group: a Pi worker answers on a
+  // Copilot model, which is exactly what these profiles forbid. Prose that
+  // contrasts native subagents against `worker-*` dispatchers therefore names
+  // a capability the session does not have.
+  test("names no worker dispatcher it does not inject", () => {
+    expect(joined(profile)).not.toContain("worker-*")
   })
 
   test("names the roster it does emit", () => {
@@ -313,6 +322,51 @@ describe.each(LOCAL_PROFILES)("%s pipeline skills describe the local roster", (p
 
     // The roster line the orchestrator renders is exactly what local emits.
     expect(md).toContain("Explore, General-Purpose, reviewer")
+    // The local profiles carry no `workers` group, so the native-only
+    // dispatcher contrast the other profiles render names a tool this one
+    // does not expose.
+    expect(md).not.toContain("worker-*")
+  })
+})
+
+// The General-Purpose `.md` is rendered from the same builder for every pinned
+// profile, and its description/prompt used to promise a "Plan handoff"
+// unconditionally. Only fast/cheap emit a `Plan` subagent, so on the rest the
+// lead may still hand over its own plan, but there is no handoff from an agent
+// that does not exist.
+describe("General-Purpose promises no Plan handoff where no Plan agent exists", () => {
+  const BASE = {
+    codexCli: false,
+    geminiAvailable: false,
+    groupKeys: { peers: "peers" },
+    nonce: "n".repeat(64),
+    codexHome: "/tmp/codex",
+  }
+
+  function generalPurpose(profile: Record<string, boolean>) {
+    return buildPeerAgentDefinitions({ ...BASE, ...profile })["General-Purpose"]!
+  }
+
+  test.each([
+    ["local", { localProfile: true }],
+    ["local2", { localProfile: true, advisorAvailable: true }],
+    ["cheapest", { cheapestProfile: true }],
+    ["balanced", { balancedProfile: true }],
+  ])("%s does not promise a Plan handoff", (_name, profile) => {
+    const agent = generalPurpose(profile as Record<string, boolean>)
+    expect(agent.description).not.toContain("Plan handoff")
+    expect(agent.prompt).not.toContain("Plan handoff")
+    // The replacement clause keeps the intent: a plan the LEAD supplies is
+    // still followed. Absence alone could be satisfied by deleting it.
+    expect(agent.prompt).toContain("When the lead hands you a plan")
+  })
+
+  // The profiles that DO emit `Plan` keep the handoff promise, so a future
+  // edit cannot satisfy the absences above by deleting the clause everywhere.
+  test("fast still follows a Plan handoff", () => {
+    const agent = generalPurpose({ fastProfile: true })
+    expect(agent.description).toContain("Follows a Plan handoff")
+    expect(agent.prompt).toContain("When a Plan handoff exists")
   })
 })
 
@@ -331,6 +385,16 @@ describe("non-local profiles keep their own wording", () => {
     const gather = getPipelineSkills(false, false, "cheapest")[0]
     expect(gather?.md).toContain("Luna")
     expect(gather?.md).toContain("6x")
+  })
+
+  // Profiles that DO inject the workers group keep the dispatcher contrast;
+  // dropping it everywhere would leave them without the boundary they rely on.
+  test("a workers-profile still contrasts native subagents with worker-*", () => {
+    expect(
+      buildOperatingDefaultsDirective({ profile: "cheapest2", workerToolsAvailable: true }),
+    ).toContain("never worker-*")
+    const gather = getPipelineSkills(false, false, "cheapest")[0]
+    expect(gather?.md).toContain("never worker-* MCP dispatchers")
   })
 
   test("a profile-less implement skill still names Plan dispatches and implementer", () => {

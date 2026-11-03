@@ -53,9 +53,9 @@ On the Pi side that means these concrete differences from a Copilot profile:
   `<proxy>/v1`, which is what the OpenAI client's `{baseUrl}/responses`
   expects. Non-local providers keep the `/v1` root.
 - Each tier row carries a per-model `x-claude-code-session-id` header
-  (`state.sessionId`), because the local server rejects a conversation
-  without one. This is the "populate the same session id" requirement; Claude
-  Code's own header is forwarded verbatim on the Claude path.
+  (`state.sessionId`), so every Pi request names the same conversation the
+  Claude path forwards verbatim from the client. The profile assumes nothing
+  about what the local endpoint does with it.
 - Each tier row also carries `X-GH-Router-Launch-Secret`, the same value
   `/mcp` registration holds. The proxy keys its local routing off the launch
   bound to that header; a request without it is treated as unbound BYO

@@ -4115,6 +4115,8 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       const oracleDesc = tools.find((t) => t.name === "oracle")?.description ?? ""
       expect(oracleDesc).toContain("GPT-6.1 Sol (200K context, high effort)")
       expect(oracleDesc).not.toContain("GPT-5.6 Sol")
+      // cheapest2 carries an Advisor, so its Oracle legitimately points at it.
+      expect(oracleDesc.toLowerCase()).toContain("advisor")
 
       let oracleUrl = ""
       const oracleCapture: { body?: { model?: string; reasoning?: { effort?: string }; instructions?: string } } = {}
@@ -4192,6 +4194,10 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       const oracleDesc = tools.find((t) => t.name === "oracle")?.description ?? ""
       expect(oracleDesc).toContain("Grok 4.7 (200K context, medium effort)")
       expect(oracleDesc).not.toContain("Grok 4.6")
+      // Balanced serves Oracle without an Advisor, so the description must
+      // not compare against one or send the model looking for a tool this
+      // session never exposes.
+      expect(oracleDesc.toLowerCase()).not.toContain("advisor")
 
       let oracleUrl = ""
       const oracleCapture: { body?: { model?: string; reasoning?: { effort?: string }; instructions?: string } } = {}

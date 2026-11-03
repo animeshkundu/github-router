@@ -271,7 +271,12 @@ describe("advisorSystemPrompt reviewer profile", () => {
     // mentor clause may not name or grade it. Everything the advisor needs to
     // act stays: the verdict shape, the round cap, and the evidence demand.
     const prompt = advisorSystemPrompt(false, false, false, true, true, true)
-    expect(prompt).toContain("You are the senior mentor to a reviewer model")
+    expect(prompt).toContain("You are advising a reviewer model")
+    // A rank over the reviewer is itself a claim about a model the launch
+    // cannot see, so the local clause carries none.
+    expect(prompt).not.toContain("senior mentor")
+    expect(prompt).not.toContain("fill exactly these gaps")
+    expect(prompt).toContain("supply what the transcript alone cannot settle")
     expect(prompt).toContain("Verdict (SHIP / FIX / BLOCK)")
     expect(prompt).toContain("at most 5 rounds per review")
     expect(prompt).toContain("Demand execution evidence")

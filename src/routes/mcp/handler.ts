@@ -467,7 +467,12 @@ function familyOracleDescriptor(profileId: string): string | undefined {
   return undefined
 }
 
-function oracleToolEntry(isCheap = false, astraAvailable = true, oracleDescriptor?: string): ToolEntry {
+function oracleToolEntry(
+  isCheap = false,
+  astraAvailable = true,
+  oracleDescriptor?: string,
+  advisorAvailable = true,
+): ToolEntry {
   const descriptor = oracleDescriptor
     ?? (isCheap
       ? "Grok 4.6 (200K context, medium effort)"
@@ -479,10 +484,16 @@ function oracleToolEntry(isCheap = false, astraAvailable = true, oracleDescripto
   const deadEndClause = astraAvailable
     ? "terminal dead ends (consult Astra), "
     : "terminal dead ends (no escalation peer on this profile; report the dead end with evidence to the lead), "
+  // Balanced/balanced2 serve Oracle without an Advisor, so their description
+  // must not compare against one or send the model looking for it.
+  const preferredOverAdvisor = advisorAvailable
+    ? " Preferred over advisor for self-contained technical briefs."
+    : ""
+  const advisorExclusion = advisorAvailable ? "not for transcript-aware framing (consult Advisor), " : "not for transcript-aware framing, "
   return {
     name: "oracle",
     description:
-      `Expert consultant backed by ${descriptor} for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them. Preferred over advisor for self-contained technical briefs.\n\nWhen NOT to invoke: not for transcript-aware framing (consult Advisor), ${deadEndClause}routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.`,
+      `Expert consultant backed by ${descriptor} for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them.${preferredOverAdvisor}\n\nWhen NOT to invoke: ${advisorExclusion}${deadEndClause}routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.`,
     inputSchema: {
       type: "object",
       required: ["query", "context"],
@@ -711,6 +722,9 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
     const isBalanced = isBalancedFamily(launch.profileId)
     const isLocal = isLocalFamily(launch.profileId)
     const isCheap = launch.profileId === "cheap" || launch.profileId === "cheap1m" || isCheapest || isBalanced
+    // Balanced/balanced2 serve Oracle without an Advisor. `local` carries
+    // neither, and never reaches the Oracle branch below.
+    const advisorAvailable = !isBalanced && !(isLocal && launch.profileId !== "local2")
     // Astra is wired only for `fast` and the `-m cheap1m` successor; the new
     // `-m cheap` (200K lead, oracle-only allowlist), `-m cheapest`, and
     // `-m balanced` never expose it, even if a hypothetical test/mint granted
@@ -739,7 +753,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       && launch.allowedPersonas?.has("oracle")
       && oracleGate
     ) {
-      entries.push(oracleToolEntry(isCheap, astraAvailable, oracleDescriptor))
+      entries.push(oracleToolEntry(isCheap, astraAvailable, oracleDescriptor, advisorAvailable))
     }
     if (
       (scope === "all" || scope === "peers")

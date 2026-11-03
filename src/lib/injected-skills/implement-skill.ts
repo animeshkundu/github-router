@@ -28,6 +28,9 @@ export function buildImplementSkill(_searchEnabled?: boolean, profile?: PlanSkil
   const compactionNote = isLocalFamily(profile)
     ? "Output volume dominates."
     : "Output tokens cost several times input on every profile."
+  // Local carries no `workers` group, so contrasting its dispatchers would name
+  // a tool the profile does not inject.
+  const dispatchBoundary = isLocalFamily(profile) ? "" : ", never worker-* MCP dispatchers"
   return {
   name: "gh-implement",
   md: `---
@@ -50,7 +53,7 @@ each task subagent self-tests, self-reviews, and reports an explicit confidence
 verdict; the lead dispatches a reviewer only on low-confidence validation or
 complex and risky changes, then a General-Purpose fix pass only for major
 reviewer findings. This skill dispatches ONLY native subagents via the Agent
-tool, never worker-* MCP dispatchers.
+tool${dispatchBoundary}.
 
 ## Hard bounds
 

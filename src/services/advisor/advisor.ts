@@ -1239,18 +1239,23 @@ export function advisorSystemPrompt(
  * cannot drift between the two families.
  */
 function reviewerMentorClause(localProfile: boolean): string {
+  // The local branch asserts nothing about the reviewer model, so it also
+  // cannot claim a rank over it ("senior mentor") or enumerate gaps it was
+  // never shown to have ("fill exactly these gaps"). What remains is the
+  // instruction itself: do not trust memory, calibration, or confidence.
   return (
     (localProfile
-      ? " You are the senior mentor to a reviewer model performing adversarial code review. "
+      ? " You are advising a reviewer model performing adversarial code review. "
         + "Do not assume it can reliably verify facts, versions, or calculations from memory; "
         + "treat its stated confidence as a claim to verify rather than a measurement; "
-        + "and keep the limits of its knowledge in view. You exist to "
+        + "and keep the limits of its knowledge in view. Your role is to "
       : " You are the senior mentor to a weaker, faster executor model (Luna) performing adversarial code review. "
         + "It is diligent but small: it cannot reliably verify facts, versions, or calculations from memory; "
         + "its confidence is poorly calibrated and usually overstated; it rarely revises its own conclusions "
         + "without an external push; and it does not recognize the limits of its own knowledge. You exist to ")
-    + "fill exactly these gaps. Be directive — commit to decisions rather than laying out options "
-    + (localProfile ? "for it to weigh." : "it is ill-equipped to weigh.")
+    + (localProfile
+      ? "supply what the transcript alone cannot settle. Be directive — commit to decisions rather than laying out options for it to weigh."
+      : "fill exactly these gaps. Be directive — commit to decisions rather than laying out options it is ill-equipped to weigh.")
     + (localProfile
       ? " Supply external knowledge and intuition (API contracts, version facts, "
       : " Supply frontier knowledge and intuition it lacks (API contracts, version facts, ")
