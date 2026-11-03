@@ -597,6 +597,54 @@ export async function ensureClaudeConfigMirror(opts: {
 }
 
 /**
+ * Rewrite this process's synthetic credential so its access token carries a
+ * launch-binding secret (`LAUNCH_BOUND_TOKEN_PREFIX` + secret).
+ *
+ * Claude Code spawns agent-teams teammates with an environment allowlist that
+ * inherits `CLAUDE_CONFIG_DIR` but drops `ANTHROPIC_CUSTOM_HEADERS`, so a
+ * teammate never sends `LAUNCH_SECRET_HEADER`. It reads this file and sends
+ * the token as `Authorization: Bearer`, which makes this the only identity
+ * channel that reaches a teammate. `runMessagesIdentityPreflight` accepts the
+ * prefixed bearer and binds it to the same registry entry the header would
+ * have named.
+ *
+ * Only local-family launches call this. Those profiles exist so that no
+ * request reaches Copilot, and an unbound teammate would silently resolve its
+ * bare tier ids against the Copilot catalog and be billed. Every other
+ * profile keeps the plain `github-router-synthetic` token and stays unbound,
+ * exactly as before.
+ *
+ * MUST run after `ensureClaudeConfigMirror()` (its credential step restores
+ * the constant blob) and before `launchChild`. Best-effort by contract: the
+ * caller warns and continues, because the launch itself works without it.
+ */
+export async function writeLaunchBoundSyntheticCredential(
+  accessToken: string,
+): Promise<void> {
+  const credentialsPath = path.join(PATHS.CLAUDE_CONFIG_DIR, ".credentials.json")
+  const desiredJson = JSON.stringify(
+    {
+      ...SYNTHETIC_CREDENTIAL,
+      claudeAiOauth: { ...SYNTHETIC_CREDENTIAL.claudeAiOauth, accessToken },
+    },
+    null,
+    2,
+  )
+  // Same atomic temp-file + rename as the mirror's credential step, so a
+  // concurrently running client never reads a partial file. The `.launch`
+  // infix keeps this temp name from colliding with that step's.
+  const tempPath = `${credentialsPath}.${process.pid}.launch.tmp`
+  try {
+    await fs.writeFile(tempPath, desiredJson + "\n", { mode: 0o600, flag: "wx" })
+    await fs.rename(tempPath, credentialsPath)
+  } catch (err) {
+    await fs.unlink(tempPath).catch(() => {})
+    throw err
+  }
+  await chmodIfPossible(credentialsPath, 0o600)
+}
+
+/**
  * The in-process single-flight map behind `ensureClaudeConfigMirror`.
  *
  * Entries are released as soon as a run settles, so a SEQUENTIAL caller

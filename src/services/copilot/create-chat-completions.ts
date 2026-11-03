@@ -2,6 +2,7 @@ import consola from "consola"
 import { events } from "fetch-event-stream"
 
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
+import { assertCopilotModelAllowed, type CopilotEgressSurface } from "~/lib/copilot-model-policy"
 import { HTTPError } from "~/lib/error"
 import {
   imagesInChatPayload,
@@ -32,7 +33,12 @@ export const createChatCompletions = async (
   modelHeaders?: Record<string, string>,
   callerSignal?: AbortSignal,
   retryTransient = false,
+  surface?: CopilotEgressSurface,
 ) => {
+  // Copilot egress for `/v1/chat/completions`, the chat-completions leg of the
+  // Anthropic translation shim, and every caller that reaches Copilot through
+  // this service (peer personas, orchestration, the Pi worker runtime).
+  assertCopilotModelAllowed(payload.model, surface)
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
   const carriesImages = payload.messages.some(

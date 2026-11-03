@@ -1,10 +1,25 @@
+import { isLocalFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
+import type { PlanSkillProfile } from "./plan-skill"
 
 export function buildGatherContextSkill(
   searchEnabled: boolean,
   bluebirdEnabled: boolean = false,
+  profile?: PlanSkillProfile,
 ): InjectedSkill {
   const semanticAvailable = searchEnabled || bluebirdEnabled
+  // Local runs an unknown model on an unknown endpoint, so the skill names no
+  // model and makes no cost claim. The 200K window is the client-side budget
+  // the profile configures, which is still true.
+  const modelNote = isLocalFamily(profile)
+    ? "All reasoning runs at the 200K default window: the lead and every Explore\nsubagent run with bare slugs (no 1M accounting)."
+    : "All reasoning runs at the 200K default window: the lead and every Explore\nsubagent use the Luna model at high effort with bare slugs (no 1M accounting)."
+  const downstreamConsumer = isLocalFamily(profile)
+    ? "planner, General-Purpose, or user"
+    : "planner, implementer, or user"
+  const outputNote = isLocalFamily(profile)
+    ? "Return a compact brief, not the whole dump. Output volume dominates: return\nonly file:line citations with one-line summaries, never full file contents or\npasted source blocks."
+    : "Return a compact brief, not the whole dump. Output cost dominates: Luna output\ntokens cost 6x input, so return only file:line citations with one-line\nsummaries, never full file contents or pasted source blocks."
   const semanticBackend = bluebirdEnabled
     ? "Bluebird's Azure DevOps index; failures stay visible with no local fallback"
     : "the local ColBERT index, with transparent lexical fallback while unavailable"
@@ -20,6 +35,9 @@ export function buildGatherContextSkill(
    - Use mcp__search__web for upstream APIs, package behavior, protocol docs, or public issues.`
 
   const searchCap = semanticAvailable ? "Maximum searches per round: 10." : "Maximum lexical searches per round: 10."
+  // Local carries no `workers` group, so contrasting its dispatchers would name
+  // a tool the profile does not inject.
+  const dispatchBoundary = isLocalFamily(profile) ? "" : ", never worker-* MCP dispatchers"
 
   return {
     name: "gh-gather-context",
@@ -36,11 +54,10 @@ excludes: [trivial tasks, already-known code, implementation]
 # gh-gather-context: bounded context gathering
 
 Use this skill when a non-trivial ask needs grounded context before planning.
-All reasoning runs at the 200K default window: the lead and every Explore
-subagent use the Luna model at high effort with bare slugs (no 1M accounting).
+${modelNote}
 Output is a durable full brief plus a compact downstream version. This skill
 dispatches ONLY native subagents present on the profile roster (Explore) via
-the Agent tool, never worker-* MCP dispatchers. No reviewer dispatch in this
+the Agent tool${dispatchBoundary}. No reviewer dispatch in this
 stage: Explore evidence plus targeted follow-up reads is the verification path.
 
 ## Hard bounds
@@ -67,7 +84,7 @@ Use these exact tags on every finding and claim:
 
 1. Restate the ask and define the research target.
    - Identify whether this is a bug, feature, refactor, incident, or design question.
-   - Name the expected downstream consumer: planner, implementer, or user.
+   - Name the expected downstream consumer: ${downstreamConsumer}.
 
  2. Decompose the ask into searchable entities.
    - Extract symbols, filenames, error strings, routes, flags, config keys, and types.
@@ -112,9 +129,7 @@ more than an idle subagent costs.
 
 ## Return format
 
-Return a compact brief, not the whole dump. Output cost dominates: Luna output
-tokens cost 6x input, so return only file:line citations with one-line
-summaries, never full file contents or pasted source blocks.
+${outputNote}
 
 - Context files: paths to context.md and context.compact.md.
 - Freshness: HEAD commit, diff hash, timestamp.

@@ -13,12 +13,20 @@
 //
 // Backend selection is catalog-time: at startup (and on catalog
 // refresh) `pickBackendFromCatalog` walks a static fallback chain
-// (gpt-5.4-mini → Claude Sonnet 4.6 → Claude Haiku 4.5) and picks the
-// first entry present in `state.models` with `tool_calls` AND a
-// reachable endpoint (`/chat/completions` or `/responses`). The picked
-// id + endpoint are stored in `selectedBackend` and reused for the
-// lifetime of the proxy session; `callCompressor` routes to the matching
-// client (gpt-5.4-mini is `/responses`-only).
+// (gpt-5.4-mini → gpt-6-luna) and picks the first entry present in
+// `state.models` with `tool_calls` AND a reachable endpoint
+// (`/chat/completions` or `/responses`). The picked id + endpoint are
+// stored in `selectedBackend` and reused for the lifetime of the proxy
+// session; `callCompressor` routes to the matching client (gpt-5.4-mini is
+// `/responses`-only).
+//
+// The chain is the same on every launch profile. It is deliberately short and
+// deliberately outside the profile model policy: the browser surface is the one
+// Copilot egress `-m local` carves out, and `-m local2`'s family ceiling is
+// about the agent turns it serves, not about the page compressor. Adding a
+// third entry here is not free - every profile would then bill it - so prefer
+// fixing a gap by changing which of these two wins. See
+// `~/lib/copilot-model-policy`.
 //
 // Concurrency: every compressor call acquires from the shared
 // `MAX_INFLIGHT_TOOLS_CALL` budget (cap = 32), same pool as peer-MCP
@@ -49,21 +57,21 @@ import { pickEndpoint, type CopilotEndpoint } from "~/services/copilot/endpoint"
 import type { Model } from "~/services/copilot/get-models"
 
 /**
- * Static fallback chain for the inner compressor. Order is preference:
- * faster + cheaper near the top, with vision (required for the Phase D
- * visual fallback) and reliable forced-tool-calling. The compressor is
- * endpoint-aware: a backend may serve `/chat/completions` (the claudes)
- * or `/responses` (gpt-5.4-mini and the rest of the `/responses`-only
- * gpt-5.x family) — `callCompressor` routes to the right client per the
- * `pickEndpoint` verdict cached at selection time. A model serving
- * NEITHER endpoint is skipped rather than cached as a dead backend (the
- * regression that shipped when gpt-5.4-mini was put on the chat-only path
- * and 400'd every call with `unsupported_api_for_model`).
+ * Static fallback chain for the inner compressor, identical on every launch
+ * profile. Order is preference, with vision (required for the Phase D visual
+ * fallback) and reliable forced-tool-calling. The compressor is endpoint-aware:
+ * a backend may serve `/chat/completions` or `/responses` — `callCompressor`
+ * routes to the right client per the `pickEndpoint` verdict cached at selection
+ * time. A model serving NEITHER endpoint is skipped rather than cached as a
+ * dead backend (the regression that shipped when gpt-5.4-mini was put on the
+ * chat-only path and 400'd every call with `unsupported_api_for_model`).
+ *
+ * `gpt-6-luna` is the tail so a catalog without mini still has a backend; both
+ * entries exist on every tier we support, so the list is not a tier probe.
  */
 const COMPRESSOR_FALLBACK_CHAIN: ReadonlyArray<string> = [
   "gpt-5.4-mini",
-  "claude-sonnet-4.6",
-  "claude-haiku-4.5",
+  "gpt-6-luna",
 ]
 
 interface CompressorBackend {
@@ -80,6 +88,10 @@ let selectedBackend: CompressorBackend | undefined
  * match. Cached after first successful selection so all compressor calls
  * in a session hit the same backend + endpoint; clear via
  * `__resetCompressorBackendForTests`.
+ *
+ * No launch-policy filter here: the browser surface is exempt from the profile
+ * policy (see `CopilotEgressSurface`), so the same two candidates apply whether
+ * the process serves a standard, `local` or `local2` launch.
  */
 function pickBackend(): CompressorBackend | undefined {
   if (selectedBackend) return selectedBackend
@@ -190,7 +202,10 @@ async function callViaChat(
   } as ChatCompletionsPayload
   // retryTransient: true: non-streaming (stream:false), so the whole call is
   // pre-first-byte and a transient network/5xx retry is safe.
-  const resp = (await createChatCompletions(payload, undefined, signal, true)) as ChatCompletionResponse
+  // `"browse"`: the surface `-m local` carves out of its Copilot ban. The
+  // compound browser tools are the only reason the compressor exists, and a
+  // listed-but-refused tool is worse than the model call.
+  const resp = (await createChatCompletions(payload, undefined, signal, true, "browse")) as ChatCompletionResponse
   // Browser compression calls are billed Copilot usage on this instance.
   extractAndRecordAic(model, resp)
   const msg = resp.choices?.[0]?.message as
@@ -236,7 +251,7 @@ async function callViaResponses(
     stablePrefix: systemPrompt,
   })
   // retryTransient: true: non-streaming (stream:false), pre-first-byte, safe.
-  const resp = (await createResponses(payload, undefined, signal, true)) as ResponsesApiResponse
+  const resp = (await createResponses(payload, undefined, signal, true, "browse")) as ResponsesApiResponse
   extractAndRecordAic(model, resp)
   const output = Array.isArray(resp.output) ? resp.output : []
   for (const item of output) {

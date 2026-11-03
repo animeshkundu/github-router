@@ -1,14 +1,26 @@
-import { CHEAPEST_CONSULT_CONTRACT } from "./claude-md-injection"
+import { FRESH_CONSULT_CONTRACT } from "./claude-md-injection"
+import { profileDescriptor } from "./launch-profile"
+import { LOCAL_PROFILE_TIER_MODELS } from "./local-profile-contract"
+import { LAUNCH_SECRET_HEADER } from "./messages-identity-preflight"
 import {
   balancedContractFor,
   cheapestContractFor,
   isBalancedFamily,
   isCheapestFamily,
+  isLocalFamily,
+  local2AdvisorContract,
+  localContractFor,
+  type LocalProfileId,
 } from "./profile-family"
 import { PI_MIN_VERSION } from "./pi-version-check"
 import { piContextWindowFor } from "./pi-tier-windows"
 
-export type PiProfileId = "cheapest" | "cheapest2" | "balanced" | "balanced2"
+export type PiProfileId =
+  | "cheapest"
+  | "cheapest2"
+  | "balanced"
+  | "balanced2"
+  | LocalProfileId
 
 /** Minimal catalog view the Pi builders need (adapted from state.models). */
 export interface PiCatalogModel {
@@ -88,39 +100,118 @@ export const PI_PROVIDER_NAME = "gh-router" as const
 const PI_MIN_VERSION_NOTE = `Requires Pi >= ${PI_MIN_VERSION} and Node >= 22.19.`
 
 /**
- * The family contract for a Pi profile. `cheapest2` and `balanced2` are
- * derived from their bases, so every resolver below reads one object and a
- * `-2` launch cannot pick up a base literal by omission.
+ * The Copilot-backed family contract for a Pi profile. `cheapest2` and
+ * `balanced2` are derived from their bases, so every resolver below reads one
+ * object and a `-2` launch cannot pick up a base literal by omission.
+ *
+ * Typed to exclude the local family: `LOCAL_PROFILE_CONTRACT` has no
+ * `leadEffort` at all (the local endpoint's effort ladder is unknown), so
+ * reading that field through a widened union would be a compile hazard. Only
+ * the callers that need `leadEffort` use this narrower accessor.
  */
-function piContractFor(profileId: PiProfileId) {
+type PiCopilotProfileId = Exclude<PiProfileId, LocalProfileId>
+
+function piCopilotContractFor(profileId: PiCopilotProfileId) {
   return isCheapestFamily(profileId)
     ? cheapestContractFor(profileId)
     : balancedContractFor(profileId)
+}
+
+/**
+ * The family contract for a Pi profile, across all three families. Local is a
+ * third family, not a cheapest sibling: its egress and model ids differ even
+ * though it inherits the cheapest roster and prose. Only the fields common to
+ * every family are reachable here.
+ */
+function piContractFor(profileId: PiProfileId) {
+  return isLocalFamily(profileId)
+    ? localContractFor(profileId)
+    : piCopilotContractFor(profileId)
 }
 
 export function piLeadModel(profileId: PiProfileId): string {
   return piContractFor(profileId).models.lead
 }
 
+/**
+ * Pi's default thinking level for the lead.
+ *
+ * Local profiles answer `high` because that is the reachable ceiling, not a
+ * guess about the server: Pi exposes `xhigh`/`max` only when a row's
+ * `thinkingLevelMap` explicitly defines them, and the local rows deliberately
+ * carry no map (we do not assume the endpoint's effort ladder), so
+ * `clampThinkingLevel` walks any higher request down to `high`.
+ */
 export function piLeadThinking(profileId: PiProfileId): string {
-  return piContractFor(profileId).leadEffort
+  return isLocalFamily(profileId)
+    ? "high"
+    : piCopilotContractFor(profileId).leadEffort
 }
 
+/**
+ * The `peers` persona allow-list this profile registers with the launch
+ * registry, or `undefined` when every persona is reachable.
+ *
+ * Pi's discovery prose (a group's `mcp.json` description) and its skills are
+ * the model's only signal for what a group holds, so they have to be derived
+ * from the same list the MCP handler enforces. A group described with personas
+ * the launch filters out sends the model hunting for tools that answer
+ * -32601. `local` is the one Pi profile with an empty list: it keeps the group
+ * for the artifact review tools and nothing else.
+ */
+export function piPersonaAllowlist(
+  profileId: PiProfileId,
+): ReadonlySet<string> | undefined {
+  return profileDescriptor(profileId).personaAllowlist
+}
+
+/** Whether the Copilot-served `oracle` MCP tool is callable on this profile. */
+export function piOracleToolReachable(profileId: PiProfileId): boolean {
+  const allowlist = piPersonaAllowlist(profileId)
+  return allowlist === undefined || allowlist.has("oracle")
+}
+
+/**
+ * Which model answers the `oracle` subagent.
+ *
+ * Every Copilot profile's oracle is a Copilot-served consultant pinned by its
+ * family contract. `local` has no Copilot oracle at all, yet the subagent
+ * still has to be emitted: omitting the file would un-shadow Pi's builtin
+ * `oracle`, which also owns the `advisor` alias and is pinned to a model of
+ * its own choosing. Pinning our file to the local lead tier keeps the role,
+ * its nesting grant and the shadowing intact while running it on the one
+ * endpoint the profile is allowed to use.
+ */
 export function piOracleModel(profileId: PiProfileId): string {
-  return piContractFor(profileId).oracleModel
+  return profileId === "local"
+    ? piLeadModel(profileId)
+    : piContractFor(profileId).oracleModel
 }
 
 export function piOracleThinking(profileId: PiProfileId): string {
-  return piContractFor(profileId).oracleEffort
+  return profileId === "local"
+    ? piLeadThinking(profileId)
+    : piContractFor(profileId).oracleEffort
 }
 
-/** Cheapest-only advisor. Balanced is advisor-free by design: undefined. */
+/**
+ * Advisor row. Cheapest-family launches carry one; `balanced` is advisor-free
+ * by design and `local` mirrors that (no Advisor). `local2` is the one local
+ * profile with an Advisor, and it is Copilot-served (`gpt-6.1-sol`) — the
+ * Advisor always runs on a real Copilot model, never on the local endpoint.
+ */
 export function piAdvisorModel(
   profileId: PiProfileId,
 ): { model: string; thinking: string } | undefined {
-  if (!isCheapestFamily(profileId)) return undefined
-  const contract = cheapestContractFor(profileId)
-  return { model: contract.advisorModel, thinking: contract.advisorEffort }
+  if (isCheapestFamily(profileId)) {
+    const contract = cheapestContractFor(profileId)
+    return { model: contract.advisorModel, thinking: contract.advisorEffort }
+  }
+  if (profileId === "local2") {
+    const contract = local2AdvisorContract()
+    return { model: contract.advisorModel, thinking: contract.advisorEffort }
+  }
+  return undefined
 }
 
 export interface PiNativeRole {
@@ -173,7 +264,10 @@ export function piProfileModelIds(
   return [...ids]
 }
 
-export type PiModelApi = "openai-completions" | "openai-responses"
+export type PiModelApi =
+  | "openai-completions"
+  | "openai-responses"
+  | "anthropic-messages"
 
 export interface PiModelsJson {
   providers: Record<
@@ -226,6 +320,22 @@ export interface PiModelsJson {
          *  future chat-served model on this provider. Omitted when it
          *  matches the provider default. */
         api?: PiModelApi
+        /**
+         * Per-model base URL. Pi resolves `definition.baseUrl ??
+         * provider.baseUrl`, so a local provider whose rows do not all
+         * speak the same wire format sets the root each row needs. A row
+         * that inherits the provider value omits this.
+         */
+        baseUrl?: string
+        /**
+         * Per-model extra request headers. Pi's runtime merges these into the
+         * auth headers it would otherwise send (`Models.getAuth`), which is
+         * the only header path provable in the vendored slice — a
+         * provider-level `headers` key is not. Local profiles use it to carry
+         * the stable per-conversation session id the endpoint routes and
+         * caches by.
+         */
+        headers?: Record<string, string>
       }>
     }
   >
@@ -356,7 +466,7 @@ export function piUsdCostFor(
 /**
  * Build the `models.json` provider entry pointing Pi at the running
  * proxy as an ordinary OpenAI-compatible endpoint (the documented
- * Ollama/vLLM pattern — no provider-override extension needed).
+ * provider-override pattern — no extension needed).
  *
  * The provider speaks `openai-responses`: every roster model is
  * Responses-only on Copilot, and Pi POSTs `{baseUrl}/responses` for
@@ -379,6 +489,26 @@ export function piUsdCostFor(
  * paying a send-then-drop round trip, and `thinkingLevelMap` from the
  * catalog `reasoning_effort` allowlist so Pi never offers an effort
  * tier Copilot would 400.
+ *
+ * LOCAL PROFILES speak `anthropic-messages` instead: the provider default
+ * becomes Anthropic's wire format, the tier rows (`opus`/`sonnet`/`haiku`)
+ * are the endpoint's own ids and stay on it, and every Copilot-served row
+ * (the local2 advisor, which is the only Copilot row a local profile has) is
+ * pinned to `openai-responses`. That split is load-bearing: a Copilot row
+ * left on the provider default would send a real Copilot model id to the
+ * LOCAL server,
+ * while the tier rows must never be diverted to `/v1/responses` (that route
+ * always leaves for Copilot). Catalog endpoint discovery cannot make this
+ * call — a local id has no catalog entry, and a Copilot id's endpoints
+ * describe Copilot, not whatever is behind the local port. The tier rows
+ * also carry the launch's stable session id as a per-model header, since
+ * the endpoint requires one for routing and prompt caching, plus the launch
+ * secret that makes the proxy route them locally at all (see
+ * `launchSecret` below).
+ *
+ * The two wire formats also disagree about where the version prefix lives,
+ * so the local provider's base URL is the proxy ORIGIN and each
+ * Copilot-served row overrides it with the `/v1` root.
  */
 export function buildPiModelsJson(opts: {
   serverUrl: string
@@ -388,17 +518,52 @@ export function buildPiModelsJson(opts: {
   /** Provider-level API; uniform Responses roster needs no overrides. */
   api?: PiModelApi
   apiOverrides?: Readonly<Record<string, PiModelApi>>
+  /**
+   * Stable per-conversation id. Local profiles send it as
+   * `x-claude-code-session-id` on the tier rows, matching what the Claude
+   * Code launcher's own local egress sends.
+   */
+  sessionId?: string
+  /**
+   * The launch's `/v1/messages` identity secret. Local tier rows send it as
+   * `X-GH-Router-Launch-Secret` so the proxy binds them to a `local`/`local2`
+   * launch; unbound traffic is treated as BYO and routed to Copilot, where a
+   * bare `opus` id does not exist. Copilot-served rows deliberately omit it.
+   */
+  launchSecret?: string
 }): PiModelsJson {
-  const baseUrl = `${opts.serverUrl.replace(/\/+$/, "")}/v1`
-  const providerApi = opts.api ?? "openai-responses"
+  const origin = opts.serverUrl.replace(/\/+$/, "")
+  const local = isLocalFamily(opts.profileId)
+  // The two wire formats append their own versioned path to the base URL:
+  // Pi's OpenAI client POSTs `{baseUrl}/responses` (so the root must carry
+  // `/v1`, our `/v1/responses`), while its bundled Anthropic client POSTs
+  // `{baseUrl}/v1/messages` (so the root must NOT). Measured against the
+  // installed Pi bundle: a local provider left on the `/v1` root requested
+  // `/v1/v1/messages` and the proxy answered 404. Copilot-served rows keep
+  // the Responses root per model.
+  const responsesBaseUrl = `${origin}/v1`
+  const providerBaseUrl = local ? origin : responsesBaseUrl
+  const providerApi: PiModelApi =
+    opts.api ?? (local ? "anthropic-messages" : "openai-responses")
+  const localTierIds = new Set<string>(Object.values(LOCAL_PROFILE_TIER_MODELS))
+  const sessionId = opts.sessionId?.trim()
+  const launchSecret = opts.launchSecret?.trim()
+  const localHeaders =
+    local && (sessionId || launchSecret)
+      ? {
+          ...(sessionId ? { "x-claude-code-session-id": sessionId } : {}),
+          ...(launchSecret ? { [LAUNCH_SECRET_HEADER]: launchSecret } : {}),
+        }
+      : undefined
   return {
     providers: {
       [PI_PROVIDER_NAME]: {
-        baseUrl,
+        baseUrl: providerBaseUrl,
         api: providerApi,
         apiKey: "dummy",
         authHeader: true as const,
         models: piProfileModelIds(opts.profileId, { peers: opts.peers }).map((id) => {
+          const isLocalTier = local && localTierIds.has(id)
           const entry = opts.catalog?.find((m) => m.id === id)
           const out = entry?.maxOutputTokens
           const maxTokens =
@@ -406,7 +571,11 @@ export function buildPiModelsJson(opts: {
               ? Math.floor(out)
               : PI_MAX_TOKENS_FALLBACK
           const endpointApi = piApiForEndpoints(entry?.endpoints)
-          const override = opts.apiOverrides?.[id] ?? endpointApi
+          const override = local
+            ? isLocalTier
+              ? undefined
+              : ("openai-responses" as const)
+            : (opts.apiOverrides?.[id] ?? endpointApi)
           const thinkingLevelMap = piThinkingLevelMapFor(entry?.efforts)
           const inputLimits = piImageResizeFor(entry?.vision, entry?.maxImageBytes)
           return {
@@ -417,9 +586,11 @@ export function buildPiModelsJson(opts: {
             contextWindow: piContextWindowFor(id, entry?.maxContextTokens),
             maxTokens,
             ...(entry?.cost ? { cost: entry.cost } : {}),
+            ...(isLocalTier && localHeaders ? { headers: localHeaders } : {}),
             ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
             ...(inputLimits ? { inputLimits } : {}),
             ...(override && override !== providerApi ? { api: override } : {}),
+            ...(local && !isLocalTier ? { baseUrl: responsesBaseUrl } : {}),
           }
         }),
       },
@@ -1135,7 +1306,9 @@ export function buildPiAgentFiles(
   // Oracle consultant agent (both modes). Advisory only: challenges
   // assumptions, never edits. Cold-start fresh context matches the MCP
   // `peers/oracle` tool contract (stateless query + context, no transcript),
-  // deliberately unlike the builtin's forked decision-consistency role.
+  // deliberately unlike the builtin's forked decision-consistency role. On
+  // `local` there is no MCP oracle, so this file is the only oracle the
+  // session has, and its model is a local tier id (`piOracleModel`).
   const oracle = [
     "---",
     "name: oracle",
@@ -1286,10 +1459,14 @@ export function buildPiAppendSystem(
     // the launcher owns — APPEND_SYSTEM.md IS the digest, and the mirror's
     // AGENTS.md is bridge-synthesized PROJECT guidance, not ours — so a
     // pointer here would send the lead looking for a file that does not
-    // exist. The full contract rides the digest instead; it is the same
-    // exported constant the Claude directive uses, which is the property that
-    // actually matters: the two front-ends cannot drift.
-    lines.push("", CHEAPEST_CONSULT_CONTRACT.trimEnd());
+    // exist. The full contract rides the digest instead; it is the FRESH
+    // variant of the same text the Claude directive uses, which is the
+    // property that actually matters: the consult policy cannot drift
+    // between the two front-ends. What does differ is the transport, and it
+    // has to: Pi's `advisor` subagent is `defaultContext: fresh` with a
+    // read-only toolset, so it reads only the brief the lead writes, while
+    // the Claude path forwards a curated transcript view.
+    lines.push("", FRESH_CONSULT_CONTRACT.trimEnd());
   }
   lines.push("", `(${PI_MIN_VERSION_NOTE})`, "");
   return lines.join("\n");

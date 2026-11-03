@@ -1,4 +1,5 @@
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
+import { assertCopilotModelAllowed } from "~/lib/copilot-model-policy"
 import { HTTPError } from "~/lib/error"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
@@ -6,6 +7,11 @@ import { tryRefreshAndRetry } from "~/lib/token"
 import { fetchWithTransientRetry } from "~/lib/upstream-retry"
 
 export const createEmbeddings = async (payload: EmbeddingRequest) => {
+  // The profile policy is process-wide, not per-route: `-m local` forbids
+  // Copilot inference outright, so an embeddings call from any caller in the
+  // same process is refused here for the same reason the chat/responses
+  // clients refuse one.
+  assertCopilotModelAllowed(payload.model)
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
   const body = JSON.stringify(payload)

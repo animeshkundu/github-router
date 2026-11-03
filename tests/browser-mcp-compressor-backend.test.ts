@@ -64,22 +64,22 @@ describe("browser-mcp compressor backend selection (endpoint-aware)", () => {
     expect(pickBackendFromCatalog()).toBe("gpt-5.4-mini")
   })
 
-  test("falls through to claude-sonnet-4.6 when gpt-5.4-mini is absent", () => {
-    setCatalog([model("claude-sonnet-4.6"), model("claude-haiku-4.5")])
-    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4.6")
+  test("falls through to gpt-6-luna when gpt-5.4-mini is absent", () => {
+    setCatalog([model("gpt-6-luna"), model("claude-haiku-4.5")])
+    expect(pickBackendFromCatalog()).toBe("gpt-6-luna")
   })
 
-  test("selects claude-haiku-4.5 as the last resort", () => {
-    setCatalog([model("claude-haiku-4.5")])
-    expect(pickBackendFromCatalog()).toBe("claude-haiku-4.5")
+  test("selects gpt-6-luna as the last resort", () => {
+    setCatalog([model("gpt-6-luna")])
+    expect(pickBackendFromCatalog()).toBe("gpt-6-luna")
   })
 
   test("skips a chain entry that lacks tool_calls support", () => {
     setCatalog([
       model("gpt-5.4-mini", { toolCalls: false, endpoints: ["/responses"] }),
-      model("claude-sonnet-4.6"),
+      model("gpt-6-luna"),
     ])
-    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4.6")
+    expect(pickBackendFromCatalog()).toBe("gpt-6-luna")
   })
 
   test("regression: skips a chain entry that serves NEITHER /chat/completions NOR /responses", () => {
@@ -88,9 +88,9 @@ describe("browser-mcp compressor backend selection (endpoint-aware)", () => {
     // skipped, not cached as a dead backend that 400s every call.
     setCatalog([
       model("gpt-5.4-mini", { endpoints: ["ws:/responses"] }),
-      model("claude-sonnet-4.6"),
+      model("gpt-6-luna"),
     ])
-    expect(pickBackendFromCatalog()).toBe("claude-sonnet-4.6")
+    expect(pickBackendFromCatalog()).toBe("gpt-6-luna")
   })
 
   test("compressorAvailable() is false when no chain entry is in the catalog", () => {
@@ -159,9 +159,9 @@ describe("browser-mcp compressor AIC recording", () => {
   })
 
   test("chat compressor call records once under the selected model", async () => {
-    setCatalog([model("claude-haiku-4.5")])
-    expect(pickBackendFromCatalog()).toBe("claude-haiku-4.5")
-    const usage = nanoUsage("claude-haiku-4.5", 7, 140000)
+    setCatalog([model("gpt-6-luna")])
+    expect(pickBackendFromCatalog()).toBe("gpt-6-luna")
+    const usage = nanoUsage("gpt-6-luna", 7, 140000)
     globalThis.fetch = mock(async (input: unknown) => {
       const url = requestUrl(input)
       if (!url.includes("/chat/completions")) {
@@ -172,7 +172,7 @@ describe("browser-mcp compressor AIC recording", () => {
           id: "chatcmpl_compressor",
           object: "chat.completion",
           created: 0,
-          model: "claude-haiku-4.5",
+          model: "gpt-6-luna",
           choices: [
             {
               index: 0,
@@ -202,8 +202,8 @@ describe("browser-mcp compressor AIC recording", () => {
     const snap = aicSnapshot()
     expect(snap.requests).toBe(1)
     expect(snap.totalNanoAiu).toBe(140000)
-    expect(snap.perModel["claude-haiku-4.5"]?.requests).toBe(1)
-    expect(snap.perModel["claude-haiku-4.5"]?.nanoAiu).toBe(140000)
+    expect(snap.perModel["gpt-6-luna"]?.requests).toBe(1)
+    expect(snap.perModel["gpt-6-luna"]?.nanoAiu).toBe(140000)
   })
 
   test("responses compressor call records once under the selected model", async () => {

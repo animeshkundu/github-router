@@ -19,6 +19,10 @@ import {
   CHEAPEST_PROFILE_NATIVE_EFFORTS,
 } from "./cheapest-profile-contract"
 import {
+  LOCAL_PROFILE_NATIVE_AGENT_NAMES,
+  LOCAL_PROFILE_NATIVE_MODELS,
+} from "./local-profile-contract"
+import {
   BALANCED_PROFILE_NATIVE_AGENT_NAMES,
   BALANCED_PROFILE_NATIVE_EFFORTS,
 } from "./balanced-profile-contract"
@@ -235,6 +239,18 @@ interface BuildOpts {
   balancedExploreModel?: string
   balancedGeneralPurposeModel?: string
   balancedReviewerModel?: string
+  /** Local-profile role assignments. The cheapest surface with every role's
+   *  model swapped for the local endpoint's own tier id (`haiku`/`sonnet`/
+   *  `opus`), which is not a Copilot catalog id and must never be
+   *  alias-translated. */
+  localProfile?: boolean
+  localExploreModel?: string
+  localGeneralPurposeModel?: string
+  localReviewerModel?: string
+  /** Whether this launch has a server-side Advisor (`local2` yes, `local`
+   *  no). Gates the reviewer's protege-advisor appendix, which names an
+   *  `advisor` tool: a prompt must never name a tool the session lacks. */
+  advisorAvailable?: boolean
   /** Max-profile role assignments. */
   maxProfile?: boolean
   maxExploreModel?: string
@@ -938,19 +954,33 @@ function pinnedPlanPrompt(opts: { semanticAvailable: boolean; oracleTool?: strin
 const GENERAL_PURPOSE_DESC_TAIL =
   "Drives to a verified end state with changed files and evidence. Do not use for pure discovery (use Explore) or verification-only (use reviewer)."
 
-function pinnedGeneralPurposeDescription(explicit: boolean, isBalanced = false, is200K = false): string {
+function pinnedGeneralPurposeDescription(
+  explicit: boolean,
+  isBalanced = false,
+  is200K = false,
+  planAgent = true,
+): string {
+  // Only the profiles that emit a `Plan` subagent may promise to follow its
+  // handoff. Balanced, cheapest and local plan in the lead, so naming a Plan
+  // handoff would route the model at an agent with no `.md` in that session.
+  const planClause = planAgent
+    ? " Follows a Plan handoff when one exists and otherwise investigates before acting."
+    : " Investigates before acting when the lead has not already supplied a plan."
   const head = explicit
     ? isBalanced
-      ? "Autonomous multi-step execution agent. Use proactively and FREELY for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Follows a Plan handoff when one exists and otherwise investigates before acting. "
-      : "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. Follows a Plan handoff when one exists and otherwise investigates before acting. "
+      ? "Autonomous multi-step execution agent. Use proactively and FREELY for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work." + planClause + " "
+      : "Autonomous multi-step execution agent. Use proactively for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work." + planClause + " "
     : "Autonomous multi-step execution agent for open-ended or mixed tasks combining investigation, tool workflows, and code changes where the approach emerges during work. "
   return head + GENERAL_PURPOSE_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
 }
 
-function pinnedGeneralPurposePrompt(opts?: { is200K?: boolean }): string {
+function pinnedGeneralPurposePrompt(opts?: { is200K?: boolean; planAgent?: boolean }): string {
   return "You are an autonomous execution specialist for mixed, multi-step work. Your mission is to take an open-ended task from investigation through implementation to a verified end state within this turn. "
     + "Keep going until the task is genuinely done. Do not stop at a diagnosis, a partial fix, or a plan when the request asked for a change. Ground discovery in repository truth. For low-risk ambiguities, choose the interpretation most consistent with the repository, proceed, and record it as an assumption in your report. For material intent gaps that would alter product behavior or security, surface concrete options and a recommendation to the lead. "
-    + "When a Plan handoff exists, follow its ordered steps and acceptance criteria; do not rediscover what the plan already settled — read the critical files it names, execute each step's done condition, and report any step whose premise proves wrong instead of silently replanning. "
+    + (opts?.planAgent === false
+      ? "When the lead hands you a plan, follow its ordered steps and acceptance criteria; do not rediscover what the plan already settled — read the critical files it names, execute each step's done condition, and report any step whose premise proves wrong instead of silently replanning. "
+      : "When a Plan handoff exists, follow its ordered steps and acceptance criteria; do not rediscover what the plan already settled — read the critical files it names, execute each step's done condition, and report any step whose premise proves wrong instead of silently replanning. "
+    )
     + "Investigate before you act. Confirm your assumptions against the actual code rather than against the request's description of it. After every command, read the real output and let it decide the next step. When something fails, diagnose the specific cause before trying again. If repeated attempts fail for the same reason and no new information has emerged, stop retrying: re-examine the underlying assumption and take a different path. "
     + "Escalate rather than expand. If the task turns out to require a change the lead did not sanction, complete the sanctioned part and report the rest as a recommendation. If the task collapses to pure discovery or a single settled edit, do that slice and report the remainder as a recommendation. Do not expand scope. Match the conventions, structure, and test style already present in the files you touch. The lead owns final integration. "
     + "Verify before you report. Run the builds, linters, or test commands relevant to what you changed. Quote the command run, exit status, and concise decisive output verbatim; if output is long, summarize the middle and quote the pass/fail lines. "
@@ -979,20 +1009,47 @@ function pinnedReviewerDescription(explicit: boolean, isBalanced = false, is200K
     + (protegeAdvisor ? " May consult its Sol advisor (at most 5 advisor rounds per review) on consequential uncertainty it cannot settle by evidence." : "")
 }
 
-/** Protege appendix for the cheapest Luna/max reviewer: the capped Sol-advisor
+/** Protege appendix for the cheapest reviewer: the capped Sol-advisor
  *  protocol. Appended after the delegation paragraph so the adversarial core
- *  above stays byte-identical across profiles. */
-const PROTEGE_ADVISOR_APPENDIX =
-  "You have an `advisor` tool backed by Sol, a stronger cross-lab model that sees your full transcript. "
+ *  above stays byte-identical across profiles.
+ *
+ *  `framing` is the one clause that varies: a Copilot-served lead can be told
+ *  the consultant is the stronger cross-lab model, but a `local` launch bills
+ *  an endpoint whose model the proxy knows nothing about, so the only claim it
+ *  can make is who serves the consultant. Same builder, so the behavioural
+ *  contract cannot drift between the two.
+ *
+ *  Both framings describe the curated transport, not a full transcript: the
+ *  reviewer's consult is rendered by the curated path (24K transcript budget,
+ *  tool-aware, layered under `<operator_focus>` / `<caller_context>`), so
+ *  promising the whole transcript would overstate what the advisor sees. */
+function buildProtegeAdvisorAppendix(framing: string): string {
+  return "You have an `advisor` tool backed by Sol, " + framing + ". "
   + "You own the verdict; the advisor is counsel, never authority — it never approves, vetoes, or decides for you. "
   + "Budget: at most 5 advisor rounds per review (code-enforced; one round is one back-and-forth exchange). Spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle: a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences. "
   + "Every consult must state the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict. "
   + "Never consult for routine verification, progress narration, reassurance, or completion ritual — run the check yourself. "
   + "If the advisor disagrees with you, evaluate on the merits: adopt what is right with a one-line reason, defend what is verified with evidence, and record the disagreement in your result. "
+}
+
+const PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
+  "a stronger cross-lab model that sees the ask, the brief you write, and a bounded transcript",
+)
+
+const LOCAL_PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
+  "a Copilot-served model that sees the ask, the brief you write, and a bounded transcript",
+)
 
 function pinnedReviewerPrompt(
   semanticAvailable = true,
-  opts?: { allowExploreDelegation?: boolean; is200K?: boolean; protegeAdvisor?: boolean },
+  opts?: {
+    allowExploreDelegation?: boolean
+    is200K?: boolean
+    protegeAdvisor?: boolean
+    /** `local2`'s grant: same capped protocol, framing restricted to what the
+     *  proxy knows about a local session. */
+    localAdvisor?: boolean
+  },
 ): string {
   // Balanced-only: the reviewer narrows scope with search first, then
   // delegates targeted discovery to Explore (permitted by the balanced
@@ -1003,7 +1060,9 @@ function pinnedReviewerPrompt(
     : "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
   // Cheapest-only protege grant: the Luna reviewer may consult Sol. The core
   // stays identical; only this profile appends the capped-advisor protocol.
-  const protege = opts?.protegeAdvisor === true ? PROTEGE_ADVISOR_APPENDIX : ""
+  const protege = opts?.protegeAdvisor === true
+    ? (opts?.localAdvisor === true ? LOCAL_PROTEGE_ADVISOR_APPENDIX : PROTEGE_ADVISOR_APPENDIX)
+    : ""
   return "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
     + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
     + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
@@ -1321,8 +1380,8 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     "General-Purpose": {
-      description: pinnedGeneralPurposeDescription(false, false, true),
-      prompt: pinnedGeneralPurposePrompt({ is200K: true }),
+      description: pinnedGeneralPurposeDescription(false, false, true, false),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true, planAgent: false }),
       model: generalModel,
       effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
@@ -1367,6 +1426,97 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       : new Set(opts.nativeRoster)
   for (const name of Object.keys(out)) {
     if (name !== "worker-browse" && !roster.has(name)) delete out[name]
+  }
+  return out
+}
+
+/**
+ * Build the literal `-m local` / `-m local2` native roster.
+ *
+ * The cheapest surface with the cheapest prompts, differing in exactly one
+ * dimension: every role's `model:` is the LOCAL endpoint's own tier id
+ * (`haiku` / `sonnet` / `opus`) instead of a router-owned alias. Those ids
+ * resolve back to themselves through the `ANTHROPIC_DEFAULT_*_MODEL` tier rows
+ * the launcher seeds, so Claude Code neither catalog-resolves them nor
+ * upgrades their accounting, and the local server receives the id it
+ * advertises.
+ *
+ * Deliberately NOT run through `MODEL_ALIAS_TABLE`: that table exists so
+ * Claude Code will not `[1m]`-upgrade a REAL catalog id, and a local tier id is
+ * not a catalog id at all.
+ *
+ * The one prompt deviation from cheapest is the reviewer's optional protege
+ * appendix, which names an `advisor` tool. It is emitted only when the launch
+ * actually has an Advisor (`local2`): naming a tool that does not exist is the
+ * failure mode the droppable-agent rule exists to prevent.
+ *
+ * Unlike cheapest, this roster never includes `worker-browse`, even when browse
+ * is enabled. `worker-browse` is a Pi worker and a worker answers on a Copilot
+ * model, which is the one thing these profiles forbid a subagent to do. The
+ * browser CAPABILITY does not depend on it: the `browser` group's own
+ * `browser_*` tools are model-free and are published on both profiles.
+ */
+function buildLocalProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinitions {
+  const exploreModel = opts.localExploreModel ?? LOCAL_PROFILE_NATIVE_MODELS.Explore
+  const generalModel =
+    opts.localGeneralPurposeModel ?? LOCAL_PROFILE_NATIVE_MODELS["General-Purpose"]
+  const reviewerModel = opts.localReviewerModel ?? LOCAL_PROFILE_NATIVE_MODELS.reviewer
+  const semanticAvailable = opts.semanticSearchAvailable === true
+  const protegeAdvisor = opts.advisorAvailable === true
+
+  const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
+  const searchMcpServers = opts.serverUrl
+    ? {
+        [searchKey]: httpEntryFor(
+          opts.serverUrl,
+          "search",
+          opts.nonce,
+          opts.workspaceHeaderCmd,
+        ),
+      }
+    : undefined
+
+  const readSearchTools = ["Read", "Grep", "Glob", "Bash", "WebFetch", "WebSearch", `mcp__${searchKey}__*`]
+  const effort = (name: keyof typeof CHEAPEST_PROFILE_NATIVE_EFFORTS): SubagentEffort =>
+    CHEAPEST_PROFILE_NATIVE_EFFORTS[name]
+
+  const out: PeerAgentDefinitions = {
+    Explore: {
+      description: pinnedExploreDescription(false, true),
+      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled }),
+      tools: readSearchTools,
+      model: exploreModel,
+      effort: effort("Explore"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    "General-Purpose": {
+      description: pinnedGeneralPurposeDescription(false, false, true, false),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true, planAgent: false }),
+      model: generalModel,
+      effort: effort("General-Purpose"),
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+    reviewer: {
+      description: pinnedReviewerDescription(false, false, true, protegeAdvisor),
+      prompt: pinnedReviewerPrompt(semanticAvailable, {
+        is200K: true,
+        protegeAdvisor,
+        localAdvisor: protegeAdvisor,
+      }),
+      model: reviewerModel,
+      effort: effort("reviewer"),
+      tools: readSearchTools,
+      ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
+    },
+  }
+
+  const roster = opts.nativeRoster == null
+    ? new Set<string>(LOCAL_PROFILE_NATIVE_AGENT_NAMES)
+    : opts.nativeRoster instanceof Set
+      ? opts.nativeRoster
+      : new Set(opts.nativeRoster)
+  for (const name of Object.keys(out)) {
+    if (!roster.has(name)) delete out[name]
   }
   return out
 }
@@ -1417,8 +1567,8 @@ function buildBalancedProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     "General-Purpose": {
-      description: pinnedGeneralPurposeDescription(true, true, true),
-      prompt: pinnedGeneralPurposePrompt({ is200K: true }),
+      description: pinnedGeneralPurposeDescription(true, true, true, false),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true, planAgent: false }),
       model: generalModel,
       effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
@@ -1487,6 +1637,7 @@ export function buildPeerAgentDefinitions(
   if (opts.cheapProfile) return buildCheapProfileAgentDefinitions(opts)
   if (opts.cheapestProfile) return buildCheapestProfileAgentDefinitions(opts)
   if (opts.balancedProfile) return buildBalancedProfileAgentDefinitions(opts)
+  if (opts.localProfile) return buildLocalProfileAgentDefinitions(opts)
 
   const out: PeerAgentDefinitions = {}
   const personas = personasFor({
@@ -1840,6 +1991,13 @@ interface WriteOpts {
   balancedExploreModel?: string
   balancedGeneralPurposeModel?: string
   balancedReviewerModel?: string
+  /** Local-profile role assignments, mirrored from `BuildOpts`. */
+  localProfile?: boolean
+  localExploreModel?: string
+  localGeneralPurposeModel?: string
+  localReviewerModel?: string
+  /** `advisorAvailable` mirror, from `BuildOpts`. */
+  advisorAvailable?: boolean
   /** Whether local ColBERT semantic search or Bluebird semantic routing is
    *  available for this launch. */
   semanticSearchAvailable?: boolean
@@ -2421,6 +2579,11 @@ export async function writePeerMcpRuntimeFiles(
     balancedExploreModel: opts.balancedExploreModel,
     balancedGeneralPurposeModel: opts.balancedGeneralPurposeModel,
     balancedReviewerModel: opts.balancedReviewerModel,
+    localExploreModel: opts.localExploreModel,
+    localGeneralPurposeModel: opts.localGeneralPurposeModel,
+    localReviewerModel: opts.localReviewerModel,
+    localProfile: opts.localProfile,
+    advisorAvailable: opts.advisorAvailable,
     semanticSearchAvailable: opts.semanticSearchAvailable,
     bluebirdEnabled: opts.bluebirdEnabled,
     nativeRoster: opts.nativeRoster,

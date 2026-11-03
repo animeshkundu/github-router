@@ -10,6 +10,7 @@ import {
   displayModelName,
   isBalancedFamily,
   isCheapestFamily,
+  isLocalFamily,
 } from "./profile-family"
 import { state } from "./state"
 
@@ -182,6 +183,23 @@ const BALANCED2_PICKER_MODELS = pinnedRows(
 )
 
 /**
+ * The `local` / `local2` rows: the three tier ids the local endpoint itself
+ * resolves, emitted BARE and never catalog-filtered.
+ *
+ * These are not Copilot ids and must never be resolved through the catalog:
+ * the proxy deliberately knows nothing about what is loaded behind the port.
+ * `behavesAs` exists only because Claude Code 2.1.260 does not OFFER an
+ * otherwise-unknown picker row without it; it supplies the closest
+ * client-known capability profile and changes neither the label nor the id
+ * that is sent.
+ */
+const LOCAL_PICKER_MODELS: ReadonlyArray<DeclaredPickerModel> = Object.freeze([
+  { id: "opus", label: "Opus", behavesAs: "claude-opus-5.5" },
+  { id: "sonnet", label: "Sonnet", behavesAs: "claude-sonnet-5" },
+  { id: "haiku", label: "Haiku", behavesAs: "claude-haiku-4-5" },
+])
+
+/**
  * Return the ordered, profile-specific `/model` rows supported by the live
  * Copilot catalog. Fast intentionally shares Standard's four-row inventory;
  * Max replaces Grok with Opus because Grok is not an allowed Max lead.
@@ -197,6 +215,17 @@ const BALANCED2_PICKER_MODELS = pinnedRows(
 export function selectableModelsInCatalog(
   profile: LaunchProfileId,
 ): ModelPickerOption[] {
+  // Local rows are the endpoint's own ids, so they are offered without any
+  // Copilot catalog check — a local session must keep a usable `/model` even
+  // when the catalog was never fetched.
+  if (isLocalFamily(profile)) {
+    return LOCAL_PICKER_MODELS.map((entry) => ({
+      model: entry.id,
+      label: entry.label,
+      behavesAs: entry.behavesAs,
+    }))
+  }
+
   const catalog = state.models?.data
   if (!catalog || catalog.length === 0) return []
 
@@ -285,6 +314,7 @@ function routerWinsPicker(profile: LaunchProfileId): boolean {
     || profile === "cheap1m"
     || isCheapestFamily(profile)
     || isBalancedFamily(profile)
+    || isLocalFamily(profile)
 }
 
 function modelIdsFromExistingPicker(value: unknown): string[] {

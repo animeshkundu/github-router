@@ -1,13 +1,36 @@
-import { isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
+import { isBalancedFamily, isCheapestFamily, isLocalFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
 import type { PlanSkillProfile } from "./plan-skill"
 
 export function buildImplementSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
-  // Profiles without a Plan role (cheapest, balanced): the lead plans
+  // Profiles without a Plan role (cheapest/balanced/local): the lead plans
   // directly, so close-out wording names planning work, not Plan dispatches.
-  const planDispatches = isCheapestFamily(profile) || isBalancedFamily(profile)
+  const planDispatches = isCheapestFamily(profile) || isBalancedFamily(profile) || isLocalFamily(profile)
     ? "planning work"
     : "Plan dispatches"
+  // Only the max/standard rosters emit an `implementer` native. Local never
+  // does, so naming it (even conditionally) would route the model at an agent
+  // that is not there.
+  const implementerFirst = isLocalFamily(profile)
+    ? "Use General-Purpose for every implementation task and handoff"
+    : "If an implementer subagent exists (max profile), use it first for implementation tasks, then General-Purpose for handoffs; otherwise use General-Purpose for all tasks"
+  const implementerDispatch = isLocalFamily(profile)
+    ? "Use subagent_type General-Purpose for every task"
+    : "Use subagent_type implementer first where the profile provides one (max), otherwise subagent_type General-Purpose for every task"
+  // The suppression behaviour is a property of the subagent model a profile
+  // runs. Local runs an unknown model, so the claim cannot be made there; the
+  // plain-directive instruction it justifies stays for every profile.
+  const geminiNote = isLocalFamily(profile)
+    ? ""
+    : ": Gemini-run subagents may suppress tool calls when the prompt contains reflective text"
+  // Compact returns benefit every profile; the token-price comparison behind
+  // the instruction is unknowable for a model the local endpoint maps locally.
+  const compactionNote = isLocalFamily(profile)
+    ? "Output volume dominates."
+    : "Output tokens cost several times input on every profile."
+  // Local carries no `workers` group, so contrasting its dispatchers would name
+  // a tool the profile does not inject.
+  const dispatchBoundary = isLocalFamily(profile) ? "" : ", never worker-* MCP dispatchers"
   return {
   name: "gh-implement",
   md: `---
@@ -25,14 +48,12 @@ excludes: [unapproved plans, exploration, trivial changes]
 Use this skill only after /gh-plan produced a user-approved plan.md. All
 implementation runs at the 200K default window with bare slugs (no 1M
 accounting): the lead dispatches native subagents present on the profile
-roster. If an implementer subagent exists (max profile), use it first for
-implementation tasks, then General-Purpose for handoffs; otherwise use
-General-Purpose for all tasks. Review is conditional, never staged by default:
+roster. ${implementerFirst}. Review is conditional, never staged by default:
 each task subagent self-tests, self-reviews, and reports an explicit confidence
 verdict; the lead dispatches a reviewer only on low-confidence validation or
 complex and risky changes, then a General-Purpose fix pass only for major
 reviewer findings. This skill dispatches ONLY native subagents via the Agent
-tool, never worker-* MCP dispatchers.
+tool${dispatchBoundary}.
 
 ## Hard bounds
 
@@ -68,16 +89,16 @@ tool, never worker-* MCP dispatchers.
 1. Parse the approved plan.
    - Read plan.md fully.
    - Group tasks by parallelGroup; order groups by dependency.
-   - For each group, prepare a narrow task brief (task spec, relevant context excerpt, acceptance criteria, verification commands). Write every brief as plain directives, never reflective first-person prose: Gemini-run subagents may suppress tool calls when the prompt contains reflective text. If parallel tasks in the group require isolation, prepare one git worktree per task and pass worktree:true; otherwise tasks run in-place and must be sequentialized within shared files.
+   - For each group, prepare a narrow task brief (task spec, relevant context excerpt, acceptance criteria, verification commands). Write every brief as plain directives, never reflective first-person prose${geminiNote}. If parallel tasks in the group require isolation, prepare one git worktree per task and pass worktree:true; otherwise tasks run in-place and must be sequentialized within shared files.
 
 2. Dispatch bounded implementation subagents, one parallel batch per group.
-   - Dispatch ALL tasks in the group in a single turn via the Agent tool. Use subagent_type implementer first where the profile provides one (max), otherwise subagent_type General-Purpose for every task. Advisory: keep each task under ~10 minutes; the Task tool enforces no wall-clock.
+   - Dispatch ALL tasks in the group in a single turn via the Agent tool. ${implementerDispatch}. Advisory: keep each task under ~10 minutes; the Task tool enforces no wall-clock.
     - Each subagent runs at the 200K default window and must self-contain its work:
      a. Implement the change.
      b. Run the task verification commands (tests, typecheck, lint).
      c. Self-review against the acceptance criteria.
      d. Fix any self-found issues (at most 2 internal fix cycles).
-     e. Return the patch plus test results, self-review notes, and an explicit confidence verdict (high or low) with reasons. Low confidence means the subagent itself doubts the result: flaky or incomplete verification, untested edge cases, or behavior it could not directly observe. Keep the return compact: patch plus results, no full-file echoes; output tokens cost several times input on every profile.
+     e. Return the patch plus test results, self-review notes, and an explicit confidence verdict (high or low) with reasons. Low confidence means the subagent itself doubts the result: flaky or incomplete verification, untested edge cases, or behavior it could not directly observe. Keep the return compact: patch plus results, no full-file echoes. ${compactionNote}
    - Do NOT dispatch the same task twice (no dedup exists); a retry is a new dispatch only after a recorded failure.
    - For a big artifact, have the subagent write it to a file and return the path.
 

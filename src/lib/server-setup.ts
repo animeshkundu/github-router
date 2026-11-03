@@ -32,11 +32,13 @@ import {
 } from "./launch-profile"
 import { MAX_PROFILE_MODELS, maxOpusModel } from "./max-profile-contract"
 import { piSessionsDir } from "./pi-paths"
+import { LOCAL_PROFILE_TIER_MODELS } from "./local-profile-contract"
 import {
   balancedContractFor,
   cheapestContractFor,
   isBalancedFamily,
   isCheapestFamily,
+  isLocalFamily,
 } from "./profile-family"
 import { catalogAdvertises1M, oneMContextDisabled, withOneMSuffix, withOneMSuffixForLead } from "./one-m-context"
 import {
@@ -1143,11 +1145,15 @@ export function getClaudeCodeEnvVars(
     launchProfileId === "cheap"
     || launchProfileId === "cheap1m"
     || isCheapestFamily(launchProfileId)
+  // `local` / `local2`: the lead turns go to a local model server, so every
+  // model-bearing var names one of its three tier ids and nothing else. No
+  // catalog consultation happens for these ids anywhere downstream.
+  const isLocalProfile = isLocalFamily(launchProfileId)
   // Pinned sessions run router-provided surfaces only: tier rows are
   // force-seeded even when the parent env sets them, so a shell export
   // cannot smuggle a foreign model into the pinned `/model` UI. Standard
   // and max launches keep the presence guard (user value wins).
-  const routerWinsTiers = isFastProfile || isCheapProfile
+  const routerWinsTiers = isFastProfile || isCheapProfile || isLocalProfile
 
   // Pinned 200K profiles (`cheap`, `cheapest`, `balanced` — never `cheap1m`,
   // whose Gemini lead intentionally runs 1M): the bare-id strategy alone
@@ -1170,10 +1176,17 @@ export function getClaudeCodeEnvVars(
   // gate is a raw truthiness read, so an inherited empty string is falsy on
   // both sides (i.e. 1M stays live) and must not suppress the seed. Any other
   // operator-set value (including "0", which IS truthy client-side) wins.
+  //
+  // The local pair are pinned 200K for a different reason: `opus`/`sonnet`/
+  // `haiku` are not catalog ids, so the client cannot look up a window for
+  // them and `[1m]` decoration is meaningless. `CLAUDE_CODE_DISABLE_1M_CONTEXT`
+  // keeps the whole session on the 200K default, which is the budget the
+  // profile declares.
   const pinStrict200K =
     launchProfileId === "cheap"
     || isCheapestFamily(launchProfileId)
     || isBalancedFamily(launchProfileId)
+    || isLocalProfile
   if (pinStrict200K) {
     if (
       process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT === undefined
@@ -1222,6 +1235,8 @@ export function getClaudeCodeEnvVars(
         ? LUNA_HAIKU_ALIAS_ID
       : isCheapProfile
         ? LUNA_HAIKU_ALIAS_ID
+      : isLocalProfile
+        ? LOCAL_PROFILE_TIER_MODELS.haiku
       : isBudgetClaudeLead(model)
         && (state.models?.data?.some((m) => m.id === BUDGET_SMALL_FAST_CATALOG_ID)
           ?? false)
@@ -1292,15 +1307,16 @@ export function getClaudeCodeEnvVars(
     modelKey: string,
     nameKey: string,
     bareSlug: string,
+    force = false,
   ): void => {
-    if (process.env[modelKey] !== undefined) return
+    if (!force && process.env[modelKey] !== undefined) return
     // Strict-200K profiles (cheap/cheapest/balanced) never decorate tier rows:
     // a `[1m]` value here would trip the pinned-profile guarantee check in
     // `claude.ts` and feed `applyAutoCompactWindow` a decorated candidate the
     // profile claims is unreachable. Under the seeded
     // CLAUDE_CODE_DISABLE_1M_CONTEXT=1 the bare row still budgets 200K.
     vars[modelKey] = pinStrict200K ? bareSlug : withOneMSuffixForLead(bareSlug)
-    if (process.env[nameKey] === undefined) vars[nameKey] = bareSlug
+    if (force || process.env[nameKey] === undefined) vars[nameKey] = bareSlug
   }
   // Fast profile: the Sonnet/Haiku tier rows are the router-owned Luna
   // aliases, decorated off the REAL Luna catalog entry's window (see the
@@ -1420,6 +1436,35 @@ export function getClaudeCodeEnvVars(
         vars.ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES = fastAliasCapabilities
       }
     }
+  } else if (isLocalProfile) {
+    // The three tier rows are the local server's own ids, BARE. `pinStrict200K`
+    // already suppresses the `[1m]` decoration, and the NAME seeds stay equal
+    // to the value so the picker renders `opus` / `sonnet` / `haiku` rather
+    // than a Copilot slug the server has never heard of.
+    //
+    // Forced, unlike every other profile's rows: the request that leaves here
+    // carries the model id verbatim to the local endpoint, so an inherited
+    // `ANTHROPIC_DEFAULT_*_MODEL` from the operator's shell would send a
+    // Copilot slug to a server that has no such model. A local launch's tier
+    // rows are not a preference to preserve.
+    seedTierRow(
+      "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+      LOCAL_PROFILE_TIER_MODELS.opus,
+      routerWinsTiers,
+    )
+    seedTierRow(
+      "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+      LOCAL_PROFILE_TIER_MODELS.sonnet,
+      routerWinsTiers,
+    )
+    seedTierRow(
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+      LOCAL_PROFILE_TIER_MODELS.haiku,
+      routerWinsTiers,
+    )
   } else {
     seedTierRow(
       "ANTHROPIC_DEFAULT_SONNET_MODEL",
@@ -1432,7 +1477,11 @@ export function getClaudeCodeEnvVars(
       smallFastModel,
     )
   }
-  if (!isMaxProfile) {
+  // The opus row is seeded here for every profile EXCEPT the local pair,
+  // which seeded it above with the server's tier id: `seedTierRow` consults the
+  // PARENT env, not `vars`, so this call would overwrite the local row with
+  // `claude-opus-5.5` whenever the user had not pre-set it.
+  if (!isMaxProfile && !isLocalProfile) {
     seedTierRow(
       "ANTHROPIC_DEFAULT_OPUS_MODEL",
       "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
@@ -1497,6 +1546,20 @@ export function getClaudeCodeEnvVars(
   for (const key of experimentalEnables) {
     if (process.env[key] === undefined) {
       vars[key] = "1"
+    }
+  }
+
+  // `-m local` is Advisor-free by design. The enable above is unconditional
+  // because every other profile either has a server-side Advisor or talks to
+  // Copilot, which tolerates an advertised tool it never calls; a local
+  // endpoint makes no such promise, and we have deliberately refused to assume
+  // anything about it. The documented hard opt-out is the lever, seeded after
+  // the loop so it cannot be undone, and the enable is dropped so the child
+  // env does not carry both. `local2` keeps the tool: that IS its Advisor.
+  if (launchProfileId === "local") {
+    delete vars.CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL
+    if (process.env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL === undefined) {
+      vars.CLAUDE_CODE_DISABLE_ADVISOR_TOOL = "1"
     }
   }
 

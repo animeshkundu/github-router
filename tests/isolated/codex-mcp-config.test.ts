@@ -1109,6 +1109,84 @@ describe("buildPeerAgentDefinitions", () => {
     })
   })
 
+  describe("local launch profile", () => {
+    const LOCAL_ROSTER = ["Explore", "General-Purpose", "reviewer"]
+
+    function buildLocalAgents(extra?: Partial<Parameters<typeof buildPeerAgentDefinitions>[0]>) {
+      return buildPeerAgentDefinitions({
+        codexCli: false,
+        geminiAvailable: true,
+        groupKeys: { peers: "peers", search: "search", workers: "workers" },
+        nonce: NONCE,
+        codexHome: "/tmp/codex",
+        localProfile: true,
+        serverUrl: URL,
+        nativeRoster: LOCAL_ROSTER,
+        includeCoordinator: false,
+        localExploreModel: "haiku",
+        localGeneralPurposeModel: "sonnet",
+        localReviewerModel: "opus",
+        ...extra,
+      })
+    }
+
+    test("emits exactly the cheapest three-agent roster (no Plan)", () => {
+      const agents = buildLocalAgents()
+      expect(Object.keys(agents).sort()).toEqual(["Explore", "General-Purpose", "reviewer"])
+      for (const absent of [
+        "peer-review-coordinator", "codex-critic", "gemini-critic", "opus-critic",
+        "implementer", "implementer-fast", "reviewer-fast", "brainstorm", "scribe", "general-purpose-fast", "general-purpose", "critic", "planner", "Plan",
+      ]) expect(agents[absent]).toBeUndefined()
+    })
+
+    test("pins the local tier ids and the cheapest efforts", () => {
+      const agents = buildLocalAgents()
+      expect(agents.Explore!.model).toBe("haiku")
+      expect(agents["General-Purpose"]!.model).toBe("sonnet")
+      expect(agents.reviewer!.model).toBe("opus")
+      expect(agents.Explore!.effort).toBe("high")
+      expect(agents["General-Purpose"]!.effort).toBe("max")
+      expect(agents.reviewer!.effort).toBe("max")
+    })
+
+    test("no emitted role carries a router-owned alias, and no browse worker at all", () => {
+      // Local egress forwards the body model verbatim, so a `gh-router-*`
+      // alias would reach the local server unresolved. Cheapest pins
+      // BROWSE_LOW_ALIAS_ID for worker-browse; local emits no such agent.
+      const agents = buildLocalAgents({ browseAvailable: true })
+      for (const [name, def] of Object.entries(agents)) {
+        expect(`${name}:${def.model ?? ""}`).not.toContain("gh-router-")
+      }
+      // `worker-browse` is a Pi worker, and a worker answers on a Copilot
+      // model, which these profiles forbid a subagent to do. The browser
+      // capability itself is the `browser` group's model-free tools, so
+      // browse being enabled must not resurrect the worker.
+      expect(agents["worker-browse"]).toBeUndefined()
+    })
+
+    test("protege advisor appendix only when the launch has an Advisor", () => {
+      const withAdvisor = buildLocalAgents({ advisorAvailable: true })
+      expect(withAdvisor.reviewer!.prompt).toContain("at most 5 advisor rounds")
+      expect(withAdvisor.reviewer!.description).toContain("Sol advisor")
+
+      const withoutAdvisor = buildLocalAgents({ advisorAvailable: false })
+      expect(withoutAdvisor.reviewer!.prompt).not.toContain("at most 5 advisor rounds")
+      expect(withoutAdvisor.reviewer!.description).not.toContain("Sol advisor")
+    })
+
+    test("nativeRoster remains a hard filter on the local definitions", () => {
+      const agents = buildLocalAgents({ nativeRoster: ["Explore"] })
+      expect(Object.keys(agents)).toEqual(["Explore"])
+    })
+
+    test("every local agent name matches the permanent sweep allowlist", () => {
+      const agents = buildLocalAgents({ browseAvailable: true })
+      for (const name of Object.keys(agents)) {
+        expect(PEER_AGENT_MD_FILENAME.test(`peer-123-${"a".repeat(8)}-${name}.md`)).toBe(true)
+      }
+    })
+  })
+
   describe("balanced launch profile", () => {
     const BALANCED_ROSTER = ["Explore", "General-Purpose", "reviewer"]
 
@@ -1153,7 +1231,10 @@ describe("buildPeerAgentDefinitions", () => {
       // Explicit delegation tuning (complex tasks): proactive parallel
       // Explore and reviewer verification; the lead owns planning directly.
       expect(agents.Explore!.description).toContain("Use proactively")
-      expect(agents["General-Purpose"]!.prompt).toContain("Plan handoff")
+      // Balanced emits no `Plan` agent, so there is no handoff to promise; the
+      // lead still supplies a plan directly and General-Purpose follows it.
+      expect(agents["General-Purpose"]!.prompt).not.toContain("Plan handoff")
+      expect(agents["General-Purpose"]!.prompt).toContain("When the lead hands you a plan")
       expect(agents["General-Purpose"]!.description).not.toContain("implementer")
       expect(agents.reviewer!.description).toContain("Use proactively")
       // Balanced: reviewer delegates ONLY when genuinely needed (lead

@@ -14,7 +14,12 @@ import {
   BALANCED_PROFILE_MODELS,
   BALANCED_PROFILE_NATIVE_AGENT_NAMES,
 } from "./balanced-profile-contract"
-import { balancedContractFor, cheapestContractFor } from "./profile-family"
+import {
+  balancedContractFor,
+  cheapestContractFor,
+  local2AdvisorContract,
+  localContractFor,
+} from "./profile-family"
 import {
   FAST_PROFILE_MODELS,
   FAST_PROFILE_NATIVE_AGENT_NAMES,
@@ -28,12 +33,12 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
 /**
  * Which launch surface a `github-router claude` session is running under.
  *
- * `"standard"` is every launch today: the ordinary Opus/Sonnet/Haiku lead,
- * the full native-agent roster, every peer persona, and every scoped MCP
-*  group (`peers`/`search`/`workers`/`orchestrate`, plus the independently
- *  opted-in `browser`/`fleet`/`first-mate`/`decide` groups under their own
- *  predicates). `"fast"` is the deliberately lean `-m fast` profile: a
- *  Gemini lead, exactly four native agents, the fast-only Oracle,
+ * `"standard"` is the launch with no profile alias: the ordinary
+ * Opus/Sonnet/Haiku lead, the full native-agent roster, every peer persona,
+ * and every scoped MCP group (`peers`/`search`/`workers`/`orchestrate`, plus
+ * the independently opted-in `browser`/`fleet`/`first-mate`/`decide` groups
+ * under their own predicates). `"fast"` is the deliberately lean `-m fast`
+ * profile: a Gemini lead, exactly four native agents, the fast-only Oracle,
  *  Artifact/search tools, and optional direct-browser plus browse-worker groups.
  *  `"cheap"` is the cost-lean `-m cheap` variant of `fast`: the same exact
  *  four-agent surface, but the Gemini leader also runs at the 200K default
@@ -67,7 +72,7 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  from the resolved lead model id — so `-m gpt-6-luna` (a direct pin of
  *  the same model the fast profile drives) stays a standard-surface launch,
  *  and only the literal `fast`/`cheap`/`cheap1m`/`cheapest`/`cheapest2`/
- *  `balanced`/`balanced2` aliases narrow the surface.
+ *  `balanced`/`balanced2`/`local`/`local2`/`max` aliases narrow the surface.
  */
 export type LaunchProfileId =
   | "standard"
@@ -79,6 +84,8 @@ export type LaunchProfileId =
   | "cheapest2"
   | "balanced"
   | "balanced2"
+  | "local"
+  | "local2"
 
 /**
  * Everything a launch profile needs to declare about its own surface.
@@ -213,6 +220,47 @@ export const BALANCED2_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
+ * The `-m local` roster: the cheapest surface (same three-agent roster, no
+ * coordinator), with every role's model swapped for the local endpoint's tier
+ * id.
+ *
+ * No agent turn on a local launch reaches a Copilot model, so every group
+ * whose tools spawn one is absent: `workers` (the Pi workers resolve Copilot
+ * models) and every group built for model ties. `peers` is permitted only
+ * because the artifact tools live there and human review is not model
+ * inference, and the empty allow-list means no persona is listed or callable:
+ * with the artifact panel off the group holds nothing and neither launcher
+ * publishes it. What remains is the surface that is not an agent model call —
+ * `search` (in-process lexical/ColBERT plus the PAT-backed web search),
+ * `browser` (a local extension, whose page compressor is the one model-backed
+ * exception and carries its own fixed chain), and the three Azure data groups.
+ * The egress guard in `copilot-model-policy.ts` enforces the same rule from
+ * the other side, so a path that somehow reaches Copilot still refuses.
+ */
+export const LOCAL_PROFILE: LaunchProfileDescriptor = Object.freeze({
+  id: "local",
+  nativeRoster: new Set(localContractFor("local").nativeAgentNames),
+  personaAllowlist: new Set<string>(),
+  allowedGroups: new Set(["peers", "search", "browser", "ado", "kusto", "cloudagent"]),
+  hasCoordinator: false,
+})
+
+/**
+ * The `-m local2` roster: `local` plus the curated `gpt-6.1-sol`/high Advisor.
+ * The Advisor and the Oracle are the only two Copilot consumers the profile
+ * has, so `peers` gains the Oracle persona next to the model-free artifact
+ * tools. `workers` stays absent as on `local`: a Pi worker is neither of the
+ * two exceptions.
+ */
+export const LOCAL2_PROFILE: LaunchProfileDescriptor = Object.freeze({
+  id: "local2",
+  nativeRoster: new Set(localContractFor("local2").nativeAgentNames),
+  personaAllowlist: new Set(["oracle"]),
+  allowedGroups: new Set(["peers", "search", "browser", "ado", "kusto", "cloudagent"]),
+  hasCoordinator: false,
+})
+
+/**
  * The `-m max` profile: Sol/Luna-led, browse-only workers, and explicit
  * cross-lab peer names. The descriptor is a hard projection for bound launch
  * requests; unbound/BYO traffic remains standard because it has no registry
@@ -244,6 +292,8 @@ export function profileDescriptor(id: LaunchProfileId): LaunchProfileDescriptor 
   if (id === "cheapest2") return CHEAPEST2_PROFILE
   if (id === "balanced") return BALANCED_PROFILE
   if (id === "balanced2") return BALANCED2_PROFILE
+  if (id === "local") return LOCAL_PROFILE
+  if (id === "local2") return LOCAL2_PROFILE
   return STANDARD_PROFILE
 }
 
@@ -268,6 +318,8 @@ export function resolveLaunchProfile(modelArg: string | undefined): LaunchProfil
   if (arg === "cheapest2") return "cheapest2"
   if (arg === "balanced") return "balanced"
   if (arg === "balanced2") return "balanced2"
+  if (arg === "local") return "local"
+  if (arg === "local2") return "local2"
   return "standard"
 }
 
@@ -1339,3 +1391,98 @@ export function formatBalancedPrerequisiteFailure(
   )
 }
 
+
+// ---------------------------------------------------------------------------
+// Local-profile startup prerequisites (`-m local`, `-m local2`)
+// ---------------------------------------------------------------------------
+
+export interface LocalPrerequisiteCheck {
+  ok: boolean
+  /** Human-readable description of each missing/invalid requirement, empty
+   *  when `ok`. */
+  missing: ReadonlyArray<string>
+}
+
+/**
+ * Validate the launch prerequisites for the `local` family.
+ *
+ * The LOCAL roster needs nothing from the Copilot catalog: its lead and its
+ * native roles are the bare tier ids `opus` / `sonnet` / `haiku`, which the
+ * local server resolves, and this profile deliberately makes no claim about
+ * what that server can do (no context, effort, tool-call or endpoint check —
+ * we do not know, and refusing to launch on a guess would be worse than
+ * letting the server answer for itself).
+ *
+ * The ONE Copilot model the family still consumes is `local2`'s Advisor:
+ * `gpt-6.1-sol`, server-side, at its default context and `high` effort. That
+ * model is checked here, and only for `local2`. `local` has no advisor at the
+ * type level, so passing its contract would be a programming error rather
+ * than a launch to validate.
+ *
+ * Contrast with `validateCheapestProfilePrerequisites`: there the whole roster
+ * IS the catalog, so every role is checked.
+ */
+export function validateLocalProfilePrerequisites(
+  catalog: ModelsResponse | undefined,
+  profileId: string = "local",
+): LocalPrerequisiteCheck {
+  // `local` carries no advisor fields at the type level (see
+  // `./local-profile-contract`), so there is nothing to validate and the whole
+  // launch rests on the local server. That absence is the fact this branch
+  // reads: reaching `local2AdvisorContract()` requires naming `local2`.
+  if (profileId !== "local2") {
+    return { ok: true, missing: [] }
+  }
+
+  const contract = local2AdvisorContract()
+  const advisorModel = contract.advisorModel
+  const missing: Array<string> = []
+  const advisor = findModel(catalog, advisorModel)
+  if (!advisor) {
+    missing.push(
+      `${advisorModel}: absent from the live catalog (the ${profileId} Advisor)`,
+    )
+    return { ok: false, missing }
+  }
+  if (!hasToolCalls(advisor)) {
+    missing.push(`${advisorModel}: does not advertise tool_calls`)
+  }
+  if (!hasContextAtLeast(advisor, contract.subagentContextTokens)) {
+    missing.push(
+      `${advisorModel}: advertised context window is below the 200K subagent floor`,
+    )
+  }
+  if (!supportsEffort(advisor, contract.advisorEffort)) {
+    missing.push(
+      `${advisorModel}: does not advertise a "${contract.advisorEffort}" reasoning effort`,
+    )
+  }
+  if (!supportsEndpoint(advisor, "responses")) {
+    missing.push(
+      `${advisorModel}: does not advertise a supported Responses endpoint`,
+    )
+  }
+  return { ok: missing.length === 0, missing }
+}
+
+/**
+ * Format `validateLocalProfilePrerequisites`'s failure list. The local roles
+ * themselves are never in the list — they need no catalog entry — so the
+ * message names the Advisor explicitly rather than implying the roster failed.
+ *
+ * `command` is the subcommand whose launch failed (`claude` or `pi`), so the
+ * remedy the message prints is one the user can actually type.
+ */
+export function formatLocalPrerequisiteFailure(
+  missing: ReadonlyArray<string>,
+  profileId: string = "local",
+  command: string = "claude",
+): string {
+  return (
+    `github-router ${command} -m ${profileId} requires the following Copilot capabilities for its `
+    + `server-side Advisor, which this account's catalog does not fully provide:\n`
+    + missing.map((m) => `  - ${m}`).join("\n")
+    + `\n\nThe lead and native roles run on the local endpoint and need no catalog entry; `
+    + `only the Advisor is served by Copilot. Drop the Advisor by launching \`-m local\` instead.`
+  )
+}

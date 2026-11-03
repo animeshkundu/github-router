@@ -116,9 +116,12 @@ function readAicSnapshot(): { fragment: string; actualUsd?: number } {
     if (!ledgerPath) return { fragment: "" }
     const snapshot = readAicSnapshotFile(ledgerPath)
     if (!snapshot) return { fragment: "" }
-    // No priced responses yet → no fragment AND no USD: the `~$`
-    // segment renders its `~$--` placeholder instead of `~$0.00`.
-    if (snapshot.requests === 0 || snapshot.totalNanoAiu <= 0) {
+    // No recorded requests at all → no fragment AND no USD: the `~$`
+    // segment renders its `~$--` placeholder instead of a fabricated zero.
+    // A recorded request that cost nothing (`-m local`, where the lead turn
+    // runs on the operator's own server) IS a measured zero, so it renders
+    // `[AIC 0.00]` and `~$0.00` rather than nothing.
+    if (snapshot.requests === 0) {
       return { fragment: "" }
     }
     return {

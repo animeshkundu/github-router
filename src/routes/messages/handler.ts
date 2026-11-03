@@ -4,7 +4,7 @@ import consola from "consola"
 
 import { awaitApproval } from "~/lib/approval"
 import { createAnthropicAicTap } from "~/lib/aic-sse-tap"
-import { extractAndRecordAic, recordAic } from "~/lib/aic-ledger"
+import { extractAndRecordAic, recordAic, recordZeroCostRequest } from "~/lib/aic-ledger"
 import {
   classifyMessagesRoute,
   handleNonClaudeChat,
@@ -41,7 +41,9 @@ import { maxRequestError } from "~/lib/max-request-preprocess"
 import { FAST_PROFILE_ADVISOR_MODEL } from "~/lib/fast-profile-contract"
 import { CHEAP_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheap-profile-contract"
 import { CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL } from "~/lib/cheapest-profile-contract"
-import { cheapestContractFor, isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
+import { effectiveLocalProfile } from "~/lib/copilot-model-policy"
+import { cheapestContractFor, isBalancedFamily, isCheapestFamily, local2AdvisorContract } from "~/lib/profile-family"
+import { localBaseUrl, localSessionId } from "~/lib/local-egress"
 import {
   MAX_PROFILE_ADVISOR_INSTRUCTIONS,
   maxAdvisorEffortForModel,
@@ -62,6 +64,8 @@ import {
   CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS,
   CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
   FAST_ADVISOR_TOOL_INSTRUCTIONS,
+  LOCAL_ADVISOR_TOOL_INSTRUCTIONS,
+  LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
   buildAdvisorStream,
   injectAdvisorTool,
   isAdvisorRequested,
@@ -99,6 +103,26 @@ function extractBetaHeaders(c: Context): Record<string, string> {
     if (filtered) headers["anthropic-beta"] = filtered
   }
   return headers
+}
+
+/**
+ * Beta headers for a local-profile request: forwarded VERBATIM.
+ *
+ * `filterBetaHeader`'s allowlist is a list of capabilities COPILOT supports.
+ * A local server's capabilities are unknowable by construction (the profile
+ * assumes nothing about the stack behind the endpoint), so filtering here would
+ * strip features the server may well implement. The one value removed is the
+ * proxy's own `advisor-tool-` beta: the router consumes that marker rather than
+ * forwarding it, on every profile.
+ */
+function rawLocalBetaHeaders(c: Context): Record<string, string> {
+  const anthropicBeta = c.req.header("anthropic-beta")
+  if (!anthropicBeta) return {}
+  const kept = anthropicBeta
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0 && !part.startsWith("advisor-tool-"))
+  return kept.length > 0 ? { "anthropic-beta": kept.join(",") } : {}
 }
 
 /**
@@ -466,7 +490,15 @@ export async function handleCompletion(c: Context) {
     await awaitApproval()
   }
 
-  const betaHeaders = extractBetaHeaders(c)
+  // Bound identity first; otherwise fall back to the launch this process is
+  // serving. A spawned teammate keeps `CLAUDE_CONFIG_DIR` but can lose the
+  // launch header, and it still belongs to the local session — answering it
+  // from Copilot would bill a model that session exists to avoid.
+  const localProfileRequest = effectiveLocalProfile(identity.launch?.profileId) !== undefined
+  // A local profile forwards the client's beta header VERBATIM: its allowlist
+  // is a statement about Copilot's capabilities, and this profile assumes
+  // nothing about the server behind the endpoint.
+  const betaHeaders = localProfileRequest ? rawLocalBetaHeaders(c) : extractBetaHeaders(c)
 
   // Phase I: detect ADVISOR request BEFORE filterBetaHeader strips
   // the advisor-tool- prefix from the outgoing header. We need the raw
@@ -479,15 +511,22 @@ export async function handleCompletion(c: Context) {
     identity.launch?.profileId === "cheap" || identity.launch?.profileId === "cheap1m"
   const cheapestProfileRequest = isCheapestFamily(identity.launch?.profileId)
   const balancedProfileRequest = isBalancedFamily(identity.launch?.profileId)
+  // `local2` is `local` plus exactly the curated Advisor `cheapest2` runs, so
+  // the cheapest Advisor machinery below serves it too. The contract is
+  // resolved through `local2AdvisorContract`, never `cheapestContractFor`:
+  // the latter returns the BASE cheapest contract for any id that is not
+  // `cheapest2` and would silently downgrade local2's Advisor to gpt-5.6-sol.
+  const localAdvisorRequest = identity.launch?.profileId === "local2"
+  const curatedAdvisorContract = localAdvisorRequest
+    ? local2AdvisorContract()
+    : cheapestProfileRequest
+      ? cheapestContractFor(identity.launch?.profileId)
+      : undefined
   // The cheapest family's Advisor identity follows its contract: `cheapest`
   // pins `gpt-5.6-sol`, `cheapest2` pins `gpt-6.1-sol`. The client pin and the
   // wire model are the same bare 200K slug for both siblings.
-  const cheapestFamilyAdvisorModel = isCheapestFamily(identity.launch?.profileId)
-    ? cheapestContractFor(identity.launch?.profileId).advisorModel
-    : undefined
-  const cheapestFamilyAdvisorClientModel = isCheapestFamily(identity.launch?.profileId)
-    ? cheapestContractFor(identity.launch?.profileId).advisorClientModel
-    : undefined
+  const curatedAdvisorModel = curatedAdvisorContract?.advisorModel
+  const curatedAdvisorClientModel = curatedAdvisorContract?.advisorClientModel
   const subagentAgentId = (c.req.header("x-claude-code-agent-id") ?? "").trim()
   const subagentRequest = subagentAgentId.length > 0
   const fastSubagentRequest = fastProfileRequest && subagentRequest
@@ -499,40 +538,62 @@ export async function handleCompletion(c: Context) {
   const maxLeadAdvisor = maxProfileRequest && !maxSubagentRequest
   const cheapLeadAdvisor = cheapProfileRequest && !cheapSubagentRequest
   const cheapestLeadAdvisor = cheapestProfileRequest && !cheapestSubagentRequest
-  // Cheapest-only protege grant: the Luna/max reviewer may consult the Sol
-  // Advisor (capped, non-binding). Every other subagent stays excluded.
-  // Detected by agent id (classic Task spawns) OR request model alias
-  // (Agent-team teammates carry name-based ids like "reviewer-advisor-only",
-  // so the id alone cannot identify the role — see `isCheapestReviewerModel`).
+  // `local2` takes the curated Advisor on its LEAD, exactly as `cheapest2`
+  // does on its own lead. `local` gets no Advisor at all.
+  const localLeadAdvisor = localAdvisorRequest && !subagentRequest
+  // The curated Advisor surface: the cheapest family plus `local2`, which is
+  // cheapest2's Advisor on a local lead. Both share the fixed-model, bare
+  // client pin, 200K transcript cap and small-digest prompt below.
+  const curatedLeadAdvisor = cheapestLeadAdvisor || localLeadAdvisor
+  // Reviewer protege grant: the cheapest family's Luna/max reviewer and the
+  // local2 reviewer may consult the curated Advisor (capped, non-binding).
+  // Every other subagent stays excluded.
+  //
+  // Cheapest is detected by agent id (classic Task spawns) OR request model
+  // alias (Agent-team teammates carry name-based ids like
+  // "reviewer-advisor-only", so the id alone cannot identify the role — see
+  // `isCheapestReviewerModel`). Local has no alias to key on: the local
+  // reviewer and the local lead share the same bare `opus` id, so the agent
+  // id is the only signal, and its Agent-team form is the `reviewer-` prefix.
   const cheapestReviewerAdvisor = cheapestProfileRequest
     && (subagentAgentId === "reviewer" || isCheapestReviewerModel(rawBody))
-  if (cheapestProfileRequest && subagentRequest) {
+  const localReviewerAdvisor = localAdvisorRequest
+    && (subagentAgentId === "reviewer" || subagentAgentId.startsWith("reviewer-"))
+  if ((cheapestProfileRequest || localAdvisorRequest) && subagentRequest) {
     consola.debug(
-      `cheapest subagent advisor gate: agentId=${JSON.stringify(subagentAgentId)} reviewerModel=${isCheapestReviewerModel(rawBody)} granted=${cheapestReviewerAdvisor && advisorRequested}`,
+      `curated subagent advisor gate: agentId=${JSON.stringify(subagentAgentId)} reviewerModel=${isCheapestReviewerModel(rawBody)} granted=${(cheapestReviewerAdvisor || localReviewerAdvisor) && advisorRequested}`,
     )
   }
   // Balanced is advisor-free by design: the lead never gets the Advisor tool,
   // even when the client sends the advisor beta (enforced by the
   // `balancedProfileRequest ? false` branch in `advisorBehaviorEnabled`).
-  const advisorEnabled = advisorRequested && !fastSubagentRequest && !maxSubagentRequest && !cheapSubagentRequest && (!cheapestSubagentRequest || cheapestReviewerAdvisor) && !balancedSubagentRequest
+  // `!localProfileRequest` keeps local traffic out of the GENERIC advisor gate:
+  // a local profile must never reach the advisor through a fallback it never
+  // asked for — `local` has none, and `local2`'s is lead-or-reviewer only.
+  const advisorEnabled = advisorRequested && !localProfileRequest && !fastSubagentRequest && !maxSubagentRequest && !cheapSubagentRequest && (!cheapestSubagentRequest || cheapestReviewerAdvisor) && !balancedSubagentRequest
   const fastAdvisorEnabled = fastLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const maxAdvisorEnabled = maxLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const cheapAdvisorEnabled = cheapLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
-  const cheapestAdvisorEnabled = cheapestLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
-  const cheapestReviewerEnabled = cheapestReviewerAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
+  const curatedAdvisorEnabled = curatedLeadAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
+  // One protege grant shape serves both families: the capped, mentor-posture
+  // consult the curated Advisor offers a reviewer.
+  const curatedReviewerAdvisor = cheapestReviewerAdvisor || localReviewerAdvisor
+  const curatedReviewerEnabled = curatedReviewerAdvisor && advisorRequested && hasNonEmptyTools(rawBody)
   const advisorBehaviorEnabled = balancedProfileRequest
     ? false
-    : fastLeadAdvisor
-      ? fastAdvisorEnabled
-      : cheapLeadAdvisor
-        ? cheapAdvisorEnabled
-        : cheapestLeadAdvisor
-          ? cheapestAdvisorEnabled
-          : maxLeadAdvisor
-            ? maxAdvisorEnabled
-            : cheapestReviewerAdvisor
-              ? cheapestReviewerEnabled
-              : advisorEnabled
+    : localProfileRequest
+      ? (curatedAdvisorEnabled || curatedReviewerEnabled)
+      : fastLeadAdvisor
+        ? fastAdvisorEnabled
+        : cheapLeadAdvisor
+          ? cheapAdvisorEnabled
+          : curatedLeadAdvisor
+            ? curatedAdvisorEnabled
+            : maxLeadAdvisor
+              ? maxAdvisorEnabled
+              : curatedReviewerAdvisor
+                ? curatedReviewerEnabled
+                : advisorEnabled
   let fastAdvisorChoice: ReturnType<typeof resolveAdvisorModel> | undefined
   let maxAdvisorChoice: { model: string; effort: string } | undefined
   if (maxAdvisorEnabled) {
@@ -624,30 +685,36 @@ export async function handleCompletion(c: Context) {
       )
     }
   }
-  if (cheapestAdvisorEnabled) {
+  if (curatedAdvisorEnabled) {
     // Fixed Sol advisor at the 200K default window (bare client pin) with
     // the 200K transcript cap applied at dispatch, mirroring cheap's shape.
     const mismatch = cheapestAdvisorMetadataMismatch(
       rawBody,
-      cheapestFamilyAdvisorClientModel ?? CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL,
+      curatedAdvisorClientModel ?? CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL,
     )
 
     if (mismatch) {
+      // Name the profile the launch actually is. `local2` shares this
+      // machinery but its lead runs on the operator's own server, so telling
+      // it to restore "the fixed cheapest profile" would point at the wrong
+      // model entirely.
+      const curatedLabel = localAdvisorRequest ? "Local Advisor" : "Cheapest Advisor"
+      const curatedAlias = localAdvisorRequest ? "local2" : "cheapest"
       return c.json(
         {
           type: "error",
           error: {
             type: "invalid_request_error",
             message:
-              `Cheapest Advisor model mismatch: ${mismatch}. `
-              + `Run \`/advisor ${cheapestFamilyAdvisorClientModel ?? CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL}\` to restore the fixed cheapest profile, or relaunch with \`github-router claude -m ${identity.launch?.profileId ?? "cheapest"}\`.`,
+              `${curatedLabel} model mismatch: ${mismatch}. `
+              + `Run \`/advisor ${curatedAdvisorClientModel ?? CHEAPEST_PROFILE_ADVISOR_CLIENT_MODEL}\` to restore the fixed ${curatedAlias} profile, or relaunch with \`github-router claude -m ${identity.launch?.profileId ?? curatedAlias}\`.`,
           },
         },
         400,
       )
     }
     try {
-      fastAdvisorChoice = resolveCheapestAdvisorModel(cheapestFamilyAdvisorModel)
+      fastAdvisorChoice = resolveCheapestAdvisorModel(curatedAdvisorModel)
     } catch (error) {
       return c.json(
         {
@@ -661,12 +728,12 @@ export async function handleCompletion(c: Context) {
       )
     }
   }
-  if (cheapestReviewerEnabled && !fastAdvisorChoice) {
+  if (curatedReviewerEnabled && !fastAdvisorChoice) {
     // Reviewer subagents carry no native advisor metadata to validate (the
     // proxy injects the tool itself), so skip the mismatch check and resolve
     // the same fixed Sol advisor. Throws -> 503 like the lead path.
     try {
-      fastAdvisorChoice = resolveCheapestAdvisorModel(cheapestFamilyAdvisorModel)
+      fastAdvisorChoice = resolveCheapestAdvisorModel(curatedAdvisorModel)
     } catch (error) {
       return c.json(
         {
@@ -724,9 +791,20 @@ export async function handleCompletion(c: Context) {
   // lead's conversation. A Task subagent has a different, narrower transcript,
   // so exposing Advisor there adds cost and conflicting authority without the
   // intended context. Strip both Claude Code's native typed tool and any
-  // replay-injected proxy tool before routing. The cheapest reviewer is the
-  // one exception (protege grant): every other cheapest subagent is stripped.
-  if (fastSubagentRequest || maxSubagentRequest || (cheapestSubagentRequest && !cheapestReviewerAdvisor)) {
+  // replay-injected proxy tool before routing. The curated reviewer is the one
+  // exception (protege grant): every other cheapest and local subagent is
+  // stripped.
+  //
+  // The local arm also covers `local2` LEADS whose request carries no advisor
+  // beta: `injectAdvisorTool` (which itself strips native typed tools) only
+  // runs when `advisorBehaviorEnabled`, and the local server is never assumed
+  // to understand an Anthropic server-tool type it cannot be asked about.
+  if (
+    fastSubagentRequest
+    || maxSubagentRequest
+    || (cheapestSubagentRequest && !cheapestReviewerAdvisor)
+    || (localProfileRequest && !advisorBehaviorEnabled)
+  ) {
     finalBody = stripAdvisorTool(finalBody)
   }
 
@@ -757,12 +835,26 @@ export async function handleCompletion(c: Context) {
     // ADVISOR_TOOL_INSTRUCTIONS as description) so the model knows
     // when to call it. Tool name uses double-underscore prefix to
     // avoid collision with any user MCP server's `advisor`.
+    //
+    // `local2` shares the cheapest2 machinery but not its framing: the local
+    // lead is an unknown model on an unknown endpoint, so calling the
+    // Copilot-served Advisor "stronger" would be a claim the profile cannot
+    // make. Same behavioural contract, different framing sentence.
+    const curatedAdvisorInstructions = localAdvisorRequest
+      ? {
+          lead: LOCAL_ADVISOR_TOOL_INSTRUCTIONS,
+          reviewer: LOCAL_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
+        }
+      : {
+          lead: CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS,
+          reviewer: CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS,
+        }
     finalBody = injectAdvisorTool(
       finalBody,
-      cheapestReviewerAdvisor
-        ? CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS
-        : cheapestLeadAdvisor
-          ? CHEAPEST_ADVISOR_TOOL_INSTRUCTIONS
+      curatedReviewerAdvisor
+        ? curatedAdvisorInstructions.reviewer
+        : curatedLeadAdvisor
+          ? curatedAdvisorInstructions.lead
           : fastLeadAdvisor
             ? FAST_ADVISOR_TOOL_INSTRUCTIONS
             : maxLeadAdvisor
@@ -811,12 +903,20 @@ export async function handleCompletion(c: Context) {
 
   // Resolve model name (e.g. opus → opus-1m variant) and translate
   // thinking-mode shape for adaptive-thinking models.
+  //
+  // A local profile takes the verbatim branch instead: `resolveModel` would
+  // rewrite the bare `opus` tier id onto a Copilot `claude-opus-*` (its
+  // opus-family preference), `translateThinking` / `clampOutputConfigEffort`
+  // would rewrite the thinking shape from a Copilot catalog entry that does
+  // not describe this model, and `stripAnthropicOnlyFields` would drop fields
+  // the local server may well understand. The profile's whole contract is
+  // that the endpoint already speaks Claude Code's dialect.
   const {
     body: resolvedBody,
     originalModel,
     resolvedModel,
     selectedModel,
-  } = resolveModelInBody(finalBody)
+  } = localProfileRequest ? localModelInBody(finalBody) : resolveModelInBody(finalBody)
 
   const modelId = resolvedModel ?? originalModel
   const { body: promptWindowBody } = await salvageOversizedPrompt(
@@ -833,12 +933,20 @@ export async function handleCompletion(c: Context) {
   // slug list. The ORIGINAL (pre-resolution) request model id is passed as the
   // 3rd arg so a Claude alias that resolveModel maps onto a non-Claude-looking
   // id can never be diverted to either shim (fail-closed to Claude).
-  const messagesRoute = classifyMessagesRoute(
-    modelId,
-    selectedModel,
-    originalModel,
-    fastProfileRequest,
-  )
+  //
+  // A local profile is pinned to `claude-passthrough` outright rather than
+  // relying on `selectedModel === undefined` to classify it that way: the local
+  // server IS the Anthropic endpoint, so diverting a local request into the
+  // Copilot-translation shim would be sending it somewhere it was never meant
+  // to go.
+  const messagesRoute = localProfileRequest
+    ? "claude-passthrough"
+    : classifyMessagesRoute(
+        modelId,
+        selectedModel,
+        originalModel,
+        fastProfileRequest,
+      )
   if (messagesRoute !== "claude-passthrough") {
     // ADVISOR is Claude-only in the GENERAL case: the server-side advisor
     // translate-loop (buildAdvisorStream) exists only on native Messages.
@@ -859,7 +967,7 @@ export async function handleCompletion(c: Context) {
     const wantsStream = parsedBase?.stream === true
 
     if (
-      (fastAdvisorEnabled || cheapAdvisorEnabled || cheapestAdvisorEnabled || maxAdvisorEnabled || cheapestReviewerEnabled)
+      (fastAdvisorEnabled || cheapAdvisorEnabled || curatedAdvisorEnabled || maxAdvisorEnabled || curatedReviewerEnabled)
       && wantsStream
     ) {
       const initialConversation = Array.isArray(parsedBase!.messages)
@@ -899,7 +1007,7 @@ export async function handleCompletion(c: Context) {
             escalated: false,
             fastProfile: false,
           }
-        : cheapAdvisorEnabled || cheapestAdvisorEnabled || cheapestReviewerEnabled
+        : cheapAdvisorEnabled || curatedAdvisorEnabled || curatedReviewerEnabled
           ? {
               // Cheap and cheapest share fast's fixed Sol identity/effort
               // (the reviewer's protege consults use the same fixed Sol
@@ -932,15 +1040,16 @@ export async function handleCompletion(c: Context) {
           // retaining their independent model, effort, and transport policies.
           // The cheapest reviewer gets the mentor posture instead (never the
           // lead consultant clause) plus its per-invocation turn cap.
-          advisorFastProfile: advisorChoice.fastProfile && !cheapestReviewerEnabled,
+          advisorFastProfile: advisorChoice.fastProfile && !curatedReviewerEnabled,
           advisorMaxProfile: maxAdvisorEnabled,
-          advisorCheapProfile: cheapAdvisorEnabled || cheapestAdvisorEnabled || cheapestReviewerEnabled,
+          advisorCheapProfile: cheapAdvisorEnabled || curatedAdvisorEnabled || curatedReviewerEnabled,
           // Cheapest-only structured protégé consult: curated transcript +
           // tool-aware rendering + XML-tagged layered prompt. Distinct from
           // `advisorCheapProfile` (which also covers `-m cheap`).
-          advisorCheapestProfile: cheapestAdvisorEnabled || cheapestReviewerEnabled,
-          advisorReviewerProfile: cheapestReviewerEnabled,
-          advisorMaxTurns: cheapestReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
+          advisorCheapestProfile: curatedAdvisorEnabled || curatedReviewerEnabled,
+          advisorReviewerProfile: curatedReviewerEnabled,
+          advisorLocalProfile: localAdvisorRequest,
+          advisorMaxTurns: curatedReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: advisorChoice.effort,
           externalAborter: translatedAdvisorAborter,
           continueTurn: makeShimContinueTurn(endpoint, {
@@ -995,7 +1104,10 @@ export async function handleCompletion(c: Context) {
       : handleNonClaudeResponses(c, shimOpts)
   }
 
-  if (modelId) logEndpointMismatch(modelId, "/v1/messages")
+  // Never on a local profile: the Copilot catalog says nothing about a model
+  // the operator's own server is serving, so consulting it can only produce a
+  // false diagnosis.
+  if (modelId && !localProfileRequest) logEndpointMismatch(modelId, "/v1/messages")
 
   // Apply default anthropic-beta for Claude models when client sends none
   const effectiveBetas = applyDefaultBetas(betaHeaders, resolvedModel ?? originalModel)
@@ -1034,11 +1146,20 @@ export async function handleCompletion(c: Context) {
       // retryTransient: true — pre-first-byte retry on a 429/5xx/network blip.
       // The response body is not consumed until the streaming/non-streaming
       // branch below, so re-issuing here cannot duplicate streamed output.
+      //
+      // The trailing `local` egress is what sends a `-m local` / `-m local2`
+      // LEAD turn to the operator's server instead of Copilot. Every other
+      // caller of `createMessages` (the Advisor, peer personas, `stand_in`)
+      // omits it and keeps hitting Copilot, which is exactly why `local2`'s
+      // Advisor stays on the real `gpt-6.1-sol` while its lead turns are free.
       response = await createMessages(
         nativeBody,
         requestHeaders,
         advisorAborter?.signal,
         true,
+        localProfileRequest ?
+          { baseUrl: localBaseUrl(), sessionId: localSessionId(c) }
+        : undefined,
       )
       if (acceptedRepair) {
         rememberThinkingHistoryRepair(acceptedRepair.fingerprint)
@@ -1105,6 +1226,16 @@ export async function handleCompletion(c: Context) {
       acceptedRepair = thinkingRepair
       repairedMessageIndices.add(thinkingRepair.messageIndex)
     }
+  }
+
+  // A local lead turn cost the operator nothing, and no `copilot_usage` will
+  // ever arrive to say so. Record the REQUEST at zero credits (raw model id —
+  // see `recordZeroCostRequest`) so the status line reads `[AIC 0.00]` and the
+  // exit summary counts the turn instead of reporting a broken ledger. One
+  // site covers streaming and non-streaming; a rejected call is not a lead
+  // turn and is not counted.
+  if (localProfileRequest && response.ok) {
+    recordZeroCostRequest(originalModel)
   }
 
   const contentType = response.headers.get("content-type") ?? ""
@@ -1210,19 +1341,26 @@ export async function handleCompletion(c: Context) {
           requestHeaders,
           advisorModel: advisorChoice.model,
           advisorEscalated: advisorChoice.escalated,
-          advisorFastProfile: (fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor) && !cheapestReviewerEnabled,
+          advisorFastProfile: (fastLeadAdvisor || cheapLeadAdvisor || curatedLeadAdvisor) && !curatedReviewerEnabled,
           advisorMaxProfile: maxAdvisorEnabled,
-          advisorCheapProfile: cheapLeadAdvisor || cheapestLeadAdvisor || cheapestReviewerEnabled,
+          advisorCheapProfile: cheapLeadAdvisor || curatedLeadAdvisor || curatedReviewerEnabled,
           // Cheapest-only structured protégé consult (lead or reviewer).
-          advisorCheapestProfile: cheapestAdvisorEnabled || cheapestReviewerEnabled,
-          advisorReviewerProfile: cheapestReviewerEnabled,
-          advisorMaxTurns: cheapestReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
+          advisorCheapestProfile: curatedAdvisorEnabled || curatedReviewerEnabled,
+          advisorReviewerProfile: curatedReviewerEnabled,
+          advisorLocalProfile: localAdvisorRequest,
+          // A local lead's post-advisor turn is still a LEAD turn: without
+          // this the continuation went to Copilot with the bare local model
+          // id and the session died on the first advisor round.
+          localEgress: localProfileRequest
+            ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c) }
+            : undefined,
+          advisorMaxTurns: curatedReviewerEnabled ? ADVISOR_REVIEWER_MAX_TURNS : undefined,
           advisorEffort: maxAdvisorChoice
             ? maxAdvisorChoice.effort
             : resolveAdvisorEffort(
                 rawBody,
                 advisorChoice.model,
-                fastLeadAdvisor || cheapLeadAdvisor || cheapestLeadAdvisor,
+                fastLeadAdvisor || cheapLeadAdvisor || curatedLeadAdvisor,
               ),
           externalAborter: advisorAborter,
         }),
@@ -1233,13 +1371,17 @@ export async function handleCompletion(c: Context) {
       )
     }
 
+    // A local stream is not tapped: we have refused to assume what the local
+    // server is, so a `copilot_usage` block it happened to emit would
+    // double-count this turn (once priced here, once at zero above).
+    const aicTap = localProfileRequest
+      ? undefined
+      : createAnthropicAicTap((usage) => recordAic(resolvedModel, usage))
     return new Response(
       response.body
         ? relayAnthropicStream(response.body, {
             routePath: c.req.path,
-            onBytes: createAnthropicAicTap((usage) =>
-              recordAic(resolvedModel, usage),
-            ).onBytes,
+            ...(aicTap ? { onBytes: aicTap.onBytes } : {}),
           })
         : null,
       {
@@ -1273,8 +1415,12 @@ export async function handleCompletion(c: Context) {
       }
     | undefined
 
-  // Upstream AIC report (verified live as top-level `copilot_usage`).
-  const aicNano = extractAndRecordAic(resolvedModel, responseBody)
+  // Upstream AIC report (verified live as top-level `copilot_usage`). Skipped
+  // for a local profile for the same reason as the streaming tap: the turn was
+  // already recorded at zero, and a local `copilot_usage` would be a fiction.
+  const aicNano = localProfileRequest
+    ? undefined
+    : extractAndRecordAic(resolvedModel, responseBody)
 
   logRequest(
     {
@@ -1308,6 +1454,44 @@ export async function handleCompletion(c: Context) {
   const requestIdHeader = response.headers.get("request-id")
   if (requestIdHeader) c.header("request-id", requestIdHeader)
   return c.json(responseBody, response.status as 200)
+}
+
+/**
+ * Verbatim alternative to `resolveModelInBody` for the local profiles.
+ *
+ * The body is forwarded byte-for-byte: no model rewrite (the tier ids
+ * `opus` / `sonnet` / `haiku` are the local server's own, and `resolveModel`'s
+ * opus-family preference would map `opus` onto a Copilot `claude-opus-*`), no
+ * thinking translation or effort clamp (both consult a Copilot catalog entry
+ * that does not describe this model), and no Anthropic-only field strip (the
+ * local server is the thing those fields were written for).
+ *
+ * `selectedModel` is deliberately `undefined` — the catalog knows nothing
+ * about this model, and `salvageOversizedPrompt` / `logEndpointMismatch`
+ * correctly no-op on it.
+ */
+function localModelInBody(rawBody: string): {
+  body: string
+  originalModel?: string
+  resolvedModel?: string
+  selectedModel?: Model
+} {
+  let originalModel: string | undefined
+  try {
+    const parsed: unknown = JSON.parse(rawBody)
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const model = (parsed as AnyRecord).model
+      if (typeof model === "string" && model.length > 0) originalModel = model
+    }
+  } catch {
+    // Malformed body: still forwarded verbatim — the local server owns the
+    // parse error, and re-serializing a body we could not parse is not
+    // possible anyway.
+  }
+  return {
+    body: rawBody,
+    ...(originalModel ? { originalModel, resolvedModel: originalModel } : {}),
+  }
 }
 
 /**

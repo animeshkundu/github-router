@@ -26,9 +26,14 @@ import {
 import {
   CHEAPEST2_PROFILE_CONTRACT,
 } from "./cheapest2-profile-contract"
+import {
+  LOCAL_PROFILE_CONTRACT,
+  LOCAL2_PROFILE_CONTRACT,
+} from "./local-profile-contract"
 
 export type CheapestProfileId = "cheapest" | "cheapest2"
 export type BalancedProfileId = "balanced" | "balanced2"
+export type LocalProfileId = "local" | "local2"
 
 export function isCheapestFamily(
   profileId: string | null | undefined,
@@ -42,9 +47,15 @@ export function isBalancedFamily(
   return profileId === "balanced" || profileId === "balanced2"
 }
 
+export function isLocalFamily(
+  profileId: string | null | undefined,
+): profileId is LocalProfileId {
+  return profileId === "local" || profileId === "local2"
+}
+
 /**
- * Every FIXED-ROSTER launch profile: `fast`, the cheap pair, and both
- * families. These are the launches whose MCP surface, picker rows,
+ * Every FIXED-ROSTER launch profile: `fast`, the cheap pair, both families,
+ * and the local pair. These are the launches whose MCP surface, picker rows,
  * mirror purge and status line the router owns outright.
  *
  * `max` is deliberately absent. It shares some of the same wiring, but it
@@ -59,6 +70,8 @@ const PINNED_PROFILE_IDS: ReadonlySet<string> = new Set([
   "cheapest2",
   "balanced",
   "balanced2",
+  "local",
+  "local2",
 ])
 
 export function isPinnedLaunchProfile(
@@ -86,6 +99,35 @@ export function balancedContractFor(
   return profileId === "balanced2"
     ? BALANCED2_PROFILE_CONTRACT
     : BALANCED_PROFILE_CONTRACT
+}
+
+/**
+ * The contract for a local-family profile (base fallback, as above).
+ *
+ * Local is a THIRD family, not a cheapest sibling: its egress and model ids
+ * differ while its prose is inherited. `cheapestContractFor` is never the
+ * accessor for it, precisely because that function would hand back a Copilot
+ * model id for a launch that must never name one.
+ */
+export function localContractFor(
+  profileId: string | null | undefined,
+): typeof LOCAL_PROFILE_CONTRACT | typeof LOCAL2_PROFILE_CONTRACT {
+  return profileId === "local2"
+    ? LOCAL2_PROFILE_CONTRACT
+    : LOCAL_PROFILE_CONTRACT
+}
+
+/**
+ * The `local2` contract including its Advisor block.
+ *
+ * A dedicated accessor rather than a widening of `localContractFor`: the base
+ * local contract has NO advisor fields at the type level (Advisor-free by
+ * design), so reading `localContractFor(id).advisorModel` is a type error on
+ * the union. Every advisor site therefore has to name `local2` to reach this
+ * function — which is exactly the property the contract's doc asks for.
+ */
+export function local2AdvisorContract(): typeof LOCAL2_PROFILE_CONTRACT {
+  return LOCAL2_PROFILE_CONTRACT
 }
 
 /**

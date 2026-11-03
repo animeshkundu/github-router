@@ -1,18 +1,46 @@
-import { isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
+import { isBalancedFamily, isCheapestFamily, isLocalFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
 
 /**
- * Profiles without a `Plan` native (`cheapest`, `balanced`): the lead plans
- * directly instead of dispatching a Plan subagent. Every other profile uses
- * the native Plan dispatch.
+ * Profiles without a `Plan` native (`cheapest`, `balanced`, `local`): the lead
+ * plans directly instead of dispatching a Plan subagent. Every other profile
+ * uses the native Plan dispatch.
  */
-export type PlanSkillProfile = "cheapest" | "cheapest2" | "balanced" | "balanced2"
+export type PlanSkillProfile =
+  | "cheapest"
+  | "cheapest2"
+  | "balanced"
+  | "balanced2"
+  | "local"
+  | "local2"
 
 export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
-  const leadPlansDirectly = isCheapestFamily(profile) || isBalancedFamily(profile)
+  const leadPlansDirectly =
+    isCheapestFamily(profile) || isBalancedFamily(profile) || isLocalFamily(profile)
   const planningMeans = leadPlansDirectly
-    ? "the lead plans directly (no Plan subagent exists on the cheapest/balanced rosters)"
+    ? "the lead plans directly (no separate planning subagent exists on this roster)"
     : "dispatch the native Plan subagent (subagent_type Plan) present on the profile roster where provided; profile frontmatter pins its model and effort (Sol at the 200K default window)"
+  // Local emits no `implementer` native, so the downstream consumer is always
+  // General-Purpose there and the parenthetical would name a missing agent.
+  const downstreamAgent = isLocalFamily(profile)
+    ? "a native General-Purpose subagent"
+    : "a native General-Purpose (or implementer, where the profile provides one) subagent"
+  // The suppression behaviour belongs to the subagent model a profile runs;
+  // local runs an unknown one. The plain-directive instruction that precedes
+  // it is model-neutral and stays on every profile.
+  const briefProseNote = isLocalFamily(profile)
+    ? "Write the brief as plain directives, never reflective first-person prose."
+    : "Write the brief as plain directives, never reflective first-person prose: Gemini-run subagents may suppress tool calls when the prompt contains reflective text."
+  // Output is worth compressing on every profile, but the per-token pricing
+  // rationale behind it is a claim about a model comparison the local profile
+  // cannot make. Keep the instruction, drop the comparison.
+  const compactionNote = isLocalFamily(profile)
+    ? "Output volume dominates."
+    : "Output tokens cost several times input on every profile."
+  // Local carries no `workers` group, so contrasting its dispatchers would name
+  // a tool the profile does not inject.
+  const dispatchBoundary = isLocalFamily(profile) ? "" : ", never via worker-* MCP dispatchers"
+  const planDispatchBoundary = isLocalFamily(profile) ? "" : ", never worker-* MCP dispatchers"
   const dispatchStep = leadPlansDirectly
     ? `3. Compose the plan directly with that brief, then validate it against
    the same bar: every task names files, states the change and its done
@@ -34,7 +62,8 @@ export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProf
    send ONE bounded follow-up to the same Plan dispatch naming the exact gaps
    (at most 2 follow-up rounds total). If still underspecified, checkpoint
    with the gaps as residual risk instead of pretending the plan is complete.`
-  const advisorStep = isCheapestFamily(profile)
+  // `local2` carries an Advisor; `local` is Advisor-free by design.
+  const advisorStep = isCheapestFamily(profile) || profile === "local2"
     ? `
 6. Review the final plan with the Advisor before presenting it to the user:
    consult \`advisor\` once for a framing check. It is non-binding counsel;
@@ -64,9 +93,8 @@ excludes: [trivial changes, implementation, missing context]
 Use this skill after /gh-gather-context (or when equivalent context is already
 available) and before any implementation. For non-trivial work, ${planningMeans}.
 The plan must be scoped, modular, non-overlapping, and ordered, with
-enough detail for a native General-Purpose (or implementer, where the profile
-provides one) subagent to execute each task in isolation. User approval is
-mandatory before implementation. ${leadPlansDirectly ? "This skill plans directly (plus scoped Explore discovery where the delegation graph permits), never via worker-* MCP dispatchers." : "This skill dispatches ONLY the native Plan subagent via the Agent tool, never worker-* MCP dispatchers."} ${leadPlansDirectly ? "The lead self-serves Explore follow-ups per its delegation graph; the skill does not dispatch Explore directly." : "Plan self-serves Explore follow-ups per its delegation graph; the skill does not dispatch Explore directly."}
+enough detail for ${downstreamAgent} to execute each task in isolation. User approval is
+mandatory before implementation. ${leadPlansDirectly ? `This skill plans directly (plus scoped Explore discovery where the delegation graph permits)${dispatchBoundary}.` : `This skill dispatches ONLY the native Plan subagent via the Agent tool${planDispatchBoundary}.`} ${leadPlansDirectly ? "The lead self-serves Explore follow-ups per its delegation graph; the skill does not dispatch Explore directly." : "Plan self-serves Explore follow-ups per its delegation graph; the skill does not dispatch Explore directly."}
 
 ## Prerequisites
 
@@ -129,11 +157,9 @@ mandatory before implementation. ${leadPlansDirectly ? "This skill plans directl
    - Plan-mode rule: plan and acceptance criteria only, no implementation
      file edits.
    - Permission to use Explore ${leadPlansDirectly ? "per the lead delegation graph" : "and reviewer per the delegation graph"}.
-   - Write the brief as plain directives, never reflective first-person prose:
-     Gemini-run subagents may suppress tool calls when the prompt contains
-     reflective text.
+   - ${briefProseNote}
    - Demand compact output: file:line plus one-line purposes, never pasted
-     source blocks. Output tokens cost several times input on every profile.
+     source blocks. ${compactionNote}
    - Advisory ~5 minute budget.
 
 ${dispatchStep}

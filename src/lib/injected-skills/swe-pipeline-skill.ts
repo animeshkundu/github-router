@@ -1,15 +1,21 @@
-import { isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
+import { isBalancedFamily, isCheapestFamily, isLocalFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
 import type { PlanSkillProfile } from "./plan-skill"
 
 export function buildSwePipelineSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
-  // Profiles without a Plan role (cheapest, balanced): the lead plans
-  // directly, so stage wording names lead planning, not Plan dispatches.
-  const leadPlansDirectly = isCheapestFamily(profile) || isBalancedFamily(profile)
+  // Profiles without a Plan role (cheapest/balanced/local): the lead plans
+  // directly, so every stage mention names lead planning, not Plan
+  // dispatches. Local belongs here for the same reason and also has no
+  // `implementer`, which is why the roster never names one on that branch.
+  const leadPlansDirectly =
+    isCheapestFamily(profile) || isBalancedFamily(profile) || isLocalFamily(profile)
   const roster = leadPlansDirectly
     ? "Explore, General-Purpose, reviewer"
     : "Explore, Plan, General-Purpose, reviewer, implementer where provided"
   const planDispatches = leadPlansDirectly ? "lead planning" : "Plan subagents"
+  // Local carries no `workers` group, so contrasting its dispatchers would name
+  // a tool the profile does not inject.
+  const dispatchBoundary = isLocalFamily(profile) ? "" : ", never worker-* MCP dispatchers"
   return {
   name: "gh-swe-pipeline",
   md: `---
@@ -25,7 +31,7 @@ change. It coordinates the three pipeline stages in STRICT SEQUENCE. No two
 stages ever overlap: each stage runs to completion, its subagents are all
 finished or explicitly superseded, and its completion artifact exists before
 the next stage starts. Every stage dispatches ONLY native subagents present on
-the profile roster (${roster}) via the Agent tool, never worker-* MCP dispatchers.
+the profile roster (${roster}) via the Agent tool${dispatchBoundary}.
 
 All work runs at the 200K default window with bare slugs (no 1M accounting).
 Advisory budgets (the Task tool enforces no wall-clock): gather ~3 minutes

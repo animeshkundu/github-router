@@ -9,6 +9,7 @@ import {
   PI_MCP_NONCE_PLACEHOLDER,
   PI_MCP_SERVER_PREFIX,
   PI_MCP_WORKSPACE_PLACEHOLDER,
+  peersGroupDescription,
   piMcpServerKey,
   readMcpServerKeys,
   resolvePiSurfaces,
@@ -57,6 +58,7 @@ describe("resolvePiSurfaces", () => {
     cloudAgentEnabled: false,
     browseAgentAvailable: false,
     directBrowserAvailable: false,
+    artifactToolsAvailable: false,
     peersEnabled: true,
   }
 
@@ -123,8 +125,10 @@ describe("resolvePiSurfaces", () => {
 
   test("each Pi profile publishes the same groups Claude does for it", () => {
     // The pinned-profile branch of `src/claude.ts` and this function must not
-    // drift: all four Pi profiles carry the same `allowedGroups`, so the same
-    // flags produce the same seven groups on every one of them.
+    // drift: the four Copilot-led Pi profiles carry the same `allowedGroups`,
+    // so the same flags produce the same seven groups on each of them. The
+    // local pair diverges by one group (`workers`, never published) and is
+    // covered separately.
     const everything = {
       ...base,
       adoEnabled: true,
@@ -162,6 +166,59 @@ describe("resolvePiSurfaces", () => {
       // signal for what the server is, so it has to say something.
       expect(g.description.length).toBeGreaterThan(40)
     }
+  })
+
+  test("local profiles never publish workers, whatever the browse agent says", () => {
+    // A worker is a Copilot-model subagent, so the group is off both local
+    // profiles by descriptor even when its own gate passes.
+    const everything = {
+      ...base,
+      adoEnabled: true,
+      kustoEnabled: true,
+      cloudAgentEnabled: true,
+      browseAgentAvailable: true,
+      directBrowserAvailable: true,
+      artifactToolsAvailable: true,
+    }
+    const expected = ["peers", "search", "browser", "ado", "kusto", "cloudagent"]
+    for (const profileId of ["local", "local2"] as const) {
+      const groups = resolvePiSurfaces({ ...everything, profileId }).groups.map((g) => g.group)
+      expect(groups).toEqual(expected)
+      expect(groups).not.toContain("workers")
+    }
+  })
+})
+
+describe("peersGroupDescription", () => {
+  test("an unrestricted surface keeps the full description", () => {
+    // `undefined` means no allow-list; the standard launch surface.
+    const text = peersGroupDescription(undefined, false)
+    expect(text).toContain("codex_critic")
+    expect(text).toContain("oracle")
+  })
+
+  test("a filtered surface names only what the filter admits", () => {
+    // Every pinned profile registers a list, and naming a critic the MCP
+    // handler answers with -32601 costs the model a turn.
+    const oracleOnly = peersGroupDescription(new Set(["oracle"]), false)
+    expect(oracleOnly).toContain("oracle")
+    expect(oracleOnly).not.toContain("codex_critic")
+
+    const empty = peersGroupDescription(new Set<string>(), true)
+    expect(empty).not.toContain("oracle")
+    expect(empty).toContain("artifact_")
+  })
+
+  test("an empty group with no artifact gate yields nothing to publish", () => {
+    // `local` keeps the group for the artifact tools alone. Without them the
+    // server would be advertised with no tools behind it.
+    expect(peersGroupDescription(new Set<string>(), false)).toBe("")
+  })
+
+  test("the artifact sentence rides whatever the persona filter admits", () => {
+    const both = peersGroupDescription(new Set(["oracle"]), true)
+    expect(both).toContain("oracle")
+    expect(both).toContain("artifact_")
   })
 })
 
@@ -386,6 +443,7 @@ describe("the seam does not move the other consumers", () => {
     cloudAgentEnabled: false,
     browseAgentAvailable: false,
     directBrowserAvailable: false,
+    artifactToolsAvailable: false,
     peersEnabled: true,
   })
 

@@ -66,6 +66,7 @@ import {
   cheapAstraModel,
   cheapestOracleModel,
   balancedOracleModel,
+  localOracleModel,
   geminiAvailable,
   resolveGeminiReviewModel,
   standInToolEnabled,
@@ -87,7 +88,9 @@ import {
   displayModelName,
   isBalancedFamily,
   isCheapestFamily,
+  isLocalFamily,
   isPinnedLaunchProfile,
+  localContractFor,
 } from "~/lib/profile-family"
 import {
   MAX_PROFILE_MODELS,
@@ -453,10 +456,23 @@ function familyOracleDescriptor(profileId: string): string | undefined {
     const contract = balancedContractFor(profileId)
     return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
   }
+  if (isLocalFamily(profileId)) {
+    // The Oracle stays a Copilot persona on a local launch: the local server
+    // serves the lead turn, the consult is billed. Name the contract model so
+    // a swap renames itself here rather than leaving the fast-profile default
+    // ("exact Opus 5.5") in the description of a gpt-6.1-sol tool.
+    const contract = localContractFor(profileId)
+    return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
+  }
   return undefined
 }
 
-function oracleToolEntry(isCheap = false, astraAvailable = true, oracleDescriptor?: string): ToolEntry {
+function oracleToolEntry(
+  isCheap = false,
+  astraAvailable = true,
+  oracleDescriptor?: string,
+  advisorAvailable = true,
+): ToolEntry {
   const descriptor = oracleDescriptor
     ?? (isCheap
       ? "Grok 4.6 (200K context, medium effort)"
@@ -468,10 +484,16 @@ function oracleToolEntry(isCheap = false, astraAvailable = true, oracleDescripto
   const deadEndClause = astraAvailable
     ? "terminal dead ends (consult Astra), "
     : "terminal dead ends (no escalation peer on this profile; report the dead end with evidence to the lead), "
+  // Balanced/balanced2 serve Oracle without an Advisor, so their description
+  // must not compare against one or send the model looking for it.
+  const preferredOverAdvisor = advisorAvailable
+    ? " Preferred over advisor for self-contained technical briefs."
+    : ""
+  const advisorExclusion = advisorAvailable ? "not for transcript-aware framing (consult Advisor), " : "not for transcript-aware framing, "
   return {
     name: "oracle",
     description:
-      `Expert consultant backed by ${descriptor} for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them. Preferred over advisor for self-contained technical briefs.\n\nWhen NOT to invoke: not for transcript-aware framing (consult Advisor), ${deadEndClause}routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.`,
+      `Expert consultant backed by ${descriptor} for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them.${preferredOverAdvisor}\n\nWhen NOT to invoke: ${advisorExclusion}${deadEndClause}routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.`,
     inputSchema: {
       type: "object",
       required: ["query", "context"],
@@ -698,7 +720,11 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
   if (isPinnedLaunchProfile(launch.profileId)) {
     const isCheapest = isCheapestFamily(launch.profileId)
     const isBalanced = isBalancedFamily(launch.profileId)
+    const isLocal = isLocalFamily(launch.profileId)
     const isCheap = launch.profileId === "cheap" || launch.profileId === "cheap1m" || isCheapest || isBalanced
+    // Balanced/balanced2 serve Oracle without an Advisor. `local` carries
+    // neither, and never reaches the Oracle branch below.
+    const advisorAvailable = !isBalanced && !(isLocal && launch.profileId !== "local2")
     // Astra is wired only for `fast` and the `-m cheap1m` successor; the new
     // `-m cheap` (200K lead, oracle-only allowlist), `-m cheapest`, and
     // `-m balanced` never expose it, even if a hypothetical test/mint granted
@@ -710,13 +736,15 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
     // fast/cheap1m when the Astra catalog gate fails (naming it would route
     // into a -32601).
     const astraAvailable = astraWired && (isCheap && !isCheapest ? cheapAstraModel() : isCheapest ? undefined : fastAstraModel()) != null
-    const oracleGate = isCheapest
-      ? cheapestOracleModel(launch.profileId)
-      : isBalanced
-        ? balancedOracleModel(launch.profileId)
-        : isCheap
-          ? cheapOracleModel()
-          : fastOracleModel()
+    const oracleGate = isLocal
+      ? localOracleModel(launch.profileId)
+      : isCheapest
+        ? cheapestOracleModel(launch.profileId)
+        : isBalanced
+          ? balancedOracleModel(launch.profileId)
+          : isCheap
+            ? cheapOracleModel()
+            : fastOracleModel()
     const oracleDescriptor = familyOracleDescriptor(launch.profileId)
     const entries: Array<ToolEntry> = []
     if (
@@ -725,7 +753,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       && launch.allowedPersonas?.has("oracle")
       && oracleGate
     ) {
-      entries.push(oracleToolEntry(isCheap, astraAvailable, oracleDescriptor))
+      entries.push(oracleToolEntry(isCheap, astraAvailable, oracleDescriptor, advisorAvailable))
     }
     if (
       (scope === "all" || scope === "peers")
@@ -1602,29 +1630,39 @@ async function handleToolsCall(
   if (isPinnedLaunchProfile(launch.profileId) && name === "oracle") {
     const isCheapestOracle = isCheapestFamily(launch.profileId)
     const isBalancedOracle = isBalancedFamily(launch.profileId)
+    // The Oracle is a Copilot persona on every pinned profile, local included:
+    // a local launch's lead turns are free, but a consult is a billed call, so
+    // it resolves and gates exactly like the cheapest family's.
+    const isLocalOracle = isLocalFamily(launch.profileId)
     const isCheapOracle = launch.profileId === "cheap" || launch.profileId === "cheap1m" || isCheapestOracle || isBalancedOracle
-    const oracleModel = isCheapestOracle
-      ? cheapestContractFor(launch.profileId).oracleModel
-      : isBalancedOracle
-        ? balancedContractFor(launch.profileId).oracleModel
-        : isCheapOracle
-          ? CHEAP_PROFILE_ORACLE_MODEL
-          : "claude-opus-5.5"
-    const oracleEndpoint = isCheapOracle ? "/v1/responses" : "/v1/messages"
-    const oracleEffort = isCheapestOracle
-      ? cheapestContractFor(launch.profileId).oracleEffort
-      : isBalancedOracle
-        ? balancedContractFor(launch.profileId).oracleEffort
-        : isCheapOracle
-          ? CHEAP_PROFILE_ORACLE_EFFORT
-          : "high"
-    const oracleGateFn = isCheapestOracle
-      ? () => cheapestOracleModel(launch.profileId)
-      : isBalancedOracle
-        ? () => balancedOracleModel(launch.profileId)
-        : isCheapOracle
-          ? cheapOracleModel
-          : fastOracleModel
+    const oracleModel = isLocalOracle
+      ? localContractFor(launch.profileId).oracleModel
+      : isCheapestOracle
+        ? cheapestContractFor(launch.profileId).oracleModel
+        : isBalancedOracle
+          ? balancedContractFor(launch.profileId).oracleModel
+          : isCheapOracle
+            ? CHEAP_PROFILE_ORACLE_MODEL
+            : "claude-opus-5.5"
+    const oracleEndpoint = isCheapOracle || isLocalOracle ? "/v1/responses" : "/v1/messages"
+    const oracleEffort = isLocalOracle
+      ? localContractFor(launch.profileId).oracleEffort
+      : isCheapestOracle
+        ? cheapestContractFor(launch.profileId).oracleEffort
+        : isBalancedOracle
+          ? balancedContractFor(launch.profileId).oracleEffort
+          : isCheapOracle
+            ? CHEAP_PROFILE_ORACLE_EFFORT
+            : "high"
+    const oracleGateFn = isLocalOracle
+      ? () => localOracleModel(launch.profileId)
+      : isCheapestOracle
+        ? () => cheapestOracleModel(launch.profileId)
+        : isBalancedOracle
+          ? () => balancedOracleModel(launch.profileId)
+          : isCheapOracle
+            ? cheapOracleModel
+            : fastOracleModel
     if (
       (scope !== "all" && scope !== "peers")
       || !launch.allowedGroups?.has("peers")
@@ -1649,7 +1687,7 @@ async function handleToolsCall(
       toolNameHttp: "oracle",
       model: oracleModel,
       endpoint: oracleEndpoint,
-      description: "Fast/cheap-profile Oracle",
+      description: "Oracle: self-contained consultant",
       baseInstructions: `You are Oracle, an expert architectural and technical consultant running on ${displayModelName(oracleModel)}. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.`,
       agentPrompt: "",
       writeCapable: false,

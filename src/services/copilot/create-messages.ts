@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto"
 import consola from "consola"
 
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
+import { assertCopilotMessagesBodyAllowed } from "~/lib/copilot-model-policy"
 import { HTTPError } from "~/lib/error"
 import { UPSTREAM_FETCH_TIMEOUT_MS } from "~/lib/port"
 import { state } from "~/lib/state"
@@ -56,6 +57,53 @@ function buildHeaders(
     "X-Initiator": "agent",
     "anthropic-version": "2023-06-01",
     "X-Interaction-Id": randomUUID(),
+    ...extraHeaders,
+  }
+}
+
+/**
+ * Egress for the `-m local` / `-m local2` profiles: the MAIN agent loop's
+ * `/v1/messages` traffic goes to a locally running Anthropic-compatible server
+ * instead of Copilot.
+ *
+ * Both fields are required because both are facts the local server does not
+ * let us infer: the base URL is the only endpoint knowledge the profile is
+ * allowed to carry, and the session id is mandatory upstream (a request
+ * without it is a 400).
+ *
+ * Deliberately NOT a flag on the module or on `state`: this is a per-call
+ * option, so every internal caller (Advisor, peer personas, `stand_in`) keeps
+ * hitting Copilot by simply not passing it. That is what keeps `local2`'s
+ * Advisor on the real `gpt-6.1-sol` while its lead turns stay local.
+ */
+export interface LocalMessagesEgress {
+  /** e.g. `https://localhost:11111/v1` — the `/messages` suffix is appended. */
+  baseUrl: string
+  /** Forwarded as `x-claude-code-session-id`; must be stable per conversation. */
+  sessionId: string
+}
+
+/**
+ * Headers for a local-endpoint call.
+ *
+ * Nothing Copilot-specific is sent: no `Authorization`, no
+ * `copilot-integration-id`, no VS Code editor/user-agent headers and no
+ * `X-Initiator`. The local server was never asked to authenticate us, and
+ * sending Copilot's credentials to it would leak a live token to an endpoint
+ * the operator merely pointed us at.
+ *
+ * `extraHeaders` (the client's own `anthropic-beta` / `anthropic-version`) is
+ * applied last so the client's values win over our defaults.
+ */
+function buildLocalHeaders(
+  egress: LocalMessagesEgress,
+  extraHeaders?: Record<string, string>,
+): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    accept: "application/json",
+    "anthropic-version": "2023-06-01",
+    "x-claude-code-session-id": egress.sessionId,
     ...extraHeaders,
   }
 }
@@ -153,28 +201,43 @@ function mayCarryImages(body: string): boolean {
  * streamed output. Only user-facing route handlers pass `true`; internal
  * callers (e.g. `dispatchModelCall`) already wrap this function in their own
  * `withTransientRetry`, so they MUST omit it to avoid nested retry.
+ *
+ * `local` (optional, trailing) redirects the call to a local
+ * Anthropic-compatible server. Omitted — the default for every caller — the
+ * function behaves exactly as before.
  */
 export async function createMessages(
   body: string,
   extraHeaders?: Record<string, string>,
   callerSignal?: AbortSignal,
   retryTransient = false,
+  local?: LocalMessagesEgress,
 ): Promise<Response> {
-  if (!state.copilotToken) throw new Error("Copilot token not found")
+  // A local session needs no Copilot credential for its lead turns, and
+  // demanding one would make `-m local` unusable with a dead GitHub token.
+  if (!local) assertCopilotMessagesBodyAllowed(body)
+  if (!local && !state.copilotToken) throw new Error("Copilot token not found")
 
-  const url = `${copilotBaseUrl(state)}/v1/messages?beta=true`
+  const url = local ?
+    `${local.baseUrl}/messages`
+  : `${copilotBaseUrl(state)}/v1/messages?beta=true`
+  const target = local ? "Local /v1/messages" : "Copilot /v1/messages"
   consola.debug(`Forwarding to ${url}`)
 
   // Prune proactively only once upstream has already told us this model's real
   // ceiling. Until then there is nothing to prune to, and parsing every body on
   // the hot path to discover that would cost more than the round trip it saves.
-  if (hasLearnedImageCeilings() && mayCarryImages(body)) {
+  // Skipped entirely for local: the ceiling is Copilot's, and pruning a body
+  // the local server accepted would be a silent content change on a path we
+  // promised to forward verbatim.
+  if (!local && hasLearnedImageCeilings() && mayCarryImages(body)) {
     body = pruneToLearnedCeiling(body) ?? body
   }
 
   // Re-build headers per attempt so a 401-retry picks up the refreshed token.
   const doFetch = (): Promise<Response> => {
-    const headers = buildHeaders(extraHeaders)
+    const headers =
+      local ? buildLocalHeaders(local, extraHeaders) : buildHeaders(extraHeaders)
     const fetchInit: RequestInit = { method: "POST", headers, body }
     const signals: Array<AbortSignal> = []
     if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
@@ -185,8 +248,10 @@ export async function createMessages(
     else if (signals.length > 1) fetchInit.signal = AbortSignal.any(signals)
     return fetch(url, fetchInit)
   }
+  // `tryRefreshAndRetry` is Copilot token semantics; a local endpoint has no
+  // token to refresh, so the 401 path is bypassed rather than made a no-op.
   const withRefresh = (): Promise<Response> =>
-    tryRefreshAndRetry(doFetch, "/v1/messages")
+    local ? doFetch() : tryRefreshAndRetry(doFetch, "/v1/messages")
   const send = (): Promise<Response> =>
     retryTransient ?
       fetchWithTransientRetry(withRefresh, {
@@ -202,7 +267,7 @@ export async function createMessages(
   // forwarded untouched, so this can never loop. Deliberately NOT gated on a
   // "does this body carry images" probe: `parseUpstreamImageCeiling` is already
   // image-specific, and a probe miss would silently restore the fatal 400.
-  if (!response.ok) {
+  if (!local && !response.ok) {
     const ceiling = parseUpstreamImageCeiling(await peekErrorBody(response))
     if (ceiling !== undefined) {
       const pruned = pruneToStatedCeiling(body, ceiling)
@@ -221,15 +286,16 @@ export async function createMessages(
     } catch {
       errorBody = "(could not read error body)"
     }
-    consola.error(
-      `Copilot /v1/messages error: ${response.status} ${errorBody}`,
-    )
+    consola.error(`${target} error: ${response.status} ${errorBody}`)
     const reconstructed = new Response(errorBody, {
       status: response.status,
       statusText: response.statusText,
       headers: response.headers,
     })
-    throw new HTTPError("Copilot messages request failed", reconstructed)
+    throw new HTTPError(
+      local ? "Local messages request failed" : "Copilot messages request failed",
+      reconstructed,
+    )
   }
 
   return response
@@ -243,20 +309,29 @@ export async function createMessages(
  * as createMessages. `retryTransient` (opt-in) adds the same pre-first-byte
  * transient retry — count_tokens is non-streaming, so the whole call is in
  * the safe window.
+ *
+ * `local` (optional, trailing) redirects to a local Anthropic-compatible
+ * server, exactly as `createMessages` does. Omitted, behaviour is unchanged.
  */
 export async function countTokens(
   body: string,
   extraHeaders?: Record<string, string>,
   callerSignal?: AbortSignal,
   retryTransient = false,
+  local?: LocalMessagesEgress,
 ): Promise<Response> {
-  if (!state.copilotToken) throw new Error("Copilot token not found")
+  if (!local) assertCopilotMessagesBodyAllowed(body)
+  if (!local && !state.copilotToken) throw new Error("Copilot token not found")
 
-  const url = `${copilotBaseUrl(state)}/v1/messages/count_tokens?beta=true`
+  const url = local ?
+    `${local.baseUrl}/messages/count_tokens`
+  : `${copilotBaseUrl(state)}/v1/messages/count_tokens?beta=true`
+  const target = local ? "Local /v1/messages/count_tokens" : "Copilot count_tokens"
   consola.debug(`Forwarding to ${url}`)
 
   const doFetch = (): Promise<Response> => {
-    const headers = buildHeaders(extraHeaders)
+    const headers =
+      local ? buildLocalHeaders(local, extraHeaders) : buildHeaders(extraHeaders)
     const fetchInit: RequestInit = { method: "POST", headers, body }
     const signals: Array<AbortSignal> = []
     if (UPSTREAM_FETCH_TIMEOUT_MS > 0) {
@@ -268,7 +343,7 @@ export async function countTokens(
     return fetch(url, fetchInit)
   }
   const withRefresh = (): Promise<Response> =>
-    tryRefreshAndRetry(doFetch, "/v1/messages/count_tokens")
+    local ? doFetch() : tryRefreshAndRetry(doFetch, "/v1/messages/count_tokens")
   const response =
     retryTransient ?
       await fetchWithTransientRetry(withRefresh, {
@@ -284,15 +359,16 @@ export async function countTokens(
     } catch {
       errorBody = "(could not read error body)"
     }
-    consola.error(
-      `Copilot count_tokens error: ${response.status} ${errorBody}`,
-    )
+    consola.error(`${target} error: ${response.status} ${errorBody}`)
     const reconstructed = new Response(errorBody, {
       status: response.status,
       statusText: response.statusText,
       headers: response.headers,
     })
-    throw new HTTPError("Copilot count_tokens request failed", reconstructed)
+    throw new HTTPError(
+      local ? "Local count_tokens request failed" : "Copilot count_tokens request failed",
+      reconstructed,
+    )
   }
 
   return response

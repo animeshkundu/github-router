@@ -2,6 +2,7 @@ import consola from "consola"
 import { events } from "fetch-event-stream"
 
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
+import { assertCopilotModelAllowed, type CopilotEgressSurface } from "~/lib/copilot-model-policy"
 import { HTTPError } from "~/lib/error"
 import {
   imagesInResponsesPayload,
@@ -35,7 +36,12 @@ export const createResponses = async (
   modelHeaders?: Record<string, string>,
   callerSignal?: AbortSignal,
   retryTransient = false,
+  surface?: CopilotEgressSurface,
 ) => {
+  // Copilot egress for the whole non-Anthropic surface: the `/v1/responses`
+  // route, every peer persona and orchestration tool via `dispatchModelCall`,
+  // and the Pi worker runtime. One guard here covers all of them.
+  assertCopilotModelAllowed(payload.model, surface)
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
   const carriesImages = detectVision(payload.input)

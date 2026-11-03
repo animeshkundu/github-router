@@ -20,7 +20,7 @@ import { buildResearchSkill, RESEARCH_SKILL } from "./research-skill"
 import { buildRebriefSkill } from "./rebrief-skill"
 import { buildSwePipelineSkill, SWE_PIPELINE_SKILL } from "./swe-pipeline-skill"
 import { buildWorkerSkill, WORKER_SKILL } from "./worker-skill"
-import { isBalancedFamily, isCheapestFamily } from "~/lib/profile-family"
+import { isBalancedFamily, isCheapestFamily, isLocalFamily } from "~/lib/profile-family"
 import { isPipelineSkillProfile } from "~/lib/skill-model-contract"
 
 export { ARTIFACT_REVIEW_SKILL, buildArtifactReviewSkill } from "./artifact-review-skill"
@@ -47,7 +47,7 @@ export interface InjectedSkill {
 }
 
 export interface InjectedSkillSelection {
-  profileId: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "max"
+  profileId: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "local" | "local2" | "max"
   workerSkillsActive: boolean
   firstMateEnabled: boolean
   /**
@@ -74,8 +74,8 @@ export interface InjectedSkillSelection {
  * 200K default context). The orchestrator (`/gh-swe-pipeline`) runs the
  * other three in strict sequence; the three stages stay individually
  * invokable for users who only want one stage. Profiles without a `Plan`
- * role (`cheapest`, `balanced`) get the lead-plans-directly `/gh-plan`
- * variant.
+ * role (`cheapest`, `balanced`, `local`) get the lead-plans-directly
+ * `/gh-plan` variant.
  */
 export function getPipelineSkills(
   searchEnabled: boolean,
@@ -83,7 +83,7 @@ export function getPipelineSkills(
   profile?: PlanSkillProfile,
 ): ReadonlyArray<InjectedSkill> {
   return [
-    buildGatherContextSkill(searchEnabled, bluebirdEnabled),
+    buildGatherContextSkill(searchEnabled, bluebirdEnabled, profile),
     buildPlanSkill(searchEnabled || bluebirdEnabled, profile),
     buildImplementSkill(searchEnabled || bluebirdEnabled, profile),
     buildSwePipelineSkill(searchEnabled || bluebirdEnabled, profile),
@@ -159,7 +159,9 @@ export function injectedSkillsForLaunch(
   const bluebirdEnabled = selection.bluebirdEnabled === true
   const allSkills = getInjectedSkills(searchEnabled, bluebirdEnabled)
   const planProfile: PlanSkillProfile | undefined =
-    isCheapestFamily(selection.profileId) || isBalancedFamily(selection.profileId)
+    isCheapestFamily(selection.profileId) ||
+    isBalancedFamily(selection.profileId) ||
+    isLocalFamily(selection.profileId)
       ? selection.profileId
       : undefined
   const pipelineSkills = getPipelineSkills(searchEnabled, bluebirdEnabled, planProfile)

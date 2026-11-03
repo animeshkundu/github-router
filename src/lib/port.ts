@@ -8,6 +8,7 @@ import { BALANCED_PROFILE_MODELS } from "./balanced-profile-contract"
 import { BALANCED2_PROFILE_MODELS } from "./balanced2-profile-contract"
 import { FAST_PROFILE_MODELS } from "./fast-profile-contract"
 import { MAX_PROFILE_LEAD_MODEL } from "./max-profile-contract"
+import { LOCAL_PROFILE_LEAD_MODEL } from "./local-profile-contract"
 import { state } from "./state"
 import { isClaudeModel } from "./anthropic-translate/classifier"
 import { resolveModel } from "./utils"
@@ -172,6 +173,10 @@ export const BUDGET_SMALL_FAST_CATALOG_ID = "claude-haiku-4.5"
  *                   the Sol Advisor/Oracle at `gpt-6.1-sol`; same Luna lead)
  *   - `balanced2` → `BALANCED2_LEAD_MODEL` BARE (the `balanced` sibling with
  *                   the lead/reviewer at `gpt-6.1-sol` and the Grok-4.7 Oracle)
+ *   - `local`, `local2` → `LOCAL_PROFILE_LEAD_MODEL`, the bare `opus` tier id
+ *                   the LOCAL server resolves. No catalog consultation and no
+ *                   `[1m]` decoration: these launches never talk to Copilot
+ *                   for their lead turns.
  *   - `N.M`       → the best variant of that Opus family, via `pickClaudeDefault`
  *   - a full slug → unchanged, including Copilot slugs a power user pins
  *   - absent      → the ordinary default
@@ -228,6 +233,13 @@ export function resolveLeadSlugArg(modelArg: string | undefined): string {
   }
   if (arg.toLowerCase() === "balanced2") {
     return BALANCED2_LEAD_MODEL
+  }
+  // The local pair return the tier id the local server resolves, BARE and
+  // unresolved: `pickClaudeDefault` and `withOneMSuffixForLead` both consult
+  // the Copilot catalog, and a local launch must never depend on it or
+  // decorate an id the server has never heard of.
+  if (arg.toLowerCase() === "local" || arg.toLowerCase() === "local2") {
+    return LOCAL_PROFILE_LEAD_MODEL
   }
   const opusFamilyShorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
   if (opusFamilyShorthand) return pickClaudeDefault(opusFamilyShorthand)
