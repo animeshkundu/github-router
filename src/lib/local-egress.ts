@@ -228,7 +228,7 @@ export function configureLocalEgress(override: LocalEgressOverride): void {
  * The session id sent upstream on the local path.
  *
  * `x-claude-code-session-id` is what the local server requires (a request
- * without it is a 400). It must stay stable per conversation, so the client's
+ * without it is a 400). It must stay stable per session, so the client's
  * own value always wins and the process-level id is only a fallback for a
  * caller that sent none. Never synthesize a fresh value per request: the
  * header exists for prompt-cache routing, and a random value defeats it.
@@ -237,7 +237,7 @@ export function configureLocalEgress(override: LocalEgressOverride): void {
  * client header: the `cheaplocal` Oracle is called over `/mcp`, whose client
  * (Claude Code or Pi) sends only its bearer and workspace. The launch entry
  * learns the id from the lead's `/v1/messages` traffic, so passing it here
- * gives the consult the same conversation key the lead's own turns use. The
+ * gives the consult the same session key the lead's own turns use. The
  * ordering matters on `/v1/messages` itself: its context DOES carry the
  * header, and that live value must beat the remembered one after `/clear`.
  */

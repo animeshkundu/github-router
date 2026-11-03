@@ -392,7 +392,7 @@ export async function handleCompletion(c: Context) {
   if (!identity.ok) {
     return identityPreflightErrorResponse(c, identity.reason)
   }
-  // A local consult issued from `/mcp` has no conversation header of its own
+  // A local consult issued from `/mcp` has no session header of its own
   // (neither Claude Code's MCP client nor Pi's sends one), so the launch entry
   // carries the id learned here. This is the only request path that has both
   // the header and the authenticated launch.

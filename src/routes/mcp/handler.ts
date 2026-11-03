@@ -2535,7 +2535,7 @@ export async function handleMcpPost(
   // No MCP client sends `x-claude-code-session-id`, so the launch entry's
   // remembered value is the real source here: the lead's `/v1/messages`
   // traffic recorded it, and using it keeps the consult in the same
-  // prompt-cache conversation as the turns that led to the call.
+  // prompt-cache session as the turns that led to the call.
   const localConsultEgress: LocalMessagesEgress | undefined = isCheaplocalProfile(launch.profileId)
     ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c, launch.sessionId) }
     : undefined
