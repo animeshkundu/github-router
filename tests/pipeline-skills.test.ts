@@ -133,6 +133,7 @@ describe("pipeline skills registry", () => {
         "cheap1m",
         "cheapest",
         "cheapest2",
+        "cheaplocal",
         "fast",
         "local",
         "local2",

@@ -311,6 +311,9 @@ mock.module("~/lib/mcp-capabilities", () => ({
   // Local-profile Oracle (only exercised under `-m local` / `-m local2`);
   // stubbed for the same static-import-graph reason as the entries above.
   localOracleModel: mock(() => "gpt-6.1-sol"),
+  // Cheaplocal's Oracle answers from the local endpoint, so its gate has no
+  // catalog to consult and is always open.
+  cheaplocalOracleModel: mock((): true => true),
   FAST_EXPLORE_EFFORT: "high",
   FAST_PLAN_EFFORT: "high",
   FAST_GENERAL_PURPOSE_EFFORT: "max",

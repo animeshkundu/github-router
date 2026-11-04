@@ -19,6 +19,13 @@ graph, the peer set, the prompt-rewrite brief (`cheapest` family only), the
 compaction reserves, and the bare-200K accounting. `balanced2` keeps the
 declarative `astra` slot (`gpt-6-astra`, not callable on this family).
 
+`-m cheaplocal` exists on `github-router claude` but is deliberately not a Pi
+profile. Pi binds one provider per profile in its models file, while cheaplocal
+needs the lead and the natives on the Copilot provider and the Advisor and
+Oracle on the local `anthropic-messages` one. The launcher rejects the alias
+with a message pointing at `-m cheapest` / `-m cheapest2` for Pi and
+`github-router claude -m cheaplocal` for the two-provider layout.
+
 No Copilot-served role runs above its **Default-tier** window (Luna/Sol
 272K, Grok 200K, anything else 200K) — that is the whole cost lever here,
 the Pi counterpart of the bare-200K default window the Claude `cheap` family
@@ -53,7 +60,7 @@ On the Pi side that means these concrete differences from a Copilot profile:
   `<proxy>/v1`, which is what the OpenAI client's `{baseUrl}/responses`
   expects. Non-local providers keep the `/v1` root.
 - Each tier row carries a per-model `x-claude-code-session-id` header
-  (`state.sessionId`), so every Pi request names the same conversation the
+  (`state.sessionId`), so every Pi request names the same session the
   Claude path forwards verbatim from the client. The profile assumes nothing
   about what the local endpoint does with it.
 - Each tier row also carries `X-GH-Router-Launch-Secret`, the same value
@@ -199,7 +206,7 @@ the index is ready, labelled lexical otherwise) and `web` is Copilot-backed, so
 there is no configuration where withholding it buys anything.
 
 **Entry shape.** Each entry is `type: "http"` with the scoped URL
-`<serverUrl>/mcp/<group>`, `exposure: "deferred"`, a `description`, and two
+`<serverUrl>/mcp/<group>`, `exposure: "deferred"`, a `description`, and three
 headers:
 
 - `Authorization: Bearer ${GH_ROUTER_HOOK_NONCE}` — a placeholder Pi expands
@@ -208,6 +215,11 @@ headers:
   worker tools refuse a call that names no workspace, and native MCP sends no
   such header on its own (the old extension set it by hand). It rides every
   group and is ignored where unused.
+- `x-claude-code-session-id: <session id>` — a literal, not a placeholder: the
+  id is a random UUID rather than a secret, and the mirror file it lands in is
+  per-launch and swept with it. Native MCP sends no session header on its own,
+  and a consult keyed on the process id would lose prompt-cache routing. Every
+  other launch ignores the header.
 
 **Keys are always `gh-router-<group>`, never the bare name.** A project
 `.pi/mcp.json` outranks the user-level file and replaces a same-named server

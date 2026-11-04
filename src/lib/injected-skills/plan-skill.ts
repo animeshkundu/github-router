@@ -9,10 +9,25 @@ import type { InjectedSkill } from "./index"
 export type PlanSkillProfile =
   | "cheapest"
   | "cheapest2"
+  | "cheaplocal"
   | "balanced"
   | "balanced2"
   | "local"
   | "local2"
+
+/**
+ * Whether the profile roster includes an `implementer` native.
+ *
+ * Only the standard, fast and max rosters emit one, and none of those profiles
+ * receives the pipeline skills. Every member of `PlanSkillProfile` is a
+ * cheap/balanced/local family launch whose roster is Explore,
+ * General-Purpose and reviewer, so naming `implementer` there would point the
+ * model at an agent the launch does not have. A profile-less call is the
+ * legacy standalone builder, where the max-conditional wording still applies.
+ */
+export function rosterEmitsImplementer(profile?: PlanSkillProfile): boolean {
+  return profile === undefined
+}
 
 export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProfile): InjectedSkill {
   const leadPlansDirectly =
@@ -20,11 +35,11 @@ export function buildPlanSkill(_searchEnabled?: boolean, profile?: PlanSkillProf
   const planningMeans = leadPlansDirectly
     ? "the lead plans directly (no separate planning subagent exists on this roster)"
     : "dispatch the native Plan subagent (subagent_type Plan) present on the profile roster where provided; profile frontmatter pins its model and effort (Sol at the 200K default window)"
-  // Local emits no `implementer` native, so the downstream consumer is always
-  // General-Purpose there and the parenthetical would name a missing agent.
-  const downstreamAgent = isLocalFamily(profile)
-    ? "a native General-Purpose subagent"
-    : "a native General-Purpose (or implementer, where the profile provides one) subagent"
+  // No pipeline-skill roster emits an `implementer` native, so the
+  // parenthetical would name a missing agent on every one of them.
+  const downstreamAgent = rosterEmitsImplementer(profile)
+    ? "a native General-Purpose (or implementer, where the profile provides one) subagent"
+    : "a native General-Purpose subagent"
   // The suppression behaviour belongs to the subagent model a profile runs;
   // local runs an unknown one. The plain-directive instruction that precedes
   // it is model-neutral and stays on every profile.

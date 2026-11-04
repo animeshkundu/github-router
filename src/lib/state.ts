@@ -44,6 +44,18 @@ export interface LaunchRegistryEntry {
   allowedGroups?: ReadonlySet<string>
   /** Persona (peers-group) tool-name allow-list. `undefined` = unrestricted. */
   allowedPersonas?: ReadonlySet<string>
+  /**
+   * The client's own conversation id, learned from `x-claude-code-session-id`
+   * on this launch's `/v1/messages` traffic.
+   *
+   * `/mcp` has no conversation header of its own, so a local consult issued
+   * from an MCP tool call has nothing to key prompt-cache routing on. The
+   * lead's `/v1/messages` requests are the one channel that carries the id,
+   * and the launch registry is the shared place the messages route and the MCP
+   * route both hold. Latest value wins: `/clear` starts a new conversation and
+   * the stale id would otherwise follow the session forever.
+   */
+  sessionId?: string
   createdAt: number
 }
 

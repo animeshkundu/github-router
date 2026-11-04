@@ -21,6 +21,12 @@
  * untouched: `web` search goes through Copilot's MCP endpoint with the GitHub
  * PAT, and the browser tools drive a local extension.
  *
+ * `cheaplocal` is the mirror image: its lead and every native stay on Copilot,
+ * and only its Advisor and Oracle leave. It therefore caps Copilot egress to the
+ * same two families without being a local launch: `activeLocalLaunchProfile`
+ * ignores it, because returning it would send the whole main loop to the local
+ * endpoint.
+ *
  * The one model-backed exception is the browser page compressor, which runs on
  * both profiles so the compound browse tools can answer at all. It is exempt
  * from the profile ceiling entirely and bounded by its own fixed chain instead;
@@ -30,12 +36,17 @@
 import { isLocalFamily, type LocalProfileId } from "./profile-family"
 import { state } from "./state"
 
+/** The profiles that cap which Copilot model families may be billed.
+ *  `cheaplocal` is not a local-family member (its lead and natives stay on
+ *  Copilot) but its two consultants leave, so it carries the same ceiling. */
+export type CopilotFamilyCeilingProfileId = LocalProfileId | "cheaplocal"
+
 export type CopilotModelPolicy =
   | { kind: "unrestricted" }
   | { kind: "forbidden"; profileId: LocalProfileId }
   | {
     kind: "families"
-    profileId: LocalProfileId
+    profileId: CopilotFamilyCeilingProfileId
     /** Lowercased trailing tier token of a Copilot model id (`sol`, `luna`). */
     families: ReadonlySet<string>
   }
@@ -52,14 +63,18 @@ export type CopilotModelPolicy =
  * if the exemption ever narrows. No other local surface selects Luna: no local
  * launch publishes the `workers` group. The ceiling stays an operator
  * decision, so moving it later is a policy change rather than a code change.
+ *
+ * `cheaplocal` shares the set for the same reason: its lead and natives are
+ * Luna, its Copilot rewrite is Sol, and its consultants are not Copilot calls
+ * at all.
  */
 export const LOCAL2_COPILOT_MODEL_FAMILIES: ReadonlySet<string> = new Set(["sol", "luna"])
 
 /** The policy a launch profile imposes on Copilot egress. Every profile other
- *  than the local pair is unrestricted. */
+ *  than the local pair and `cheaplocal` is unrestricted. */
 export function copilotModelPolicyForProfile(profileId: string | null | undefined): CopilotModelPolicy {
   if (profileId === "local") return { kind: "forbidden", profileId }
-  if (profileId === "local2") {
+  if (profileId === "local2" || profileId === "cheaplocal") {
     return { kind: "families", profileId, families: LOCAL2_COPILOT_MODEL_FAMILIES }
   }
   return { kind: "unrestricted" }
@@ -92,10 +107,17 @@ export function activeCopilotModelPolicy(): CopilotModelPolicy {
 
 /** The local-family profile this process is serving, if any. Used by the
  *  `/v1/messages` routes to send traffic that carries no launch identity to
- *  the local endpoint rather than to Copilot. */
+ *  the local endpoint rather than to Copilot.
+ *
+ *  A restricted policy is not enough: `cheaplocal` caps Copilot egress to the
+ *  same families as `local2` while keeping its whole main loop on Copilot.
+ *  Returning it here would route that loop to the local endpoint, so only an
+ *  actual local-family id answers. */
 export function activeLocalLaunchProfile(): LocalProfileId | undefined {
   const policy = activeCopilotModelPolicy()
-  return policy.kind === "unrestricted" ? undefined : policy.profileId
+  if (policy.kind === "unrestricted") return undefined
+  if (policy.kind === "forbidden") return policy.profileId
+  return isLocalFamily(policy.profileId) ? policy.profileId : undefined
 }
 
 /**

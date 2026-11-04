@@ -1,6 +1,6 @@
 import { isLocalFamily } from "~/lib/profile-family"
 import type { InjectedSkill } from "./index"
-import type { PlanSkillProfile } from "./plan-skill"
+import { rosterEmitsImplementer, type PlanSkillProfile } from "./plan-skill"
 
 export function buildGatherContextSkill(
   searchEnabled: boolean,
@@ -14,9 +14,9 @@ export function buildGatherContextSkill(
   const modelNote = isLocalFamily(profile)
     ? "All reasoning runs at the 200K default window: the lead and every Explore\nsubagent run with bare slugs (no 1M accounting)."
     : "All reasoning runs at the 200K default window: the lead and every Explore\nsubagent use the Luna model at high effort with bare slugs (no 1M accounting)."
-  const downstreamConsumer = isLocalFamily(profile)
-    ? "planner, General-Purpose, or user"
-    : "planner, implementer, or user"
+  const downstreamConsumer = rosterEmitsImplementer(profile)
+    ? "planner, implementer, or user"
+    : "planner, General-Purpose, or user"
   const outputNote = isLocalFamily(profile)
     ? "Return a compact brief, not the whole dump. Output volume dominates: return\nonly file:line citations with one-line summaries, never full file contents or\npasted source blocks."
     : "Return a compact brief, not the whole dump. Output cost dominates: Luna output\ntokens cost 6x input, so return only file:line citations with one-line\nsummaries, never full file contents or pasted source blocks."

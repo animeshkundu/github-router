@@ -683,7 +683,7 @@ export function buildPeerAwarenessSnippet(opts: {
    *  renders its own native/peer roster and gated retained groups.
    *  Absent/`"standard"` preserves the full standard surface. Same field as
    *  `NativeAgentAvailability.profile` in claude-md-injection.ts. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "local" | "local2" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "cheaplocal" | "balanced" | "balanced2" | "local" | "local2" | "max"
   /** Whether local ColBERT semantic search or Bluebird semantic routing is
    *  available for this launch. When false/absent the `code` tool is lexical-only. */
   semanticSearchAvailable?: boolean
@@ -739,11 +739,18 @@ export function buildPeerAwarenessSnippet(opts: {
         : isLocal
           ? localContractFor(opts.profile)
           : undefined
-    const oracleDescriptor = familyContract
-      ? `${displayModelName(familyContract.oracleModel)} (200K/${familyContract.oracleEffort})`
-      : isCheap
-        ? "Grok 4.6 (200K/medium)"
-        : "exact Opus 5.5 (1M/high)"
+    // The transport is a contract field, so this file never branches on the
+    // profile id. A local consult renders no identity at all: no slug, no
+    // window, no catalog-derived effort, because the profile was never told
+    // any of them. The one effort it requests is the operator's setting.
+    const consultIsLocal = familyContract?.consultTransport === "local"
+    const oracleDescriptor = consultIsLocal
+      ? "the local model"
+      : familyContract
+        ? `${displayModelName(familyContract.oracleModel)} (200K/${familyContract.oracleEffort})`
+        : isCheap
+          ? "Grok 4.6 (200K/medium)"
+          : "exact Opus 5.5 (1M/high)"
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
     const fastPeersKey = key("peers")
     const fastSearchKey = key("search")
@@ -829,9 +836,14 @@ export function buildPeerAwarenessSnippet(opts: {
         ? "Native delegation is ACL-scoped: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; " + leadLeaf + " cannot invoke native subagents."
         : "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; " + leadLeaf + " cannot invoke native subagents."
     // 200K profiles: name the window once so every role prefers targeted
-    // reads. cheap1m's lead is 1M; its subagents are still 200K.
+    // reads. cheap1m's lead is 1M; its subagents are still 200K. A local
+    // consult contributes no known window, so its note names only the roles
+    // the launch can account for.
     const rosterWindow = isCheapest || isBalanced || isLocal
-      ? " All roles run at a 200K context window — prefer targeted reads over full file reads."
+      ? (consultIsLocal
+          ? " The lead and every native subagent run at a 200K context window"
+          : " All roles run at a 200K context window")
+        + " — prefer targeted reads over full file reads."
       : isCheap
         ? " The lead runs at 200K on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — prefer targeted reads over full file reads."
         : ""
@@ -1035,7 +1047,7 @@ export function buildPeerAwarenessSummary(opts: {
    *  matching option on `buildPeerAwarenessSnippet`). Every other flag on
    *  this call is ignored in favor of a short fast-profile rendering. Same
    *  field name/values as `NativeAgentAvailability.profile`. */
-  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "local" | "local2" | "max"
+  profile?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "cheaplocal" | "balanced" | "balanced2" | "local" | "local2" | "max"
 }): string {
   const key = (g: McpGroup): string => opts.groupKeys?.[g] ?? GROUP_META[g].preferredKey
   if (opts.profile === "max") {
@@ -1077,11 +1089,18 @@ export function buildPeerAwarenessSummary(opts: {
         : isLocal
           ? localContractFor(opts.profile)
           : undefined
-    const oracleDescriptor = familyContract
-      ? `${displayModelName(familyContract.oracleModel)} (200K/${familyContract.oracleEffort})`
-      : isCheap
-        ? "Grok 4.6 (200K/medium)"
-        : "exact Opus 5.5 (1M/high)"
+    // The transport is a contract field, so this file never branches on the
+    // profile id. A local consult renders no identity at all: no slug, no
+    // window, no catalog-derived effort, because the profile was never told
+    // any of them. The one effort it requests is the operator's setting.
+    const consultIsLocal = familyContract?.consultTransport === "local"
+    const oracleDescriptor = consultIsLocal
+      ? "the local model"
+      : familyContract
+        ? `${displayModelName(familyContract.oracleModel)} (200K/${familyContract.oracleEffort})`
+        : isCheap
+          ? "Grok 4.6 (200K/medium)"
+          : "exact Opus 5.5 (1M/high)"
     const astraDescriptor = isCheap && !isCheapest ? "200K/medium" : "200K/high"
     const directBrowserAvailable = opts.browserToolsAvailable ?? opts.browseAvailable
     const browserClause = directBrowserAvailable ? ` \`mcp__${key("browser")}__*\` provides the opt-in browser.` : ""
@@ -1128,7 +1147,10 @@ export function buildPeerAwarenessSummary(opts: {
         : "Native delegation is ACL-scoped: the lead may invoke all four; `Plan` may invoke `Explore` and `reviewer`; `General-Purpose` may invoke `reviewer`; " + summaryLeadLeaf + " cannot invoke native subagents."
     // 200K profiles mirror the snippet's roster window note.
     const summaryWindow = isCheapest || isBalanced || isLocal
-      ? " All roles run at a 200K context window — prefer targeted reads over full file reads."
+      ? (consultIsLocal
+          ? " The lead and every native subagent run at a 200K context window"
+          : " All roles run at a 200K context window")
+        + " — prefer targeted reads over full file reads."
       : isCheap
         ? " The lead runs at 200K on `-m cheap` (1M on `-m cheap1m`) and every subagent runs at 200K — prefer targeted reads over full file reads."
         : ""
@@ -1620,7 +1642,7 @@ export type WorkspaceSource = "argument" | "session" | "absent"
  *  changing standard/BYO behavior. */
 export interface McpToolCallContext {
   workspaceSource: WorkspaceSource
-  profileId?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "balanced" | "balanced2" | "local" | "local2" | "max"
+  profileId?: "standard" | "fast" | "cheap" | "cheap1m" | "cheapest" | "cheapest2" | "cheaplocal" | "balanced" | "balanced2" | "local" | "local2" | "max"
 }
 
 const WEB_SEARCH_DESCRIPTION =
@@ -2219,7 +2241,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
     //
     // This is the Pi front-end for the SAME decision Claude Code gets from its
     // `UserPromptSubmit` hook: `decidePromptSubmitV2` — prior-turn findings,
-    // the search tip, the triviality gate, the cheapest-family Sol rewrite, and
+    // the search tip, the triviality gate, the cheapest-family rewrite, and
     // the Luna scope note with its fail-open goal. Only the prose differs
     // (`PI_PROMPT_PROSE`), because Pi has no `/gh-research` or
     // `/gh-orchestrate` skills and its MCP tool names carry a `gh-router-`
@@ -2235,7 +2257,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
       group: "search",
       hookOnly: true,
       description:
-        "Internal hook channel: returns the advisory block for one user prompt — pending review findings, a search tip, and a grounded scope note (plus the cheapest-profile Sol rewrite). Called by the Pi extension's before_agent_start handler, never by the model. Returns an empty text block when there is nothing to inject, which is the ordinary answer for a trivial prompt.",
+        "Internal hook channel: returns the advisory block for one user prompt — pending review findings, a search tip, and a grounded scope note (plus the cheapest-profile rewrite). Called by the Pi extension's before_agent_start handler, never by the model. Returns an empty text block when there is nothing to inject, which is the ordinary answer for a trivial prompt.",
       inputSchema: {
         type: "object",
         required: ["prompt", "session_id"],
@@ -2309,8 +2331,10 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
                 effort: PI_PROMPT_SCOPE_EFFORT,
                 signal: callSignal,
               }),
-            // Cheapest-family Sol rewrite. The family's Advisor-tier Sol:
-            // `gpt-5.6-sol` on `cheapest`, `gpt-6.1-sol` on `cheapest2`.
+            // Cheapest-family rewrite. The family's rewrite model is its
+            // Advisor-tier Sol on `cheapest` (`gpt-5.6-sol`) and `cheapest2`
+            // (`gpt-6.1-sol`), and stays `gpt-5.6-sol` on `cheaplocal`, whose
+            // CONSULTANTS leave Copilot while this dispatch does not.
             // Resolved per call because the profile is per connection, while
             // the persona list is static.
             inferSol: (system, user, callSignal) =>

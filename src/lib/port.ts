@@ -171,6 +171,10 @@ export const BUDGET_SMALL_FAST_CATALOG_ID = "claude-haiku-4.5"
  *                   Oracle, no astra peer)
  *   - `cheapest2` → `CHEAPEST2_LEAD_MODEL` BARE (the `cheapest` sibling with
  *                   the Sol Advisor/Oracle at `gpt-6.1-sol`; same Luna lead)
+ *   - `cheaplocal` → `CHEAPEST_LEAD_MODEL` BARE (the `cheapest` sibling whose
+ *                   Advisor and Oracle move to the local endpoint; the lead is
+ *                   still Luna on Copilot, so it resolves exactly like
+ *                   `cheapest`)
  *   - `balanced2` → `BALANCED2_LEAD_MODEL` BARE (the `balanced` sibling with
  *                   the lead/reviewer at `gpt-6.1-sol` and the Grok-4.7 Oracle)
  *   - `local`, `local2` → `LOCAL_PROFILE_LEAD_MODEL`, the bare `opus` tier id
@@ -182,7 +186,8 @@ export const BUDGET_SMALL_FAST_CATALOG_ID = "claude-haiku-4.5"
  *   - absent      → the ordinary default
  *
  * Every branch except the 200K aliases (`cheap`/`cheapest`/`cheapest2`/
- * `balanced`/`balanced2`) is `[1m]`-decorated against the live catalog, by
+ * `cheaplocal`/`balanced`/`balanced2`) is `[1m]`-decorated against the live
+ * catalog, by
  * `pickClaudeDefault` on the two Opus-family branches and by
  * `withOneMSuffixForLead` on the rest — the decoration is catalog-gated per
  * model, so a genuinely 200K model (`claude-haiku-4-5`) still comes back
@@ -223,6 +228,10 @@ export function resolveLeadSlugArg(modelArg: string | undefined): string {
     return CHEAP_LEAD_MODEL
   }
   if (arg.toLowerCase() === "cheapest") {
+    return CHEAPEST_LEAD_MODEL
+  }
+  // Same lead as `cheapest`: only the consultants change transport.
+  if (arg.toLowerCase() === "cheaplocal") {
     return CHEAPEST_LEAD_MODEL
   }
   if (arg.toLowerCase() === "balanced") {

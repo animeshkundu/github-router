@@ -44,6 +44,7 @@ import {
 
 import { type SelfInvocation } from "./hook-launcher/self-invocation"
 import { buildCodexProviderConfigFlags } from "./launch"
+import { LOCAL_CONSULT_REDACTION_LINE } from "./local-consult-redaction"
 import { buildWorkspaceHeaderHelperCommand } from "./mcp-workspace-header"
 import { oneMContextDisabled, withOneMSuffix } from "./one-m-context"
 import { PATHS, writeRuntimeFileSecure } from "./paths"
@@ -228,6 +229,10 @@ interface BuildOpts {
    *  emitted model BARE (200K default window). No `Plan` role: the lead
    *  plans directly. */
   cheapestProfile?: boolean
+  /** Whether this cheapest-family launch's Advisor and Oracle answer from the
+   *  local endpoint (`cheaplocal`) rather than Copilot. Reviewer prose then
+   *  names no consultant model, because the profile is told none. */
+  cheaplocalProfile?: boolean
   cheapestExploreModel?: string
   cheapestGeneralPurposeModel?: string
   cheapestImplementerModel?: string
@@ -999,56 +1004,95 @@ function pinnedGeneralPurposePrompt(opts?: { is200K?: boolean; planAgent?: boole
 const REVIEWER_DESC_TAIL =
   "Runs builds/tests itself rather than assuming them. Returns SHIP / FIX / BLOCK with reproducible evidence. Never edits source."
 
-function pinnedReviewerDescription(explicit: boolean, isBalanced = false, is200K = false, protegeAdvisor = false): string {
+/** What a protege reviewer's description may call its consultant.
+ *
+ *  `sol` is every Copilot-backed cheapest launch, which can observe the
+ *  advisor's identity. `copilot-served` is `local2`: the lead is local but the
+ *  Advisor still runs on Copilot, and it really is Sol, so the name is true
+ *  and the strength comparison is not. `local-endpoint` is `cheaplocal`, whose
+ *  consult leaves Copilot entirely, so the description names no model at all.
+ */
+export type ProtegeAdvisorKind = "sol" | "copilot-served" | "local-endpoint"
+
+function pinnedReviewerDescription(
+  explicit: boolean,
+  isBalanced = false,
+  is200K = false,
+  advisorKind?: ProtegeAdvisorKind,
+): string {
   const head = explicit
     ? isBalanced
       ? "Adversarial evidence-based reviewer. Use proactively ONLY when the change is genuinely behavior-changing, cross-boundary, or risk-sensitive, before done. The lead owns verification by default. "
       : "Adversarial evidence-based reviewer. Use proactively post-integration after behavior-changing, cross-boundary, or risk-sensitive changes, before done. "
     : "Adversarial evidence-based reviewer for behavior-changing, cross-boundary, or risk-sensitive changes. "
+  const consultant = advisorKind === "local-endpoint" ? "advisor" : "Sol advisor"
   return head + REVIEWER_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
-    + (protegeAdvisor ? " May consult its Sol advisor (at most 5 advisor rounds per review) on consequential uncertainty it cannot settle by evidence." : "")
+    + (advisorKind ? ` May consult its ${consultant} (at most 5 advisor rounds per review) on consequential uncertainty it cannot settle by evidence.` : "")
 }
 
 /** Protege appendix for the cheapest reviewer: the capped Sol-advisor
  *  protocol. Appended after the delegation paragraph so the adversarial core
  *  above stays byte-identical across profiles.
  *
- *  `framing` is the one clause that varies: a Copilot-served lead can be told
- *  the consultant is the stronger cross-lab model, but a `local` launch bills
- *  an endpoint whose model the proxy knows nothing about, so the only claim it
- *  can make is who serves the consultant. Same builder, so the behavioural
- *  contract cannot drift between the two.
+ *  `framing` is the complete noun phrase describing the consultant, from its
+ *  identity (or the absence of one) through what it sees. One parameter rather
+ *  than a model name plus a predicate, because the variants differ in both: a
+ *  Copilot-served lead can be told the consultant is Sol and stronger
+ *  cross-lab, a `local` launch bills an endpoint whose model the proxy knows
+ *  nothing about so the only claim it can make is who serves it, and
+ *  `cheaplocal` names no model at all. Same builder, so the behavioural
+ *  contract cannot drift between them.
  *
- *  Both framings describe the curated transport, not a full transcript: the
+ *  All framings describe the curated transport, not a full transcript: the
  *  reviewer's consult is rendered by the curated path (24K transcript budget,
  *  tool-aware, layered under `<operator_focus>` / `<caller_context>`), so
- *  promising the whole transcript would overstate what the advisor sees. */
-function buildProtegeAdvisorAppendix(framing: string): string {
-  return "You have an `advisor` tool backed by Sol, " + framing + ". "
+ *  promising the whole transcript would overstate what the advisor sees.
+ *
+ *  `redact` carries the caller half of the redaction contract to the one
+ *  framing whose brief leaves Copilot for an endpoint the operator runs. It is
+ *  a boolean rather than part of `framing` because it describes the transport,
+ *  not the consultant: the same endpoint-backed reviewer would need it whether
+ *  or not the profile names a model. */
+function buildProtegeAdvisorAppendix(framing: string, redact = false): string {
+  return "You have an `advisor` tool backed by " + framing + ". "
   + "You own the verdict; the advisor is counsel, never authority — it never approves, vetoes, or decides for you. "
   + "Budget: at most 5 advisor rounds per review (code-enforced; one round is one back-and-forth exchange). Spend them only on consequential uncertainty that repository evidence, builds, or tests cannot settle: a changed assumption, conflicting evidence, an approach that will not converge, or a severity call with merge-blocking consequences. "
   + "Every consult must state the precise question, your evidence so far with file:line citations, the credible alternatives, and what evidence would change your verdict. "
+  + (redact ? LOCAL_CONSULT_REDACTION_LINE + " " : "")
   + "Never consult for routine verification, progress narration, reassurance, or completion ritual — run the check yourself. "
   + "If the advisor disagrees with you, evaluate on the merits: adopt what is right with a one-line reason, defend what is verified with evidence, and record the disagreement in your result. "
 }
 
 const PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
-  "a stronger cross-lab model that sees the ask, the brief you write, and a bounded transcript",
+  "Sol, a stronger cross-lab model that sees the ask, the brief you write, and a bounded transcript",
 )
 
 const LOCAL_PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
   "a Copilot-served model that sees the ask, the brief you write, and a bounded transcript",
 )
 
+const CHEAPLOCAL_PROTEGE_ADVISOR_APPENDIX = buildProtegeAdvisorAppendix(
+  "a model on your local endpoint that sees the ask, the brief you write, and a bounded transcript",
+  true,
+)
+
+/** The appendix per consultant kind. Indexed rather than branched at the two
+ *  call sites so a new kind cannot be reachable from `pinnedReviewerPrompt`
+ *  without its prose existing. */
+const PROTEGE_APPENDICES: Record<ProtegeAdvisorKind, string> = {
+  sol: PROTEGE_ADVISOR_APPENDIX,
+  "copilot-served": LOCAL_PROTEGE_ADVISOR_APPENDIX,
+  "local-endpoint": CHEAPLOCAL_PROTEGE_ADVISOR_APPENDIX,
+}
+
 function pinnedReviewerPrompt(
   semanticAvailable = true,
   opts?: {
     allowExploreDelegation?: boolean
     is200K?: boolean
-    protegeAdvisor?: boolean
-    /** `local2`'s grant: same capped protocol, framing restricted to what the
-     *  proxy knows about a local session. */
-    localAdvisor?: boolean
+    /** The cheapest-family protege grant: absent when the launch has no
+     *  Advisor, otherwise the consultant the profile may describe. */
+    advisorKind?: ProtegeAdvisorKind
   },
 ): string {
   // Balanced-only: the reviewer narrows scope with search first, then
@@ -1058,11 +1102,10 @@ function pinnedReviewerPrompt(
   const delegation = opts?.allowExploreDelegation === true
     ? "Do not modify source code. Scope first with search, then delegate: use code search (lexical, then semantic when available) and web search to narrow scope and rule out hypotheses before delegating — cheapest, always first. When search is insufficient, delegate targeted discovery to `Explore`: launch one or more `Explore` subagents in parallel with scoped evidence questions (call chains, config patterns, test conventions, boundary conditions) and let them return file:line conclusions; do not sweep the repository yourself. You may invoke only `Explore`; do not invoke any other subagent. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
     : "Do not modify source code and do not delegate to other agents. You may run build, test, and read-only inspection commands; do not run commands that alter tracked source files or touch remote infrastructure (transient build cache or test runner side effects are expected). "
-  // Cheapest-only protege grant: the Luna reviewer may consult Sol. The core
-  // stays identical; only this profile appends the capped-advisor protocol.
-  const protege = opts?.protegeAdvisor === true
-    ? (opts?.localAdvisor === true ? LOCAL_PROTEGE_ADVISOR_APPENDIX : PROTEGE_ADVISOR_APPENDIX)
-    : ""
+  // Cheapest-family protege grant: the Luna reviewer may consult the
+  // profile's Advisor. The core stays identical; only this grant appends the
+  // capped-advisor protocol.
+  const protege = opts?.advisorKind ? PROTEGE_APPENDICES[opts.advisorKind] : ""
   return "You are an adversarial code reviewer. Your job is not to confirm that the change works. Your job is to find the conditions under which it does not. "
     + "Think carefully about the plausible failure modes of this change before you start running commands, so that what you run is chosen to expose them. "
     + "Read before you judge. Inspect the changed files and relevant surrounding context, callers of affected call sites, and tests that claim to cover the change, sized to the identified risks of the change. "
@@ -1353,6 +1396,12 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
   const generalModel = CHEAPEST_GENERAL_PURPOSE_ALIAS_ID
   const reviewerModel = CHEAPEST_REVIEWER_ALIAS_ID
   const semanticAvailable = opts.semanticSearchAvailable === true
+  // The family's two consult transports. `sol` names the Copilot Advisor that
+  // `cheapest`/`cheapest2` really run; `local-endpoint` names no model, because
+  // a `cheaplocal` launch is told none. Surfaced as a boolean because this
+  // file never carries a profile id; the launcher derives it from the
+  // contract's `consultTransport`.
+  const advisorKind: ProtegeAdvisorKind = opts.cheaplocalProfile ? "local-endpoint" : "sol"
 
   const searchKey = opts.groupKeys.search ?? GROUP_META.search.preferredKey
   const searchMcpServers = opts.serverUrl
@@ -1387,8 +1436,8 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description: pinnedReviewerDescription(false, false, true, true),
-      prompt: pinnedReviewerPrompt(semanticAvailable, { is200K: true, protegeAdvisor: true }),
+      description: pinnedReviewerDescription(false, false, true, advisorKind),
+      prompt: pinnedReviewerPrompt(semanticAvailable, { is200K: true, advisorKind }),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,
@@ -1497,11 +1546,10 @@ function buildLocalProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
-      description: pinnedReviewerDescription(false, false, true, protegeAdvisor),
+      description: pinnedReviewerDescription(false, false, true, protegeAdvisor ? "copilot-served" : undefined),
       prompt: pinnedReviewerPrompt(semanticAvailable, {
         is200K: true,
-        protegeAdvisor,
-        localAdvisor: protegeAdvisor,
+        advisorKind: protegeAdvisor ? "copilot-served" : undefined,
       }),
       model: reviewerModel,
       effort: effort("reviewer"),
@@ -1982,6 +2030,7 @@ interface WriteOpts {
   cheapReviewerModel?: string
   /** Cheapest-profile role assignments, mirrored from `BuildOpts`. */
   cheapestProfile?: boolean
+  cheaplocalProfile?: boolean
   cheapestExploreModel?: string
   cheapestGeneralPurposeModel?: string
   cheapestImplementerModel?: string
@@ -2595,6 +2644,7 @@ export async function writePeerMcpRuntimeFiles(
     fastProfile: opts.fastProfile,
     cheapProfile: opts.cheapProfile,
     cheapestProfile: opts.cheapestProfile,
+    cheaplocalProfile: opts.cheaplocalProfile,
     balancedProfile: opts.balancedProfile,
     implementerEffort: opts.implementerEffort,
     reviewerEffort: opts.reviewerEffort,

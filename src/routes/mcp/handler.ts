@@ -13,7 +13,15 @@ import {
   type McpAudience,
 } from "~/lib/launch-registry"
 import { MCP_WORKSPACE_HEADER } from "~/lib/mcp-workspace-header"
-import { extractAndRecordAic } from "~/lib/aic-ledger"
+import {
+  LOCAL_CONSULT_MAX_OUTPUT_TOKENS,
+  LOCAL_CONSULT_REDACTION_LINE,
+  LOCAL_CONSULT_REDACTION_NOTE,
+  localBaseUrl,
+  localSessionId,
+  sendLocalMessages,
+} from "~/lib/local-egress"
+import { extractAndRecordAic, recordZeroCostRequest } from "~/lib/aic-ledger"
 import { loadPeerImages } from "~/lib/peer-attachments"
 import { state } from "~/lib/state"
 import { getTextTokenCount, getTokenizerFromModel } from "~/lib/tokenizer"
@@ -42,7 +50,10 @@ import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
-import { createMessages } from "~/services/copilot/create-messages"
+import {
+  createMessages,
+  type LocalMessagesEgress,
+} from "~/services/copilot/create-messages"
 import { withTransientRetry } from "~/lib/upstream-retry"
 import {
   createResponses,
@@ -65,6 +76,7 @@ import {
   cheapOracleModel,
   cheapAstraModel,
   cheapestOracleModel,
+  cheaplocalOracleModel,
   balancedOracleModel,
   localOracleModel,
   geminiAvailable,
@@ -88,6 +100,7 @@ import {
   displayModelName,
   isBalancedFamily,
   isCheapestFamily,
+  isCheaplocalProfile,
   isLocalFamily,
   isPinnedLaunchProfile,
   localContractFor,
@@ -448,6 +461,16 @@ function activePersonas(launch?: LaunchRegistryEntry): Array<PersonaSpec> {
 /** Oracle descriptor derived from the family contract, so a model swap in the
  *  contract renames itself here instead of leaving stale prose behind. */
 function familyOracleDescriptor(profileId: string): string | undefined {
+  // Before the family branches: `cheaplocal` IS a cheapest-family member, and
+  // its Oracle is a local consult. No slug and no catalog lookup, so nothing
+  // here is read off Copilot's metadata. No window and no effort either: the
+  // consult's `output_config: { effort: "max" }` is a field of the request
+  // (`LOCAL_CONSULT_EFFORT`), not a property this description may assert about
+  // an endpoint nobody has asked about. The descriptor names the transport and
+  // stops there.
+  if (isCheaplocalProfile(profileId)) {
+    return "the local model"
+  }
   if (isCheapestFamily(profileId)) {
     const contract = cheapestContractFor(profileId)
     return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
@@ -467,11 +490,27 @@ function familyOracleDescriptor(profileId: string): string | undefined {
   return undefined
 }
 
+/**
+ * The Oracle gate for the cheapest family, whose two transports need different
+ * checks.
+ *
+ * `cheaplocal`'s Oracle is a local consult: it resolves no Copilot slug, so
+ * `cheapestOracleModel` would DROP the tool on any catalog that happens not to
+ * carry an Opus row and would gate a local call on a Copilot window. One helper
+ * so the list-time and call-time gates cannot disagree about the transport.
+ */
+function cheapestFamilyOracleGate(profileId: string): string | true | undefined {
+  return cheapestContractFor(profileId).consultTransport === "local"
+    ? cheaplocalOracleModel()
+    : cheapestOracleModel(profileId)
+}
+
 function oracleToolEntry(
   isCheap = false,
   astraAvailable = true,
   oracleDescriptor?: string,
   advisorAvailable = true,
+  redactBrief = false,
 ): ToolEntry {
   const descriptor = oracleDescriptor
     ?? (isCheap
@@ -493,13 +532,16 @@ function oracleToolEntry(
   return {
     name: "oracle",
     description:
-      `Expert consultant backed by ${descriptor} for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them.${preferredOverAdvisor}\n\nWhen NOT to invoke: ${advisorExclusion}${deadEndClause}routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.`,
+      `Expert consultant backed by ${descriptor} for complex conceptual, algorithmic, spec/protocol, or architectural trade-offs. Stateless and cold-start: evaluates a self-contained brief.\n\nWhen to invoke: use for difficult conceptual, algorithmic, spec/protocol, or architectural tradeoffs before implementation when repository evidence alone cannot settle them.${preferredOverAdvisor}\n\nWhen NOT to invoke: ${advisorExclusion}${deadEndClause}routine code lookup, or mechanical facts verifiable by tests.\n\nPass complete context, constraints, minimal code excerpts with path:line, and one precise unresolved question.${redactBrief ? ` ${LOCAL_CONSULT_REDACTION_LINE}` : ""}`,
     inputSchema: {
       type: "object",
       required: ["query", "context"],
       additionalProperties: false,
       properties: {
         query: { type: "string", description: "One precise, consequential unresolved question or architectural decision." },
+        // The redaction ask rides on the tool description only. Repeating an
+        // abridged copy here gave one contract two wordings that could drift,
+        // and the tool description is the surface a model reads first.
         context: { type: "string", description: "Complete self-contained evidence, constraints, code excerpts with path:line, and ruled-out alternatives needed to evaluate cold-start." },
       },
     },
@@ -739,7 +781,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
     const oracleGate = isLocal
       ? localOracleModel(launch.profileId)
       : isCheapest
-        ? cheapestOracleModel(launch.profileId)
+        ? cheapestFamilyOracleGate(launch.profileId)
         : isBalanced
           ? balancedOracleModel(launch.profileId)
           : isCheap
@@ -753,7 +795,15 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       && launch.allowedPersonas?.has("oracle")
       && oracleGate
     ) {
-      entries.push(oracleToolEntry(isCheap, astraAvailable, oracleDescriptor, advisorAvailable))
+      entries.push(
+        oracleToolEntry(
+          isCheap,
+          astraAvailable,
+          oracleDescriptor,
+          advisorAvailable,
+          isCheaplocalProfile(launch.profileId),
+        ),
+      )
     }
     if (
       (scope === "all" || scope === "peers")
@@ -1519,6 +1569,7 @@ async function handleToolsCall(
   launch: LaunchRegistryEntry,
   audience: McpAudience = "shared",
   sessionWorkspace?: string,
+  localConsultEgress?: LocalMessagesEgress,
 ): Promise<object> {
   const params = body.params ?? {}
   const name = typeof params.name === "string" ? params.name : ""
@@ -1634,6 +1685,11 @@ async function handleToolsCall(
     // a local launch's lead turns are free, but a consult is a billed call, so
     // it resolves and gates exactly like the cheapest family's.
     const isLocalOracle = isLocalFamily(launch.profileId)
+    // `cheaplocal` is the one exception: its Oracle is a local consult, so the
+    // transport comes from the contract rather than from the family id.
+    const isCheaplocalOracle =
+      isCheapestOracle
+      && cheapestContractFor(launch.profileId).consultTransport === "local"
     const isCheapOracle = launch.profileId === "cheap" || launch.profileId === "cheap1m" || isCheapestOracle || isBalancedOracle
     const oracleModel = isLocalOracle
       ? localContractFor(launch.profileId).oracleModel
@@ -1644,7 +1700,13 @@ async function handleToolsCall(
           : isCheapOracle
             ? CHEAP_PROFILE_ORACLE_MODEL
             : "claude-opus-5.5"
-    const oracleEndpoint = isCheapOracle || isLocalOracle ? "/v1/responses" : "/v1/messages"
+    // The local consult speaks Anthropic Messages directly; the Copilot
+    // cheapest/balanced Oracle uses the Responses API.
+    const oracleEndpoint = isCheaplocalOracle
+      ? "/v1/messages"
+      : isCheapOracle || isLocalOracle
+        ? "/v1/responses"
+        : "/v1/messages"
     const oracleEffort = isLocalOracle
       ? localContractFor(launch.profileId).oracleEffort
       : isCheapestOracle
@@ -1657,7 +1719,7 @@ async function handleToolsCall(
     const oracleGateFn = isLocalOracle
       ? () => localOracleModel(launch.profileId)
       : isCheapestOracle
-        ? () => cheapestOracleModel(launch.profileId)
+        ? () => cheapestFamilyOracleGate(launch.profileId)
         : isBalancedOracle
           ? () => balancedOracleModel(launch.profileId)
           : isCheapOracle
@@ -1682,21 +1744,38 @@ async function handleToolsCall(
     if (inputBytes > MAX_ORACLE_INPUT_BYTES) {
       return rpcResult(body.id, toolError(`pre-flight rejected: oracle input is ${inputBytes} bytes, over the ${MAX_ORACLE_INPUT_BYTES}-byte cap; narrow the context without silently truncating it`))
     }
+    // The Copilot branches can name the model because the catalog told us what
+    // it is. A local consult cannot: the proxy has never been told anything
+    // about what answers there, so the identity clause is dropped rather than
+    // guessed at. The local branch also carries the consultant half of the
+    // redaction contract, because only this transport asks the caller to redact.
+    const oracleInstructions = isCheaplocalOracle
+      ? `You are Oracle, an expert architectural and technical consultant. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action. ${LOCAL_CONSULT_REDACTION_NOTE}`
+      : `You are Oracle, an expert architectural and technical consultant running on ${displayModelName(oracleModel)}. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.`
     const oraclePersona: PersonaSpec = {
       agentName: "oracle",
       toolNameHttp: "oracle",
       model: oracleModel,
       endpoint: oracleEndpoint,
       description: "Oracle: self-contained consultant",
-      baseInstructions: `You are Oracle, an expert architectural and technical consultant running on ${displayModelName(oracleModel)}. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.`,
+      baseInstructions: oracleInstructions,
       agentPrompt: "",
       writeCapable: false,
       requiresHttp: true,
       allowedEfforts: [oracleEffort],
       defaultEffort: oracleEffort,
     }
-    const overflow = await predictedWindowOverflow(oraclePersona, oracleInput, undefined)
-    if (overflow) return rpcResult(body.id, toolError(overflow))
+    // The window guard is a CATALOG check: it resolves the persona's id and
+    // compares against that entry's `max_prompt_tokens`. A local consult has
+    // no catalog entry to consult and no promise of one, and running the guard
+    // anyway is worse than useless — `resolveModel("opus")` maps the bare id
+    // onto a Copilot Opus, so the local call would be rejected against a
+    // window belonging to a model that is not answering it. The 256KB byte cap
+    // above stays: that one is transport-neutral.
+    if (!isCheaplocalOracle) {
+      const overflow = await predictedWindowOverflow(oraclePersona, oracleInput, undefined)
+      if (overflow) return rpcResult(body.id, toolError(overflow))
+    }
     const release = acquireInFlightSlot()
     if (!release) {
       return rpcResult(body.id, toolError(`Peer MCP queue full (${MAX_INFLIGHT_TOOLS_CALL} in-flight). Retry shortly.`))
@@ -1707,14 +1786,49 @@ async function handleToolsCall(
     const inflightEntry: InflightEntry = { aborter, release }
     if (abortKey !== undefined) inflightAborts.set(abortKey, inflightEntry)
     try {
-      const text = await dispatchModelCall({
-        model: oracleModel,
-        endpoint: oracleEndpoint,
-        instructions: oraclePersona.baseInstructions,
-        userText: oracleInput,
-        effort: oracleEffort,
-        signal: aborter.signal,
-      })
+      let text: string
+      if (isCheaplocalOracle) {
+        // Bypass `dispatchModelCall`: it opens with `resolveModel(args.model)`
+        // and would rewrite the bare `opus` onto a Copilot catalog id. Nothing
+        // here reads the catalog — one model id, one system prompt, one user
+        // message, one output cap and one fixed reasoning request, exactly
+        // like the local Advisor.
+        // The route threads `localConsultEgress` for every cheaplocal launch,
+        // so this fallback is defensive. It still prefers what the launch
+        // remembered over the process-wide id, because those are different
+        // values whenever the lead is a different session than the first one
+        // this proxy saw, and a silent degrade here would key the consult's
+        // prompt cache on the wrong session.
+        const egress: LocalMessagesEgress = localConsultEgress ?? {
+          baseUrl: localBaseUrl(),
+          sessionId: launch.sessionId?.trim() || state.sessionId,
+        }
+        text = await withTransientRetry(
+          () =>
+            sendLocalMessages({
+              egress,
+              model: oracleModel,
+              system: oraclePersona.baseInstructions,
+              userText: oracleInput,
+              maxTokens: LOCAL_CONSULT_MAX_OUTPUT_TOKENS,
+              signal: aborter.signal,
+            }),
+          { signal: aborter.signal, label: oracleModel },
+        )
+        // A local call bills nobody, and `sendLocalMessages` carries no
+        // `copilot_usage` to extract. Recording zero keeps the AIC ledger
+        // honest, matching the local Advisor path.
+        recordZeroCostRequest(oracleModel)
+      } else {
+        text = await dispatchModelCall({
+          model: oracleModel,
+          endpoint: oracleEndpoint,
+          instructions: oraclePersona.baseInstructions,
+          userText: oracleInput,
+          effort: oracleEffort,
+          signal: aborter.signal,
+        })
+      }
       logTelemetry({ name: "oracle", model: oracleModel, durationMs: Date.now() - startedAt, result: "ok" })
       return rpcResult(body.id, { content: [{ type: "text", text }] })
     } catch (err) {
@@ -2216,6 +2330,7 @@ async function handleRpc(
   launch: LaunchRegistryEntry,
   audience: McpAudience = "shared",
   sessionWorkspace?: string,
+  localConsultEgress?: LocalMessagesEgress,
 ): Promise<{ status: number; body: object | null }> {
   // Reject non-object envelopes (null, arrays, primitives) BEFORE we
   // dereference body.jsonrpc / body.method — without this guard a `null`
@@ -2285,7 +2400,7 @@ async function handleRpc(
       if (isNotification) return { status: 202, body: null }
       return {
         status: 200,
-        body: await handleToolsCall(body, scope, launch, audience, sessionWorkspace),
+        body: await handleToolsCall(body, scope, launch, audience, sessionWorkspace, localConsultEgress),
       }
 
     // --- Phase D: MCP method stubs with full handshake coherence ---
@@ -2412,6 +2527,18 @@ export async function handleMcpPost(
   }
 
   const sessionWorkspace = c.req.header(MCP_WORKSPACE_HEADER)
+  // `cheaplocal`'s Oracle calls the local endpoint, and only the Hono context
+  // can read the client's session header, so the egress is resolved once here
+  // and threaded into both tools/call paths. `undefined` on every other
+  // profile, which is what keeps the Copilot branches untouched.
+  //
+  // No MCP client sends `x-claude-code-session-id`, so the launch entry's
+  // remembered value is the real source here: the lead's `/v1/messages`
+  // traffic recorded it, and using it keeps the consult in the same
+  // prompt-cache session as the turns that led to the call.
+  const localConsultEgress: LocalMessagesEgress | undefined = isCheaplocalProfile(launch.profileId)
+    ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c, launch.sessionId) }
+    : undefined
 
   // Diagnostic (opt-in, GH_ROUTER_LOG_PEER_MCP=1): log the ARRIVAL of each
   // tools/call with a wall-clock stamp + the current in-flight count. The proxy
@@ -2451,7 +2578,7 @@ export async function handleMcpPost(
     && body.method === "tools/call"
     && acceptsEventStream(c.req.header("accept"))
   ) {
-    return handleToolsCallSSE(body, scope, launch, audience, sessionWorkspace)
+    return handleToolsCallSSE(body, scope, launch, audience, sessionWorkspace, localConsultEgress)
   }
 
   // JSON-path pre-flight predictedTooLong cap. SSE clients (above)
@@ -2476,7 +2603,15 @@ export async function handleMcpPost(
   }
 
   try {
-    const { status, body: respBody } = await handleRpc(c, body, scope, launch, audience, sessionWorkspace)
+    const { status, body: respBody } = await handleRpc(
+      c,
+      body,
+      scope,
+      launch,
+      audience,
+      sessionWorkspace,
+      localConsultEgress,
+    )
     if (respBody === null) return c.body(null, status as 202)
     return c.json(respBody, status as 200)
   } catch (err) {
@@ -2554,12 +2689,13 @@ async function handleToolsCallSSE(
   launch: LaunchRegistryEntry,
   audience: McpAudience = "shared",
   sessionWorkspace?: string,
+  localConsultEgress?: LocalMessagesEgress,
 ): Promise<Response> {
   const encoder = new TextEncoder()
   // Kick off the actual tool call as a Promise. handleToolsCall handles
   // all gates, slot accounting, abort registration, telemetry — we just
   // wrap its eventual result in an SSE envelope.
-  const callPromise = handleToolsCall(body, scope, launch, audience, sessionWorkspace)
+  const callPromise = handleToolsCall(body, scope, launch, audience, sessionWorkspace, localConsultEgress)
   // Heartbeat interval is hoisted out of `start()` so `cancel()` can
   // clear it synchronously on consumer disconnect — otherwise a 5-second
   // tick fires into a closed controller after every cancel, and the

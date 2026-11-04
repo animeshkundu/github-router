@@ -31,6 +31,7 @@ describe("serve model profile boundary", () => {
       "cheap1m",
       "cheapest",
       "cheapest2",
+      "cheaplocal",
       "balanced",
       "balanced2",
       "local",

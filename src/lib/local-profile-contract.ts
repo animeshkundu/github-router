@@ -114,6 +114,13 @@ export const LOCAL_PROFILE_CONTRACT = Object.freeze({
   oracleEffort: LOCAL_PROFILE_ORACLE_EFFORT,
   synthesizedPeers: LOCAL_PROFILE_SYNTHESIZED_PEERS,
   delegationGraph: LOCAL_PROFILE_DELEGATION_GRAPH,
+  /**
+   * The consultants here are Copilot dispatches even though the LEAD is local:
+   * `local`'s Oracle persona and `local2`'s curated Advisor both run on the
+   * inherited Copilot slug. Declared so the cheapest family's transport field
+   * is present across every contract a curated-Advisor call site can hold.
+   */
+  consultTransport: "copilot" as const,
 })
 
 export type LocalProfileContract = typeof LOCAL_PROFILE_CONTRACT

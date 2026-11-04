@@ -1,5 +1,6 @@
 /**
- * Local-model egress for the `-m local` / `-m local2` launch profiles.
+ * Local-model egress for the `-m local` / `-m local2` launch profiles, and for
+ * the `-m cheaplocal` consultants.
  *
  * The only fact these profiles are allowed to know about the endpoint is its
  * base URL. Nothing here probes, sniffs, or branches on what is serving it,
@@ -11,11 +12,50 @@
 import type { Context } from "hono"
 import consola from "consola"
 
-import { isLocalFamily } from "~/lib/profile-family"
+import { isCheaplocalProfile, isLocalFamily } from "~/lib/profile-family"
 import { state } from "~/lib/state"
+import {
+  createMessages,
+  type LocalMessagesEgress,
+} from "~/services/copilot/create-messages"
 
 export const LOCAL_DEFAULT_PORT = 11111
 export const LOCAL_DEFAULT_BASE_URL = `https://localhost:${LOCAL_DEFAULT_PORT}/v1`
+
+/**
+ * Output cap for a local consultant turn (Advisor and Oracle).
+ *
+ * One number for both, and deliberately a small one: a consultant answers a
+ * single question, and every larger value would be a claim about how much room
+ * the model behind the endpoint has. The Copilot paths keep their own
+ * catalog-derived budgets; this is only ever the catalog-less fallback, so a
+ * launch whose consultants left Copilot is no worse off than the branch that
+ * existed before it.
+ */
+export const LOCAL_CONSULT_MAX_OUTPUT_TOKENS = 4096
+
+/**
+ * Reasoning effort requested on every local consultant turn.
+ *
+ * This is the operator's setting for the two `cheaplocal` consults, not an
+ * observation about the endpoint. `output_config.effort` is the same Anthropic
+ * field Claude Code sends on its own requests, and `max` is its top rung. No
+ * catalog lookup and no clamp apply, because the profile has no reasoning
+ * ladder to clamp against and a guessed rung would be an assumption. An
+ * endpoint that rejects the field fails the consult visibly; the proxy does
+ * not quietly retry with a different body.
+ */
+export const LOCAL_CONSULT_EFFORT = "max" as const
+
+/**
+ * The redaction contract lives in a leaf module so the prompt builders can
+ * embed it without importing this file's service graph. Re-exported here
+ * because every caller that consults the endpoint already imports this module.
+ */
+export {
+  LOCAL_CONSULT_REDACTION_LINE,
+  LOCAL_CONSULT_REDACTION_NOTE,
+} from "./local-consult-redaction"
 
 export interface LocalEgressOverride {
   /** `--localurl` — full base URL, including the `/v1` prefix. */
@@ -158,11 +198,19 @@ export function configureLocalEgress(override: LocalEgressOverride): void {
   // returns BEFORE validation. Validating first meant a typo in a flag we had
   // just called ignored could still fail the launch, and stored an override
   // the warning said was being discarded.
-  if (override.profileId !== undefined && !isLocalFamily(override.profileId)) {
+  //
+  // `cheaplocal` is not a local-family member (its lead and natives stay on
+  // Copilot) but its Advisor and Oracle DO use this endpoint, so the flags are
+  // live for it.
+  if (
+    override.profileId !== undefined
+    && !isLocalFamily(override.profileId)
+    && !isCheaplocalProfile(override.profileId)
+  ) {
     if (!warnedInert) {
       warnedInert = true
       consola.warn(
-        `--localurl/--localport only apply to the local launch profiles (profile: ${override.profileId}); ignoring`,
+        `--localurl/--localport only apply to the local and cheaplocal launch profiles (profile: ${override.profileId}); ignoring`,
       )
     }
     cliOverride = undefined
@@ -180,15 +228,88 @@ export function configureLocalEgress(override: LocalEgressOverride): void {
  * The session id sent upstream on the local path.
  *
  * `x-claude-code-session-id` is what the local server requires (a request
- * without it is a 400). It must stay stable per conversation, so the client's
+ * without it is a 400). It must stay stable per session, so the client's
  * own value always wins and the process-level id is only a fallback for a
  * caller that sent none. Never synthesize a fresh value per request: the
  * header exists for prompt-cache routing, and a random value defeats it.
+ *
+ * `launchSessionId` is the second fallback, for the one route that carries no
+ * client header: the `cheaplocal` Oracle is called over `/mcp`, whose client
+ * (Claude Code or Pi) sends only its bearer and workspace. The launch entry
+ * learns the id from the lead's `/v1/messages` traffic, so passing it here
+ * gives the consult the same session key the lead's own turns use. The
+ * ordering matters on `/v1/messages` itself: its context DOES carry the
+ * header, and that live value must beat the remembered one after `/clear`.
  */
-export function localSessionId(c: Context): string {
+export function localSessionId(c: Context, launchSessionId?: string): string {
   const incoming = c.req.header("x-claude-code-session-id")?.trim()
   if (incoming !== undefined && incoming.length > 0) {
     return incoming
   }
+  const remembered = launchSessionId?.trim()
+  if (remembered !== undefined && remembered.length > 0) {
+    return remembered
+  }
   return state.sessionId
+}
+
+/**
+ * One non-streaming consultant turn against the local endpoint.
+ *
+ * This is the whole wire contract the `cheaplocal` Advisor and Oracle share:
+ * a bare model id, a system prompt, one user message, an output cap, and one
+ * reasoning request. It is deliberately the smallest Anthropic body that can
+ * carry the request — no `thinking`, no `cache_control`, no catalog lookup, no
+ * `stream` flag, and no tools. Every one of those would be a claim about a
+ * model the proxy has never been told anything about, and a server that does
+ * not implement one of them fails the whole consult.
+ *
+ * `output_config.effort` is the exception, and it is not a claim: it is the
+ * same Anthropic spelling Claude Code itself sends, and it states what the
+ * operator asked for (`LOCAL_CONSULT_EFFORT`) rather than what the endpoint is.
+ * The proxy does not clamp it against a reasoning ladder it has never read.
+ *
+ * `maxTokens` is a caller decision rather than a constant here so the two
+ * consultants can keep their own budgets; both pass the catalog-less fallback,
+ * because a number read off a Copilot entry is exactly the assumption this
+ * profile refuses to make. A server that counts reasoning tokens against
+ * `max_tokens` can spend this cap before it writes an answer; the cap is not
+ * raised here because a value above a small endpoint's own output limit would
+ * fail the request outright.
+ *
+ * The response is parsed for Anthropic `text` blocks. Callers own retry
+ * policy: `createMessages` itself has no local retry, and the two consultant
+ * paths wrap this in `withTransientRetry` the same way the Copilot branches do.
+ */
+export async function sendLocalMessages(req: {
+  egress: LocalMessagesEgress
+  model: string
+  system: string
+  userText: string
+  maxTokens: number
+  signal?: AbortSignal
+}): Promise<string> {
+  const body = JSON.stringify({
+    model: req.model,
+    max_tokens: req.maxTokens,
+    system: req.system,
+    messages: [{ role: "user", content: req.userText }],
+    output_config: { effort: LOCAL_CONSULT_EFFORT },
+  })
+  const response = await createMessages(body, {}, req.signal, false, req.egress)
+  const json = (await response.json()) as { content?: unknown }
+  const blocks = Array.isArray(json.content) ? json.content : []
+  const texts: Array<string> = []
+  for (const block of blocks) {
+    if (typeof block !== "object" || block === null) continue
+    const b = block as { type?: unknown; text?: unknown }
+    if (b.type === "text" && typeof b.text === "string" && b.text.length > 0) {
+      texts.push(b.text)
+    }
+  }
+  const text = texts.join("\n\n")
+  if (text.length === 0) {
+    throw new Error(`Local model returned empty response (model: ${req.model})`)
+  }
+  return text
 }

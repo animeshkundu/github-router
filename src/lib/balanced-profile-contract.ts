@@ -115,6 +115,12 @@ export const BALANCED_PROFILE_CONTRACT = Object.freeze({
   leadEffort: BALANCED_PROFILE_LEAD_EFFORT,
   oracleModel: BALANCED_PROFILE_ORACLE_MODEL,
   oracleEffort: BALANCED_PROFILE_ORACLE_EFFORT,
+  /**
+   * Where the family's consultants are served. Both balanced members consult
+   * Copilot. Present on every family contract so a consumer can read the field
+   * off the union without narrowing to a member first.
+   */
+  consultTransport: "copilot" as const,
   synthesizedPeers: BALANCED_PROFILE_SYNTHESIZED_PEERS,
   delegationGraph: BALANCED_PROFILE_DELEGATION_GRAPH,
 })
