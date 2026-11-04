@@ -2531,6 +2531,7 @@ describe("resolveGroupKeysFromMirror", () => {
         ado: "ado",
         kusto: "kusto",
         cloudagent: "cloudagent",
+        workiq: "workiq",
       })
     })
   })

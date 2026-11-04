@@ -273,6 +273,27 @@ export interface State {
   cloudAgentEnvironment: string
 
   /**
+   * Work IQ MCP group (`mcp__workiq__*`): Microsoft 365 research through the
+   * hosted Work IQ service.
+   *
+   * Off by default and never auto-enabled: the group needs a signed-in Work IQ
+   * account, and turning it on without one would advertise an empty server.
+   * Enabled by `--workiq` or `GH_ROUTER_ENABLE_WORKIQ=1`.
+   *
+   * `setupAndServe` clears it back to false when the launch-time provisioning
+   * pass cannot reach the service or has no usable token, so the group is
+   * advertised only when the snapshot behind it is real.
+   */
+  workiqEnabled: boolean
+  /**
+   * Exposes the four mutating Work IQ tools (`create_entity`, `update_entity`,
+   * `delete_entity`, `do_action`). The default surface is the eight read-only
+   * tools; `--workiq-write` widens the snapshot to whatever the live server
+   * actually advertises.
+   */
+  workiqWriteEnabled: boolean
+
+  /**
    * Humanlike pacing override:
    *   "on"   - --humanlike CLI flag or GH_ROUTER_HUMANLIKE=1 env;
    *            inject Beta-distributed inter-action delays, Bezier
@@ -360,6 +381,8 @@ export const state: State = {
   kustoDatabase: null,
   cloudAgentEnabled: false,
   cloudAgentEnvironment: "prod",
+  workiqEnabled: false,
+  workiqWriteEnabled: false,
   humanlikeForce: "auto",
   sessionId: randomUUID(),
   machineId: randomBytes(32).toString("hex"),

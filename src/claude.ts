@@ -140,6 +140,7 @@ import {
   artifactToolsEnabled,
   kustoToolsEnabled,
   cloudAgentToolsEnabled,
+  workiqToolsEnabled,
   browseAgentEnabled,
   browserCompoundToolsEnabled,
   browserToolsEnabled,
@@ -1148,6 +1149,8 @@ export const claude = defineCommand({
       await disposeBluebirdClients()
       const { disposeAdoClients } = await import("./lib/ado-tools")
       await disposeAdoClients()
+      const { disposeWorkiqClients } = await import("./lib/workiq-tools")
+      await disposeWorkiqClients()
       await removeOwnClaudeConfigMirror()
       await removeAicLedgerFile()
     }
@@ -1384,6 +1387,9 @@ export const claude = defineCommand({
         if (kustoToolsEnabled() && allowsGroup("kusto")) enabledGroups.push("kusto")
         // One switch, write tools included, matching `ado` and `kusto`.
         if (cloudAgentToolsEnabled() && allowsGroup("cloudagent")) enabledGroups.push("cloudagent")
+        // Read-only by default; `--workiq-write` is already folded into the
+        // launch-time snapshot the gate reports on.
+        if (workiqToolsEnabled() && allowsGroup("workiq")) enabledGroups.push("workiq")
         if (!isPinnedProfile && fleetToolsEnabled()) enabledGroups.push("fleet")
         if (!isPinnedProfile && agentToolsEnabled()) enabledGroups.push("first-mate")
         if (isMaxProfile && fleetToolsEnabled()) enabledGroups.push("fleet")

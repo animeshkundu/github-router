@@ -17,6 +17,13 @@ import {
   applySessionWorkspace,
 } from "../src/routes/mcp/handler"
 import { __setAdoToolSnapshotForTests, resetAdoToolsForTesting } from "../src/lib/ado-tools"
+import {
+  __setWorkiqToolSnapshotForTests,
+  buildWorkiqToolEntries,
+  resetWorkiqToolsForTesting,
+} from "../src/lib/workiq-tools"
+import { WORKIQ_TOKEN_ENV, WORKIQ_TOKEN_PATH_ENV } from "../src/lib/workiq/constants"
+import { resetWorkiqTokenStateForTesting } from "../src/lib/workiq/token"
 import { aicSnapshot } from "../src/lib/aic-ledger"
 import { configureLocalEgress, LOCAL_CONSULT_MAX_OUTPUT_TOKENS } from "../src/lib/local-egress"
 import { MAX_INFLIGHT_TOOLS_CALL } from "../src/lib/mcp-inflight"
@@ -5177,6 +5184,173 @@ describe("/mcp cloudagent group — scoping and the discovery gate", () => {
       expect(names).not.toContain("list_jobs")
       expect(names).not.toContain("create_job")
       expect(names).not.toContain("cancel_job")
+    } finally {
+      unregisterLaunch(launch.launchId)
+    }
+  })
+})
+
+describe("/mcp workiq group — scoping and the auth gate", () => {
+  /** The live twelve, transcribed from `tools/list` (2026-11-02). */
+  const LIVE_NAMES = [
+    "ask",
+    "retrieve",
+    "fetch",
+    "fetch_blob",
+    "list_agents",
+    "get_schema",
+    "search_paths",
+    "call_function",
+    "create_entity",
+    "update_entity",
+    "delete_entity",
+    "do_action",
+  ]
+  const READ_TOOLS = [
+    "agents",
+    "ask",
+    "call_function",
+    "fetch",
+    "fetch_blob",
+    "get_schema",
+    "retrieve",
+    "search_paths",
+  ]
+
+  function installSnapshot(write = false): void {
+    __setWorkiqToolSnapshotForTests(
+      buildWorkiqToolEntries(
+        LIVE_NAMES.map((name) => ({
+          name,
+          description: `${name} (recorded fixture)`,
+          inputSchema: { type: "object", properties: {} },
+        })),
+        { write },
+      ),
+    )
+    state.workiqEnabled = true
+  }
+
+  afterEach(() => {
+    state.workiqEnabled = false
+    state.workiqWriteEnabled = false
+    resetWorkiqToolsForTesting()
+    resetWorkiqTokenStateForTesting()
+  })
+
+  test("workiq is invisible by default", async () => {
+    const { json } = await scopedRpc("workiq", { jsonrpc: "2.0", id: 970, method: "tools/list" })
+    expect((json.result as { tools: Array<unknown> }).tools).toEqual([])
+  })
+
+  test("the enabled group lists exactly the eight read tools, list_agents renamed", async () => {
+    installSnapshot()
+    const { json } = await scopedRpc("workiq", { jsonrpc: "2.0", id: 971, method: "tools/list" })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools
+      .map((t) => t.name)
+      .sort()
+    expect(names).toEqual(READ_TOOLS)
+  })
+
+  test("a hard-coded ask call on a launch that never enabled the group is -32601", async () => {
+    // Defense in depth: the client can skip tools/list entirely.
+    const { json } = await rpc({
+      jsonrpc: "2.0",
+      id: 972,
+      method: "tools/call",
+      params: { name: "ask", arguments: { question: "what changed this week?" } },
+    })
+    expect((json.error as { code: number }).code).toBe(-32601)
+  })
+
+  test("an enabled call with no login is a tool error naming the sign-in command", async () => {
+    // Past the gate, a missing login is the tool's own verdict and has to reach
+    // the model as one, with the command that fixes it. `-32601` here would
+    // read as "this proxy has no such tool" and send the model looking for
+    // another way in.
+    const savedToken = process.env[WORKIQ_TOKEN_ENV]
+    const savedPath = process.env[WORKIQ_TOKEN_PATH_ENV]
+    const dir = mkdtempSync(join(tmpdir(), "workiq-routes-"))
+    delete process.env[WORKIQ_TOKEN_ENV]
+    process.env[WORKIQ_TOKEN_PATH_ENV] = join(dir, "workiq-token.json")
+    resetWorkiqTokenStateForTesting()
+    installSnapshot()
+    try {
+      const { json } = await rpc({
+        jsonrpc: "2.0",
+        id: 973,
+        method: "tools/call",
+        params: { name: "ask", arguments: { question: "what changed this week?" } },
+      })
+      expect(json.error).toBeUndefined()
+      const result = json.result as { isError?: boolean; content: Array<{ text: string }> }
+      expect(result.isError).toBe(true)
+      expect(result.content[0]!.text).toContain("No Work IQ login found")
+      expect(result.content[0]!.text).toContain("github-router workiq auth")
+    } finally {
+      if (savedToken === undefined) delete process.env[WORKIQ_TOKEN_ENV]
+      else process.env[WORKIQ_TOKEN_ENV] = savedToken
+      if (savedPath === undefined) delete process.env[WORKIQ_TOKEN_PATH_ENV]
+      else process.env[WORKIQ_TOKEN_PATH_ENV] = savedPath
+      resetWorkiqTokenStateForTesting()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("the workiq group does not leak onto another group's scope, nor the reverse", async () => {
+    installSnapshot()
+    const search = await scopedRpc("search", { jsonrpc: "2.0", id: 974, method: "tools/list" })
+    const searchNames = (search.json.result as { tools: Array<{ name: string }> }).tools
+      .map((t) => t.name)
+      .sort()
+    expect(searchNames).toEqual(["code", "web"])
+
+    const workiq = await scopedRpc("workiq", { jsonrpc: "2.0", id: 975, method: "tools/list" })
+    const workiqNames = (workiq.json.result as { tools: Array<{ name: string }> }).tools
+      .map((t) => t.name)
+    expect(workiqNames).not.toContain("code")
+    expect(workiqNames).not.toContain("web")
+  })
+
+  test("the unscoped union carries the group when it is enabled", async () => {
+    installSnapshot()
+    const { json } = await rpc({ jsonrpc: "2.0", id: 976, method: "tools/list" })
+    const names = (json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name)
+    expect(names).toContain("ask")
+    expect(names).toContain("agents")
+  })
+
+  test("a pinned profile admits workiq through list, and still follows the capability gate", async () => {
+    // Every profile set that carries `ado` carries `workiq`, and the launcher
+    // registers the server, so an unhandled group in the predicate would list
+    // nothing and answer -32601 to every call.
+    installSnapshot()
+    const nonce = "w".repeat(64)
+    const launch = registerLaunch({
+      profileId: "fast",
+      nonce,
+      secret: "fast-workiq-allowlist-secret",
+      allowedGroups: new Set(["search", "workiq"]),
+    })
+    try {
+      const listed = await rpc(
+        { jsonrpc: "2.0", id: 977, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const names = (listed.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      expect(names).toContain("ask")
+
+      // `allowedGroups` alone must not surface the group: with the capability
+      // off, the same launch lists nothing from it.
+      state.workiqEnabled = false
+      const gated = await rpc(
+        { jsonrpc: "2.0", id: 978, method: "tools/list" },
+        { auth: `Bearer ${nonce}` },
+      )
+      const gatedNames = (gated.json.result as { tools: Array<{ name: string }> }).tools
+        .map((t) => t.name)
+      expect(gatedNames).not.toContain("ask")
     } finally {
       unregisterLaunch(launch.launchId)
     }

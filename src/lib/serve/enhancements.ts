@@ -50,6 +50,7 @@ import {
   adoToolsEnabled,
   cloudAgentToolsEnabled,
   kustoToolsEnabled,
+  workiqToolsEnabled,
 } from "../mcp-capabilities"
 import { buildPlanReviewHookCommand, planReviewEnabled } from "../orchestration/plan-review-hook"
 import { buildPromptSubmitHookCommand } from "../orchestration/prompt-submit-hook"
@@ -112,6 +113,11 @@ export interface ServeEnhancementOpts {
    *  operator's compute budget. A tunnel client is not the operator, so both
    *  halves stay local unless this is passed. */
   cloudAgentOverTunnel?: boolean
+  /** Operator opt-in to expose the Work IQ MCP group over the tunnel. The
+   *  tools read the signed-in user's entire M365 estate — mail, files, chats,
+   *  meetings, sites — so a tunnel client would inherit that reach. The same
+   *  rule as its neighbours: local unless this is passed. */
+  workiqOverTunnel?: boolean
 }
 
 const NOOP: ServeEnhancementsHandle = { cleanup: async () => {} }
@@ -177,6 +183,7 @@ export async function provisionServeEnhancements(
     if (adoToolsEnabled() && (!tunnelExposed || opts.adoOverTunnel === true)) enabledGroups.push("ado")
     if (kustoToolsEnabled() && (!tunnelExposed || opts.kustoOverTunnel === true)) enabledGroups.push("kusto")
     if (cloudAgentToolsEnabled() && (!tunnelExposed || opts.cloudAgentOverTunnel === true)) enabledGroups.push("cloudagent")
+    if (workiqToolsEnabled() && (!tunnelExposed || opts.workiqOverTunnel === true)) enabledGroups.push("workiq")
 
     const gem = geminiAvailable()
     const { keys: groupKeys } = await resolveGroupKeysFromMirror(enabledGroups)

@@ -64,6 +64,10 @@ export const STRIPPED_AUTH_ROUTING_ENV_KEYS = [
   // CLI or one of its MCPs would be both a credential leak and a
   // capability leak.
   "GH_ROUTER_CLOUDAGENT_TOKEN",
+  // Work IQ hosted MCP bearer override. The group reads the signed-in user's
+  // entire Microsoft 365 estate, so a spawned CLI or one of its MCPs must never
+  // inherit the credential that reaches it.
+  "WORKIQ_MCP_TOKEN",
   // Codex CLI auth surface
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",

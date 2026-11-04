@@ -221,6 +221,11 @@ export const serve = defineCommand({
       default: false,
       description: "Expose the Kusto MCP group (reads any cluster your az identity can reach, named per call) even when tunnel-exposed (only with fully-trusted tunnel access)",
     },
+    "workiq-over-tunnel": {
+      type: "boolean",
+      default: false,
+      description: "Expose the Work IQ MCP group (reads your whole Microsoft 365 estate: mail, files, chats, meetings, sites) even when tunnel-exposed (only with fully-trusted tunnel access)",
+    },
     "no-install": {
       type: "boolean",
       default: false,
@@ -404,6 +409,11 @@ export const serve = defineCommand({
         "Kusto MCP is disabled over the tunnel (it reads any cluster your az identity can reach). Pass --kusto-over-tunnel to enable it for fully-trusted access.",
       )
     }
+    if (tunnelExposed && state.workiqEnabled && args["workiq-over-tunnel"] !== true) {
+      consola.info(
+        "Work IQ MCP is disabled over the tunnel (it reads your entire Microsoft 365 estate). Pass --workiq-over-tunnel to enable it for fully-trusted access.",
+      )
+    }
 
     // 2b. wire the github-router enhancement layer (MCP servers + peer/worker
     //     subagents + gh-* skills) into the mirror so CloudCLI-spawned Claude
@@ -425,6 +435,7 @@ export const serve = defineCommand({
       adoOverTunnel: args["ado-over-tunnel"] === true,
       kustoOverTunnel: args["kusto-over-tunnel"] === true,
       cloudAgentOverTunnel: args["cloudagent-over-tunnel"] === true,
+      workiqOverTunnel: args["workiq-over-tunnel"] === true,
     })
 
     // 3. filtered child env: the vetted secret-stripping allowlist (buildEnv,

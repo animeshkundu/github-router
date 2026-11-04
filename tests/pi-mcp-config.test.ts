@@ -57,6 +57,7 @@ describe("resolvePiSurfaces", () => {
     adoEnabled: false,
     kustoEnabled: false,
     cloudAgentEnabled: false,
+    workiqEnabled: false,
     browseAgentAvailable: false,
     directBrowserAvailable: false,
     artifactToolsAvailable: false,
@@ -127,7 +128,7 @@ describe("resolvePiSurfaces", () => {
   test("each Pi profile publishes the same groups Claude does for it", () => {
     // The pinned-profile branch of `src/claude.ts` and this function must not
     // drift: the four Copilot-led Pi profiles carry the same `allowedGroups`,
-    // so the same flags produce the same seven groups on each of them. The
+    // so the same flags produce the same eight groups on each of them. The
     // local pair diverges by one group (`workers`, never published) and is
     // covered separately.
     const everything = {
@@ -135,10 +136,11 @@ describe("resolvePiSurfaces", () => {
       adoEnabled: true,
       kustoEnabled: true,
       cloudAgentEnabled: true,
+      workiqEnabled: true,
       browseAgentAvailable: true,
       directBrowserAvailable: true,
     }
-    const expected = ["peers", "search", "workers", "browser", "ado", "kusto", "cloudagent"]
+    const expected = ["peers", "search", "workers", "browser", "ado", "kusto", "cloudagent", "workiq"]
     for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
       const groups = resolvePiSurfaces({ ...everything, profileId }).groups.map((g) => g.group)
       expect(groups).toEqual(expected)
@@ -156,10 +158,11 @@ describe("resolvePiSurfaces", () => {
       adoEnabled: true,
       kustoEnabled: true,
       cloudAgentEnabled: true,
+      workiqEnabled: true,
       browseAgentAvailable: true,
       directBrowserAvailable: true,
     })
-    expect(s.groups.length).toBe(7)
+    expect(s.groups.length).toBe(8)
     for (const g of s.groups) {
       expect(piMcpServerKey(g.group)).toBe(`${PI_MCP_SERVER_PREFIX}${g.group}`)
       expect(piMcpServerKey(g.group)).not.toBe(g.group)
@@ -177,11 +180,12 @@ describe("resolvePiSurfaces", () => {
       adoEnabled: true,
       kustoEnabled: true,
       cloudAgentEnabled: true,
+      workiqEnabled: true,
       browseAgentAvailable: true,
       directBrowserAvailable: true,
       artifactToolsAvailable: true,
     }
-    const expected = ["peers", "search", "browser", "ado", "kusto", "cloudagent"]
+    const expected = ["peers", "search", "browser", "ado", "kusto", "cloudagent", "workiq"]
     for (const profileId of ["local", "local2"] as const) {
       const groups = resolvePiSurfaces({ ...everything, profileId }).groups.map((g) => g.group)
       expect(groups).toEqual(expected)
@@ -475,6 +479,7 @@ describe("the seam does not move the other consumers", () => {
     adoEnabled: false,
     kustoEnabled: false,
     cloudAgentEnabled: false,
+    workiqEnabled: false,
     browseAgentAvailable: false,
     directBrowserAvailable: false,
     artifactToolsAvailable: false,

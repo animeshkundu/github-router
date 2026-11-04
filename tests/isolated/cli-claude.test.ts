@@ -236,6 +236,8 @@ const artifactToolsEnabledMock = mock(() => false)
 const adoToolsEnabledMock = mock(() => false)
 const kustoToolsEnabledMock = mock(() => false)
 const cloudAgentToolsEnabledMock = mock(() => false)
+// Work IQ is opt-in and needs a sign-in, so it is off unless a test turns it on.
+const workiqToolsEnabledMock = mock(() => false)
 // Cheap-profile resolvers. Named consts (rather than inline factories) so the
 // prerequisite-drift test can force one of them to miss and assert the
 // resulting message. Values mirror `CHEAP_PROFILE_MODELS`.
@@ -253,6 +255,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   adoToolsEnabled: adoToolsEnabledMock,
   kustoToolsEnabled: kustoToolsEnabledMock,
   cloudAgentToolsEnabled: cloudAgentToolsEnabledMock,
+  workiqToolsEnabled: workiqToolsEnabledMock,
   standInToolEnabled: standInToolEnabledMock,
   browserToolsEnabled: browserToolsEnabledMock,
   browserCompoundToolsEnabled: browserCompoundToolsEnabledMock,

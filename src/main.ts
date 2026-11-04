@@ -83,6 +83,7 @@ const main = defineCommand({
     claude: () => import("./claude").then((m) => m.claude),
     codex: () => import("./codex").then((m) => m.codex),
     pi: () => import("./pi").then((m) => m.pi),
+    workiq: () => import("./workiq").then((m) => m.workiq),
     serve: () => import("./serve").then((m) => m.serve),
     models: () => import("./models").then((m) => m.models),
     "check-usage": () => import("./check-usage").then((m) => m.checkUsage),

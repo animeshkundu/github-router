@@ -67,6 +67,7 @@ import {
   cloudAgentToolsEnabled,
   browseAgentEnabled,
   kustoToolsEnabled,
+  workiqToolsEnabled,
   browserCompoundToolsEnabled,
   browserPowerToolsEnabled,
   browserToolsEnabled,
@@ -85,9 +86,11 @@ import {
   workerToolsEnabled,
 } from "~/lib/mcp-capabilities"
 import { maxPersonasFor } from "~/lib/peer-mcp-personas"
-// The `ado` group is the one non-persona group whose tool set is not a static
-// array: Azure DevOps advertises it at runtime. See the module header for why.
+// Two non-persona groups have a tool set that is not a static array, because a
+// remote service advertises it at runtime: Azure DevOps and Work IQ. See the
+// module header for why.
 import { adoMcpToolEntries } from "~/lib/ado-tools"
+import { workiqMcpToolEntries } from "~/lib/workiq-tools"
 import {
   CHEAP_PROFILE_ASTRA_EFFORT,
   CHEAP_PROFILE_ASTRA_MODEL,
@@ -373,9 +376,10 @@ function checkAuth(
  * which is every launch unless `--ado` resolved on.
  */
 function allNonPersonaTools(): ReadonlyArray<NonPersonaMcpTool> {
-  const dynamic = adoMcpToolEntries()
-  if (dynamic.length === 0) return NON_PERSONA_MCP_TOOLS
-  return [...NON_PERSONA_MCP_TOOLS, ...dynamic]
+  const ado = adoMcpToolEntries()
+  const workiq = workiqMcpToolEntries()
+  if (ado.length === 0 && workiq.length === 0) return NON_PERSONA_MCP_TOOLS
+  return [...NON_PERSONA_MCP_TOOLS, ...ado, ...workiq]
 }
 
 /**
@@ -639,6 +643,7 @@ function maxToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   // it gates on anything of its own.
   if (tool.group === "ado") return adoToolsEnabled()
   if (tool.group === "kusto") return kustoToolsEnabled()
+  if (tool.group === "workiq") return workiqToolsEnabled()
   if (tool.capability === "cloudagent" || tool.capability === "cloudagent_write") {
     return cloudAgentToolsEnabled()
   }
@@ -703,6 +708,7 @@ function fastToolIsEnabled(tool: NonPersonaMcpTool): boolean {
   // tools too.
   if (tool.group === "ado") return adoToolsEnabled()
   if (tool.group === "kusto") return kustoToolsEnabled()
+  if (tool.group === "workiq") return workiqToolsEnabled()
   if (tool.capability === "cloudagent" || tool.capability === "cloudagent_write") {
     return cloudAgentToolsEnabled()
   }
@@ -901,6 +907,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
       if (t.capability === "artifact") return artifactToolsEnabled()
       if (t.capability === "ado") return adoToolsEnabled()
       if (t.capability === "kusto") return kustoToolsEnabled()
+      if (t.capability === "workiq") return workiqToolsEnabled()
       if (t.capability === "cloudagent" || t.capability === "cloudagent_write") {
         return cloudAgentToolsEnabled()
       }
@@ -2030,6 +2037,13 @@ async function handleToolsCall(
     )
   }
   if (nonPersonaTool && nonPersonaTool.capability === "kusto" && !kustoToolsEnabled()) {
+    return rpcError(
+      body.id,
+      RPC_METHOD_NOT_FOUND,
+      `tools/call: unknown tool "${name}"`,
+    )
+  }
+  if (nonPersonaTool && nonPersonaTool.capability === "workiq" && !workiqToolsEnabled()) {
     return rpcError(
       body.id,
       RPC_METHOD_NOT_FOUND,

@@ -15,6 +15,7 @@ import {
   type CloudAgentInputs,
 } from "./cloudagent-flags"
 import { provisionAdoTools } from "./ado-tools"
+import { provisionWorkiqTools } from "./workiq-tools"
 import { maybeSpawnDaemon, wireDaemonTeardown } from "./first-mate/scheduler/autospawn"
 import { agentToolsEnabled } from "./mcp-capabilities"
 import { deriveAutoCompactWindowTokens } from "./grok-context"
@@ -292,6 +293,14 @@ export interface ServerSetupOptions {
   cloudAgentEnabled?: boolean | undefined
   /** `prod` or `ppe`, already falling back to GH_ROUTER_CLOUDAGENT_ENV. */
   cloudAgentEnvironment?: string | undefined
+  /**
+   * `--workiq` or `GH_ROUTER_ENABLE_WORKIQ=1`. Plain boolean, not tri-state:
+   * nothing infers Work IQ from the environment, so there is no discovered
+   * positive for `--no-workiq` to outrank.
+   */
+  workiqEnabled?: boolean | undefined
+  /** `--workiq-write`: widen the snapshot past the eight read-only tools. */
+  workiqWriteEnabled?: boolean | undefined
   silent: boolean
 }
 
@@ -460,6 +469,20 @@ export async function setupAndServe(
   state.kustoDatabase = azureFlags.kustoDatabase
   state.cloudAgentEnabled = cloudAgentFlags.enabled
   state.cloudAgentEnvironment = cloudAgentFlags.environment
+  // Work IQ is opt-in only. It is never inferred from the repository or from a
+  // signed-in Entra account: enabling it advertises a group whose every tool
+  // needs a Work IQ licence, and a tenant without one would get an empty
+  // server. Provisioning below clears the flag again if the group cannot be
+  // reached.
+  state.workiqEnabled =
+    options.workiqEnabled === true || process.env.GH_ROUTER_ENABLE_WORKIQ === "1"
+  state.workiqWriteEnabled = options.workiqWriteEnabled === true
+  if (state.workiqWriteEnabled && !state.workiqEnabled) {
+    consola.warn(
+      "Work IQ: --workiq-write has no effect without --workiq (or GH_ROUTER_ENABLE_WORKIQ=1).",
+    )
+    state.workiqWriteEnabled = false
+  }
   // Said here rather than at the first tool call: a `--kusto` that was meant as
   // `--kusto-cluster` would otherwise stay silent until a model spent a turn
   // discovering the group needs a cluster per call. This now also fires for an
@@ -501,6 +524,12 @@ export async function setupAndServe(
       + "Mutating tools are reachable from this session.",
     )
   }
+  if (state.workiqWriteEnabled) {
+    consola.warn(
+      "Work IQ MCP is exposing its mutating tools (--workiq-write): "
+      + "create_entity, update_entity, delete_entity and do_action can change M365 data from this session.",
+    )
+  }
   // The `ado` group is the one MCP group whose tool set comes from an upstream
   // server, so its `tools/list` has to be resolved before anything downstream
   // reads it — `toolEntries()` is synchronous and the group's config entry is
@@ -521,6 +550,17 @@ export async function setupAndServe(
     consola.info("Azure DevOps MCP: provisioning the remote tool surface...")
     const result = await provisionAdoTools()
     if (result.ok) consola.info(`Azure DevOps MCP: ${result.toolCount} tool(s) exposed.`)
+  }
+  // Same reason as ADO: `toolEntries()` is synchronous and the mirrored
+  // `.claude.json` entry is written before the child spawns, so the Work IQ
+  // surface has to exist by then. AWAITED before the spawn for the same reason,
+  // and announced first because the first call may include a token refresh plus
+  // an `initialize` round trip to a remote service. Non-fatal inside: a missing
+  // login or an unreachable service costs a warning and a disabled group.
+  if (state.workiqEnabled) {
+    consola.info("Work IQ MCP: provisioning the remote tool surface...")
+    const result = await provisionWorkiqTools()
+    if (result.ok) consola.info(`Work IQ MCP: ${result.toolCount} tool(s) exposed.`)
   }
   state.fleetEnabled =
     options.fleetEnabled || process.env.GH_ROUTER_ENABLE_FLEET === "1"
@@ -848,6 +888,18 @@ export const sharedServerArgs = {
     description:
       "Cloud Agent service environment: prod (default) or ppe. Naming one does NOT enable the group; it selects which service --cloudagent talks to, and which Entra audience the token is minted for. Falls back to GH_ROUTER_CLOUDAGENT_ENV.",
   },
+  workiq: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Expose the Work IQ MCP group (mcp__workiq__*): Microsoft 365 research over mail, files, chats, meetings and sites through the hosted Work IQ MCP service. Read-only by default (ask, retrieve, fetch, fetch_blob, agents, get_schema, search_paths, call_function). Because the calls run on the Work IQ service, they are billed through its Copilot Credits usage-based plan rather than GitHub Copilot premium requests. Nothing is enabled implicitly: sign in first with `github-router workiq auth`. GH_ROUTER_ENABLE_WORKIQ=1 is the env equivalent.",
+  },
+  "workiq-write": {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Also expose the four mutating Work IQ tools (create_entity, update_entity, delete_entity, do_action). Off by default and never implied by --workiq; a banner line marks the elevated session.",
+  },
 } as const
 
 const allowedAccountTypes = new Set(["individual", "business", "enterprise"])
@@ -904,6 +956,8 @@ export function parseSharedArgs(args: Record<string, unknown>): {
   kustoDatabase?: string | undefined
   cloudAgentEnabled?: boolean | undefined
   cloudAgentEnvironment?: string | undefined
+  workiqEnabled?: boolean | undefined
+  workiqWriteEnabled?: boolean | undefined
 } {
   const portRaw = args.port as string | undefined
   let port: number | undefined
@@ -969,6 +1023,8 @@ export function parseSharedArgs(args: Record<string, unknown>): {
     kustoDatabase: args["kusto-database"] as string | undefined,
     cloudAgentEnabled: args.cloudagent as boolean | undefined,
     cloudAgentEnvironment: args["cloudagent-env"] as string | undefined,
+    workiqEnabled: args.workiq as boolean | undefined,
+    workiqWriteEnabled: args["workiq-write"] as boolean | undefined,
   }
 }
 

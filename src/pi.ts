@@ -83,6 +83,7 @@ import {
   adoToolsEnabled,
   cloudAgentToolsEnabled,
   kustoToolsEnabled,
+  workiqToolsEnabled,
 } from "./lib/mcp-capabilities"
 import { resolvePiSurfaces, writePiMcpJson } from "./lib/pi-mcp-config"
 import {
@@ -429,6 +430,7 @@ export const pi = defineCommand({
       adoEnabled: adoToolsEnabled(),
       kustoEnabled: kustoToolsEnabled(),
       cloudAgentEnabled: cloudAgentToolsEnabled(),
+      workiqEnabled: workiqToolsEnabled(),
       browseAgentAvailable: browseAgentEnabled(),
       directBrowserAvailable: browseEnabled,
       artifactToolsAvailable: artifactToolsEnabled(),

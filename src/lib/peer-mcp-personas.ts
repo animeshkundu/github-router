@@ -137,8 +137,10 @@ import { runWorkflowLive } from "~/lib/orchestration/run-workflow-live"
  *   - `fleet`   — remote ai-or-die session-control tools
  *   - `first-mate` — durable GitHub cloud-agent controller tools
  *   - `cloudagent`  — Microsoft Cloud Agent Job API v2 (cloud coding-agent jobs)
+ *   - `workiq`  — Microsoft 365 research through the hosted Work IQ MCP service
+ *                 (read-only unless `--workiq-write`)
  */
-export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide" | "fleet" | "first-mate" | "ado" | "kusto" | "cloudagent"
+export type McpGroup = "peers" | "search" | "workers" | "orchestrate" | "browser" | "decide" | "fleet" | "first-mate" | "ado" | "kusto" | "cloudagent" | "workiq"
 /** Either a single group (scoped endpoint) or the full union (`/mcp`). */
 export type McpScope = McpGroup | "all"
 export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
@@ -153,6 +155,7 @@ export const MCP_GROUPS: ReadonlyArray<McpGroup> = Object.freeze([
   "ado",
   "kusto",
   "cloudagent",
+  "workiq",
 ])
 
 export interface McpGroupMeta {
@@ -183,6 +186,7 @@ export const GROUP_META: Record<McpGroup, McpGroupMeta> = Object.freeze({
   ado: { preferredKey: "ado", urlSuffix: "ado", serverInfoName: "github-router-ado" },
   kusto: { preferredKey: "kusto", urlSuffix: "kusto", serverInfoName: "github-router-kusto" },
   cloudagent: { preferredKey: "cloudagent", urlSuffix: "cloudagent", serverInfoName: "github-router-cloudagent" },
+  workiq: { preferredKey: "workiq", urlSuffix: "workiq", serverInfoName: "github-router-workiq" },
 })
 
 /** True iff `s` is a registered group name (route `:group` param validation). */
@@ -1586,7 +1590,7 @@ export interface NonPersonaMcpTool {
    * Absent on `web` / `code`; those are always available once the proxy is
    * in claude mode (loopback + nonce already gate `/mcp` itself).
    */
-  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "agents" | "artifact" | "kusto" | "ado" | "cloudagent" | "cloudagent_write"
+  capability?: "worker" | "stand_in" | "browser" | "browser_compound" | "browser_power" | "browse_agent" | "fleet" | "agents" | "artifact" | "kusto" | "ado" | "cloudagent" | "cloudagent_write" | "workiq"
   /**
    * Hook-channel only: CALLABLE, but never advertised in `tools/list`.
    *

@@ -953,3 +953,16 @@ export function kustoToolsEnabled(): boolean {
 export function cloudAgentToolsEnabled(): boolean {
   return state.cloudAgentEnabled
 }
+
+/**
+ * Gate for the Work IQ MCP group (`mcp__workiq__*`).
+ *
+ * Returns true iff `setupAndServe` resolved the group ON, exactly like
+ * `adoToolsEnabled()`. The launch path is the only availability check there
+ * is: `provisionWorkiqTools()` performs the `initialize` + `tools/list` round
+ * trip and turns the group OFF when either fails, so a true here means a real
+ * snapshot is waiting behind the tools this gate is hiding or showing.
+ */
+export function workiqToolsEnabled(): boolean {
+  return state.workiqEnabled
+}

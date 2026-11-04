@@ -97,7 +97,7 @@ const RENAME_RETRY_DELAYS_MS = [50, 200, 500] as const
  * Both token files live under `CLAUDE_RUNTIME_DIR`, which is chmod'd 0o700, so
  * directory ACLs are what actually protect them there.)
  */
-async function writeTokenFileAtomic(
+export async function writeTokenFileAtomic(
   filePath: string,
   token: string,
 ): Promise<void> {

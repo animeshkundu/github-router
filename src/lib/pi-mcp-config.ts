@@ -117,7 +117,7 @@ export function readMcpServerKeys(raw: string): Array<string> | null {
  * what a server is, so each one says what the group does and when to reach for
  * it rather than naming the server back at the model.
  *
- * Only the seven groups a Pi profile can reach are listed. `orchestrate`,
+ * Only the eight groups a Pi profile can reach are listed. `orchestrate`,
  * `decide`, `fleet` and `first-mate` sit outside every Pi profile's
  * `allowedGroups` (`src/lib/launch-profile.ts`), so `resolvePiSurfaces` can
  * never emit them and a description for them would be dead text.
@@ -130,6 +130,7 @@ const GROUP_DESCRIPTIONS: Record<string, string> = {
   ado: "Azure DevOps for the open repository: repositories, work items, pipelines and wikis.",
   kusto: "Azure Data Explorer: query and management commands against the cluster named on each call, or the launch default.",
   cloudagent: "Microsoft Cloud Agent jobs: hand a prompt plus an Azure DevOps repository to a cloud coding agent, then poll it for hours and collect the answer. create_job, create_pr_job and cancel_job spend compute; confirm with the user before creating a job the user did not ask for.",
+  workiq: "Microsoft 365 research through Work IQ: ask a question across mail, files, chats, meetings and sites, retrieve with citations, or fetch specific entity URLs. Reach for it when the answer lives in the user's M365 data rather than in the repository.",
 }
 
 /** The `peers` half of `GROUP_DESCRIPTIONS.peers`, split out so the oracle's
@@ -195,7 +196,7 @@ export interface PiSurfaceDecision {
  * is available, `browser` under `--browse`, and the three Azure groups under
  * their own predicates. Everything is then filtered through
  * `profileDescriptor(profileId).allowedGroups`, which is
- * `{peers, search, browser, ado, kusto, cloudagent}` for `local`/`local2` and
+ * `{peers, search, browser, ado, kusto, cloudagent, workiq}` for `local`/`local2` and
  * adds `workers` for the other four Pi profiles — so `orchestrate`, `decide`,
  * `fleet` and `first-mate` stay off everywhere.
  */
@@ -206,6 +207,7 @@ export function resolvePiSurfaces(opts: {
   adoEnabled: boolean
   kustoEnabled: boolean
   cloudAgentEnabled: boolean
+  workiqEnabled: boolean
   /** Browse-worker gate (`browseAgentEnabled()`), which also requires the model. */
   browseAgentAvailable: boolean
   /** Direct browser-control gate (`browserToolsEnabled()`), the `--browse` opt-in. */
@@ -236,6 +238,7 @@ export function resolvePiSurfaces(opts: {
   if (opts.adoEnabled) push("ado")
   if (opts.kustoEnabled) push("kusto")
   if (opts.cloudAgentEnabled) push("cloudagent")
+  if (opts.workiqEnabled) push("workiq")
 
   return {
     search: opts.searchEnabled,

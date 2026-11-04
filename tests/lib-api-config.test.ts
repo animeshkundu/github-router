@@ -35,6 +35,8 @@ const baseState: State = {
   kustoDatabase: null,
   cloudAgentEnabled: false,
   cloudAgentEnvironment: "prod",
+  workiqEnabled: false,
+  workiqWriteEnabled: false,
   humanlikeForce: "auto",
   sessionId: "test-session-id",
   machineId: "test-machine-id",

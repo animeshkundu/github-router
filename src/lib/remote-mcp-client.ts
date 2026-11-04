@@ -74,6 +74,13 @@ export interface RemoteMcpClientConfig {
   /** Headers merged into every request (scope headers, toolset controls). */
   staticHeaders?: () => Record<string, string>
   /**
+   * Per-request deadline, in milliseconds. Defaults to 30 s, which suits a
+   * control-plane server whose calls are lookups. A server whose calls run a
+   * model or a long query needs a larger value: the deadline covers the whole
+   * response, not just time-to-first-byte.
+   */
+  requestTimeoutMs?: number
+  /**
    * Called with the fully-paginated tool map before it is published. Throwing
    * rejects initialization, which is how a client pins the tool set it needs.
    */
@@ -357,7 +364,7 @@ export class RemoteMcpClient {
 
   private composeRequestSignal(
     caller: AbortSignal | undefined,
-    timeoutMs = 30_000,
+    timeoutMs = this.config.requestTimeoutMs ?? 30_000,
   ): ComposedSignal {
     const disposal = this.disposalController.signal
     const controller = new AbortController()
