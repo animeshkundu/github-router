@@ -55,6 +55,10 @@ import {
   recordZeroCostRequest,
 } from "~/lib/aic-ledger"
 
+import {
+  anthropicUsageNormalizeDisabled,
+  normalizeAnthropicUsageInPlace,
+} from "~/lib/anthropic-usage"
 import { isClaudeModel } from "~/lib/anthropic-translate/classifier"
 import {
   LOCAL_CONSULT_EFFORT,
@@ -2279,6 +2283,14 @@ export function buildAdvisorStream(opts: {
             nextUsage[key] = value
           }
         }
+        // Same inclusive-usage defect as the direct passthrough: this map is
+        // re-emitted as the client-visible terminal `message_delta.usage`, so
+        // an un-normalized `input_tokens` would double-count the cached prefix
+        // in Claude Code's context meter. No-op on a cold turn or on an
+        // already-disjoint upstream.
+        if (!anthropicUsageNormalizeDisabled()) {
+          normalizeAnthropicUsageInPlace(nextUsage)
+        }
         pendingMessageDelta.usage = nextUsage
         const turnAic = extractCopilotUsage(payload.copilot_usage)
         if (!turnAic || turnAic.totalNanoAiu <= 0) return
@@ -2363,6 +2375,19 @@ export function buildAdvisorStream(opts: {
 
           switch (ev.event) {
             case "message_start": {
+              // First-turn usage is normally cold (no cache to double-count),
+              // but normalize the forwarded frame for symmetry with the direct
+              // passthrough so a warm start cannot reintroduce the inflated
+              // meter the terminal delta is already corrected for.
+              const startMessage = (payload as AnyRecord).message
+              if (
+                !anthropicUsageNormalizeDisabled()
+                && startMessage
+                && typeof startMessage === "object"
+                && !Array.isArray(startMessage)
+              ) {
+                normalizeAnthropicUsageInPlace((startMessage as AnyRecord).usage)
+              }
               if (!messageStartForwarded) {
                 if (!safeEnqueueEvent(ev.event, payload)) {
                   return { capturedBlocks, advisorToolUses, clientToolUseCount }

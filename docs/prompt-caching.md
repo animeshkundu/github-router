@@ -76,23 +76,113 @@ user identifiers are never logged.
 
 **Per-request cache accounting.** The standard per-request summary line
 (`logRequest`) surfaces `cache:r<read>/w<write>` whenever either is nonzero.
-For the OpenAI-shaped routes (`/v1/chat/completions`, `/v1/responses`) the
-inclusive OpenAI usage total is first split into disjoint buckets by
-`normalizeOpenAIUsage`. Native Claude `/v1/messages` (both the passthrough and
-the non-Claude shim's synthesized usage) already reports
-`cache_read_input_tokens` / `cache_creation_input_tokens` as disjoint buckets,
-so the non-streaming handler forwards them straight through with no
-normalization step. Live evidence from a controlled native-Claude probe: a
-cold turn on a fresh prefix reported `cache_creation_input_tokens: 7566,
-cache_read_input_tokens: 0`; the immediately following warm turn on the same
-prefix reported `cache_creation_input_tokens: 44, cache_read_input_tokens:
-7566` — i.e. the prior write became a read. This is a per-request
-observability signal, not a claim about the effectiveness of any policy in
-this document; the streaming path is a raw relay of whatever Claude Code's own
-usage accounting reports and is unaffected.
+Every route normalizes `usage` to DISJOINT input buckets before logging or
+forwarding: the OpenAI-shaped routes (`/v1/chat/completions`, `/v1/responses`)
+and the non-Claude `/v1/messages` shim through `normalizeOpenAIUsage`, native
+Claude `/v1/messages` (streaming and non-streaming alike) through
+`normalizeAnthropicUsageInPlace` in `src/lib/anthropic-usage.ts`.
 
-The native Claude non-streaming `in:` figure sums `input_tokens +
-cache_read_input_tokens + cache_creation_input_tokens`
+**Upstreams differ on whether `input_tokens` includes the cached prefix, and
+both shapes have been measured in real traffic.** In the INCLUSIVE shape
+(OpenAI semantics inside an Anthropic-shaped object) `input_tokens` is the
+total prompt and `cache_read_input_tokens` is a detail of that total; in the
+EXCLUSIVE shape (the Anthropic contract) `input_tokens` is the uncached
+remainder only. Anthropic clients, and Claude Code's context meter, sum the
+three input buckets as if they were disjoint, so forwarding an inclusive
+figure counts the cached prefix twice.
+
+Inclusive, measured: session `ec65e3f9` (Standard, `claude-opus-5-5`, native
+passthrough) reported turn 1 `input 55,931 / read 0`, turn 2 `input 56,423 /
+read 55,808` across an exchange whose entire new payload was under 2 KB — a
+198-char user message and two tool results totalling ~1 KB. Exclusive
+semantics would require ~56,300 new tokens between those turns; inclusive
+predicts +492, which is what happened. Session `c1e87ec0` corroborates
+(62,451/0 → 66,699/66,176), and the `--localurl` endpoint is inclusive too
+(session `a1ab11a5`: turn 2 `input 74,547 / read 74,496` after a 72-char
+assistant text and a 41-char user message).
+
+Exclusive, measured: an advisor-off capture of the same native Copilot route
+on 2026-11-05 (`claude-opus-5-5`) reported `message_start input_tokens=2
+cache_creation_input_tokens=66,941` and `message_delta input_tokens=4
+cache_read_input_tokens=66,600 cache_creation_input_tokens=392`. `input 2`
+next to a 66,941-token cache write only parses under the exclusive reading, so
+the native path is not reliably inclusive across sessions.
+
+The raw wire shape was captured on both egresses on 2026-11-05, using the
+opt-in `GH_ROUTER_LOG_ANTHROPIC_USAGE_FRAMES=1` diagnostic (one
+`[anthropic-usage]` line per `message_start` / `message_delta` with the four
+numeric usage keys only — no prompt text, no payloads, no identifiers). Both
+delivered `input_tokens` and the cache buckets on the SAME record, the
+terminal `message_delta`. A real `-m local` run through the proxy against an
+LM Studio-backed gateway produced cold `message_start input_tokens=43,105 …
+cache_read=0` / `message_delta input_tokens=45,585 … cache_read=0`, then warm
+`message_delta input_tokens=45,620 cache_read_input_tokens=45,440`; the
+client-visible result usage was `inputTokens: 180, cacheReadInputTokens:
+45,440`. Without the rewrite that meter would read 91,060 for a 45,620-token
+prompt. The diagnostic stays in the product because the rewrite depends on an
+unversioned upstream detail: if the fields ever split across frames the
+rewrite silently becomes a no-op, and these lines are the only signal. It
+rides on the rewrite transform, so it is silent when
+`GH_ROUTER_DISABLE_ANTHROPIC_USAGE_NORMALIZE` is set.
+
+The compaction symptom was then reproduced and cleared end to end. A real
+`-m local` session was run with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000`
+(the client floors the value to 100,000, putting its reactive trigger at
+100,000 - 20,000 - 13,000 = 67,000 tokens) over three turns whose true prompt
+was ~45.7K. With the rewrite DISABLED the client read 45,577 then
+45,649 + 45,568 = 91,217, and Claude Code emitted
+`compact_boundary { trigger: "auto", pre_tokens: 91,247, post_tokens: 1,572 }`
+on the second turn, replacing a live ~45.7K-token conversation with a 1.6K
+summary. With the rewrite ENABLED the same shape read 45,586, then
+53 + 45,568 = 45,621 and 88 + 45,568 = 45,656, and no compaction fired. That
+`pre_tokens` at twice the real content is the thrash this fixes: the
+compaction itself is correct arithmetic on a number that was doubled.
+
+The consequence is not cosmetic. Claude Code computes context size as
+`input + cache_creation + cache_read + output` and auto-compacts at
+`min(modelWindow, CLAUDE_CODE_AUTO_COMPACT_WINDOW) - min(maxOutput, 20_000) -
+13_000` (167,000 for a 200K window). A session carrying a 74.5K-token static
+prefix reads ~149K on a warm turn, so right after a compaction that leaves 15K
+of live context the meter is already at ~164K of 167K and refills in two or
+three turns — exactly the "Autocompact is thrashing" report against session
+`a1ab11a5`.
+
+The rewrite mirrors `normalizeOpenAIUsage`:
+`input_tokens = max(0, input_tokens - cache_read - cache_creation)`. It no-ops
+on a cold turn (no cache, where both conventions agree) and no-ops when
+`input_tokens < cached` — a shape impossible under inclusive semantics and the
+exact shape a conformant Anthropic upstream reports on a warm turn (`input 26`
+alongside `cache_read 97,304`). That guard is what lets the rewrite run
+unconditionally on both egresses. On the streaming path the same rule runs as
+a byte transform in `relayAnthropicStream`, buffering to SSE record
+terminators so a record split across chunk boundaries is never corrupted, and
+re-emitting every record that needs no correction byte-identically; the AIC
+tap still sees the ORIGINAL upstream bytes, because it must reflect what
+upstream billed rather than what was rewritten. The advisor loop normalizes the
+lead-turn usage it re-emits on its synthesized terminal `message_delta` for the
+same reason.
+
+The residual ambiguity is an exclusive upstream whose uncached remainder
+exceeds its cached prefix (`input >= cached`): it is misread as inclusive and
+under-reported by the cached total. That takes a single turn adding more new
+tokens than the whole cached prefix, and it applies to either egress, since
+the native path has been measured exclusive. The error direction is the safe
+one — the meter under-reads, so the client compacts later rather than earlier.
+`GH_ROUTER_DISABLE_ANTHROPIC_USAGE_NORMALIZE=1` disables the rewrite for an
+upstream whose shape the guard cannot discriminate.
+
+Cache accounting remains a per-request observability signal, not a claim about
+the effectiveness of any policy in this document. Live evidence from a
+controlled native-Claude probe: a cold turn on a fresh prefix reported
+`cache_creation_input_tokens: 7566, cache_read_input_tokens: 0`; the
+immediately following warm turn on the same prefix reported
+`cache_creation_input_tokens: 44, cache_read_input_tokens: 7566` — the prior
+write became a read. (That probe used a synthetic body, which Copilot reports
+with disjoint buckets — see the probe caveat in
+[`copilot-compat-matrix.md`](copilot-compat-matrix.md). Real Claude Code
+traffic on the same route has been measured in both shapes, as above.)
+
+The native Claude non-streaming `in:` figure sums the three normalized buckets
 (`anthropicTotalInputTokens`), because Anthropic's `input_tokens` alone is only
 the NEW (uncached) portion — unlike OpenAI's inclusive total. Forwarding it
 alone would understate a warm-cache turn's real prompt size, sometimes

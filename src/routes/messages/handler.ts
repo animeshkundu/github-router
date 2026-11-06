@@ -2,6 +2,11 @@ import type { Context } from "hono"
 
 import consola from "consola"
 
+import {
+  anthropicUsageNormalizeDisabled,
+  createAnthropicUsageRewriteTransform,
+  normalizeAnthropicUsageInPlace,
+} from "~/lib/anthropic-usage"
 import { awaitApproval } from "~/lib/approval"
 import { createAnthropicAicTap } from "~/lib/aic-sse-tap"
 import { extractAndRecordAic, recordAic, recordZeroCostRequest } from "~/lib/aic-ledger"
@@ -1438,11 +1443,22 @@ export async function handleCompletion(c: Context) {
     const aicTap = localProfileRequest
       ? undefined
       : createAnthropicAicTap((usage) => recordAic(resolvedModel, usage))
+    // The native passthrough forwards upstream's usage verbatim, and both
+    // Copilot and the local endpoint report `input_tokens` INCLUSIVE of the
+    // cached prefix. Anthropic clients treat the three input buckets as
+    // disjoint, so the cached prefix would be counted twice on every warm turn
+    // and autocompact would fire at half the real window. The transform
+    // rewrites `message_start.usage` / `message_delta.usage` in flight and
+    // no-ops on a cold turn or an already-disjoint stream; it runs AFTER the
+    // AIC tap, which must see what upstream actually billed.
     return new Response(
       response.body
         ? relayAnthropicStream(response.body, {
             routePath: c.req.path,
             ...(aicTap ? { onBytes: aicTap.onBytes } : {}),
+            ...(anthropicUsageNormalizeDisabled()
+              ? {}
+              : { transform: createAnthropicUsageRewriteTransform() }),
           })
         : null,
       {
@@ -1466,6 +1482,16 @@ export async function handleCompletion(c: Context) {
   }
 
   const responseBody = cappedResult.value
+
+  // Make the three input buckets mutually exclusive BEFORE anything reads
+  // them. Some upstreams (the local endpoint; the native Copilot path in an
+  // earlier session) report `input_tokens` inclusive of the cached prefix —
+  // OpenAI semantics inside an Anthropic shape — while clients sum the
+  // buckets. Same rewrite as the streaming transform; a no-op on a cold turn
+  // or an already-disjoint response.
+  if (!anthropicUsageNormalizeDisabled()) {
+    normalizeAnthropicUsageInPlace(responseBody.usage)
+  }
 
   const usage = responseBody.usage as
     | {
@@ -1491,10 +1517,8 @@ export async function handleCompletion(c: Context) {
       resolvedModel,
       inputTokens: anthropicTotalInputTokens(usage),
       outputTokens: usage?.output_tokens,
-      // Anthropic's own usage shape already reports disjoint buckets (unlike
-      // OpenAI's inclusive totals), so these ride straight through with no
-      // `normalizeOpenAIUsage` step — see that function's doc for why the
-      // OpenAI-shaped routes need one and this one doesn't.
+      // `usage` has already been normalized above, so `input_tokens` is the
+      // uncached remainder and the three buckets sum to the true prompt size.
       cacheReadTokens: usage?.cache_read_input_tokens,
       cacheWriteTokens: usage?.cache_creation_input_tokens,
       aicNano,
@@ -1740,12 +1764,20 @@ export function clampOutputConfigEffortInPlace(
  * Sum native Claude `/v1/messages` usage into the TOTAL input-token figure
  * `logRequest`'s context-window-fill display expects.
  *
- * Anthropic's `input_tokens` is the NEW (uncached) portion ONLY — unlike
- * OpenAI's inclusive total, it excludes both `cache_read_input_tokens` and
- * `cache_creation_input_tokens`. Forwarding it alone understates the real
- * prompt size on any cache hit, sometimes drastically: a live warm-cache turn
- * measured `input_tokens: 26` alongside `cache_read_input_tokens: 97304` — the
- * actual prompt was ~97k tokens, not 26. Returns `undefined` only when
+ * In the ANTHROPIC contract `input_tokens` is the NEW (uncached) portion ONLY —
+ * unlike OpenAI's inclusive total, it excludes both `cache_read_input_tokens`
+ * and `cache_creation_input_tokens` — so summing the three is what yields the
+ * real prompt size on a cache hit. A conformant warm turn reports something
+ * like `input_tokens: 26` with `cache_read_input_tokens: 97304`; the actual
+ * prompt was ~97k tokens, not 26.
+ *
+ * Upstream does not always honour that contract: the local endpoint of session
+ * `a1ab11a5` and the native Copilot path in session `ec65e3f9` reported
+ * `input_tokens` INCLUSIVE of the cached prefix, so summing raw buckets there
+ * double-counts it. Every call
+ * site normalizes first (`normalizeAnthropicUsageInPlace` /
+ * `createAnthropicUsageRewriteTransform`), which makes the three buckets
+ * disjoint again and this sum correct on both paths. Returns `undefined` only when
  * `usage` itself is absent, so the log line omits the field entirely rather
  * than reporting a fabricated total (matching how `formatTokenInfo` treats an
  * undefined `inputTokens`).

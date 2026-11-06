@@ -86,6 +86,7 @@ declare -a PROBE_REGISTRY=(
   # ===== Prompt caching =====
   "cache_control_ephemeral_1h|claude-emits|Claude cache_control with ttl:1h returns 200"
   "cache_control_marker_limit_5|exploratory|Five Claude cache_control markers return 400 (upstream maximum is four)"
+  "messages_usage_buckets_inclusive|claude-emits|Warm /v1/messages turn reports DISJOINT usage buckets (input_tokens within 200 of a ~5-token delta over a cached prefix)"
   "gpt56_explicit_cache_breakpoint|copilot-cli|GPT-5.6 Responses accepts prompt_cache_key + explicit prompt_cache_options + prompt_cache_breakpoint"
   "gpt55_cache_retention_24h|vscode-source|GPT-5.5 Responses accepts prompt_cache_retention:24h (acceptance only; long-idle effectiveness is not claimed)"
 
@@ -426,6 +427,71 @@ probe_cache_control_marker_limit_5() {
   do_request POST /v1/messages "$body"
   assert_status 400 \
     && assert_body_contains "maximum of 4"
+}
+
+probe_messages_usage_buckets_inclusive() {
+  # Upstream reports `input_tokens` INCLUSIVE of the cached prefix on native
+  # /v1/messages for real Claude Code traffic. Anthropic clients sum the three
+  # input buckets as disjoint, so forwarding the inclusive figure counts the
+  # prefix twice and halves the effective context window (Claude Code then
+  # auto-compacts every 2-3 turns). The proxy rewrites it to disjoint buckets.
+  #
+  # DISCRIMINATION CAVEAT, measured 2026-11-05: upstream returns the INCLUSIVE
+  # shape to real Claude Code bodies (session 5a08214c: 53,219/49,536 ->
+  # 56,813/54,272 across a ~8.7 KB exchange, where disjoint would require
+  # +8,330 tokens from 8.7 KB), but returns the DISJOINT shape to every
+  # synthetic request this probe can build — including a 40K-token prefix, four
+  # cache breakpoints, the realistic beta list, and context_management. The
+  # discriminator is not reproduced here, so this probe PASSES with or without
+  # the rewrite: it pins the client-visible CONTRACT (a warm turn must report a
+  # large cached prefix and a near-zero new-input count) and catches drift in
+  # either direction, but the rewrite itself is proven by unit tests
+  # (tests/anthropic-usage-normalize.test.ts) and by real-traffic transcripts.
+  #
+  # The bound is ABSOLUTE rather than `input_tokens < cached`: the body below
+  # differs from the cached prefix only by "Reply OK." (~5 tokens), so a
+  # conformant disjoint reading is ~10-20. An inclusive passthrough would report
+  # the whole ~2,400-token prefix.
+  local stable body
+  stable="$(printf 'stable %.0s' {1..1200})"
+  body="$(jq -nc --arg stable "$stable" '{
+    model:"claude-sonnet-5",
+    max_tokens:16,
+    system:[{
+      type:"text",
+      text:$stable,
+      cache_control:{type:"ephemeral"}
+    }],
+    messages:[{role:"user",content:"Reply OK."}]
+  }')"
+  # Turn 1 writes the prefix into the cache; turn 2 reads it back.
+  do_request POST /v1/messages "$body"
+  assert_status 200 || return 1
+  do_request POST /v1/messages "$body"
+  assert_status 200 || return 1
+
+  local usage input_tokens cache_read cache_write cached max_new_input
+  usage="$(jq -c '.usage // empty' "$LAST_BODY_FILE")"
+  if [ -z "$usage" ]; then
+    echo "  ${C_RED}FAIL${C_RESET}: response body has no .usage"
+    return 1
+  fi
+  input_tokens="$(jq -r '.usage.input_tokens // 0' "$LAST_BODY_FILE")"
+  cache_read="$(jq -r '.usage.cache_read_input_tokens // 0' "$LAST_BODY_FILE")"
+  cache_write="$(jq -r '.usage.cache_creation_input_tokens // 0' "$LAST_BODY_FILE")"
+  cached=$((cache_read + cache_write))
+  max_new_input=200
+  if [ "$cached" -le 0 ]; then
+    echo "  ${C_RED}FAIL${C_RESET}: turn 2 reported no cached prefix (usage: $usage) — the disjoint rewrite cannot be verified"
+    echo "  ${C_DIM}if caching legitimately did not engage on this tier, this probe needs a longer prefix${C_RESET}"
+    return 1
+  fi
+  if [ "$input_tokens" -gt "$max_new_input" ]; then
+    echo "  ${C_RED}FAIL${C_RESET}: input_tokens ($input_tokens) exceeds the $max_new_input-token bound for a 'Reply OK.' delta over a cached $cached-token prefix — usage is NOT disjoint (usage: $usage)"
+    return 1
+  fi
+  echo "  ${C_DIM}turn 2 usage: input=$input_tokens cache_read=$cache_read cache_creation=$cache_write${C_RESET}"
+  return 0
 }
 
 probe_gpt56_explicit_cache_breakpoint() {

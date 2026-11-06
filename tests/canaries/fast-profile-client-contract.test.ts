@@ -41,6 +41,13 @@ import { bundleContainsAny, installedClaudeBundle } from "./installed-claude"
  * 2.1.314 rolled the three identifier sets once more with no shape change, so
  * the new byte sequences are appended beside 2.1.312's rather than replacing
  * them.
+ *
+ * 2.1.318 rolled all three again and moved none of the behavior: the tag
+ * literal and its `.replace(/\d+$/,"")` survive as `Xtn`/`Qtn`, the tool is
+ * still pushed with `type`/`name`/`model` plus a conditional `defer_loading`
+ * (`name:Nve`, and `Nve="advisor"` is asserted separately so a bundle that
+ * keeps the push but drops the name binding still fails), and the PreToolUse
+ * check still admits a string `model` with the same `?? deny(...)` fallback.
  */
 const REQUIRED_MARKERS = [
   "--advisor <model>",
@@ -59,6 +66,8 @@ const REQUIRED_MARKERS = [
     'var f7t="advisor_20260301",p7t="advisor_20260301".replace(/\\d+$/,"");',
     // 2.1.316: same two bindings, rolled names once more.
     'var bQt="advisor_20260301",wQt="advisor_20260301".replace(/\\d+$/,"");',
+    // 2.1.318: same two bindings again.
+    'var Xtn="advisor_20260301",Qtn="advisor_20260301".replace(/\\d+$/,"");',
   ],
   [
     'type:"advisor_20260301",name:"advisor",model:',
@@ -75,7 +84,13 @@ const REQUIRED_MARKERS = [
     // held in `CFe="advisor"` rather than inlined, which is why the literal
     // `type:"advisor_20260301",name:"advisor",model:` no longer appears.
     "push({type:bQt,name:CFe,model:bd,...Nl&&{defer_loading:!0}})",
+    // 2.1.318: the push still carries the tag, the resolved model, and the
+    // conditional `defer_loading`; the advisor name moved into `Nve`.
+    "push({type:Xtn,name:Nve,model:Tf,...hp&&{defer_loading:!0}})",
   ],
+  // The name binding the 2.1.318 push above relies on, asserted on its own so
+  // a bundle that keeps the push shape but renames the advisor fails here.
+  'var Nve="advisor"',
   "Advising",
   " using ",
   "updatedInput",
@@ -95,6 +110,9 @@ const REQUIRED_MARKERS = [
     // 2.1.316: the outer check identifier rolled (M -> N); inner `st` and
     // `Ot("deny", ...)` are unchanged.
     'check:N((e,o,r)=>st(e,"{ model }",(n)=>typeof n.model==="string")??Ot("deny",e,r))',
+    // 2.1.318: all three identifiers rolled; the predicate and the deny
+    // fallback are unchanged.
+    'check:F((e,o,r)=>rt(e,"{ model }",(n)=>typeof n.model==="string")??St("deny",e,r))',
     "a rewrite changes model alone",
   ],
   'agentType:"Explore"',
