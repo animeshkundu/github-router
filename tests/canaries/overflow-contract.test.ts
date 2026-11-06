@@ -55,7 +55,9 @@ const REQUIRED_MARKERS: ReadonlyArray<{ needles: Array<string>; why: string }> =
  * proves the 100K/1M bounds, the other proves how a parsed value resolves
  * against them. Through 2.1.311 that was the `parseInt` call site plus its
  * `Math.max` floor; from 2.1.312 it is the suffix parser plus the bound-clamp,
- * whose identifiers roll between builds while the clamp itself does not.
+ * whose identifiers roll between builds while the clamp itself does not. From
+ * 2.1.318 the clamp lives inside the parse helper, so its group also pins the
+ * `Math.min(modelWindow, parsed)` resolve site.
  */
 const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
   [
@@ -127,6 +129,21 @@ const AUTO_COMPACT_CONTRACTS: ReadonlyArray<ReadonlyArray<string>> = [
     ',h=s==="m"?1e6:s==="k"?1000:void 0,',
     "Kx=1e5,dL=1e6",
     'case"below_minimum":return Kx;case"above_maximum":return dL',
+  ],
+  // 2.1.318 restructured the env path rather than only rolling identifiers:
+  // the clamp moved INTO the parse helper (`Ctn`), which now returns the
+  // in-range value, the bound it fell below/above, or `undefined` for an
+  // unset/invalid value. The resolve site then applies
+  // `Math.min(modelWindow, parsed)` and labels the source `env`, which is
+  // exactly the documented `min(locallyRecognizedModelWindow, launchValue)`
+  // behaviour our emitted decimal integer relies on - so no proxy change is
+  // needed, and the group pins all four facts: the suffix parser, the bounds,
+  // the resolve-to-the-bound behavior, and the min-against-the-model window.
+  [
+    ',h=s==="m"?1e6:s==="k"?1000:void 0,',
+    "uO=1e5,UF=1e6",
+    'case"below_minimum":return uO;case"above_maximum":return UF',
+    'Ctn(i.CLAUDE_CODE_AUTO_COMPACT_WINDOW);if(h!==void 0)return{window:Math.min(s,h),configured:h,source:"env"}',
   ],
 ]
 

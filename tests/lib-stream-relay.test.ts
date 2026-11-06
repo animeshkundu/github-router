@@ -1,6 +1,7 @@
 import { describe, test, expect, mock, afterEach, beforeEach } from "bun:test"
 import consola from "consola"
 
+import { createAnthropicUsageRewriteTransform } from "../src/lib/anthropic-usage"
 import {
   buildAnthropicErrorEvent,
   buildOpenAIErrorEvent,
@@ -525,5 +526,226 @@ describe("relayAnthropicStream — consumer-cancel race (the live regression)", 
     expect(captured.error.length).toBe(1)
     const log = capturedErrorLine()
     expect(log).toContain("Upstream stream interrupted")
+  })
+})
+
+describe("relayAnthropicStream — transform hook", () => {
+  const REWRITTEN =
+    'event: message_delta\ndata: {"type":"message_delta","usage":{"input_tokens":40,"cache_read_input_tokens":60}}\n\n'
+
+  test("transform output replaces upstream bytes downstream; the tap still sees originals", async () => {
+    const upstream = makeUpstream([
+      {
+        bytes: ENCODER.encode(
+          'event: message_delta\ndata: {"type":"message_delta",',
+        ),
+      },
+      {
+        bytes: ENCODER.encode(
+          '"usage":{"input_tokens":100,"cache_read_input_tokens":60}}\n\n',
+        ),
+      },
+    ])
+    const tapped: Array<string> = []
+    const wrapped = relayAnthropicStream(upstream, {
+      routePath: "/v1/messages",
+      onBytes: (bytes) => tapped.push(DECODER.decode(bytes)),
+      transform: createAnthropicUsageRewriteTransform(),
+    })
+
+    const out = await collect(wrapped)
+    expect(out).toBe(REWRITTEN)
+    // The AIC tap must reflect what upstream billed, not what we rewrote.
+    expect(tapped.join("")).toContain('"input_tokens":100')
+    expect(tapped.join("")).not.toContain('"input_tokens":40')
+    expect(captured.warn.length).toBe(0)
+    expect(captured.error.length).toBe(0)
+  })
+
+  test("a record split into one-byte chunks is reassembled across many pulls", async () => {
+    // Pins the relay's internal read loop. Every one of these chunks leaves
+    // the transform still buffering, so the pull that read it has nothing to
+    // enqueue. A pull that resolves empty is not re-invoked on every runtime
+    // (Bun does not re-pull), which would strand the consumer's pending read.
+    const record =
+      'event: message_delta\ndata: {"type":"message_delta","usage":{"input_tokens":100,"cache_read_input_tokens":60}}\n\n'
+    const bytes = ENCODER.encode(record)
+    const chunks: Array<{ bytes: Uint8Array }> = []
+    for (let index = 0; index < bytes.byteLength; index++) {
+      chunks.push({ bytes: bytes.subarray(index, index + 1) })
+    }
+    const wrapped = relayAnthropicStream(makeUpstream(chunks), {
+      routePath: "/v1/messages",
+      transform: createAnthropicUsageRewriteTransform(),
+    })
+
+    const out = await collect(wrapped)
+    expect(out).toBe(REWRITTEN)
+    expect(captured.warn.length).toBe(0)
+    expect(captured.error.length).toBe(0)
+  })
+
+  test("a throwing transform is retired and its chunk is delivered verbatim", async () => {
+    const first = "event: a\ndata: 1\n\n"
+    const second = "event: b\ndata: 2\n\n"
+    const upstream = makeUpstream([
+      { bytes: ENCODER.encode(first) },
+      { bytes: ENCODER.encode(second) },
+    ])
+    let calls = 0
+    let flushes = 0
+    const wrapped = relayAnthropicStream(upstream, {
+      routePath: "/v1/messages",
+      transform: {
+        push() {
+          calls += 1
+          throw new Error("transform boom")
+        },
+        flush() {
+          flushes += 1
+          throw new Error("flush boom")
+        },
+      },
+    })
+
+    const out = await collect(wrapped)
+    expect(out).toBe(first + second)
+    // Retired after the first throw: the second chunk is never pushed. The
+    // retired transform gets exactly one rescue flush attempt, whose own
+    // throw is swallowed so delivery still continues.
+    expect(calls).toBe(1)
+    expect(flushes).toBe(1)
+    expect(captured.warn.length).toBe(1)
+    expect(String((captured.warn[0] ?? [])[0])).toContain("transform disabled")
+    expect(captured.error.length).toBe(0)
+  })
+
+  test("a throw releases bytes the transform buffered from earlier chunks", async () => {
+    // The relay's rescue flush. A transform holds a partial record from chunk
+    // 1 and throws on chunk 2; those earlier bytes are not recoverable from
+    // the throwing chunk, so they must be flushed out AHEAD of it rather than
+    // silently truncated.
+    const first = "event: a\ndata: 1\n\n"
+    const second = "event: b\ndata: 2\n\n"
+    const upstream = makeUpstream([
+      { bytes: ENCODER.encode(first) },
+      { bytes: ENCODER.encode(second) },
+    ])
+    let buffered: Uint8Array | undefined
+    const wrapped = relayAnthropicStream(upstream, {
+      routePath: "/v1/messages",
+      transform: {
+        push(bytes: Uint8Array): Uint8Array | undefined {
+          if (!buffered) {
+            buffered = bytes
+            return undefined
+          }
+          throw new Error("transform boom")
+        },
+        flush(): Uint8Array | undefined {
+          const held = buffered
+          buffered = undefined
+          return held
+        },
+      },
+    })
+
+    const out = await collect(wrapped)
+    // Order matters: the rescued buffer came first, then the untransformed chunk.
+    expect(out).toBe(first + second)
+    expect(captured.warn.length).toBe(1)
+    expect(captured.error.length).toBe(0)
+  })
+
+  test("a mid-stream failure drops buffered transform bytes so the error frame stays parseable", async () => {
+    // A partial record emitted immediately before `event: error` would be
+    // concatenated onto it by any blank-line framing parser, corrupting the
+    // terminal error. The buffer is therefore deliberately NOT flushed on the
+    // failure path.
+    const upstream = makeUpstream([
+      {
+        bytes: ENCODER.encode(
+          'event: message_delta\ndata: {"type":"message_delta",',
+        ),
+      },
+      { error: new TypeError("terminated") },
+    ])
+    const wrapped = relayAnthropicStream(upstream, {
+      routePath: "/v1/messages",
+      transform: createAnthropicUsageRewriteTransform(),
+    })
+
+    const out = await collect(wrapped)
+    expect(out.startsWith("event: error")).toBe(true)
+    expect(out).not.toContain("message_delta")
+    expect(captured.error.length).toBe(1)
+  })
+
+  test("consumer cancel racing the transform enqueue is silent", async () => {
+    // The review-checklist race: pull() has read a chunk and is between the
+    // transform and the enqueue when the consumer cancels. Cancelling FROM the
+    // transform reproduces that window deterministically, without relying on
+    // timing. The enqueue must hit the already-closed controller, be
+    // recognised, and exit silently.
+    const upstream = makeUpstream([
+      { bytes: ENCODER.encode("event: a\ndata: 1\n\n") },
+      { bytes: ENCODER.encode("event: b\ndata: 2\n\n") },
+    ])
+    let pushed = 0
+    const racer: { cancel?: (reason?: unknown) => void } = {}
+    const transform = {
+      push(bytes: Uint8Array): Uint8Array | undefined {
+        pushed += 1
+        racer.cancel?.("race-from-transform")
+        return bytes
+      },
+      flush(): Uint8Array | undefined {
+        return undefined
+      },
+    }
+    const wrapped = relayAnthropicStream(upstream, {
+      routePath: "/v1/messages",
+      transform,
+    })
+
+    const reader = wrapped.getReader()
+    racer.cancel = (reason?: unknown) => void reader.cancel(reason)
+    const first = await reader.read()
+    expect(first.done).toBe(true)
+    expect(pushed).toBe(1)
+    expect(captured.error.length).toBe(0)
+    expect(captured.warn.length).toBe(0)
+  })
+
+  test("consumer cancel racing the flush enqueue is silent", async () => {
+    // Same race at the other new enqueue site: EOF arrives, the transform
+    // releases its buffered tail, and the consumer has already gone.
+    const upstream = makeUpstream([
+      { bytes: ENCODER.encode('event: message_delta\ndata: {"type":"message_delta"') },
+    ])
+    let flushed = 0
+    const racer: { cancel?: (reason?: unknown) => void } = {}
+    const transform = {
+      push(): Uint8Array | undefined {
+        return undefined
+      },
+      flush(): Uint8Array | undefined {
+        flushed += 1
+        racer.cancel?.("race-from-flush")
+        return ENCODER.encode("tail")
+      },
+    }
+    const wrapped = relayAnthropicStream(upstream, {
+      routePath: "/v1/messages",
+      transform,
+    })
+
+    const reader = wrapped.getReader()
+    racer.cancel = (reason?: unknown) => void reader.cancel(reason)
+    const first = await reader.read()
+    expect(first.done).toBe(true)
+    expect(flushed).toBe(1)
+    expect(captured.error.length).toBe(0)
+    expect(captured.warn.length).toBe(0)
   })
 })

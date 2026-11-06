@@ -1402,9 +1402,13 @@ describe("native Claude non-streaming cache accounting", () => {
   })
 
   test("anthropicTotalInputTokens sums the new-input and both cache buckets, and is undefined only when usage itself is absent", () => {
-    // Pins the exact live-measured shape that motivated this: a warm-cache
-    // turn whose `input_tokens` alone (26) would have grossly understated the
-    // real ~97k-token prompt.
+    // Pins the shape `anthropicTotalInputTokens` exists for: a warm-cache turn
+    // whose `input_tokens` alone (26) would grossly understate the real
+    // ~97k-token prompt. This is the DISJOINT (conformant) shape — what the
+    // non-Claude shim and a strictly conformant local endpoint emit. Copilot's
+    // native `/v1/messages` sends the INCLUSIVE shape instead and is rewritten
+    // to this one by `normalizeAnthropicUsageInPlace` before this function
+    // runs (see `tests/anthropic-usage-normalize.test.ts`).
     expect(
       anthropicTotalInputTokens({
         input_tokens: 26,

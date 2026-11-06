@@ -9,6 +9,16 @@ import {
 
 const ENCODER = new TextEncoder()
 
+/** Concatenate two byte runs, preserving order (left first). */
+function concatBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
+  if (left.byteLength === 0) return right
+  if (right.byteLength === 0) return left
+  const out = new Uint8Array(left.byteLength + right.byteLength)
+  out.set(left, 0)
+  out.set(right, left.byteLength)
+  return out
+}
+
 // Structural reader type so this helper accepts both DOM-style
 // (`ReadableStreamDefaultReader<Uint8Array>`) and Node-style
 // (`node:stream/web` reader) without type-incompatibility friction.
@@ -16,6 +26,32 @@ interface ByteReader {
   read(): Promise<{ done: boolean; value?: Uint8Array }>
   cancel(reason?: unknown): Promise<void>
   releaseLock(): void
+}
+
+/**
+ * Optional byte transformer applied between the upstream read and the
+ * downstream enqueue. Implementations must be TOTAL — a throw is caught by
+ * the relay and disables the transform for the rest of the stream, but never
+ * drops bytes: whatever the transform had buffered from EARLIER chunks is
+ * flushed out first (best effort), then the offending chunk is delivered
+ * untransformed.
+ *
+ * `push` may buffer (returning undefined) until it holds a complete unit;
+ * `flush` releases whatever is still buffered at upstream EOF. Both may
+ * return zero-length output, which the relay skips. While `push` produces
+ * nothing the relay keeps reading upstream INSIDE the current pull — a pull
+ * that resolved without enqueueing is not re-invoked on every runtime (Bun
+ * does not re-pull), which would strand the consumer's pending read.
+ *
+ * `flush` is called at a clean upstream EOF, and once more, best effort, when
+ * `push` throws. It is NOT called on a mid-stream FAILURE: the pending buffer
+ * is deliberately dropped there, because a partial record emitted immediately
+ * before the synthesized `event: error` frame would be concatenated onto it by
+ * any blank-line framing parser, corrupting the terminal error.
+ */
+export interface ByteTransform {
+  push(bytes: Uint8Array): Uint8Array | undefined
+  flush(): Uint8Array | undefined
 }
 
 interface RelayOptions {
@@ -34,6 +70,20 @@ interface RelayOptions {
    * alter bytes. Not invoked for synthesized error events.
    */
   onBytes?: (bytes: Uint8Array) => void
+  /**
+   * Optional byte rewriter run AFTER the `onBytes` tap (the tap always sees the
+   * original upstream bytes) and BEFORE the downstream enqueue. `push` is fed
+   * every upstream chunk; its return value, when non-empty, is what the
+   * consumer receives instead. At upstream EOF, `flush` releases anything the
+   * transform was still buffering. Never invoked for synthesized error events.
+   *
+   * A throw disables the transform for the remainder of the stream: anything
+   * it had buffered from earlier chunks is flushed out (best effort, ahead of
+   * the offending chunk), the offending chunk is delivered untransformed, and
+   * a warning is logged. The relay must not fail delivery because a rewriter
+   * has a bug, and must not truncate the stream either.
+   */
+  transform?: ByteTransform
 }
 
 /**
@@ -90,12 +140,81 @@ export function relayAnthropicStream(
   let bytesRelayed = 0
   let upstreamFinished = false
   let consumerCancelled = false
+  let transform = opts.transform
 
   const safeClose = (controller: ReadableStreamDefaultController<Uint8Array>) => {
     try {
       controller.close()
     } catch {
       // already closed / errored — fine
+    }
+  }
+
+  /**
+   * Enqueue transform output, tolerating the consumer-cancel race exactly like
+   * the untransformed path. Returns false when the consumer has gone away, in
+   * which case the caller must stop pulling.
+   */
+  const enqueueBytes = (
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    bytes: Uint8Array | undefined,
+  ): boolean => {
+    if (!bytes || bytes.byteLength === 0) return true
+    try {
+      controller.enqueue(bytes)
+      return true
+    } catch (enqueueError) {
+      if (isControllerClosedError(enqueueError)) {
+        consumerCancelled = true
+        return false
+      }
+      throw enqueueError
+    }
+  }
+
+  /**
+   * Run the optional transform. A throw retires the transform and delivers this
+   * chunk verbatim — a rewriter bug must never break delivery.
+   *
+   * Bytes the transform buffered from EARLIER chunks are not recoverable from
+   * this chunk, so they are flushed out best-effort ahead of it. Without that,
+   * a transform that held a partial record and then threw would silently
+   * truncate everything it was holding.
+   */
+  const applyTransform = (bytes: Uint8Array): Uint8Array | undefined => {
+    const active = transform
+    if (!active) return bytes
+    try {
+      return active.push(bytes)
+    } catch (error) {
+      transform = undefined
+      consola.warn(
+        `Stream byte transform disabled at ${opts.routePath}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      let buffered: Uint8Array | undefined
+      try {
+        buffered = active.flush()
+      } catch {
+        // Best effort: the transform is already retired and its state is
+        // unknown. Delivery continues with the untransformed chunk.
+      }
+      if (!buffered || buffered.byteLength === 0) return bytes
+      return concatBytes(buffered, bytes)
+    }
+  }
+
+  /** Release any bytes the transform buffered, at a clean upstream EOF. */
+  const flushTransform = (): Uint8Array | undefined => {
+    const active = transform
+    if (!active) return undefined
+    transform = undefined
+    try {
+      return active.flush()
+    } catch (error) {
+      consola.warn(
+        `Stream byte transform flush failed at ${opts.routePath}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      return undefined
     }
   }
 
@@ -107,49 +226,55 @@ export function relayAnthropicStream(
       }
 
       try {
-        const result = await readWithInactivityTimeout(reader, inactivityMs)
-        if (consumerCancelled) {
-          // Consumer cancelled while we were awaiting upstream — drop the
-          // value (if any) and exit silently. The cancel() callback has
-          // already propagated cancellation upstream.
-          safeClose(controller)
-          return
-        }
-        if (result.done) {
-          // Zero-byte close is rare and usually indicates upstream
-          // misbehavior (200 + SSE headers + immediate FIN). Surface it
-          // in the error log so the operator can correlate; the consumer
-          // sees a clean empty stream.
-          if (bytesRelayed === 0) {
-            consola.warn(
-              `Upstream returned empty SSE stream at ${opts.routePath}`,
-            )
+        // Loop inside a single pull until we have bytes to enqueue, upstream
+        // ends, or the consumer cancels. A byte transform buffers across chunk
+        // boundaries, so one upstream chunk can legitimately produce no output;
+        // a pull that returns WITHOUT enqueueing is not re-invoked on every
+        // runtime (Bun does not re-pull), which would strand the consumer's
+        // pending read forever.
+        for (;;) {
+          const result = await readWithInactivityTimeout(reader, inactivityMs)
+          if (consumerCancelled) {
+            // Consumer cancelled while we were awaiting upstream — drop the
+            // value (if any) and exit silently. The cancel() callback has
+            // already propagated cancellation upstream.
+            safeClose(controller)
+            return
           }
-          upstreamFinished = true
-          safeClose(controller)
-          return
-        }
-        if (result.value) {
-          bytesRelayed += result.value.byteLength
-          if (opts.onBytes) {
-            try {
-              opts.onBytes(result.value)
-            } catch {
-              // Tap failures must never break delivery.
+          if (result.done) {
+            // Zero-byte close is rare and usually indicates upstream
+            // misbehavior (200 + SSE headers + immediate FIN). Surface it
+            // in the error log so the operator can correlate; the consumer
+            // sees a clean empty stream.
+            if (bytesRelayed === 0) {
+              consola.warn(
+                `Upstream returned empty SSE stream at ${opts.routePath}`,
+              )
             }
+            upstreamFinished = true
+            // Release whatever the transform was still holding before closing.
+            // A consumer that raced ahead of this enqueue is handled inside
+            // enqueueBytes (it flags the cancel and we stop without closing).
+            if (!enqueueBytes(controller, flushTransform())) return
+            safeClose(controller)
+            return
           }
-          try {
-            controller.enqueue(result.value)
-          } catch (enqueueError) {
-            if (isControllerClosedError(enqueueError)) {
-              // Consumer raced ahead of us: it closed the stream between
-              // our last await and this enqueue. Treat as a normal end of
-              // stream — upstream chunks past this point are dropped, but
-              // that's expected behavior on consumer cancel.
-              consumerCancelled = true
-              return
+          if (result.value) {
+            bytesRelayed += result.value.byteLength
+            // The tap sees the ORIGINAL upstream bytes: it feeds the AIC
+            // ledger, which must reflect what upstream billed, not what we
+            // rewrote.
+            if (opts.onBytes) {
+              try {
+                opts.onBytes(result.value)
+              } catch {
+                // Tap failures must never break delivery.
+              }
             }
-            throw enqueueError
+            const out = applyTransform(result.value)
+            if (!out || out.byteLength === 0) continue
+            if (!enqueueBytes(controller, out)) return
+            return
           }
         }
       } catch (error) {
