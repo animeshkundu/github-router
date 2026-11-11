@@ -18,7 +18,10 @@
  * 3. **Writes blocked by name as well as removed from the active set.** Two
  *    independent barriers: the model cannot see `edit`/`write`, and a tool call
  *    that arrives anyway is refused. `powershell` is refused outright; the
- *    upstream allowlist also lives here without the metacharacter gap.
+ *    upstream allowlist also lives here without the metacharacter gap, and
+ *    wider than upstream: MCP tools are denied by namespace, `todo`'s writer
+ *    actions are refused, and so are `subagent_launch`/`workflow`/
+ *    `send_to_session` (see `PLAN_MCP_READ_TOOLS`).
  * 4. **No `@earendil-works/pi-agent-core` import.** Upstream imports its message
  *    types; generated extensions may only import host-provided specifiers
  *    (`typebox`, `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`,
@@ -89,7 +92,14 @@ export function isPlanUnsafeCommand(command: string): boolean {
     // A pager that can be told to run something (`bat --pager="sh -c ..."`).
     /\bbat\b[^|;]*--pager/i,
     /\bsort\b[^|;]*\s-o/i,
+    // `sort -T dir` only picks where the spill files go; it still writes them.
+    // Case-SENSITIVE on purpose: the whole table is `/i`, and sort's field
+    // separator `-t` must not trip this (`sort -t, -k2 f` is a plain read).
+    /\bsort\b[^|;]*\s-T/,
     /\btree\b[^|;]*\s-o/i,
+    // `file -C -m magic` compiles the magic database next to it. Also
+    // case-sensitive, so `file -c` (the check-only report) stays a read.
+    /\bfile\b[^|;]*\s-C\b/,
     /\bnpm\s+audit\s+(fix|--fix)\b/i,
     /\brg\b[^|;]*\s--pre\b/i,
     /\bdate\b[^|;]*\s--?s(et)?\b/i,
@@ -97,6 +107,9 @@ export function isPlanUnsafeCommand(command: string): boolean {
     // (`sort --compress-program`), an external differ, or a textconv filter.
     /--compress-program/i,
     /\bgit\b[^|;]*--(ext-diff|textconv)\b/i,
+    // git's transport helpers: `git ls-remote --upload-pack='touch x' .` names
+    // a program on the command line and git runs it.
+    /\bgit\b[^|;]*--(upload-pack|receive-pack|exec)\b/i,
     /--output(-file)?[= ]/i,
   ]
   return destructive.some((pattern) => pattern.test(command))
@@ -155,8 +168,11 @@ export function isPlanReadOnlyCommand(command: string): boolean {
     /^\s*git\s+config\s+--get\b/i,
     /^\s*npm\s+(list|ls|view|info|search|outdated|audit)/i,
     /^\s*yarn\s+(list|info|why|audit)/i,
-    /^\s*node\s+--version/i,
-    /^\s*python3?\s+--version/i,
+    // `--version` short-circuits, but the pattern must not license trailing
+    // tokens: `node --version -e '<js>'` is only saved by the interpreter's own
+    // argument order, which is not a contract worth betting reads on.
+    /^\s*node\s+--version\s*$/i,
+    /^\s*python3?\s+--version\s*$/i,
     /^\s*jq\b/,
     // `sed` and `awk` are deliberately ABSENT: both take a script, and a script
     // can shell out (`awk 'BEGIN{system("sh")}'`, `sed -n '1e sh'`,
@@ -180,8 +196,12 @@ export function isPlanSafeCommand(command: string): boolean {
   if (isPlanUnsafeCommand(trimmed)) return false
   // Shell metacharacters are refused: a pipe or substitution can smuggle a
   // write into an otherwise allowlisted prefix (`ls $(rm -rf /)`), and a second
-  // command after `;` or `&&` never reaches the allowlist check at all.
-  if (/\||;|&&|\|\||\$\(|`|\n/.test(trimmed)) return false
+  // command after `;`, `&&` or a bare `&` never reaches the allowlist check at
+  // all. The bare `&` is the one that bites: `ls & node -e '…'` backgrounds the
+  // read and runs the writer, and `ls&rm -rf x` needs no space at all.
+  // Process substitution (`cat <(cmd)`, `cat >(cmd)`) does the same job with no
+  // pipe for this test to see, so the bracket forms are refused too.
+  if (/[|;&\n`]|\$\(|<(?=\()|>(?=\()/.test(trimmed)) return false
   return isPlanReadOnlyCommand(trimmed)
 }
 
@@ -305,13 +325,36 @@ export const PLAN_BLOCKED_TOOLS: ReadonlyArray<string> = Object.freeze([
 ])
 
 /**
+ * `todo` is a file-backed store (`.pi/todos/*.md`), so its WRITE actions are
+ * writes like any other — but its read actions are exactly what a planning turn
+ * wants, and blocking the tool outright would take the user's own todo list away
+ * from the model for the whole mode. Only the writer actions are refused.
+ */
+export const PLAN_TODO_READ_ACTIONS: ReadonlyArray<string> = Object.freeze([
+  "list",
+  "list-all",
+  "get",
+])
+
+/**
  * Delegation tools, refused during plan mode for a subtler reason than
  * `PLAN_BLOCKED_TOOLS`: a child session is a separate process with its own
  * tool roster, so `subagent` is a write vector this extension cannot gate —
  * the barrier has no visibility into what the child was told to do. Blocking
  * it is what keeps the mode's promise ("nothing on disk may change") true.
  */
-export const PLAN_BLOCKED_DELEGATION: ReadonlyArray<string> = Object.freeze(["subagent"])
+export const PLAN_BLOCKED_DELEGATION: ReadonlyArray<string> = Object.freeze([
+  "subagent",
+  // The rest of the family: `subagent_launch` is the workflow-flavoured entry
+  // point, and `send_to_session` hands a message to a DIFFERENT session that is
+  // not in this mode at all. Same escape as `subagent`, only further from the
+  // barrier.
+  "subagent_launch",
+  "send_to_session",
+  // `workflow` runs a JavaScript orchestration script that spawns its own
+  // agents; the script is the payload, so no per-tool rule can vet it.
+  "workflow",
+])
 
 /**
  * Shells plan mode refuses outright: unlike `bash`, a PowerShell allowlist is
@@ -319,6 +362,37 @@ export const PLAN_BLOCKED_DELEGATION: ReadonlyArray<string> = Object.freeze(["su
  * default), so plan mode simply has no powershell.
  */
 export const PLAN_BLOCKED_SHELLS: ReadonlyArray<string> = Object.freeze(["powershell"])
+
+/**
+ * The only MCP tools plan mode lets through.
+ *
+ * Every other MCP tool is refused by namespace prefix (`mcp__<server>__<tool>`),
+ * because a tool's NAME is not evidence about what it does:
+ * `mcp__gh-router-peers__explore` and `mcp__gh-router-peers__implement` differ by
+ * one word, and the second edits files in a worktree. `workers` (`implement`,
+ * `worker_defaults`), `cloudagent` (`create_job`), `browser` (clicks and types)
+ * and the peers `implement`/`test` family are all reachable from a plan-mode
+ * turn if this is left to the active-set barrier.
+ *
+ * That barrier cannot carry this weight: MCP servers are published `deferred`,
+ * so their tools are absent from the snapshot plan mode narrows, and
+ * `tool_search` can activate one at any point. The `tool_call` handler is the
+ * only place that sees these calls.
+ *
+ * Our own groups declare no `readOnlyHint` (and a server's hint would be the
+ * server's own claim, unverified by pi), so the rule is default-deny with an
+ * allowlist of the two search tools whose handlers this repo owns and whose
+ * bodies only read.
+ *
+ * Pi's own resource readers (`list_mcp_resources`, `read_mcp_resource`, …) are
+ * deliberately NOT listed: they carry no `mcp__` prefix, pi implements them, and
+ * pi marks them `readOnlyHint: true` (`extensions/mcp/resources.js:153`), so
+ * they fall outside the namespace rule and stay available for free.
+ */
+export const PLAN_MCP_READ_TOOLS: ReadonlyArray<string> = Object.freeze([
+  "mcp__gh-router-search__code",
+  "mcp__gh-router-search__web",
+])
 
 /** Session entry type for persisting plan state across resume. */
 export const PLAN_MODE_ENTRY = "gh-router-plan-mode"
@@ -362,6 +436,9 @@ export function buildPiPlanModeSection(): Array<string> {
     `    const PLAN_BLOCKED = new Set(${JSON.stringify([...PLAN_BLOCKED_TOOLS])});`,
     `    const PLAN_NO_DELEGATION = new Set(${JSON.stringify([...PLAN_BLOCKED_DELEGATION])});`,
     `    const PLAN_NO_SHELL = new Set(${JSON.stringify([...PLAN_BLOCKED_SHELLS])});`,
+    `    const PLAN_MCP_READ = new Set(${JSON.stringify([...PLAN_MCP_READ_TOOLS])});`,
+    `    const PLAN_TODO_READ = new Set(${JSON.stringify([...PLAN_TODO_READ_ACTIONS])});`,
+    `    const PLAN_MCP_READ_LIST = ${JSON.stringify(PLAN_MCP_READ_TOOLS.join(", "))};`,
     `    const isPlanUnsafeCommand = (${isPlanUnsafeCommand.toString()});`,
     `    const isPlanReadOnlyCommand = (${isPlanReadOnlyCommand.toString()});`,
     `    const isPlanSafeCommand = (${isPlanSafeCommand.toString()});`,
@@ -390,6 +467,16 @@ export function buildPiPlanModeSection(): Array<string> {
     `        if (known.size === 0) return names;`,
     `        return names.filter((n) => known.has(n));`,
     `      } catch { return names; }`,
+    `    }`,
+    ``,
+    // MCP server tools are `mcp__<server>__<tool>` with `-` flattened to `_` (pi
+    // `mcp-servers.js` mcpNamespace + `extensions/mcp/tools.js`). Unknown is
+    // denied: the active-set barrier never saw these names, so a call that
+    // arrives here is the whole decision. Tools without the prefix are not this
+    // rule's business — including pi's own `read_mcp_resource` readers.
+    `    function planBlockedMcp(name) {`,
+    `      if (name.indexOf("mcp__") !== 0) return false;`,
+    `      return !PLAN_MCP_READ.has(name);`,
     `    }`,
     ``,
     `    function planPaint(ctx, text, color) {`,
@@ -453,7 +540,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `        if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;`,
     `        if (toolsBeforePlan === null) toolsBeforePlan = [...pi.getActiveTools()];`,
     `        const snapshot = toolsBeforePlan;`,
-    `        const kept = snapshot.filter((n) => !PLAN_BLOCKED.has(n) && !PLAN_NO_DELEGATION.has(n));`,
+    `        const kept = snapshot.filter((n) => !PLAN_BLOCKED.has(n) && !PLAN_NO_DELEGATION.has(n) && !planBlockedMcp(n));`,
     `        // Entry may only NARROW. A read tool the caller already removed (a`,
     `        // --tools launch, or a profile that never had it) stays removed: adding`,
     `        // it here would hand the model a tool the launch deliberately withheld.`,
@@ -549,6 +636,15 @@ export function buildPiPlanModeSection(): Array<string> {
     `        if (PLAN_NO_DELEGATION.has(name)) {`,
     `          return { block: true, reason: "Plan mode is read-only: " + name + " would hand the work to a child session whose tool set this mode cannot gate. Investigate here, then leave plan mode (/plan or Ctrl+Alt+P) to delegate." };`,
     `        }`,
+    `        if (planBlockedMcp(name)) {`,
+    `          return { block: true, reason: "Plan mode is read-only: " + name + " is an MCP tool whose handler this mode cannot vouch for. Leave plan mode (/plan or Ctrl+Alt+P) to use it, or explore with the built-in read tools, the bash allowlist, and " + PLAN_MCP_READ_LIST + "." };`,
+    `        }`,
+    `        if (name === "todo") {`,
+    `          const action = String((event.input && event.input.action) || "");`,
+    `          if (!PLAN_TODO_READ.has(action)) {`,
+    `            return { block: true, reason: "Plan mode is read-only: todo/" + (action || "?") + " writes to the todo store. Use list/list-all/get to read it, or leave plan mode (/plan or Ctrl+Alt+P) to edit it." };`,
+    `          }`,
+    `        }`,
     `        if (name === "bash") {`,
     `          const command = (event.input && event.input.command) || "";`,
     `          if (!isPlanSafeCommand(String(command))) {`,
@@ -629,6 +725,8 @@ export function buildPiPlanModeSection(): Array<string> {
     `            "Restrictions:",`,
     `            "- The edit and write tools are disabled; a call to them is refused.",`,
     `            "- Delegation is disabled: a child session would escape these restrictions.",`,
+    `            "- MCP tools are refused, except the read-only search tools and resources.",`,
+    `            "- todo may be read (list/get) but not written.",`,
     `            "- Bash is restricted to an allowlist of read-only commands.",`,
     `            "- Nothing on disk may change.",`,
     `            "",`,

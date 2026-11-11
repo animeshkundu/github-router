@@ -454,22 +454,42 @@ state and the step list. While plan mode is on:
   believes it can still write is still stopped. `subagent` is refused too, and
   removed from the active set: a child session is a separate process with its
   own tool roster, so delegation is the one write vector this mode cannot
-  gate. Claude Code keeps its read-only Explore subagent available in plan
-  mode; here the agent catalog mixes read-only and writer agents and the
-  handler cannot tell them apart, so delegation resumes on `/plan` instead of
-  being half-gated.
+  gate. `subagent_launch`, `workflow` and `send_to_session` are refused for the
+  same reason — a workflow script spawns its own agents, and
+  `send_to_session` messages a session that is not in plan mode at all. Claude
+  Code keeps its read-only Explore subagent available in plan mode; here the
+  agent catalog mixes read-only and writer agents and the handler cannot tell
+  them apart, so delegation resumes on `/plan` instead of being half-gated.
 - `powershell` is refused outright (no allowlist can be derived safely from a
   PowerShell command string); `bash` is allowlisted to read-only commands
   (`git status|log|diff|show|blame`, `ls`, `cat`, `rg`, `npm ls`, …). The
-  destructive list wins over the allowlist, and any pipe, `;`, `&&`, or `$(…)`
-  is refused, so `git log && rm -rf dist` cannot launder itself. Read-only
-  first words with a write in their flags are refused too (`find -delete`,
-  `sort -o`, `git log --output=`), as are `sed`, `awk`, `env`, `less`/`more`:
-  the first two take a script, `env <cmd>` runs `<cmd>`, and a pager writes
-  (`less -o`) and executes (`less +!cmd`), so all of them can act with no
-  metacharacter for the guard to see. `fd -x`, `jq -i`,
-  `sort --compress-program`, `bat --pager` and `git --ext-diff`/`--textconv`
-  are refused for the same reason — they name or run a program.
+  destructive list wins over the allowlist, and any pipe, `;`, `&&`, a bare
+  `&`, a backtick, `$(…)`, or process substitution (`<(...)`, `>(...)`) is
+  refused — a bare `&` is the one that bites, since `ls & node -e '…'`
+  backgrounds the read and runs the writer, and `ls&rm -rf x` needs no space.
+  So `git log && rm -rf dist` cannot launder itself either.
+- Read-only first words with a write in their flags are refused too
+  (`find -delete`, `sort -o`, `sort -T`, `git log --output=`, `file -C`), as
+  are `sed`, `awk`, `env`, `less`/`more`: the first two take a script,
+  `env <cmd>` runs `<cmd>`, and a pager writes (`less -o`) and executes
+  (`less +!cmd`), so all of them can act with no metacharacter for the guard to
+  see. `fd -x`, `jq -i`, `sort --compress-program`, `bat --pager`,
+  `git --ext-diff`/`--textconv` and `git ls-remote --upload-pack` are refused
+  for the same reason — they name or run a program. `todo` may be *read*
+  (`list`, `list-all`, `get`) but its writer actions are refused: the store is
+  files under `.pi/todos/`, so a create is a write like any other. The plan
+  checklist itself is plan mode's own widget, never the todo store.
+- **MCP tools are denied by namespace.** Everything published as
+  `mcp__<server>__<tool>` is refused except a short allowlist
+  (`mcp__gh-router-search__code` and `…__web`; pi's own `read_mcp_resource`
+  family has no `mcp__` prefix and is untouched) —
+  `mcp__gh-router-peers__implement` edits files in a worktree and
+  `mcp__gh-router-cloudagent__create_job` spends compute, and neither is
+  distinguishable from its read-only sibling by name alone. The active-tool
+  barrier cannot cover this on its own: servers are published `deferred`, so
+  their tools are not in the set plan mode narrows, and `tool_search` can
+  activate one mid-session. The `tool_call` handler is the only place that
+  sees them.
 - The injected context is `display: false` and only appears on a real user
   turn — a background notification cannot re-add it. Pi appends and persists
   each injected block, so the transcript keeps only the newest block of each
