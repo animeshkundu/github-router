@@ -182,6 +182,17 @@ describe("plan mode: pure helpers", () => {
       "jq -r .a f",
       "fd -e ts",
       "bat f",
+      // Quoted patterns are ordinary arguments once the quotes are gone, and a
+      // destructive word in ARGUMENT position is just a word being searched for.
+      "rg 'TODO: fix' src",
+      "rg tee src",
+      "grep -n dd src/x.ts",
+      "rg ln lib",
+      "echo mkdir",
+      "git log --grep=\"fix typo\"",
+      "cat 'my file.txt'",
+      // `${IFS}` in a read is still a read once it normalizes to a space.
+      "cat${IFS}/etc/passwd",
       // The new flag denies must not swallow the read-only forms.
       "git ls-remote .",
       "sort -k2 f",
@@ -233,6 +244,23 @@ describe("plan mode: pure helpers", () => {
       // No-space output flags.
       "sort -oout.txt in.txt",
       "tree -oout.txt",
+      // Quoting, backslashes and `${IFS}` are handled by the shell, not by us:
+      // every spelling below runs the same denying flag, so all must be refused.
+      "find . -del''ete",
+      "find . -del\\ete",
+      "find . -'delete'",
+      'find . "-delete"',
+      "sort '-o' out in.txt",
+      "jq '-i' . f",
+      "fd '-x' sh",
+      "find${IFS}.${IFS}-delete",
+      "sort${IFS}-o${IFS}out${IFS}in.txt",
+      "tree${IFS}-o${IFS}out",
+      "jq${IFS}-i${IFS}.${IFS}f",
+      "fd${IFS}-x${IFS}sh",
+      // A variable can expand to a flag, and no reading of the text tells which.
+      "find . $FLAG",
+      "ls $HOME",
       // A bare `&` runs a second command, with or without spaces, and `${IFS}`
       // defeats the destructive list's command-position anchor.
       "ls & node -e 'x'",

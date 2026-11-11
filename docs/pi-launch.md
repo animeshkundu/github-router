@@ -490,6 +490,15 @@ state and the step list. While plan mode is on:
   their tools are not in the set plan mode narrows, and `tool_search` can
   activate one mid-session. The `tool_call` handler is the only place that
   sees them.
+- The checks read the command **after de-quoting it**: quotes and backslashes
+  are removed and `${IFS}`/`$IFS`/`$@`/`$*` become spaces, because bash does
+  exactly that before any program sees an argument. Without it, `find .
+  '-delete'`, `find . -del''ete` and `find${IFS}.${IFS}-delete` all read as
+  harmless words while running `find . -delete`. Any `$` left after that
+  normalization is refused outright — a variable can expand to a flag just as
+  easily as to a path. The cost is a false refusal of *quoted* metacharacters
+  (`rg 'a|b' src`, `git log --grep='fix && test'`, `ls 2>&1`); split the
+  pattern instead (`rg -e a -e b src`).
 - The injected context is `display: false` and only appears on a real user
   turn — a background notification cannot re-add it. Pi appends and persists
   each injected block, so the transcript keeps only the newest block of each

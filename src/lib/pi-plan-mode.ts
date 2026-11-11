@@ -57,13 +57,17 @@ export interface PlanStep {
  * its first word, so the destructive check is unconditional.
  */
 export function isPlanUnsafeCommand(command: string): boolean {
-  // Writers and process killers, anchored at a command position (start, or after
-  // whitespace / `;` / `|` / `&` / `(`). A bare `\bcp\b` refuses `ls -cp` and a
-  // bare `\brm\b` refuses `cat rm.md`; a second command cannot reach this list
-  // anyway, because `isPlanSafeCommand` refuses pipes, `;`, `&&` and `$(` before
-  // the allowlist runs.
+  // Writers and process killers, anchored at a COMMAND position: the start, or
+  // just after a separator that could begin one. Plain whitespace is not in that
+  // set, and that is the point — a word sitting in an ARGUMENT is not a command:
+  // `rg code src` searches for the word "code", `rg tee lib` for "tee". A bare
+  // `\bcp\b` would refuse `ls -cp`; a bare `\brm\b` would refuse `cat rm.md`.
+  // Nothing is lost by dropping `\s`: a second command needs `;`, `&&`, a bare
+  // `&` or `$(`, and `isPlanSafeCommand` refuses all of them before the
+  // allowlist runs. The separator set stays as the belt for a future edit that
+  // relaxes that guard.
   const destructive = [
-    /(^|[\s;|&(])(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|chgrp|ln|tee|truncate|dd|shred|sudo|su|killall|pkill|kill)(?=$|\s)/i,
+    /(^|[;|&(])\s*(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|chgrp|ln|tee|truncate|dd|shred|sudo|su|killall|pkill|kill)(?=$|\s)/i,
     /(^|[^<])>(?!>)/,
     />>/,
     /\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
@@ -78,7 +82,7 @@ export function isPlanUnsafeCommand(command: string): boolean {
     /\bshutdown\b/i,
     /\bsystemctl\s+(start|stop|restart|enable|disable)/i,
     /\bservice\s+\S+\s+(start|stop|restart)/i,
-    /(^|[\s;|&(])(?:vim?|nano|emacs|subl|code)(?=$|\s)/i,
+    /(^|[;|&(])\s*(?:vim?|nano|emacs|subl|code)(?=$|\s)/i,
     // Writers that the read allowlist would otherwise admit on the strength of
     // a read-only first word. Each of these READS like its harmless neighbour,
     // so plain prefix matching is not enough: `find . -delete` deletes, `sort
@@ -188,21 +192,49 @@ export function isPlanReadOnlyCommand(command: string): boolean {
   return safe.some((pattern) => pattern.test(command))
 }
 
+/**
+ * The string bash will actually run, as far as the quoting rules go.
+ *
+ * Every check below reads a command as TEXT, but bash does not: it removes
+ * quotes, eats backslashes, and expands a few shell parameters before any
+ * program sees an argument. That gap is not theoretical — as raw text,
+ * `find . '-delete'`, `find . -del''ete` and `find${IFS}.${IFS}-delete` all
+ * spell a harmless word, and all three run `find . -delete`.
+ *
+ * So the checks run on this normalization instead:
+ *   - `${IFS}`, `$IFS` and `$@`/`$*` expand to whitespace or to argv, and are
+ *     replaced with a space (the worst case for us);
+ *   - a backslash-escaped character loses the backslash, as bash does;
+ *   - quotes are removed, which is what they do — they group, they do not join.
+ *
+ * Anything still holding a `$` afterwards is refused by the caller: a variable
+ * can expand to `-delete` just as easily as to a path, and no reading of the
+ * raw text can tell which.
+ */
+export function planNormalizeCommand(command: string): string {
+  return String(command)
+    .replace(/\$\{IFS\}|\$IFS\b|\$[@*]/g, " ")
+    .replace(/\\([\s\S])/g, "$1")
+    .replace(/['"]/g, "")
+}
+
 /** True when plan mode may execute this bash command. */
 export function isPlanSafeCommand(command: string): boolean {
   if (typeof command !== "string") return false
   const trimmed = command.trim()
   if (!trimmed) return false
-  if (isPlanUnsafeCommand(trimmed)) return false
+  const normalized = planNormalizeCommand(trimmed)
+  if (isPlanUnsafeCommand(normalized)) return false
   // Shell metacharacters are refused: a pipe or substitution can smuggle a
   // write into an otherwise allowlisted prefix (`ls $(rm -rf /)`), and a second
   // command after `;`, `&&` or a bare `&` never reaches the allowlist check at
   // all. The bare `&` is the one that bites: `ls & node -e '…'` backgrounds the
   // read and runs the writer, and `ls&rm -rf x` needs no space at all.
   // Process substitution (`cat <(cmd)`, `cat >(cmd)`) does the same job with no
-  // pipe for this test to see, so the bracket forms are refused too.
-  if (/[|;&\n`]|\$\(|<(?=\()|>(?=\()/.test(trimmed)) return false
-  return isPlanReadOnlyCommand(trimmed)
+  // pipe for this test to see, so the bracket forms are refused too. A `$` that
+  // survived normalization is a variable, which can expand to a flag.
+  if (/[|;&\n`$]|<(?=\()|>(?=\()/.test(normalized)) return false
+  return isPlanReadOnlyCommand(normalized)
 }
 
 /**
@@ -439,6 +471,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `    const PLAN_MCP_READ = new Set(${JSON.stringify([...PLAN_MCP_READ_TOOLS])});`,
     `    const PLAN_TODO_READ = new Set(${JSON.stringify([...PLAN_TODO_READ_ACTIONS])});`,
     `    const PLAN_MCP_READ_LIST = ${JSON.stringify(PLAN_MCP_READ_TOOLS.join(", "))};`,
+    `    const planNormalizeCommand = (${planNormalizeCommand.toString()});`,
     `    const isPlanUnsafeCommand = (${isPlanUnsafeCommand.toString()});`,
     `    const isPlanReadOnlyCommand = (${isPlanReadOnlyCommand.toString()});`,
     `    const isPlanSafeCommand = (${isPlanSafeCommand.toString()});`,
