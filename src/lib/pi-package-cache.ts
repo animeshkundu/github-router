@@ -23,13 +23,37 @@ import type { PiPackageEntry } from "./pi-models-settings"
  * Keyed by the exact package set (sorted spec fingerprints), so flag
  * combinations (`--helpers`/`--ui`/`--search`/`--browse`) each get
  * their own entry and can never cross-contaminate. Entries older than
- * `PI_PACKAGE_CACHE_MAX_AGE_MS` (default 7d) are treated as a miss so
- * unpinned packages periodically refresh to upstream latest; the fresh
- * install is then saved back over the entry. Opt out entirely with
- * `GH_ROUTER_PI_NO_PACKAGE_CACHE=1`.
+ * the max age are treated as a miss so unpinned packages periodically
+ * refresh to upstream latest; the fresh install is then saved back over
+ * the entry. Opt out entirely with `GH_ROUTER_PI_NO_PACKAGE_CACHE=1`.
+ *
+ * Max age defaults to 24h, not the original 7d. Pi resolves an unpinned
+ * `npm:name` spec to whatever is already installed, so the max age IS the
+ * worst-case staleness of every extension the user runs — a week of it meant a
+ * fix published upstream on Monday was still missing the following Sunday.
+ * A day bounds the lag without making the cache pointless: the npm install it
+ * avoids takes ~5s, so one refresh per day is paid back by every other launch
+ * that day. Override with `GH_ROUTER_PI_PACKAGE_CACHE_HOURS`.
  */
 
-export const PI_PACKAGE_CACHE_MAX_AGE_MS = 7 * 24 * 3600 * 1000
+export const PI_PACKAGE_CACHE_MAX_AGE_MS = 24 * 3600 * 1000
+
+export const PI_PACKAGE_CACHE_HOURS_ENV = "GH_ROUTER_PI_PACKAGE_CACHE_HOURS"
+
+/**
+ * Effective max age. Read per call rather than at module load so a test (or a
+ * long-lived process re-reading config) can change the env and observe it, and
+ * so a malformed value degrades to the default instead of `NaN` day math —
+ * `Date.now() - mtime > NaN` is always false, which would make every entry
+ * eternally fresh.
+ */
+export function piPackageCacheMaxAgeMs(): number {
+  const raw = (process.env[PI_PACKAGE_CACHE_HOURS_ENV] ?? "").trim()
+  if (!raw) return PI_PACKAGE_CACHE_MAX_AGE_MS
+  const hours = Number(raw)
+  if (!Number.isFinite(hours) || hours <= 0) return PI_PACKAGE_CACHE_MAX_AGE_MS
+  return hours * 3600 * 1000
+}
 
 function cacheDisabled(): boolean {
   return process.env.GH_ROUTER_PI_NO_PACKAGE_CACHE === "1"
@@ -86,8 +110,12 @@ export async function seedPiPackageCache(
   const cachedNpm = npmDirOf(piPackageCacheDir(key))
   const mtime = await mtimeMsOf(cachedNpm)
   if (mtime === null) return false
-  if (Date.now() - mtime > PI_PACKAGE_CACHE_MAX_AGE_MS) {
-    consola.debug(`Pi package cache ${key} is stale; refreshing from registry.`)
+  const maxAge = piPackageCacheMaxAgeMs()
+  if (Date.now() - mtime > maxAge) {
+    const ageHours = Math.floor((Date.now() - mtime) / 3600000)
+    consola.debug(
+      `Pi package cache ${key} is stale (${ageHours}h old, max ${Math.round(maxAge / 3600000)}h); refreshing from registry.`,
+    )
     return false
   }
   try {
@@ -140,7 +168,7 @@ export async function sweepStalePiPackageCaches(): Promise<void> {
       const npmDir = npmDirOf(path.join(root, entry))
       try {
         const mtime = await mtimeMsOf(npmDir)
-        if (mtime === null || Date.now() - mtime > PI_PACKAGE_CACHE_MAX_AGE_MS) {
+        if (mtime === null || Date.now() - mtime > piPackageCacheMaxAgeMs()) {
           await fs.rm(path.join(root, entry), { recursive: true, force: true })
         }
       } catch (err) {

@@ -29,10 +29,13 @@ describe("pi extension surface", () => {
       expect(src).toContain("X-GH-Workspace")
     }
     // Balanced is floor-free by design: no brief, and with it no MCP client
-    // at all, so the generated source carries no fetch seam to fail.
+    // at all, so the generated source carries no fetch seam to fail. Plan
+    // mode still registers `before_agent_start` here (it returns undefined
+    // unless the user turns it on), so the assertion targets the BRIEF.
     for (const profileId of ["balanced", "balanced2"] as const) {
       const src = buildPiExtensionSource({ profileId })
-      expect(src).not.toContain("before_agent_start")
+      expect(src).not.toContain("prompt_brief")
+      expect(src).not.toContain("gh-router-prompt-brief")
       expect(src).not.toContain("callMcp")
     }
   })

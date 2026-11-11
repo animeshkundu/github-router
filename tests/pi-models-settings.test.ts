@@ -484,8 +484,11 @@ describe("pi cosmetic user overrides", () => {
       {
         hideThinkingBlock: false,
         theme: "tokyo-night",
+        terminalTheme: false,
+        thinkingMode: "full",
+        bashIntent: "model",
         readOutputMode: "preview",
-        themeAdaptive: true,
+        themeAdaptive: false,
         toolBackground: "border",
         terminal: { showImages: false },
         markdown: { mermaid: "off" },
@@ -495,8 +498,11 @@ describe("pi cosmetic user overrides", () => {
     expect(overrides).toEqual({
       hideThinkingBlock: false,
       theme: "tokyo-night",
+      terminalTheme: false,
+      thinkingMode: "full",
+      bashIntent: "model",
       readOutputMode: "preview",
-      themeAdaptive: true,
+      themeAdaptive: false,
       toolBackground: "border",
       terminal: { showImages: false },
       markdown: { mermaid: "off" },
@@ -779,18 +785,28 @@ describe("pi settings.json", () => {
     })
     // Presentational only (grouped rows, Shiki diffs) — zero model cost.
     expect(bare.packages).toContain("npm:pi-claude-code-ui")
-    // Claude-Code look: hidden thinking, fixed Claude palette, one-line
-    // tool rows (expandable via Ctrl+O).
+    // Claude-Code look: hidden thinking, one-line tool rows (expandable via
+    // Ctrl+O), and a transcript that draws live thinking then collapses it.
     expect(bare.hideThinkingBlock).toBe(true)
-    expect(bare.themeAdaptive).toBe(false)
+    // cc-ui's chrome now follows the active theme instead of a fixed palette;
+    // with `theme: "system"` that means it follows the terminal too.
+    expect(bare.themeAdaptive).toBe(true)
     expect(bare.groupToolCalls).toBe(true)
     expect(bare.readOutputMode).toBe("summary")
     expect(bare.searchOutputMode).toBe("count")
     expect(bare.mcpOutputMode).toBe("summary")
     expect(bare.bashOutputMode).toBe("summary")
     expect(bare.toolBackground).toBe("transparent")
-    // Genuine Claude Code dark palette, themes-only package (no code).
-    expect(bare.theme).toBe("claude-code-dark")
+    expect(bare.thinkingMode).toBe("live")
+    // Cost contract: bash labels are upstream's "model" default, which adds a
+    // tool field plus an instruction line to every turn. Pinned off.
+    expect(bare.bashIntent).toBe("off")
+    // Follow the terminal's palette rather than a fixed palette. cc-ui rewrote
+    // our old `claude-code-dark` pin to `system` at session_start anyway, so
+    // emitting the pin only bought a startup flash and a lying settings file.
+    expect(bare.theme).toBe("system")
+    expect(bare.terminalTheme).toBe(true)
+    // The CC palettes still ship as data, so `/settings` can pick one.
     expect(bare.packages).toContainEqual({
       source: "npm:better-claude-code-ui",
       themes: ["theme/*.json"],
@@ -815,6 +831,9 @@ describe("pi settings.json", () => {
     expect(noUi.readOutputMode).toBeUndefined()
     expect(noUi.toolBackground).toBeUndefined()
     expect(noUi.theme).toBeUndefined()
+    expect(noUi.terminalTheme).toBeUndefined()
+    expect(noUi.thinkingMode).toBeUndefined()
+    expect(noUi.bashIntent).toBeUndefined()
     expect(
       noUi.packages.some(
         (p) => typeof p === "object" && p.source === "npm:better-claude-code-ui",

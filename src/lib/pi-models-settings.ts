@@ -778,12 +778,39 @@ export interface PiSettingsJson {
    */
   toolBackground?: "default" | "transparent" | "outlines" | "border"
   /**
-   * Active Pi theme. Default is the genuine Claude Code dark palette
-   * (provided by the bundled theme package below); light-terminal
-   * users can pick `claude-code-light` (or any installed theme) and
-   * — like every other look key — their own snapshot value wins.
+   * Active Pi theme. Default is `system`: Pi builds every color from the
+   * terminal's own palette, and (with the bundled cc-ui) re-reads that
+   * palette when the terminal regains focus, so light/dark terminal
+   * switches are followed instead of fought. The `better-claude-code-ui`
+   * palettes still ship (themes-only), so `claude-code-dark` /
+   * `claude-code-light` / any installed theme stays one `/settings` pick —
+   * and, like every other look key, a user's own snapshot value wins.
    */
   theme?: string
+  /**
+   * cc-ui: keep Pi's theme on the terminal's palette. Its own default is
+   * also `true`; emitted explicitly so a future upstream default flip
+   * cannot silently pin the router back to a fixed palette. This is the
+   * setting that used to fight our `claude-code-dark` pin — cc-ui rewrote
+   * it to `system` at `session_start` anyway, so emitting `theme: "system"`
+   * is the same outcome without a startup flash.
+   */
+  terminalTheme?: boolean
+  /**
+   * cc-ui: how finished thinking blocks are drawn. `live` shows thinking
+   * while it streams and collapses it to `Thought for Xs` afterwards — the
+   * closest surface to Claude Code's transcript, and what stock Pi does not
+   * do. Display only; the thinking still happens at the configured effort.
+   */
+  thinkingMode?: "live" | "full" | "latest"
+  /**
+   * cc-ui: bash row labels. Default upstream is `"model"` since 1.0.112,
+   * which adds a field to the bash tool and a line to the model's
+   * instructions — a real (if small) token cost on every turn. Pinned to
+   * `"off"` on cost grounds: rows show the command itself, which is also
+   * what Claude Code does when it has no description to show.
+   */
+  bashIntent?: boolean | "off" | "model" | "local"
   /** Branch-summary token budget for session-tree navigation. */
   branchSummary?: {
     reserveTokens?: number
@@ -836,6 +863,9 @@ export const PI_COSMETIC_SETTING_KEYS = [
   "fullscreenCopyOnSelect",
   "fullscreenWheelScrollLines",
   "theme",
+  "terminalTheme",
+  "thinkingMode",
+  "bashIntent",
   "themeAdaptive",
   "groupToolCalls",
   "readOutputMode",
@@ -939,29 +969,43 @@ export const PI_UI_PACKAGES: ReadonlyArray<PiPackageEntry> = Object.freeze([
 ])
 
 /**
- * Claude Code dark theme (`#D77757` coral and friends) from
- * `better-claude-code-ui`, which ships six CC palettes. Themes-only:
+ * Claude Code palettes from `better-claude-code-ui`, which ships six CC
+ * variants (`claude-code-dark`, `claude-code-light`, …). Themes-only:
  * extensions/skills/prompts are explicitly emptied so none of the
  * package's status line, footer, or tool rendering loads and fights
- * the router-owned footer or `pi-claude-code-ui`. Theme files are
- * pure JSON data — loading the whole `./theme` dir costs nothing at
- * runtime and leaves all six CC variants pickable via `/settings`,
- * with `claude-code-dark` the default (see `PI_CC_DARK_THEME`).
+ * the router-owned footer or `pi-claude-code-ui`. Theme files are pure
+ * JSON data — loading the whole `./theme` dir costs nothing at runtime and
+ * leaves all six CC variants pickable via `/settings`.
+ *
+ * These are no longer the DEFAULT. The launch now follows the terminal
+ * (`PI_FOLLOW_TERMINAL_THEME`), which is what cc-ui did to our pin at
+ * `session_start` regardless: it rewrote `theme` to `system` and stashed
+ * `claude-code-dark` in `terminalThemePrevious`. Emitting the pin only
+ * bought a startup flash and a lying settings file, so the palettes stay
+ * as data and users who want the fixed CC look pick one.
  */
 export const PI_CC_THEME_PACKAGE: PiPackageEntry = {
   source: "npm:better-claude-code-ui",
   // Bare relative glob, NO `./` prefix (see note above): minimatch
   // matches manifest files by root-relative path, so `./theme` selects
   // nothing and the theme silently fails to load. All six CC variants
-  // load as pure JSON data (zero runtime cost); the default is
-  // `claude-code-dark`, light-terminal users pick `claude-code-light`.
+  // load as pure JSON data (zero runtime cost).
   themes: ["theme/*.json"],
   extensions: [],
   skills: [],
   prompts: [],
 }
 
-/** Default Pi theme: genuine Claude Code dark palette. */
+/**
+ * Default Pi theme: follow the terminal's own palette. Pi's built-in
+ * `system` theme derives every color from the terminal and already exists in
+ * `PI_MIN_VERSION` (1.3.0) — see `modes/interactive/theme/system-theme.js`,
+ * where it is also sorted first in `getAvailableThemesWithPaths()` because it
+ * is Pi's own default when no `theme` setting is present.
+ */
+export const PI_FOLLOW_TERMINAL_THEME = "system" as const
+
+/** The fixed Claude Code dark palette, kept for `/settings` picks and docs. */
 export const PI_CC_DARK_THEME = "claude-code-dark" as const
 
 /** Built-in tools enabled at startup (Pi-native set incl. Windows). */
@@ -1051,14 +1095,30 @@ export function buildPiSettingsJson(opts: {
     fullscreenWheelScrollLines: "auto",
     ...(ui
       ? {
-          themeAdaptive: false,
+          themeAdaptive: true,
           groupToolCalls: true,
           readOutputMode: "summary" as const,
           searchOutputMode: "count" as const,
           mcpOutputMode: "summary" as const,
           bashOutputMode: "summary" as const,
           toolBackground: "transparent" as const,
-          theme: PI_CC_DARK_THEME,
+          // Follow the terminal instead of pinning a palette. cc-ui's
+          // `terminalTheme` (its own default, emitted here so an upstream
+          // default flip cannot pin us) switches Pi to the `system` theme at
+          // session_start either way; emitting the same value up front just
+          // removes the flash between Pi's first frame and that switch.
+          theme: PI_FOLLOW_TERMINAL_THEME,
+          terminalTheme: true,
+          // Claude Code's transcript draws thinking while it streams and then
+          // collapses it to a one-liner. Display only — effort is unchanged.
+          thinkingMode: "live" as const,
+          // Upstream default since cc-ui 1.0.112 is "model", which buys bash
+          // labels by adding a tool field and an instruction line to every
+          // turn. Emitted as "off" to keep that standing token cost off the
+          // defaults; it stays a cosmetic key, so a user who writes
+          // `bashIntent: "model"` in their own settings still wins
+          // (`applyCosmeticUserOverrides`).
+          bashIntent: "off" as const,
         }
       : {}),
     branchSummary: { reserveTokens: 16384, skipPrompt: false },

@@ -135,7 +135,7 @@ plus the mode identity. Each surface rides a flag:
 |---|---|---|
 | `--peers` / `--no-peers` | **on** | Native agent files, the `peers` MCP group (`mcp__gh-router-peers__oracle`, plus the `advisor` subagent wherever the profile carries one), `gh-oracle` skill, `pi-subagents` package (**extensions only** — its skills/prompts are filtered out so they never reach Ctrl+O). `--no-peers` drops all of it (plus the server-side allow-list) and validates the lead model only. |
 | `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer and no `files` picker, whose `ctrl+shift+o` would collide with the UI's extra-detail toggle), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
-| `--ui` / `--no-ui` | **on** | Claude-Code look: genuine `claude-code-dark` theme (`#D77757` coral palette; all six CC variants pickable via `/settings`), fixed Claude palette in tool rows (`themeAdaptive: false`), one-line tool rows (`summary`/`count` modes), transparent tool backgrounds. Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag (the cc-ui `Thought for Xs` one-liner has no off switch upstream — it is the minimum). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
+| `--ui` / `--no-ui` | **on** | Claude-Code look: Pi follows the terminal's own palette (`theme: system`, `terminalTheme: true`) — the same colours the terminal uses for every other tool, and light/dark switches are tracked automatically. The six genuine Claude Code palettes still ship themes-only from `better-claude-code-ui` (`claude-code-dark` `#D77757` coral, `claude-code-light`, …), one `/settings` pick away. cc-ui chrome derives from the active theme (`themeAdaptive: true`), tool rows collapse to one line (`summary`/`count` modes) on transparent backgrounds, and finished thinking collapses to `Thought for Xs` (`thinkingMode: live`). Bash row labels stay **off**: upstream's `model` default adds a tool field plus an instruction line to every turn, a standing token cost for a cosmetic. Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag (the cc-ui `Thought for Xs` one-liner has no off switch upstream — it is the minimum). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
 | `--swe` | off | Pipeline surface: `gh-delegate` (+`gh-advisor` wherever the profile carries an Advisor) skills, `review` / `parallel-review` (+`plan-review` on the same profiles) prompts |
 | `--search` | off | ColBERT provision + the `gh-search-first` skill prose. The `code` tool itself is published on every launch (see the MCP section), so this flag now owns only the ColBERT-specific advice, which would be wrong on a Bluebird or lexical backend |
 | `--browse` | off | Browser MCP group when a supported browser is installed |
@@ -150,8 +150,9 @@ defaults): `models.json` (routing is load-bearing), `mcp.json` (the
 `search` group at minimum), minimal `settings.json`, `APPEND_SYSTEM.md`
 digest, statusline footer (built into
 the `gh-router-pi` extension — no third-party package; opt out with
-`GH_ROUTER_DISABLE_AIC_STATUSLINE=1`), toolbelt PATH (opt out with
-`GH_ROUTER_DISABLE_TOOLBELT=1`), launch binding. The user's own
+`GH_ROUTER_DISABLE_AIC_STATUSLINE=1`), plan mode (built into the same
+extension — see [Plan mode](#plan-mode); no flag, no package), toolbelt PATH
+(opt out with `GH_ROUTER_DISABLE_TOOLBELT=1`), launch binding. The user's own
 `~/.pi/agent` snapshot is their Pi default, never gated.
 
 ## MCP: Pi's built-in client, every profile-appropriate group
@@ -286,9 +287,12 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   `<mirror>/npm` from `~/.local/share/github-router/pi-packages/<hash>/`
   (keyed by the exact flag-dependent package set) and saves the installed
   tree back on shutdown. Repeat launches with the same flags install
-  nothing. Entries older than 7 days are treated as a miss so unpinned
-  packages periodically refresh; opt out with
-  `GH_ROUTER_PI_NO_PACKAGE_CACHE=1`.
+  nothing. Entries older than 24 hours are treated as a miss so unpinned
+  packages refresh daily rather than weekly — that window is the worst-case
+  staleness of every extension in the launch, and the install it saves costs
+  ~5 s, so one refresh a day is paid back by every other launch that day.
+  Override with `GH_ROUTER_PI_PACKAGE_CACHE_HOURS` (e.g. `168` restores the
+  old week); opt out with `GH_ROUTER_PI_NO_PACKAGE_CACHE=1`.
 - **Subagents via `pi-subagents` + our agents.** The `gh-router-pi`
   extension registers no model-facing tools; every consult and search tool
   arrives through native MCP as `mcp__gh-router-peers__oracle`,
@@ -434,6 +438,75 @@ Deliberate divergences from the Claude path:
 Opt out with `GH_ROUTER_DISABLE_AIC_STATUSLINE=1`. Fail-open: a broken
 runner degrades to Pi's native footer, never a broken launch.
 
+## Plan mode
+
+Claude Code's plan mode is a mode; Pi ships none (upstream README: "skips
+features like sub-agents and plan mode") and offers it only as an example
+extension a user has to install. `github-router pi` therefore generates the
+equivalent into its own `local:gh-router-pi` extension, always on, for every
+profile — no flag, no package, no model-facing tool.
+
+**Toggle** with `Ctrl+Alt+P` or `/plan`; `/plan-status` prints the current
+state and the step list. While plan mode is on:
+
+- `edit`, `write` and `apply_patch` leave the active tool set AND are refused
+  by a `tool_call` handler — two independent barriers, so a model that
+  believes it can still write is still stopped. `subagent` is refused too, and
+  removed from the active set: a child session is a separate process with its
+  own tool roster, so delegation is the one write vector this mode cannot
+  gate. Claude Code keeps its read-only Explore subagent available in plan
+  mode; here the agent catalog mixes read-only and writer agents and the
+  handler cannot tell them apart, so delegation resumes on `/plan` instead of
+  being half-gated.
+- `powershell` is refused outright (no allowlist can be derived safely from a
+  PowerShell command string); `bash` is allowlisted to read-only commands
+  (`git status|log|diff|show|blame`, `ls`, `cat`, `rg`, `npm ls`, …). The
+  destructive list wins over the allowlist, and any pipe, `;`, `&&`, or `$(…)`
+  is refused, so `git log && rm -rf dist` cannot launder itself. Read-only
+  first words with a write in their flags are refused too (`find -delete`,
+  `sort -o`, `git log --output=`), as are `sed`, `awk`, `env`, `less`/`more`:
+  the first two take a script, `env <cmd>` runs `<cmd>`, and a pager writes
+  (`less -o`) and executes (`less +!cmd`), so all of them can act with no
+  metacharacter for the guard to see. `fd -x`, `jq -i`,
+  `sort --compress-program`, `bat --pager` and `git --ext-diff`/`--textconv`
+  are refused for the same reason — they name or run a program.
+- The injected context is `display: false` and only appears on a real user
+  turn — a background notification cannot re-add it. Pi appends and persists
+  each injected block, so the transcript keeps only the newest block of each
+  kind, and a block lives only while its own mode does: the read-only
+  instructions disappear the moment execution starts (they would contradict
+  the "full access" notice), and everything is gone once plan mode ends.
+
+The active tool set is **snapshotted** on entry and restored verbatim on exit,
+and entry only ever *narrows* it: read tools are added back only when the
+snapshot already had them, so a `--tools` narrowing survives the toggle in both
+directions. (The upstream example re-derives "normal mode" from a hardcoded
+list, which would resurrect the tools the narrowing removed.) Plan state
+persists through a custom session entry — one per real change, not per turn —
+so resuming a plan-mode session re-applies the read-only tool set, and starting
+a fresh session (`/new`, a fork into an empty branch) releases it.
+
+**Checklist.** The model's numbered `Plan:` block is parsed into steps and
+rendered as a resident widget above the editor, plus a footer badge —
+`⏸ plan` while planning, `📋 2/5` while executing. Accepting "Execute the
+plan" restores full tool access, kicks off the first step, and tracks
+progress from `[DONE:n]` tags (text *and* thinking blocks, since
+reasoning-max models often tag in thinking); "All steps complete" is honoured
+as a fallback. Completion is posted as a `nextTurn` message rather than
+`triggerTurn`, so a checkmark never buys an extra model turn. The checklist is
+display state only: plan mode never touches the file-backed `todo` tool, so a
+plan and a todo list stay separate stores.
+
+**Versus `--swe`'s `gh-plan`:** plan mode gates tools inside one session;
+the `gh-plan` skill (only with `--swe`) writes a durable `plan.md` plus a
+`.complete` marker for a multi-agent pipeline. Both exist on purpose — the
+first is interactive exploration, the second is an artifact other agents read.
+
+Fail-open throughout: every Pi API the section touches is feature-probed, so a
+Pi build that grew or dropped one degrades to "no plan mode" rather than a
+broken session. `Ctrl+Alt+P` can be intercepted by some terminals; `/plan` is
+the fallback.
+
 ## Files
 
 - `src/pi.ts` — launcher (TTY or `--print`/`--mode` headless).
@@ -451,11 +524,15 @@ runner degrades to Pi's native footer, never a broken launch.
 
 ## Claude-Code look (bundled by default)
 `pi-claude-code-ui` ships by default (`--no-ui` opts out): grouped rows,
-Shiki diffs, Ctrl+O previews. The TUI theme defaults to the genuine
-`claude-code-dark` palette (themes-only load from `better-claude-code-ui`
-— none of its status line, footer, or tool rendering loads, so the
-router-owned AIC footer is untouched; light-terminal users can pick
-`claude-code-light` via `/settings`). For the full Claude behavior set, install
+Shiki diffs, Ctrl+O previews. The TUI follows the terminal's own palette
+(`theme: system`), which is what cc-ui does on its own at `session_start`
+anyway — pinning `claude-code-dark` only produced a startup flash and a
+settings file that lied about the active theme. The six genuine CC
+palettes still load themes-only from `better-claude-code-ui` (none of its
+status line, footer, or tool rendering loads, so the router-owned AIC
+footer is untouched), so `claude-code-dark` / `claude-code-light` / any
+installed theme stays one `/settings` pick, and a user's own `theme` value
+still wins. For the full Claude behavior set, install
 yourself — the `~/.pi/agent` snapshot carries it into the mirror automatically
 (`pi-code` itself stays out of the bundle: its `/memory` + `/context`
 commands would collide with the router-owned pair):
@@ -473,12 +550,15 @@ Yes — every display default is overridable, at three levels:
 1. **Your settings win for display keys.** Anything you set in
    `~/.pi/agent/settings.json` for these keys survives the launch
    (snapshot-carried into the mirror, applied over our defaults):
-   `hideThinkingBlock`, `theme` (e.g. `claude-code-light` on light
-   terminals, or any installed theme), `themeAdaptive`,
+   `hideThinkingBlock`, `theme` (default `system`; `claude-code-dark`,
+   `claude-code-light`, or any installed theme also work),
+   `terminalTheme`, `thinkingMode` (`live`/`full`/`latest`),
+   `bashIntent` (`off`/`model`/`local`),
+   `themeAdaptive`,
    `groupToolCalls`, `readOutputMode` (`summary`/`preview`/`hidden`),
    `searchOutputMode` (`count`/`preview`/`hidden`),
    `mcpOutputMode`, `bashOutputMode` (`summary`/`preview`/`opencode`),
-   `toolBackground`,    `terminal`, `images`, `markdown` (`mermaid: streaming` pinned),
+   `toolBackground`, `terminal`, `images`, `markdown` (`mermaid: streaming` pinned),
    `tuiMode`, `quietStartup`, and the four `fullscreen*` keys.
    Example:
    `"hideThinkingBlock": false` shows thinking again;
@@ -487,7 +567,7 @@ Yes — every display default is overridable, at three levels:
    the cost contract, not a preference.
 2. **Kill-switch:** `--no-ui` drops the whole transcript package.
 3. **Runtime toggles (this session):** `/settings` (thinking, theme),
-   `/cc-theme on|off|toggle` (Claude palette vs Pi theme),
+   `/cc-theme terminal on|off` (follow the terminal vs. a fixed palette),
    `/cc-tools thinking|group|outlines` (thinking expansion, grouping,
    chrome), `/cc-spinner` (spinner colors).
 

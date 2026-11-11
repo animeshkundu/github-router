@@ -10,6 +10,7 @@ import { isBalancedFamily, isCheapestFamily } from "./profile-family"
 import {
   AIC_STATUSLINE_DISABLE_ENV,
 } from "./aic-statusline-settings"
+import { buildPiPlanModeSection } from "./pi-plan-mode"
 import {
   PI_STATUS_COMMAND_ENV,
   PI_STATUSLINE_DEBOUNCE_MS,
@@ -27,9 +28,9 @@ import {
  * server in the mirror's `mcp.json` (`src/lib/pi-mcp-config.ts`), which
  * brings `tool_search`, the `mcp_servers` roster and per-server `exposure`
  * that a hand-wrapped `registerTool` cannot. What stays is the work no MCP
- * server can do: the statusline footer, the memory bridge, and (cheapest
- * family only) the prompt-submit relay, which POSTs JSON-RPC `tools/call`
- * to the running proxy with the per-launch nonce (the same
+ * server can do: the statusline footer, plan mode, the memory bridge, and
+ * (cheapest family only) the prompt-submit relay, which POSTs JSON-RPC
+ * `tools/call` to the running proxy with the per-launch nonce (the same
  * `GH_ROUTER_HOOK_MCP_URL/NONCE` channel the Claude hooks use).
  *
  * No custom provider, no compaction replacement: `session_before_compact`
@@ -42,6 +43,12 @@ import {
  * segments. There is deliberately no third-party statusline package and
  * no `statusLine` settings block (the community bridge only reads the
  * user's real global/project settings, never the launch mirror).
+ *
+ * Plan mode (always on): Claude Code ships plan mode as a mode; Pi ships it
+ * only as an example extension a user has to install. `src/lib/pi-plan-mode.ts`
+ * generates the equivalent into this same package — see
+ * `buildPiPlanModeSection` for the two independent write barriers, the
+ * snapshot/restore of the tool set, and the divergences from upstream.
  */
 
 /**
@@ -465,6 +472,9 @@ export function buildPiExtensionSource(opts: {
     // flag surface): owns Pi's footer with the shared internal-aic-status
     // runner. No third-party statusline package, no settings block.
     ...buildPiStatuslineFooterSection(),
+    // Plan mode: always on, no flag. Claude Code ships plan mode as a mode; Pi
+    // ships it as an example extension, so parity means generating it per launch.
+    ...buildPiPlanModeSection(),
     `  // Route compaction summaries to the mode's cheap capable model;`,
     `  // ALWAYS fall back to Pi native (return undefined) on any failure.`,
     `  pi.on("session_before_compact", async (event) => {`,

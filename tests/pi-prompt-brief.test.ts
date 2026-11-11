@@ -152,13 +152,19 @@ describe("pi prompt brief: emission gate", () => {
     for (const profileId of ["cheapest", "cheapest2"] as const) {
       expect(emit(profileId)).toContain('pi.on("before_agent_start"')
       expect(emit(profileId)).toContain('callMcp("search", "prompt_brief"')
+      expect(emit(profileId)).toContain("gh-router-prompt-brief")
     }
     // The balanced family is floor-free by design, exactly like the advisor:
     // the digest and the front-end brief are the same surface and gate
     // together, so balanced2 derives the omission rather than re-declaring it.
+    //
+    // The assertion is on the BRIEF, not on the event name: every profile now
+    // registers a `before_agent_start` handler for plan mode (which costs
+    // nothing at rest — it returns undefined unless plan mode is engaged).
     for (const profileId of ["balanced", "balanced2"] as const) {
-      expect(emit(profileId)).not.toContain("before_agent_start")
       expect(emit(profileId)).not.toContain("prompt_brief")
+      expect(emit(profileId)).not.toContain("gh-router-prompt-brief")
+      expect(emit(profileId)).not.toContain("callMcp")
     }
   })
 })
