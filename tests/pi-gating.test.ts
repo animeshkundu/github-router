@@ -223,26 +223,27 @@ describe("pi --swe owns the pipeline surface", () => {
   })
 })
 
-describe("pi local profiles route consults to the endpoint they can reach", () => {
-  test("the default oracle skill follows whether the MCP tool exists", () => {
-    for (const profileId of ["local", "local2"] as const) {
-      expect(buildPiSkills({ profileId }).map((s) => s.dir)).toEqual(["gh-oracle"])
-    }
-    // `local` filters the peers group down to the artifact tools, so
-    // `mcp__gh-router-peers__oracle` answers -32601 there. The skill routes to
-    // the agent file instead of naming a tool that would waste a turn.
-    const local = buildPiSkills({ profileId: "local" })[0]
-    expect(local.content).not.toContain("mcp__gh-router-peers__oracle")
-    expect(local.content).toContain("`oracle` subagent")
-    const local2 = buildPiSkills({ profileId: "local2" })[0]
-    expect(local2.content).toContain("mcp__gh-router-peers__oracle")
+describe("pi local profiles carry the consultants they can reach locally", () => {
+  test("the oracle skill is emitted for every profile, including local", () => {
+    // `local`'s consult runs on the LOCAL tier, so the role exists there and is
+    // advertised: it is a plain consult of the endpoint the lead already uses.
+    // Withholding the skill would have hidden a role the model is allowed to
+    // use, which is worse than either emitting or omitting the persona.
+    const local = buildPiSkills({ profileId: "local" })
+    expect(local.map((s) => s.dir)).toEqual(["gh-oracle"])
+    expect(local[0].content).toContain("mcp__gh-router-peers__oracle")
+    // `local2` keeps the same stateless MCP persona, billed to Sol.
+    const local2 = buildPiSkills({ profileId: "local2" })
+    expect(local2.map((s) => s.dir)).toEqual(["gh-oracle"])
+    expect(local2[0].content).toContain("mcp__gh-router-peers__oracle")
   })
 
-  test("--swe names only the consultant the profile actually has", () => {
+  test("--swe names the consultant both local profiles actually have", () => {
     const local = buildPiSkills({ profileId: "local", swe: true })
     expect(local.map((s) => s.dir)).toEqual(["gh-oracle", "gh-delegate"])
     const localDelegate = local.find((s) => s.dir === "gh-delegate")
     expect(localDelegate?.content).toContain("`oracle` for consults")
+    // No Advisor on `local`: the roster sentence must not promise one.
     expect(localDelegate?.content).not.toContain("`advisor`")
 
     const local2 = buildPiSkills({ profileId: "local2", swe: true })

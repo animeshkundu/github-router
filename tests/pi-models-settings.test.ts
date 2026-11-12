@@ -22,6 +22,7 @@ import {
   piLeadModel,
   piLeadThinking,
   piNativeRoles,
+  piOracleEnabled,
   piOracleModel,
   piOracleThinking,
   piProfileModelIds,
@@ -332,13 +333,13 @@ describe("pi models.json local profiles", () => {
     }
   })
 
-  test("roster: bare tier ids, oracle on the lead tier for local", () => {
+  test("roster: bare tier ids and a LOCAL-tier consultant on local", () => {
     const json = buildPiModelsJson({
       serverUrl: "http://127.0.0.1:8787",
       profileId: "local",
     })
-    // No Copilot-served row at all: local allows no Copilot model, so its
-    // oracle runs on the same local tier as the lead.
+    // No Copilot-served row at all: `local` may bill no Copilot model, so the
+    // only rows are the tier ids the local endpoint answers.
     expect(
       json.providers["gh-router"].models.map((m) => m.id).sort(),
     ).toEqual(["haiku", "opus", "sonnet"])
@@ -354,17 +355,61 @@ describe("pi models.json local profiles", () => {
       model: "gpt-6.1-sol",
       thinking: "high",
     })
-    expect(piOracleModel("local")).toBe(piLeadModel("local"))
+    // The consultant EXISTS but is pinned to the local lead tier: an oracle
+    // that runs on `opus` bills the local endpoint, so the zero-Copilot
+    // invariant holds while the role stays available. Pointing it at a
+    // Copilot slug here would be the violation, not the role itself.
+    expect(piOracleEnabled("local")).toBe(true)
+    expect(piOracleModel("local")).toBe("opus")
     expect(piOracleThinking("local")).toBe("high")
+    // `local2` keeps the contracted Copilot consultant.
+    expect(piOracleEnabled("local2")).toBe(true)
+    expect(piOracleModel("local2")).toBe("gpt-6.1-sol")
+    expect(piOracleThinking("local2")).toBe("high")
   })
 
-  test("the local oracle file stays emitted, pinned to the local tier", () => {
-    // Omitting the file would un-shadow Pi's builtin `oracle`, which also owns
-    // the `advisor` alias and is pinned to a model of its own choosing. The
-    // role, its nesting grant and the shadowing stay; only the model moves.
+  test("local's oracle is one-shot and runs on the local tier", () => {
+    // `piOracleEnabled` no longer gates `local` out; what keeps the role honest
+    // is the model pin below plus the empty tool list, which is what makes the
+    // consult a single cold-start call on every transport.
     const derived = buildPiAgentFiles("local")
     expect(derived["agents/oracle.md"]).toContain("model: gh-router/opus")
-    expect(derived["agents/oracle.md"]).not.toContain("gpt-6.1-sol")
+    expect(derived["agents/oracle.md"]).toContain('tools: ""')
+    // The nesting grant names the agent the roster actually has.
+    expect(derived["agents/general-purpose.md"]).toContain("allowedAgents: reviewer, oracle")
+    // No disable override: our file shadows the builtin, and the shadowed role
+    // is exactly the one we want.
+    const settings = buildPiSettingsJson({
+      profileId: "local",
+      searchEnabled: false,
+      browseEnabled: false,
+    }) as { subagents?: { agentOverrides?: Record<string, { disabled?: boolean }> } }
+    expect(settings.subagents?.agentOverrides?.["oracle"]).toBeUndefined()
+
+    // `local2` differs only in the model behind the same tool-less role.
+    const local2 = buildPiAgentFiles("local2")
+    expect(local2["agents/oracle.md"]).toContain("model: gh-router/gpt-6.1-sol")
+    expect(local2["agents/oracle.md"]).toContain('tools: ""')
+  })
+
+  test("every profile's oracle is tool-less", () => {
+    // The oracle contract is one shot with no tools (the MCP persona already
+    // is). A Pi oracle that could read the repo would answer questions it was
+    // not given and cost a turn per call.
+    for (const profileId of [
+      "cheapest",
+      "cheapest2",
+      "balanced",
+      "balanced2",
+      "local",
+      "local2",
+    ] as const) {
+      const files = buildPiAgentFiles(profileId)
+      const oracle = files["agents/oracle.md"]
+      expect(oracle).toBeDefined()
+      expect(oracle).toContain('tools: ""')
+      expect(oracle).not.toContain("tools: read")
+    }
   })
 })
 
@@ -484,8 +529,11 @@ describe("pi cosmetic user overrides", () => {
       {
         hideThinkingBlock: false,
         theme: "tokyo-night",
+        terminalTheme: false,
+        thinkingMode: "full",
+        bashIntent: "model",
         readOutputMode: "preview",
-        themeAdaptive: true,
+        themeAdaptive: false,
         toolBackground: "border",
         terminal: { showImages: false },
         markdown: { mermaid: "off" },
@@ -495,8 +543,11 @@ describe("pi cosmetic user overrides", () => {
     expect(overrides).toEqual({
       hideThinkingBlock: false,
       theme: "tokyo-night",
+      terminalTheme: false,
+      thinkingMode: "full",
+      bashIntent: "model",
       readOutputMode: "preview",
-      themeAdaptive: true,
+      themeAdaptive: false,
       toolBackground: "border",
       terminal: { showImages: false },
       markdown: { mermaid: "off" },
@@ -779,18 +830,28 @@ describe("pi settings.json", () => {
     })
     // Presentational only (grouped rows, Shiki diffs) — zero model cost.
     expect(bare.packages).toContain("npm:pi-claude-code-ui")
-    // Claude-Code look: hidden thinking, fixed Claude palette, one-line
-    // tool rows (expandable via Ctrl+O).
+    // Claude-Code look: hidden thinking, one-line tool rows (expandable via
+    // Ctrl+O), and a transcript that draws live thinking then collapses it.
     expect(bare.hideThinkingBlock).toBe(true)
-    expect(bare.themeAdaptive).toBe(false)
+    // cc-ui's chrome now follows the active theme instead of a fixed palette;
+    // with `theme: "system"` that means it follows the terminal too.
+    expect(bare.themeAdaptive).toBe(true)
     expect(bare.groupToolCalls).toBe(true)
     expect(bare.readOutputMode).toBe("summary")
     expect(bare.searchOutputMode).toBe("count")
     expect(bare.mcpOutputMode).toBe("summary")
     expect(bare.bashOutputMode).toBe("summary")
     expect(bare.toolBackground).toBe("transparent")
-    // Genuine Claude Code dark palette, themes-only package (no code).
-    expect(bare.theme).toBe("claude-code-dark")
+    expect(bare.thinkingMode).toBe("live")
+    // Cost contract: bash labels are upstream's "model" default, which adds a
+    // tool field plus an instruction line to every turn. Pinned off.
+    expect(bare.bashIntent).toBe("off")
+    // Follow the terminal's palette rather than a fixed palette. cc-ui rewrote
+    // our old `claude-code-dark` pin to `system` at session_start anyway, so
+    // emitting the pin only bought a startup flash and a lying settings file.
+    expect(bare.theme).toBe("system")
+    expect(bare.terminalTheme).toBe(true)
+    // The CC palettes still ship as data, so `/settings` can pick one.
     expect(bare.packages).toContainEqual({
       source: "npm:better-claude-code-ui",
       themes: ["theme/*.json"],
@@ -815,6 +876,9 @@ describe("pi settings.json", () => {
     expect(noUi.readOutputMode).toBeUndefined()
     expect(noUi.toolBackground).toBeUndefined()
     expect(noUi.theme).toBeUndefined()
+    expect(noUi.terminalTheme).toBeUndefined()
+    expect(noUi.thinkingMode).toBeUndefined()
+    expect(noUi.bashIntent).toBeUndefined()
     expect(
       noUi.packages.some(
         (p) => typeof p === "object" && p.source === "npm:better-claude-code-ui",

@@ -5,6 +5,7 @@ import {
   microClassify,
 } from "~/lib/first-mate/classifier"
 import { resolveTierModel } from "~/lib/first-mate/model-tiers"
+import { registerLaunch, unregisterLaunch } from "~/lib/launch-registry"
 import { state } from "~/lib/state"
 
 type ModelCatalog = NonNullable<typeof state.models>
@@ -194,4 +195,23 @@ test("classifyPlanReady maps a high-confidence response", async () => {
     planReady: true,
     planExcerpt: "1. Update the parser. 2. Add focused tests.",
   })
+})
+
+test("a -m local launch refuses the Copilot classifier instead of billing a tier", async () => {
+  // The classifier builds its own Copilot request, bypassing the `create-*`
+  // services that own the profile ceiling. Without this guard a first-mate
+  // background judgment would bill a Copilot model on the one profile that
+  // must bill none. Declining is the documented "no verdict" answer.
+  const fetchMock = mockChatCompletionContent(JSON.stringify({ ok: true, confidence: 0.9 }))
+  const launch = registerLaunch({
+    profileId: "local",
+    nonce: "c".repeat(64),
+    secret: "s".repeat(64),
+  })
+  try {
+    await expect(classifyOk()).resolves.toBeNull()
+    expect(fetchMock.mock.calls.length).toBe(0)
+  } finally {
+    unregisterLaunch(launch.launchId)
+  }
 })

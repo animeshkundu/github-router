@@ -5,6 +5,7 @@ import consola from "consola"
 
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
 import { extractAndRecordAic } from "~/lib/aic-ledger"
+import { isCopilotModelAllowed } from "~/lib/copilot-model-policy"
 import { resolveTierModel } from "~/lib/first-mate/model-tiers"
 import { resolveCloudAgentModel } from "~/lib/first-mate/task-model"
 import { resolveModel } from "~/lib/utils"
@@ -161,6 +162,16 @@ const SYSTEM_PROMPT =
 export const defaultTier1Judge: Tier1Judge = async (req, opts) => {
   const model = resolveTierModel("T1", opts)
   if (!model) return null
+  // Same guard as the micro-classifier: this judge builds its own Copilot
+  // request instead of going through `create-*`, so the profile ceiling has to
+  // be applied here too. Declining routes to `decideRoute(kind, null)`, which
+  // escalates rather than auto-accepting — the fail-closed direction.
+  if (!isCopilotModelAllowed(model)) {
+    consola.debug(
+      `first-mate Tier1 judge skipped: ${model} is not permitted on this launch`,
+    )
+    return null
+  }
   const user = JSON.stringify({
     kind: req.kind,
     trusted: {

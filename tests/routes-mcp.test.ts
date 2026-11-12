@@ -4431,6 +4431,87 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
     }
   })
 
+  // `local` is `cheaplocal`'s mirror image: the LEAD is local and the consult
+  // left Copilot. The dispatch must therefore take the same local branch with
+  // the bare `opus` id — no catalog lookup, no `/responses`, no Copilot
+  // credential — which is the whole of the zero-Copilot promise for this role.
+  test("local Oracle: the consult goes to the local endpoint with the bare tier id", async () => {
+    const LOCAL_NONCE = "e".repeat(64)
+    const LOCAL_BASE = "http://127.0.0.1:9931/v1"
+    const launch = registerLaunch({
+      profileId: "local",
+      nonce: LOCAL_NONCE,
+      secret: "local-oracle-secret",
+      allowedGroups: new Set(["peers"]),
+      allowedPersonas: new Set(["oracle"]),
+    })
+    const savedSessionId = state.sessionId
+    try {
+      state.sessionId = "local-oracle-session"
+      configureLocalEgress({ profileId: "local", baseUrl: LOCAL_BASE })
+
+      let url = ""
+      const captured: { body?: Record<string, unknown>; headers?: Record<string, string> } = {}
+      globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+        url = input.toString()
+        if (init?.body) captured.body = JSON.parse(init.body.toString()) as Record<string, unknown>
+        captured.headers = (init?.headers ?? {}) as Record<string, string>
+        return Response.json({
+          id: "msg-local-oracle",
+          type: "message",
+          role: "assistant",
+          model: "opus",
+          content: [{ type: "text", text: "Approach B." }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 2 },
+        })
+      }) as unknown as typeof fetch
+
+      const before = aicSnapshot().perModel["opus"]
+      const call = await rpc(
+        {
+          jsonrpc: "2.0",
+          id: 90,
+          method: "tools/call",
+          params: { name: "oracle", arguments: { query: "A or B?", context: "Evidence E." } },
+        },
+        { auth: `Bearer ${LOCAL_NONCE}` },
+      )
+      expect(call.json.error).toBeUndefined()
+      expect(url).toBe(`${LOCAL_BASE}/messages`)
+      // The minimal local wire shape: one model id, one system prompt, one user
+      // message, one output cap, one effort request. No `tools`, no `stream`.
+      expect(Object.keys(captured.body ?? {}).sort()).toEqual([
+        "max_tokens",
+        "messages",
+        "model",
+        "output_config",
+        "system",
+      ])
+      expect(captured.body?.model).toBe("opus")
+      expect(captured.body?.max_tokens).toBe(LOCAL_CONSULT_MAX_OUTPUT_TOKENS)
+      const messages = captured.body?.messages as Array<{ role: string; content: unknown }>
+      expect(messages).toHaveLength(1)
+      // No Copilot credential leaves, and the consult is filed at zero AIC
+      // under the RAW id — inventing a charge for a request Copilot never
+      // served is the specific dishonesty this asserts against.
+      const headers: Record<string, string> = {}
+      for (const [key, value] of Object.entries(captured.headers ?? {})) headers[key.toLowerCase()] = value
+      expect(headers.authorization).toBeUndefined()
+      expect(headers["copilot-integration-id"]).toBeUndefined()
+      expect(headers["x-claude-code-session-id"]).toBe("local-oracle-session")
+      expect(aicSnapshot().perModel["opus"]).toEqual({
+        nanoAiu: before?.nanoAiu ?? 0,
+        requests: (before?.requests ?? 0) + 1,
+      })
+    } finally {
+      state.sessionId = savedSessionId
+      configureLocalEgress({})
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
   // The MCP client sends only its bearer and workspace, never a conversation
   // header. So the consult's `x-claude-code-session-id` has to come from the
   // id the launch learned on its `/v1/messages` traffic, which is what both
@@ -4508,9 +4589,10 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
 // The local pair keeps the full Claude Code feature surface, and the Artifact
 // panel is part of it. The artifact tools are non-persona entries that live in
 // the `peers` group, so on a pinned profile they pass through `fastAllowsTool`
-// and are governed by the panel gate alone. `local` registers that group with
-// an EMPTY persona allow-list (the group exists for the artifact tools, not for
-// a Copilot critic), while `local2` adds the Oracle.
+// and are governed by the panel gate alone. Both local profiles register the
+// group with the Oracle in the persona allow-list; the difference between them
+// is the Oracle's transport (local endpoint vs billed Copilot), not whether the
+// role exists.
 describe("local profiles keep the Artifact surface and the Oracle split", () => {
   const LOCAL_NONCE = "a".repeat(64)
   const LOCAL2_NONCE = "b".repeat(64)
@@ -4523,7 +4605,9 @@ describe("local profiles keep the Artifact surface and the Oracle split", () => 
         nonce: LOCAL_NONCE,
         secret: "local-launch-secret",
         allowedGroups: new Set(["peers", "search", "browser"]),
-        allowedPersonas: new Set(),
+        // `local` ships the Oracle persona: its consult runs on the local
+        // endpoint (`consultTransport: "local"`), so a local launch may name it.
+        allowedPersonas: new Set(["oracle"]),
       }).launchId,
       registerLaunch({
         profileId: "local2",
@@ -4616,11 +4700,13 @@ describe("local profiles keep the Artifact surface and the Oracle split", () => 
     }
   })
 
-  test("the Oracle reaches local2 only, even with the model present in the catalog", async () => {
-    // The empty persona allow-list, not a catalog miss, is what keeps the
-    // Oracle off `local`: a local launch may not consult a Copilot model at
-    // all, so the same catalog that satisfies local2 must not leak the tool
-    // onto its sibling.
+  test("both local profiles expose the Oracle; only local2's is catalog-gated", async () => {
+    // The split is by TRANSPORT, not by reachability: `local` consults the
+    // endpoint its lead already uses (so a missing catalog row is irrelevant and
+    // would wrongly drop a working tool), while `local2` bills a Copilot call
+    // and therefore stays gated on the live catalog exactly like the cheapest
+    // family. The old shape — oracle on `local2` only — was the zero-Copilot
+    // rule leaking into a roster decision.
     const saved = state.models
     try {
       state.models = {
@@ -4649,10 +4735,17 @@ describe("local profiles keep the Artifact surface and the Oracle split", () => 
         { jsonrpc: "2.0", id: 80, method: "tools/list" },
         { auth: `Bearer ${LOCAL_NONCE}` },
       )
-      const localNames = (localList.json.result as { tools: Array<{ name: string }> }).tools.map(
-        (tool) => tool.name,
-      )
-      expect(localNames).not.toContain("oracle")
+      const localTools = (localList.json.result as {
+        tools: Array<{ name: string; description?: string }>
+      }).tools
+      // Present WITHOUT a catalog row, because nothing about `opus` is a
+      // Copilot fact on this profile.
+      expect(localTools.map((tool) => tool.name)).toContain("oracle")
+      // And it claims no identity, because the proxy has never been told what
+      // answers at the local endpoint.
+      const localOracle = localTools.find((tool) => tool.name === "oracle")
+      expect(localOracle?.description).toContain("the local model")
+      expect(localOracle?.description).not.toMatch(/gpt-|Opus/i)
 
       const local2List = await rpc(
         { jsonrpc: "2.0", id: 81, method: "tools/list" },
@@ -4662,6 +4755,25 @@ describe("local profiles keep the Artifact surface and the Oracle split", () => 
         (tool) => tool.name,
       )
       expect(local2Names).toContain("oracle")
+
+      // local2's gate is the catalog one: an EMPTY catalog drops the tool,
+      // because a consult there would have no model to bill.
+      state.models = { object: "list", data: [] } as never
+      const emptyList = await rpc(
+        { jsonrpc: "2.0", id: 82, method: "tools/list" },
+        { auth: `Bearer ${LOCAL2_NONCE}` },
+      )
+      expect(
+        (emptyList.json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name),
+      ).not.toContain("oracle")
+      // …and the local one is unaffected by the same empty catalog.
+      const localStillListed = await rpc(
+        { jsonrpc: "2.0", id: 83, method: "tools/list" },
+        { auth: `Bearer ${LOCAL_NONCE}` },
+      )
+      expect(
+        (localStillListed.json.result as { tools: Array<{ name: string }> }).tools.map((t) => t.name),
+      ).toContain("oracle")
     } finally {
       state.models = saved
     }

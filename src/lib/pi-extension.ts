@@ -4,12 +4,14 @@ import {
   piAdvisorModel,
   piLeadModel,
   piLeadThinking,
+  piOracleEnabled,
   piOracleToolReachable,
 } from "./pi-models-settings"
 import { isBalancedFamily, isCheapestFamily } from "./profile-family"
 import {
   AIC_STATUSLINE_DISABLE_ENV,
 } from "./aic-statusline-settings"
+import { buildPiPlanModeSection } from "./pi-plan-mode"
 import {
   PI_STATUS_COMMAND_ENV,
   PI_STATUSLINE_DEBOUNCE_MS,
@@ -27,9 +29,9 @@ import {
  * server in the mirror's `mcp.json` (`src/lib/pi-mcp-config.ts`), which
  * brings `tool_search`, the `mcp_servers` roster and per-server `exposure`
  * that a hand-wrapped `registerTool` cannot. What stays is the work no MCP
- * server can do: the statusline footer, the memory bridge, and (cheapest
- * family only) the prompt-submit relay, which POSTs JSON-RPC `tools/call`
- * to the running proxy with the per-launch nonce (the same
+ * server can do: the statusline footer, plan mode, the memory bridge, and
+ * (cheapest family only) the prompt-submit relay, which POSTs JSON-RPC
+ * `tools/call` to the running proxy with the per-launch nonce (the same
  * `GH_ROUTER_HOOK_MCP_URL/NONCE` channel the Claude hooks use).
  *
  * No custom provider, no compaction replacement: `session_before_compact`
@@ -42,6 +44,12 @@ import {
  * segments. There is deliberately no third-party statusline package and
  * no `statusLine` settings block (the community bridge only reads the
  * user's real global/project settings, never the launch mirror).
+ *
+ * Plan mode (always on): Claude Code ships plan mode as a mode; Pi ships it
+ * only as an example extension a user has to install. `src/lib/pi-plan-mode.ts`
+ * generates the equivalent into this same package — see
+ * `buildPiPlanModeSection` for the two independent write barriers, the
+ * snapshot/restore of the tool set, and the divergences from upstream.
  */
 
 /**
@@ -465,6 +473,9 @@ export function buildPiExtensionSource(opts: {
     // flag surface): owns Pi's footer with the shared internal-aic-status
     // runner. No third-party statusline package, no settings block.
     ...buildPiStatuslineFooterSection(),
+    // Plan mode: always on, no flag. Claude Code ships plan mode as a mode; Pi
+    // ships it as an example extension, so parity means generating it per launch.
+    ...buildPiPlanModeSection(),
     `  // Route compaction summaries to the mode's cheap capable model;`,
     `  // ALWAYS fall back to Pi native (return undefined) on any failure.`,
     `  pi.on("session_before_compact", async (event) => {`,
@@ -562,12 +573,15 @@ export function buildPiSkills(opts: {
 }): Array<PiSkillDoc> {
   const peers = opts.peers !== false
   const skills: Array<PiSkillDoc> = []
-  if (peers) {
+  if (peers && piOracleEnabled(opts.profileId)) {
     // The oracle is reachable two ways, and the skill must name the one this
     // profile actually has. Copilot profiles carry the stateless MCP persona
-    // (and the same-named subagent for follow-ups); `local` carries only the
-    // subagent, so naming the MCP tool there would send the model after a
-    // tool that answers -32601.
+    // (and the same-named subagent for follow-ups); a profile whose peer group
+    // filters the persona out carries only the subagent, so naming the MCP tool
+    // there would send the model after a tool that answers -32601. Every shipped
+    // profile reaches the persona today (including `local`, whose consult runs
+    // on the local tier); the subagent-only wording stays for a profile that
+    // ever narrows the allowlist back.
     const oracleReachable = piOracleToolReachable(opts.profileId)
     const oracleBody = oracleReachable
       ? [
@@ -582,9 +596,9 @@ export function buildPiSkills(opts: {
       : [
           "Delegate to the `oracle` subagent through the `subagent` tool with the",
           "decision, the options considered, and the missing-context gaps. The",
-          "oracle is cold-start: it sees only what you pass, plus whatever it reads",
-          "itself. Its verdict is advisory — verify with tests and code, never",
-          "substitute votes for verification.",
+          "oracle is cold-start and tool-less: it sees only what you pass, and it",
+          "cannot read the repository on its own. Its verdict is advisory — verify",
+          "with tests and code, never substitute votes for verification.",
         ]
     skills.push({
       dir: "gh-oracle",
@@ -621,11 +635,20 @@ export function buildPiSkills(opts: {
   }
   if (opts.swe === true && peers) {
     // The roster line must not name a consultant this profile has neither a
-    // tool nor an agent file for: balanced and local are advisor-free, so
-    // they name the oracle alone.
-    const consults = piAdvisorModel(opts.profileId)
+    // tool nor an agent file for: balanced and `local` are advisor-free, so
+    // they name the oracle alone. Composing the sentence per case keeps a `, .`
+    // (or a comma before nothing) out of the prose — which is also what a
+    // profile with neither consultant would get.
+    const advisor = piAdvisorModel(opts.profileId)
+    const oracle = piOracleEnabled(opts.profileId)
+    const consults = advisor
       ? "`oracle`/`advisor` for consults"
-      : "`oracle` for consults"
+      : oracle
+        ? "`oracle` for consults"
+        : undefined
+    const rosterLine = consults
+      ? `for verification, ${consults} (builtin \`scout\` and`
+      : "for verification. (Builtin `scout` and"
     skills.push({
       dir: "gh-delegate",
       content: [
@@ -638,7 +661,7 @@ export function buildPiSkills(opts: {
         "",
         "You may delegate via the `subagent` tool to this roster only: `Explore`",
         "for discovery, `General-Purpose` for scoped implementation, `reviewer`",
-        `for verification, ${consults}. (Builtin \`scout\` and`,
+        rosterLine,
         "`worker` are disabled in this session; their aliases resolve here.)",
         "Recommended loop: `Explore` to map the code, paste the brief excerpts",
         "into the `General-Purpose` brief to implement, `reviewer` to check,",
@@ -654,7 +677,7 @@ export function buildPiSkills(opts: {
           : "Send finished work to reviewer for assessment.",
       ].join("\n"),
     })
-    if (peers && piAdvisorModel(opts.profileId)) {
+    if (piAdvisorModel(opts.profileId)) {
       skills.push({
         dir: "gh-advisor",
         content: [

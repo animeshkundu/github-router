@@ -484,11 +484,13 @@ function familyOracleDescriptor(profileId: string): string | undefined {
     return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
   }
   if (isLocalFamily(profileId)) {
-    // The Oracle stays a Copilot persona on a local launch: the local server
-    // serves the lead turn, the consult is billed. Name the contract model so
-    // a swap renames itself here rather than leaving the fast-profile default
+    // The transport, not the family, decides the wording: `local` consults the
+    // endpoint its lead already uses (so no identity may be claimed), while
+    // `local2` keeps a billed Copilot Oracle and names the contract model so a
+    // swap renames itself here rather than leaving the fast-profile default
     // ("exact Opus 5.5") in the description of a gpt-6.1-sol tool.
     const contract = localContractFor(profileId)
+    if (contract.consultTransport === "local") return "the local model"
     return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
   }
   return undefined
@@ -1688,50 +1690,55 @@ async function handleToolsCall(
   if (isPinnedLaunchProfile(launch.profileId) && name === "oracle") {
     const isCheapestOracle = isCheapestFamily(launch.profileId)
     const isBalancedOracle = isBalancedFamily(launch.profileId)
-    // The Oracle is a Copilot persona on every pinned profile, local included:
-    // a local launch's lead turns are free, but a consult is a billed call, so
-    // it resolves and gates exactly like the cheapest family's.
+    // Local is the one family whose two members disagree about the transport:
+    // `local` consults its own endpoint (`consultTransport: "local"`), `local2`
+    // bills a Copilot call. The contract answers it, so nothing below branches
+    // on the profile id. `cheaplocal` is the cheapest family's mirror image and
+    // is folded in below rather than given a parallel branch.
     const isLocalOracle = isLocalFamily(launch.profileId)
-    // `cheaplocal` is the one exception: its Oracle is a local consult, so the
-    // transport comes from the contract rather than from the family id.
-    const isCheaplocalOracle =
-      isCheapestOracle
-      && cheapestContractFor(launch.profileId).consultTransport === "local"
+    const oracleContract = isLocalOracle
+      ? localContractFor(launch.profileId)
+      : isCheapestOracle
+        ? cheapestContractFor(launch.profileId)
+        : isBalancedOracle
+          ? balancedContractFor(launch.profileId)
+          : undefined
+    // True for `cheaplocal` and `local`: both send the consult to the local
+    // endpoint, and both skip the catalog entirely. The name is the transport's,
+    // not either profile's, because the branch below is one branch.
+    const oracleIsLocalConsult = oracleContract?.consultTransport === "local"
     const isCheapOracle = launch.profileId === "cheap" || launch.profileId === "cheap1m" || isCheapestOracle || isBalancedOracle
-    const oracleModel = isLocalOracle
-      ? localContractFor(launch.profileId).oracleModel
-      : isCheapestOracle
-        ? cheapestContractFor(launch.profileId).oracleModel
-        : isBalancedOracle
-          ? balancedContractFor(launch.profileId).oracleModel
-          : isCheapOracle
-            ? CHEAP_PROFILE_ORACLE_MODEL
-            : "claude-opus-5.5"
-    // The local consult speaks Anthropic Messages directly; the Copilot
-    // cheapest/balanced Oracle uses the Responses API.
-    const oracleEndpoint = isCheaplocalOracle
+    const oracleModel = oracleContract
+      ? oracleContract.oracleModel
+      : isCheapOracle
+        ? CHEAP_PROFILE_ORACLE_MODEL
+        : "claude-opus-5.5"
+    // A local consult speaks Anthropic Messages directly (the local endpoint),
+    // and so do the fast/balanced Copilot Oracles. The cheapest family and
+    // `local2` dispatch over `/responses`.
+    const oracleEndpoint = oracleIsLocalConsult
       ? "/v1/messages"
-      : isCheapOracle || isLocalOracle
+      : isCheapOracle && !isLocalOracle
         ? "/v1/responses"
-        : "/v1/messages"
-    const oracleEffort = isLocalOracle
-      ? localContractFor(launch.profileId).oracleEffort
-      : isCheapestOracle
-        ? cheapestContractFor(launch.profileId).oracleEffort
-        : isBalancedOracle
-          ? balancedContractFor(launch.profileId).oracleEffort
-          : isCheapOracle
-            ? CHEAP_PROFILE_ORACLE_EFFORT
-            : "high"
-    const oracleGateFn = isLocalOracle
-      ? () => localOracleModel(launch.profileId)
-      : isCheapestOracle
-        ? () => cheapestFamilyOracleGate(launch.profileId)
-        : isBalancedOracle
-          ? () => balancedOracleModel(launch.profileId)
-          : isCheapOracle
-            ? cheapOracleModel
-            : fastOracleModel
+        : isLocalOracle && oracleContract?.consultTransport === "copilot"
+          ? "/v1/responses"
+          : "/v1/messages"
+    const oracleEffort = oracleContract
+      ? oracleContract.oracleEffort
+      : isCheapOracle
+        ? CHEAP_PROFILE_ORACLE_EFFORT
+        : "high"
+    const oracleGateFn = oracleIsLocalConsult
+      ? () => true as const
+      : isLocalOracle
+        ? () => localOracleModel(launch.profileId)
+        : isCheapestOracle
+          ? () => cheapestFamilyOracleGate(launch.profileId)
+          : isBalancedOracle
+            ? () => balancedOracleModel(launch.profileId)
+            : isCheapOracle
+              ? cheapOracleModel
+              : fastOracleModel
     if (
       (scope !== "all" && scope !== "peers")
       || !launch.allowedGroups?.has("peers")
@@ -1756,7 +1763,7 @@ async function handleToolsCall(
     // about what answers there, so the identity clause is dropped rather than
     // guessed at. The local branch also carries the consultant half of the
     // redaction contract, because only this transport asks the caller to redact.
-    const oracleInstructions = isCheaplocalOracle
+    const oracleInstructions = oracleIsLocalConsult
       ? `You are Oracle, an expert architectural and technical consultant. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action. ${LOCAL_CONSULT_REDACTION_NOTE}`
       : `You are Oracle, an expert architectural and technical consultant running on ${displayModelName(oracleModel)}. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.`
     const oraclePersona: PersonaSpec = {
@@ -1779,7 +1786,7 @@ async function handleToolsCall(
     // onto a Copilot Opus, so the local call would be rejected against a
     // window belonging to a model that is not answering it. The 256KB byte cap
     // above stays: that one is transport-neutral.
-    if (!isCheaplocalOracle) {
+    if (!oracleIsLocalConsult) {
       const overflow = await predictedWindowOverflow(oraclePersona, oracleInput, undefined)
       if (overflow) return rpcResult(body.id, toolError(overflow))
     }
@@ -1794,7 +1801,7 @@ async function handleToolsCall(
     if (abortKey !== undefined) inflightAborts.set(abortKey, inflightEntry)
     try {
       let text: string
-      if (isCheaplocalOracle) {
+      if (oracleIsLocalConsult) {
         // Bypass `dispatchModelCall`: it opens with `resolveModel(args.model)`
         // and would rewrite the bare `opus` onto a Copilot catalog id. Nothing
         // here reads the catalog — one model id, one system prompt, one user
@@ -2550,9 +2557,16 @@ export async function handleMcpPost(
   // remembered value is the real source here: the lead's `/v1/messages`
   // traffic recorded it, and using it keeps the consult in the same
   // prompt-cache session as the turns that led to the call.
-  const localConsultEgress: LocalMessagesEgress | undefined = isCheaplocalProfile(launch.profileId)
-    ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c, launch.sessionId) }
-    : undefined
+  // The family check is load-bearing: `localContractFor` falls back to the base
+  // local contract for ANY non-local2 id, so asking it alone would answer
+  // "local transport" for `cheapest` and `balanced` too and resolve an egress
+  // no branch on those launches reads.
+  const localConsultEgress: LocalMessagesEgress | undefined =
+    isCheaplocalProfile(launch.profileId)
+    || (isLocalFamily(launch.profileId) && localContractFor(launch.profileId).consultTransport === "local")
+      ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c, launch.sessionId) }
+      : undefined
+
 
   // Diagnostic (opt-in, GH_ROUTER_LOG_PEER_MCP=1): log the ARRIVAL of each
   // tools/call with a wall-clock stamp + the current in-flight count. The proxy

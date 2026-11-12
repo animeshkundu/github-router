@@ -576,12 +576,14 @@ export const ORACLE_ONLY_CONSULT_CONTRACT_POINTER =
 /**
  * Contract for a launch that carries neither consultant.
  *
- * `-m local` exposes no `peers` group at all, so neither the Advisor nor the
- * Oracle exists on its surface. Both siblings above are written around a budget
- * of consults and a discriminator between the two roles, and naming either role
- * here would point the lead at a tool the session cannot reach. What survives
- * is the part that was never about them: settle what evidence can settle, and
- * make the reasoning explicit where it cannot.
+ * No profile reaches this today — every one of them has an Oracle, and the
+ * cheapest/balanced families add an Advisor — but the fallback is kept rather
+ * than deleted: both siblings above are written around a budget of consults and
+ * a discriminator between the two roles, so a future profile that ships neither
+ * (or a launch whose peers group failed to resolve) must still get a coherent
+ * sentence instead of a claim about a tool the session cannot reach. What it
+ * says is the part that was never about the consultants: settle what evidence
+ * can settle, and make the reasoning explicit where it cannot.
  */
 export const DIRECT_EVIDENCE_CONTRACT =
   "Consultation budget: this launch has no consultant, so every unresolved question is settled by direct evidence: a search, a read, a build, a test, or a run. Where you would otherwise want a second opinion, state the competing hypotheses explicitly, choose the one the evidence supports, and record your confidence and what being wrong would cost so the user can correct course early. Counsel is never a substitute for verification you can perform yourself.\n\n"
@@ -626,10 +628,11 @@ export function buildOperatingDefaultsDirective(
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
-    // `local` runs no Copilot model, so it has no Oracle either: its `peers`
-    // group, when the artifact panel publishes it, carries the human-review
-    // tools only, and nothing else on that launch could answer a consult.
-    const hasOracle = !(isLocal && opts.profile === "local")
+    // Every profile has an Oracle, including both local ones: `local` consults
+    // the endpoint its lead already uses (`consultTransport: "local"`) and
+    // `local2` bills a Copilot consult. The egress policy is about Copilot
+    // MODELS, not about consultants, so presence is not a per-family question.
+    const hasOracle = true
     // The cheapest family and `local2` grant `reviewer` a capped Advisor
     // (at most 5 rounds per review), so "lead-only" is false on those
     // launches; the surfaces below say who else may consult instead.
@@ -942,10 +945,11 @@ export function buildOperatingDefaultsDigest(
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
-    // `local` runs no Copilot model, so it has no Oracle either: its `peers`
-    // group, when the artifact panel publishes it, carries the human-review
-    // tools only, and nothing else on that launch could answer a consult.
-    const hasOracle = !(isLocal && opts.profile === "local")
+    // Every profile has an Oracle, including both local ones: `local` consults
+    // the endpoint its lead already uses (`consultTransport: "local"`) and
+    // `local2` bills a Copilot consult. The egress policy is about Copilot
+    // MODELS, not about consultants, so presence is not a per-family question.
+    const hasOracle = true
     // The cheapest family and `local2` grant `reviewer` a capped Advisor
     // (at most 5 rounds per review), so "lead-only" is false on those
     // launches; the surfaces below say who else may consult instead.

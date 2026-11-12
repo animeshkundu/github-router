@@ -153,7 +153,11 @@ describe("pi launch contract: packages", () => {
           (p) => typeof p === "object" && p.source === "npm:better-claude-code-ui",
         )
         if (flags.ui) {
-          expect(settings.theme).toBe("claude-code-dark")
+          // The terminal's palette, not a pinned CC palette: cc-ui rewrote the
+          // old pin to `system` at session_start regardless, so the pin only
+          // bought a startup flash. The CC palettes still ship as data.
+          expect(settings.theme).toBe("system")
+          expect(settings.terminalTheme).toBe(true)
           expect(themePkg).toBeDefined()
           // Themes-only: any code in this package would fight the
           // footer and tool rendering the router already owns.

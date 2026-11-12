@@ -215,6 +215,35 @@ export function windowsLaunchNeedsShell(executable: string): boolean {
   return ext === ".cmd" || ext === ".bat"
 }
 
+/**
+ * Forward a terminal resize to the detached child's process group.
+ *
+ * The kernel delivers `SIGWINCH` only to the FOREGROUND PROCESS GROUP of the
+ * controlling terminal. The launcher spawns the CLI with POSIX `detached: true`
+ * (so `kill(-pid)` can reap the whole subtree), which puts the CLI in its own
+ * group — that group is never the terminal's foreground, so the CLI would never
+ * learn that the window changed and would keep laying out for the old geometry.
+ * Re-broadcasting the signal the launcher itself receives is the whole fix.
+ *
+ * Returns whether a signal was sent, which is all a test can observe without a
+ * pty (the delivery path is kernel-side and is proven separately by a `pty.fork`
+ * harness: an attached child gets `SIGWINCH`, a detached one gets nothing, and
+ * `kill(-pid, "SIGWINCH")` delivers it).
+ *
+ * Windows has no `SIGWINCH` and no process groups; the console resizes the
+ * child directly, so the guard is a hard `return`, not a fallback.
+ */
+export function forwardTerminalResize(pid: number | undefined): boolean {
+  if (process.platform === "win32" || !pid) return false
+  try {
+    process.kill(-pid, "SIGWINCH")
+    return true
+  } catch {
+    // group already gone, or signalling is refused in this sandbox
+    return false
+  }
+}
+
 export function launchChild(
   target: LaunchTarget,
   server: Server,
@@ -404,6 +433,15 @@ export function launchChild(
   }
   process.on("SIGINT", () => onSignal("SIGINT"))
   process.on("SIGTERM", () => onSignal("SIGTERM"))
+  // Terminal resize has the same detached-group problem as Ctrl-C, with a
+  // different consequence: the CLI's full-screen UI keeps drawing for the old
+  // geometry and never reflows (see `forwardTerminalResize`). No debounce and no
+  // grace — a resize is not a termination request, it is idempotent state, and
+  // the winnable failure mode is a missed resize, not a doubled one.
+  process.on("SIGWINCH", () => {
+    if (cleaned) return
+    forwardTerminalResize(child.pid)
+  })
 
   child.on("exit", (exitCode, signal) => {
     // When the spawned CLI exits we may be holding worker-agent

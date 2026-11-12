@@ -172,26 +172,38 @@ export function piOracleToolReachable(profileId: PiProfileId): boolean {
 }
 
 /**
- * Which model answers the `oracle` subagent.
+ * Whether this profile has a consultant at all.
  *
- * Every Copilot profile's oracle is a Copilot-served consultant pinned by its
- * family contract. `local` has no Copilot oracle at all, yet the subagent
- * still has to be emitted: omitting the file would un-shadow Pi's builtin
- * `oracle`, which also owns the `advisor` alias and is pinned to a model of
- * its own choosing. Pinning our file to the local lead tier keeps the role,
- * its nesting grant and the shadowing intact while running it on the one
- * endpoint the profile is allowed to use.
+ * Every Pi profile does. `local` used to be the exception on the reading that
+ * the Oracle is necessarily a Copilot call — it is not: the contract's
+ * `consultTransport` decides, and `local` declares `"local"`, so its Oracle is
+ * a consult of the same endpoint its lead already uses. The role therefore
+ * exists on every profile and `piOracleModel` never returns `undefined` for one
+ * of them; the transport, not the presence, is what differs.
  */
-export function piOracleModel(profileId: PiProfileId): string {
-  return profileId === "local"
-    ? piLeadModel(profileId)
-    : piContractFor(profileId).oracleModel
+export function piOracleEnabled(_profileId: PiProfileId): boolean {
+  return true
 }
 
-export function piOracleThinking(profileId: PiProfileId): string {
-  return profileId === "local"
-    ? piLeadThinking(profileId)
-    : piContractFor(profileId).oracleEffort
+/**
+ * Which model answers the `oracle` subagent.
+ *
+ * Always a real id: a Copilot slug on every profile whose consult is billed,
+ * and the local lead tier (`opus`) on `local`, whose consult goes to the local
+ * endpoint like the rest of its turns. The transport is not this function's
+ * business — `piContractFor(profileId).consultTransport` is — so a caller that
+ * needs to know where the consult runs must ask the contract.
+ */
+export function piOracleModel(profileId: PiProfileId): string | undefined {
+  return piOracleEnabled(profileId)
+    ? piContractFor(profileId).oracleModel
+    : undefined
+}
+
+export function piOracleThinking(profileId: PiProfileId): string | undefined {
+  return piOracleEnabled(profileId)
+    ? piContractFor(profileId).oracleEffort
+    : undefined
 }
 
 /**
@@ -256,7 +268,8 @@ export function piProfileModelIds(
 ): Array<string> {
   const ids = new Set<string>([piLeadModel(profileId)])
   if (opts.peers !== false) {
-    ids.add(piOracleModel(profileId))
+    const oracle = piOracleModel(profileId)
+    if (oracle) ids.add(oracle)
     for (const r of piNativeRoles(profileId)) ids.add(r.model)
     const advisor = piAdvisorModel(profileId)
     if (advisor) ids.add(advisor.model)
@@ -778,12 +791,39 @@ export interface PiSettingsJson {
    */
   toolBackground?: "default" | "transparent" | "outlines" | "border"
   /**
-   * Active Pi theme. Default is the genuine Claude Code dark palette
-   * (provided by the bundled theme package below); light-terminal
-   * users can pick `claude-code-light` (or any installed theme) and
-   * — like every other look key — their own snapshot value wins.
+   * Active Pi theme. Default is `system`: Pi builds every color from the
+   * terminal's own palette, and (with the bundled cc-ui) re-reads that
+   * palette when the terminal regains focus, so light/dark terminal
+   * switches are followed instead of fought. The `better-claude-code-ui`
+   * palettes still ship (themes-only), so `claude-code-dark` /
+   * `claude-code-light` / any installed theme stays one `/settings` pick —
+   * and, like every other look key, a user's own snapshot value wins.
    */
   theme?: string
+  /**
+   * cc-ui: keep Pi's theme on the terminal's palette. Its own default is
+   * also `true`; emitted explicitly so a future upstream default flip
+   * cannot silently pin the router back to a fixed palette. This is the
+   * setting that used to fight our `claude-code-dark` pin — cc-ui rewrote
+   * it to `system` at `session_start` anyway, so emitting `theme: "system"`
+   * is the same outcome without a startup flash.
+   */
+  terminalTheme?: boolean
+  /**
+   * cc-ui: how finished thinking blocks are drawn. `live` shows thinking
+   * while it streams and collapses it to `Thought for Xs` afterwards — the
+   * closest surface to Claude Code's transcript, and what stock Pi does not
+   * do. Display only; the thinking still happens at the configured effort.
+   */
+  thinkingMode?: "live" | "full" | "latest"
+  /**
+   * cc-ui: bash row labels. Default upstream is `"model"` since 1.0.112,
+   * which adds a field to the bash tool and a line to the model's
+   * instructions — a real (if small) token cost on every turn. Pinned to
+   * `"off"` on cost grounds: rows show the command itself, which is also
+   * what Claude Code does when it has no description to show.
+   */
+  bashIntent?: boolean | "off" | "model" | "local"
   /** Branch-summary token budget for session-tree navigation. */
   branchSummary?: {
     reserveTokens?: number
@@ -836,6 +876,9 @@ export const PI_COSMETIC_SETTING_KEYS = [
   "fullscreenCopyOnSelect",
   "fullscreenWheelScrollLines",
   "theme",
+  "terminalTheme",
+  "thinkingMode",
+  "bashIntent",
   "themeAdaptive",
   "groupToolCalls",
   "readOutputMode",
@@ -939,29 +982,43 @@ export const PI_UI_PACKAGES: ReadonlyArray<PiPackageEntry> = Object.freeze([
 ])
 
 /**
- * Claude Code dark theme (`#D77757` coral and friends) from
- * `better-claude-code-ui`, which ships six CC palettes. Themes-only:
+ * Claude Code palettes from `better-claude-code-ui`, which ships six CC
+ * variants (`claude-code-dark`, `claude-code-light`, …). Themes-only:
  * extensions/skills/prompts are explicitly emptied so none of the
  * package's status line, footer, or tool rendering loads and fights
- * the router-owned footer or `pi-claude-code-ui`. Theme files are
- * pure JSON data — loading the whole `./theme` dir costs nothing at
- * runtime and leaves all six CC variants pickable via `/settings`,
- * with `claude-code-dark` the default (see `PI_CC_DARK_THEME`).
+ * the router-owned footer or `pi-claude-code-ui`. Theme files are pure
+ * JSON data — loading the whole `./theme` dir costs nothing at runtime and
+ * leaves all six CC variants pickable via `/settings`.
+ *
+ * These are no longer the DEFAULT. The launch now follows the terminal
+ * (`PI_FOLLOW_TERMINAL_THEME`), which is what cc-ui did to our pin at
+ * `session_start` regardless: it rewrote `theme` to `system` and stashed
+ * `claude-code-dark` in `terminalThemePrevious`. Emitting the pin only
+ * bought a startup flash and a lying settings file, so the palettes stay
+ * as data and users who want the fixed CC look pick one.
  */
 export const PI_CC_THEME_PACKAGE: PiPackageEntry = {
   source: "npm:better-claude-code-ui",
   // Bare relative glob, NO `./` prefix (see note above): minimatch
   // matches manifest files by root-relative path, so `./theme` selects
   // nothing and the theme silently fails to load. All six CC variants
-  // load as pure JSON data (zero runtime cost); the default is
-  // `claude-code-dark`, light-terminal users pick `claude-code-light`.
+  // load as pure JSON data (zero runtime cost).
   themes: ["theme/*.json"],
   extensions: [],
   skills: [],
   prompts: [],
 }
 
-/** Default Pi theme: genuine Claude Code dark palette. */
+/**
+ * Default Pi theme: follow the terminal's own palette. Pi's built-in
+ * `system` theme derives every color from the terminal and already exists in
+ * `PI_MIN_VERSION` (1.3.0) — see `modes/interactive/theme/system-theme.js`,
+ * where it is also sorted first in `getAvailableThemesWithPaths()` because it
+ * is Pi's own default when no `theme` setting is present.
+ */
+export const PI_FOLLOW_TERMINAL_THEME = "system" as const
+
+/** The fixed Claude Code dark palette, kept for `/settings` picks and docs. */
 export const PI_CC_DARK_THEME = "claude-code-dark" as const
 
 /** Built-in tools enabled at startup (Pi-native set incl. Windows). */
@@ -1019,8 +1076,11 @@ export function buildPiSettingsJson(opts: {
   for (const role of piNativeRoles(opts.profileId)) {
     modelThinkingLevels[`${PI_PROVIDER_NAME}/${role.model}`] = role.thinking
   }
-  modelThinkingLevels[`${PI_PROVIDER_NAME}/${piOracleModel(opts.profileId)}`] =
-    piOracleThinking(opts.profileId)
+  const oracle = piOracleModel(opts.profileId)
+  if (oracle) {
+    modelThinkingLevels[`${PI_PROVIDER_NAME}/${oracle}`] =
+      piOracleThinking(opts.profileId) as string
+  }
   const advisor = piAdvisorModel(opts.profileId)
   if (advisor) {
     modelThinkingLevels[`${PI_PROVIDER_NAME}/${advisor.model}`] =
@@ -1051,14 +1111,30 @@ export function buildPiSettingsJson(opts: {
     fullscreenWheelScrollLines: "auto",
     ...(ui
       ? {
-          themeAdaptive: false,
+          themeAdaptive: true,
           groupToolCalls: true,
           readOutputMode: "summary" as const,
           searchOutputMode: "count" as const,
           mcpOutputMode: "summary" as const,
           bashOutputMode: "summary" as const,
           toolBackground: "transparent" as const,
-          theme: PI_CC_DARK_THEME,
+          // Follow the terminal instead of pinning a palette. cc-ui's
+          // `terminalTheme` (its own default, emitted here so an upstream
+          // default flip cannot pin us) switches Pi to the `system` theme at
+          // session_start either way; emitting the same value up front just
+          // removes the flash between Pi's first frame and that switch.
+          theme: PI_FOLLOW_TERMINAL_THEME,
+          terminalTheme: true,
+          // Claude Code's transcript draws thinking while it streams and then
+          // collapses it to a one-liner. Display only — effort is unchanged.
+          thinkingMode: "live" as const,
+          // Upstream default since cc-ui 1.0.112 is "model", which buys bash
+          // labels by adding a tool field and an instruction line to every
+          // turn. Emitted as "off" to keep that standing token cost off the
+          // defaults; it stays a cosmetic key, so a user who writes
+          // `bashIntent: "model"` in their own settings still wins
+          // (`applyCosmeticUserOverrides`).
+          bashIntent: "off" as const,
         }
       : {}),
     branchSummary: { reserveTokens: 16384, skipPrompt: false },
@@ -1092,6 +1168,11 @@ export function buildPiSettingsJson(opts: {
               "codex-exec-writer": { disabled: true },
               "cursor-agent": { disabled: true },
               "cursor-agent-writer": { disabled: true },
+              // Every profile emits an oracle file today, so this entry is the
+              // belt: a profile that ever drops its own file would otherwise
+              // hand the slot to the builtin `oracle`, which also owns the
+              // `advisor` alias, on a model of its choosing.
+              ...(piOracleEnabled(opts.profileId) ? {} : { oracle: { disabled: true } }),
             },
           },
         }
@@ -1102,6 +1183,25 @@ export function buildPiSettingsJson(opts: {
 function agentFileName(name: string): string {
   return `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`
 }
+
+/**
+ * The oracle's tool set: empty, on purpose.
+ *
+ * The Oracle contract is ONE SHOT — ask and answer — on every transport. The
+ * MCP persona already conforms (`dispatchModelCall` sends `instructions` plus a
+ * single user message over `/v1/responses`, `stream: false`, `writeCapable:
+ * false`); a Pi subagent with read/grep/bash was the odd one out, because it
+ * could run its own investigation loop and answer from something the caller
+ * never saw. A consult that reads its own evidence is not a second opinion on
+ * the caller's evidence, it is a third party guessing at it.
+ *
+ * `tools: ""` parses to an EMPTY allowlist with `explicitToolAllowlist: true`
+ * (pi-subagents `parseFrontmatterList("")` → `[]`), which is a genuinely
+ * tool-less child, verified by driving `discoverAgentsAll` against an emitted
+ * mirror. Dropping the key would instead leave `explicitToolAllowlist: false`
+ * and inherit EVERY tool — the opposite of the intent.
+ */
+const ORACLE_TOOLS = ""
 
 /**
  * Deep-merge the `subagents` settings key across the snapshot/user and
@@ -1143,17 +1243,21 @@ function roleDescription(
   // Nested-delegation channel note: General-Purpose is the only native
   // role with a nesting grant, so only it can consult the oracle subagent
   // directly. Explore/reviewer are leaves; they surface open questions in
-  // their report and the lead (or General-Purpose) consults oracle.
-  const oracleNote =
-    "May consult the oracle subagent when a decision feels risky.";
+  // their report and the lead (or General-Purpose) consults oracle. `local`
+  // may have no oracle, and the note must not name one then: an advertised
+  // target the roster lacks is a wasted turn for whoever follows it.
+  const consultNote = piOracleEnabled(profileId)
+    ? " May consult the oracle subagent when a decision feels risky."
+    : ""
   if (role.name === "Explore") {
     return "Fast read-only recon: locate code, answer evidence questions, return compressed context."
   }
   if (role.name === "General-Purpose") {
     const isBalanced = isBalancedFamily(profileId)
-    return isBalanced
-      ? `General implementation and follow-through on scoped tasks. May hand the result to reviewer only when the change alters behavior. ${oracleNote}`
-      : `General implementation and follow-through on scoped tasks. May hand the result to reviewer for assessment. ${oracleNote}`
+    const base = isBalanced
+      ? "General implementation and follow-through on scoped tasks. May hand the result to reviewer only when the change alters behavior."
+      : "General implementation and follow-through on scoped tasks. May hand the result to reviewer for assessment."
+    return `${base}${consultNote}`
   }
   return isBalancedFamily(profileId)
     ? "Behavior-changing review only: assess a change, narrow scope with search first, delegate targeted discovery to Explore rather than sweeping the repo."
@@ -1260,12 +1364,17 @@ export function buildPiAgentFiles(
       // Aliases absorb builtin `worker` traffic (`developer/coder` plus
       // `implementer/develop`, all builtin-worker aliases);
       // `acceptanceRole: writer` restores the builtin worker's acceptance
-      // inference that shadowing would otherwise drop.
+      // inference that shadowing would otherwise drop. The oracle edge is
+      // conditional on the role actually existing: a grant naming an agent the
+      // roster lacks is a dangling target, and an advertised target the model
+      // cannot reach is a wasted turn for whoever follows it.
       lines.push(
         "aliases: worker, developer, coder, implementer, develop",
         "acceptanceRole: writer",
         "allowNestedSubagents: true",
-        "allowedAgents: reviewer, oracle",
+        piOracleEnabled(profileId)
+          ? "allowedAgents: reviewer, oracle"
+          : "allowedAgents: reviewer",
       );
     }
     if (isBalancedFamily(profileId) && isReviewer) {
@@ -1303,32 +1412,37 @@ export function buildPiAgentFiles(
     }
     files[`agents/${agentFileName(role.name)}`] = `${lines.join("\n")}\n`;
   }
-  // Oracle consultant agent (both modes). Advisory only: challenges
+  // Oracle consultant agent (every profile except `local`, which has no
+  // consultant at all — see `piOracleEnabled`). Advisory only: challenges
   // assumptions, never edits. Cold-start fresh context matches the MCP
   // `peers/oracle` tool contract (stateless query + context, no transcript),
-  // deliberately unlike the builtin's forked decision-consistency role. On
-  // `local` there is no MCP oracle, so this file is the only oracle the
-  // session has, and its model is a local tier id (`piOracleModel`).
-  const oracle = [
-    "---",
-    "name: oracle",
-    "description: Second opinion before acting. Challenges assumptions without editing. Use when the decision itself feels risky.",
-    "tools: read, grep, find, ls, bash",
-    `model: ${PI_PROVIDER_NAME}/${piOracleModel(profileId)}`,
-    `thinking: ${piOracleThinking(profileId)}`,
-    "advertise: true",
-    "async: false",
-    "systemPromptMode: replace",
-    "inheritProjectContext: true",
-    "defaultContext: fresh",
-    "---",
-    "",
-    "You are an oracle: a second set of eyes. You see only the task context",
-    "you are given — you have no repo memory beyond what you read now.",
-    "Inspect the code yourself with read/grep/find/ls before opining.",
-    "Challenge assumptions, name what is missing, recommend; never execute.",
-  ].join("\n");
-  files[`agents/${agentFileName("oracle")}`] = `${oracle}\n`;
+  // deliberately unlike the builtin's forked decision-consistency role.
+  const oracleModel = piOracleModel(profileId)
+  if (oracleModel) {
+    const oracle = [
+      "---",
+      "name: oracle",
+      "description: Second opinion before acting. Challenges assumptions without editing. Use when the decision itself feels risky.",
+      // Empty on purpose — see ORACLE_TOOLS. The consult is one shot.
+      `tools: ${ORACLE_TOOLS ? ORACLE_TOOLS : '""'}`,
+      `model: ${PI_PROVIDER_NAME}/${oracleModel}`,
+      `thinking: ${piOracleThinking(profileId) as string}`,
+      "advertise: true",
+      "async: false",
+      "systemPromptMode: replace",
+      "inheritProjectContext: true",
+      "defaultContext: fresh",
+      "---",
+      "",
+      "You are an oracle: a second set of eyes, consulted once per question.",
+      "You have no tools on purpose. You cannot read the repository, run",
+      "anything, or fetch what the caller did not paste in — so do not ask to.",
+      "Answer from the context you are given: name the assumptions it rests on,",
+      "say which missing fact would change your recommendation, and recommend.",
+      "Never claim to have verified, executed, approved, or merged anything.",
+    ].join("\n");
+    files[`agents/${agentFileName("oracle")}`] = `${oracle}\n`;
+  }
   // Advisor agent (cheapest only). Genuinely new role — the builtin has no
   // separate advisor file (`advisor` is just an alias of builtin oracle, lost
   // in shadowing). Balanced stays advisor-free: no file, no skill, no prompt,
@@ -1434,17 +1548,28 @@ export function buildPiAppendSystem(
     `- Lead owns planning directly; there is no Plan subagent.`,
   ];
   if (peers) {
+    const oracle = piOracleEnabled(profileId)
     lines.push(
       `- Delegate FREELY to Explore for discovery and General-Purpose for scoped work.`,
       `- Call subagent directly (agent + task); save workflows for genuinely parallel fanout.`,
       isBalancedFamily(profileId)
         ? `- Send work to reviewer ONLY when the change alters behavior.`
         : `- Send finished work to reviewer for assessment.`,
-      `- Ask oracle for a second opinion when the decision itself feels risky.`,
-      advisor
-        ? `- Review the final plan with advisor (advisory) before presenting it.`
-        : `- There is no advisor in this mode: oracle is the only consultant.`,
-      `- Verify, don't vote: consultant verdicts never substitute for running the tests.`,
+    )
+    // The consult sentences describe the consultant this profile HAS. `local`
+    // has none: it runs every agent turn on the local endpoint, so a sentence
+    // pointing at an oracle would route the lead into a role the roster and
+    // the peer group both refuse.
+    if (oracle) {
+      lines.push(
+        `- Ask oracle for a second opinion when the decision itself feels risky.`,
+        advisor
+          ? `- Review the final plan with advisor (advisory) before presenting it.`
+          : `- There is no advisor in this mode: oracle is the only consultant.`,
+        `- Verify, don't vote: consultant verdicts never substitute for running the tests.`,
+      )
+    }
+    lines.push(
       `- After any subagent work completes, always write the final answer yourself.`,
     );
   } else {
