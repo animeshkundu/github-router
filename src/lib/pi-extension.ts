@@ -4,6 +4,7 @@ import {
   piAdvisorModel,
   piLeadModel,
   piLeadThinking,
+  piOracleEnabled,
   piOracleToolReachable,
 } from "./pi-models-settings"
 import { isBalancedFamily, isCheapestFamily } from "./profile-family"
@@ -572,12 +573,13 @@ export function buildPiSkills(opts: {
 }): Array<PiSkillDoc> {
   const peers = opts.peers !== false
   const skills: Array<PiSkillDoc> = []
-  if (peers) {
+  if (peers && piOracleEnabled(opts.profileId)) {
     // The oracle is reachable two ways, and the skill must name the one this
     // profile actually has. Copilot profiles carry the stateless MCP persona
-    // (and the same-named subagent for follow-ups); `local` carries only the
-    // subagent, so naming the MCP tool there would send the model after a
-    // tool that answers -32601.
+    // (and the same-named subagent for follow-ups); a profile whose peer group
+    // filters the persona out carries only the subagent, so naming the MCP tool
+    // there would send the model after a tool that answers -32601. `local` has
+    // no oracle of either kind and gets no skill at all.
     const oracleReachable = piOracleToolReachable(opts.profileId)
     const oracleBody = oracleReachable
       ? [
@@ -631,11 +633,20 @@ export function buildPiSkills(opts: {
   }
   if (opts.swe === true && peers) {
     // The roster line must not name a consultant this profile has neither a
-    // tool nor an agent file for: balanced and local are advisor-free, so
-    // they name the oracle alone.
-    const consults = piAdvisorModel(opts.profileId)
+    // tool nor an agent file for: balanced and `local` are advisor-free, so
+    // they name the oracle alone; `local` has no consultant at all, so it names
+    // neither. Composing the sentence per case keeps a `, .` (or a comma before
+    // nothing) out of the prose.
+    const advisor = piAdvisorModel(opts.profileId)
+    const oracle = piOracleEnabled(opts.profileId)
+    const consults = advisor
       ? "`oracle`/`advisor` for consults"
-      : "`oracle` for consults"
+      : oracle
+        ? "`oracle` for consults"
+        : undefined
+    const rosterLine = consults
+      ? `for verification, ${consults} (builtin \`scout\` and`
+      : "for verification. (Builtin `scout` and"
     skills.push({
       dir: "gh-delegate",
       content: [
@@ -648,7 +659,7 @@ export function buildPiSkills(opts: {
         "",
         "You may delegate via the `subagent` tool to this roster only: `Explore`",
         "for discovery, `General-Purpose` for scoped implementation, `reviewer`",
-        `for verification, ${consults}. (Builtin \`scout\` and`,
+        rosterLine,
         "`worker` are disabled in this session; their aliases resolve here.)",
         "Recommended loop: `Explore` to map the code, paste the brief excerpts",
         "into the `General-Purpose` brief to implement, `reviewer` to check,",
@@ -664,7 +675,7 @@ export function buildPiSkills(opts: {
           : "Send finished work to reviewer for assessment.",
       ].join("\n"),
     })
-    if (peers && piAdvisorModel(opts.profileId)) {
+    if (piAdvisorModel(opts.profileId)) {
       skills.push({
         dir: "gh-advisor",
         content: [

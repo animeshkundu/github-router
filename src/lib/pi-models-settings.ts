@@ -172,26 +172,41 @@ export function piOracleToolReachable(profileId: PiProfileId): boolean {
 }
 
 /**
- * Which model answers the `oracle` subagent.
+ * Whether this profile has a consultant at all.
  *
- * Every Copilot profile's oracle is a Copilot-served consultant pinned by its
- * family contract. `local` has no Copilot oracle at all, yet the subagent
- * still has to be emitted: omitting the file would un-shadow Pi's builtin
- * `oracle`, which also owns the `advisor` alias and is pinned to a model of
- * its own choosing. Pinning our file to the local lead tier keeps the role,
- * its nesting grant and the shadowing intact while running it on the one
- * endpoint the profile is allowed to use.
+ * `local` is the one profile with none. Its contract is a statement about the
+ * local endpoint: every agent turn — lead, natives, consultants — is a local
+ * turn, and the Oracle is the only role that could not be one. Rather than run
+ * it on a Copilot model the profile exists to avoid, the role is absent: no
+ * agent file, no skill, no prompt prose, no `allowedAgents` edge, and the
+ * builtin `oracle` is disabled in settings so dropping our file cannot
+ * un-shadow it (the same rule already applied to the disabled scout/worker
+ * builtins).
  */
-export function piOracleModel(profileId: PiProfileId): string {
-  return profileId === "local"
-    ? piLeadModel(profileId)
-    : piContractFor(profileId).oracleModel
+export function piOracleEnabled(profileId: PiProfileId): boolean {
+  return profileId !== "local"
 }
 
-export function piOracleThinking(profileId: PiProfileId): string {
-  return profileId === "local"
-    ? piLeadThinking(profileId)
-    : piContractFor(profileId).oracleEffort
+/**
+ * Which model answers the `oracle` subagent, or `undefined` when the profile
+ * has no oracle (`local`).
+ *
+ * Every Copilot profile's oracle is a Copilot-served consultant pinned by its
+ * family contract. `local` has none: returning the lead tier there would name
+ * a model the profile may run but a role it must not carry, and a caller that
+ * ignored the distinction would re-introduce a consultant the profile bans.
+ * The `undefined` is deliberate — it puts the decision at every call site.
+ */
+export function piOracleModel(profileId: PiProfileId): string | undefined {
+  return piOracleEnabled(profileId)
+    ? piContractFor(profileId).oracleModel
+    : undefined
+}
+
+export function piOracleThinking(profileId: PiProfileId): string | undefined {
+  return piOracleEnabled(profileId)
+    ? piContractFor(profileId).oracleEffort
+    : undefined
 }
 
 /**
@@ -256,7 +271,8 @@ export function piProfileModelIds(
 ): Array<string> {
   const ids = new Set<string>([piLeadModel(profileId)])
   if (opts.peers !== false) {
-    ids.add(piOracleModel(profileId))
+    const oracle = piOracleModel(profileId)
+    if (oracle) ids.add(oracle)
     for (const r of piNativeRoles(profileId)) ids.add(r.model)
     const advisor = piAdvisorModel(profileId)
     if (advisor) ids.add(advisor.model)
@@ -1063,8 +1079,11 @@ export function buildPiSettingsJson(opts: {
   for (const role of piNativeRoles(opts.profileId)) {
     modelThinkingLevels[`${PI_PROVIDER_NAME}/${role.model}`] = role.thinking
   }
-  modelThinkingLevels[`${PI_PROVIDER_NAME}/${piOracleModel(opts.profileId)}`] =
-    piOracleThinking(opts.profileId)
+  const oracle = piOracleModel(opts.profileId)
+  if (oracle) {
+    modelThinkingLevels[`${PI_PROVIDER_NAME}/${oracle}`] =
+      piOracleThinking(opts.profileId) as string
+  }
   const advisor = piAdvisorModel(opts.profileId)
   if (advisor) {
     modelThinkingLevels[`${PI_PROVIDER_NAME}/${advisor.model}`] =
@@ -1152,6 +1171,11 @@ export function buildPiSettingsJson(opts: {
               "codex-exec-writer": { disabled: true },
               "cursor-agent": { disabled: true },
               "cursor-agent-writer": { disabled: true },
+              // `local` carries no consultant (see `piOracleEnabled`), so its
+              // own file is gone. Without this entry the builtin `oracle`
+              // would take the empty slot and reintroduce both the role and
+              // the `advisor` alias it owns, on a model of its choosing.
+              ...(piOracleEnabled(opts.profileId) ? {} : { oracle: { disabled: true } }),
             },
           },
         }
@@ -1162,6 +1186,15 @@ export function buildPiSettingsJson(opts: {
 function agentFileName(name: string): string {
   return `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`
 }
+
+/**
+ * The read-only tool set every consultant carries.
+ *
+ * No `edit`/`write`: the oracle advises, it never lands a change. No
+ * `subagent` either, which is what makes `allowedAgents` inert on this file.
+ * The list is shared with the advisor so the two consultants cannot drift.
+ */
+const ORACLE_TOOLS = "read, grep, find, ls, bash"
 
 /**
  * Deep-merge the `subagents` settings key across the snapshot/user and
@@ -1203,17 +1236,21 @@ function roleDescription(
   // Nested-delegation channel note: General-Purpose is the only native
   // role with a nesting grant, so only it can consult the oracle subagent
   // directly. Explore/reviewer are leaves; they surface open questions in
-  // their report and the lead (or General-Purpose) consults oracle.
-  const oracleNote =
-    "May consult the oracle subagent when a decision feels risky.";
+  // their report and the lead (or General-Purpose) consults oracle. `local`
+  // has no oracle at all, so the note must not name one: an advertised target
+  // the roster lacks is a wasted turn for whoever follows it.
+  const consultNote = piOracleEnabled(profileId)
+    ? " May consult the oracle subagent when a decision feels risky."
+    : ""
   if (role.name === "Explore") {
     return "Fast read-only recon: locate code, answer evidence questions, return compressed context."
   }
   if (role.name === "General-Purpose") {
     const isBalanced = isBalancedFamily(profileId)
-    return isBalanced
-      ? `General implementation and follow-through on scoped tasks. May hand the result to reviewer only when the change alters behavior. ${oracleNote}`
-      : `General implementation and follow-through on scoped tasks. May hand the result to reviewer for assessment. ${oracleNote}`
+    const base = isBalanced
+      ? "General implementation and follow-through on scoped tasks. May hand the result to reviewer only when the change alters behavior."
+      : "General implementation and follow-through on scoped tasks. May hand the result to reviewer for assessment."
+    return `${base}${consultNote}`
   }
   return isBalancedFamily(profileId)
     ? "Behavior-changing review only: assess a change, narrow scope with search first, delegate targeted discovery to Explore rather than sweeping the repo."
@@ -1320,12 +1357,17 @@ export function buildPiAgentFiles(
       // Aliases absorb builtin `worker` traffic (`developer/coder` plus
       // `implementer/develop`, all builtin-worker aliases);
       // `acceptanceRole: writer` restores the builtin worker's acceptance
-      // inference that shadowing would otherwise drop.
+      // inference that shadowing would otherwise drop. The oracle edge is
+      // conditional: a grant naming an agent the roster lacks (`local`) is a
+      // dangling target, and the nesting grant itself only exists to reach
+      // reviewer there.
       lines.push(
         "aliases: worker, developer, coder, implementer, develop",
         "acceptanceRole: writer",
         "allowNestedSubagents: true",
-        "allowedAgents: reviewer, oracle",
+        piOracleEnabled(profileId)
+          ? "allowedAgents: reviewer, oracle"
+          : "allowedAgents: reviewer",
       );
     }
     if (isBalancedFamily(profileId) && isReviewer) {
@@ -1363,32 +1405,34 @@ export function buildPiAgentFiles(
     }
     files[`agents/${agentFileName(role.name)}`] = `${lines.join("\n")}\n`;
   }
-  // Oracle consultant agent (both modes). Advisory only: challenges
+  // Oracle consultant agent (every profile except `local`, which has no
+  // consultant at all — see `piOracleEnabled`). Advisory only: challenges
   // assumptions, never edits. Cold-start fresh context matches the MCP
   // `peers/oracle` tool contract (stateless query + context, no transcript),
-  // deliberately unlike the builtin's forked decision-consistency role. On
-  // `local` there is no MCP oracle, so this file is the only oracle the
-  // session has, and its model is a local tier id (`piOracleModel`).
-  const oracle = [
-    "---",
-    "name: oracle",
-    "description: Second opinion before acting. Challenges assumptions without editing. Use when the decision itself feels risky.",
-    "tools: read, grep, find, ls, bash",
-    `model: ${PI_PROVIDER_NAME}/${piOracleModel(profileId)}`,
-    `thinking: ${piOracleThinking(profileId)}`,
-    "advertise: true",
-    "async: false",
-    "systemPromptMode: replace",
-    "inheritProjectContext: true",
-    "defaultContext: fresh",
-    "---",
-    "",
-    "You are an oracle: a second set of eyes. You see only the task context",
-    "you are given — you have no repo memory beyond what you read now.",
-    "Inspect the code yourself with read/grep/find/ls before opining.",
-    "Challenge assumptions, name what is missing, recommend; never execute.",
-  ].join("\n");
-  files[`agents/${agentFileName("oracle")}`] = `${oracle}\n`;
+  // deliberately unlike the builtin's forked decision-consistency role.
+  const oracleModel = piOracleModel(profileId)
+  if (oracleModel) {
+    const oracle = [
+      "---",
+      "name: oracle",
+      "description: Second opinion before acting. Challenges assumptions without editing. Use when the decision itself feels risky.",
+      `tools: ${ORACLE_TOOLS}`,
+      `model: ${PI_PROVIDER_NAME}/${oracleModel}`,
+      `thinking: ${piOracleThinking(profileId) as string}`,
+      "advertise: true",
+      "async: false",
+      "systemPromptMode: replace",
+      "inheritProjectContext: true",
+      "defaultContext: fresh",
+      "---",
+      "",
+      "You are an oracle: a second set of eyes. You see only the task context",
+      "you are given — you have no repo memory beyond what you read now.",
+      "Inspect the code yourself with read/grep/find/ls before opining.",
+      "Challenge assumptions, name what is missing, recommend; never execute.",
+    ].join("\n");
+    files[`agents/${agentFileName("oracle")}`] = `${oracle}\n`;
+  }
   // Advisor agent (cheapest only). Genuinely new role — the builtin has no
   // separate advisor file (`advisor` is just an alias of builtin oracle, lost
   // in shadowing). Balanced stays advisor-free: no file, no skill, no prompt,
@@ -1494,17 +1538,28 @@ export function buildPiAppendSystem(
     `- Lead owns planning directly; there is no Plan subagent.`,
   ];
   if (peers) {
+    const oracle = piOracleEnabled(profileId)
     lines.push(
       `- Delegate FREELY to Explore for discovery and General-Purpose for scoped work.`,
       `- Call subagent directly (agent + task); save workflows for genuinely parallel fanout.`,
       isBalancedFamily(profileId)
         ? `- Send work to reviewer ONLY when the change alters behavior.`
         : `- Send finished work to reviewer for assessment.`,
-      `- Ask oracle for a second opinion when the decision itself feels risky.`,
-      advisor
-        ? `- Review the final plan with advisor (advisory) before presenting it.`
-        : `- There is no advisor in this mode: oracle is the only consultant.`,
-      `- Verify, don't vote: consultant verdicts never substitute for running the tests.`,
+    )
+    // The consult sentences describe the consultant this profile HAS. `local`
+    // has none: it runs every agent turn on the local endpoint, so a sentence
+    // pointing at an oracle would route the lead into a role the roster and
+    // the peer group both refuse.
+    if (oracle) {
+      lines.push(
+        `- Ask oracle for a second opinion when the decision itself feels risky.`,
+        advisor
+          ? `- Review the final plan with advisor (advisory) before presenting it.`
+          : `- There is no advisor in this mode: oracle is the only consultant.`,
+        `- Verify, don't vote: consultant verdicts never substitute for running the tests.`,
+      )
+    }
+    lines.push(
       `- After any subagent work completes, always write the final answer yourself.`,
     );
   } else {

@@ -11,7 +11,7 @@ identities named below:
 | `cheapest2` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol 6.1/high Advisor (plan review + capped reviewer rounds), Sol 6.1/high Oracle |
 | `balanced` | `gpt-5.6-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 5.6/high, may delegate Explore); no Plan | Grok 4.6/medium Oracle only — **advisor-free by design** |
 | `balanced2` | `gpt-6.1-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 6.1/high, may delegate Explore); no Plan | Grok 4.7/medium Oracle only — **advisor-free by design** |
-| `local` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | none: the `oracle` subagent is pinned to the local tier, so **no Copilot-served role runs on this profile** (the browser page compressor is the one model-backed exception, on both local profiles) |
+| `local` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | none: `local` runs **every** agent turn on the local server, so it carries no Oracle and no Advisor (the builtin `oracle` is disabled in settings). The browser page compressor is the one model-backed Copilot exception, shared with `local2`; web search rides Copilot's MCP endpoint without a model |
 | `local2` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | Sol 6.1/high Advisor (plan review + capped reviewer rounds), Sol 6.1/high Oracle |
 
 Both `-2` profiles inherit everything else from their base: the delegation
@@ -51,8 +51,8 @@ On the Pi side that means these concrete differences from a Copilot profile:
 
 - The provider's `api` is `anthropic-messages` (every Copilot-served row —
   `local2`'s Oracle and Advisor — is pinned back to `openai-responses`, so
-  the two never mix). On `local` the `oracle` subagent resolves to the local
-  lead tier and therefore rides the local provider like every other role.
+  the two never mix). `local` has no Copilot-served row at all: it runs the
+  lead, every native role, and nothing else.
 - The provider's `baseUrl` is the proxy ORIGIN, not `<proxy>/v1`: Pi's
   bundled Anthropic client POSTs `{baseUrl}/v1/messages`, so the `/v1` root
   produced `/v1/v1/messages` and a proxy 404 (measured against the installed
@@ -75,19 +75,25 @@ On the Pi side that means these concrete differences from a Copilot profile:
   `contextWindow`, with no `cost` and no `thinkingLevelMap`: a local id has
   no catalog entry to derive either from, and the server's effort ladder is
   unknown, so both are omitted rather than guessed.
-- `local` still emits an `oracle` agent file, pinned to the local lead tier.
-  Dropping it would un-shadow Pi's builtin `oracle`, which also owns the
-  `advisor` alias and carries a model of its own choosing; keeping the file
-  keeps the role, its nesting grant and the shadowing while running it on the
-  one endpoint the profile may use.
+- `local` emits no `oracle` agent file. Every agent turn on this profile is
+  a local turn, and a consultant is the one role that cannot be — so the
+  role is absent rather than re-pointed: no file, no `gh-oracle` skill, no
+  `/plan-review`, no consult prose in the digest, no `allowedAgents: …,
+  oracle` edge on `General-Purpose`. Because our file is what shadows the
+  builtin, dropping it requires the matching settings entry:
+  `subagents.agentOverrides.oracle = {disabled: true}`. Without that, the
+  builtin `oracle` (and the `advisor` alias it owns) would take the empty
+  slot on a model of its own choosing — on the one profile that may bill no
+  Copilot model.
 - `workers` is not published on either local profile, because a worker
   subagent resolves and runs a Copilot model. `peers` is published only while
   it holds a tool: on `local` that means the artifact review panel, on
   `local2` the Oracle and the artifact panel.
 
 Lead turns are recorded in the AIC ledger at zero (`recordZeroCostRequest`,
-keyed on the raw id), so the footer reads `[AIC 0.00]` / `~$0.00` while the
-Oracle's and Advisor's Copilot-billed credits accumulate beside them. See
+keyed on the raw id), so the footer reads `[AIC 0.00]` / `~$0.00` on `local`.
+On `local2` the same zero-cost lead sits beside the Oracle's and Advisor's
+Copilot-billed credits. See
 [`default-models.md`](default-models.md#local-launch-profiles--m-local--m-local2)
 for the full contract.
 
@@ -98,14 +104,16 @@ same-named pi-subagents builtins (pinned models); builtin
 as are the external-CLI families `claude-code`/`codex-exec`/`cursor-agent`
 (+ `-writer` variants — they shell out to other CLIs with ambient auth,
 off-proxy and off-ledger), while builtin `delegate` stays enabled as the
-cheap append-mode path.
+cheap append-mode path. `local` additionally disables builtin `oracle`,
+since it emits no replacement file.
 Every emitted agent runs foreground (`async: false`): the detached
 background runner demonstrably drops `read`/`bash` from its tool registry
 (observed live as `requested unavailable child tools: [read, bash]`),
 failing every strict-allowlist child it touches. `contact_supervisor`
 appears only on `General-Purpose` (blocked-writer escalation); leaves
 never page the supervisor.
-`General-Purpose` may nest `reviewer`/`oracle`, balanced `reviewer` may nest
+`General-Purpose` may nest `reviewer`/`oracle` (`local` grants `reviewer`
+only — it has no oracle), balanced `reviewer` may nest
 `Explore` (ceiling raised to 3 via `PI_SUBAGENT_MAX_DEPTH`). Handoff is
 inline prose in the delegating brief — no `context.md`/`progress.md` file
 bindings, so runs write nothing into the repo. `--swe` without `--peers`

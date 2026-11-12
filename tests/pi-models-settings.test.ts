@@ -22,6 +22,7 @@ import {
   piLeadModel,
   piLeadThinking,
   piNativeRoles,
+  piOracleEnabled,
   piOracleModel,
   piOracleThinking,
   piProfileModelIds,
@@ -332,13 +333,14 @@ describe("pi models.json local profiles", () => {
     }
   })
 
-  test("roster: bare tier ids, oracle on the lead tier for local", () => {
+  test("roster: bare tier ids and no consultant at all on local", () => {
     const json = buildPiModelsJson({
       serverUrl: "http://127.0.0.1:8787",
       profileId: "local",
     })
-    // No Copilot-served row at all: local allows no Copilot model, so its
-    // oracle runs on the same local tier as the lead.
+    // No Copilot-served row at all: `local` allows no Copilot model, so it
+    // carries no consultant either — nothing on this profile names a model
+    // the launch refuses to bill.
     expect(
       json.providers["gh-router"].models.map((m) => m.id).sort(),
     ).toEqual(["haiku", "opus", "sonnet"])
@@ -354,17 +356,46 @@ describe("pi models.json local profiles", () => {
       model: "gpt-6.1-sol",
       thinking: "high",
     })
-    expect(piOracleModel("local")).toBe(piLeadModel("local"))
-    expect(piOracleThinking("local")).toBe("high")
+    // The consultant is absent, not merely re-pointed: `local` runs every
+    // agent turn locally, so an oracle could only exist as a Copilot call.
+    expect(piOracleEnabled("local")).toBe(false)
+    expect(piOracleModel("local")).toBeUndefined()
+    expect(piOracleThinking("local")).toBeUndefined()
+    // `local2` keeps the contracted Copilot consultant.
+    expect(piOracleEnabled("local2")).toBe(true)
+    expect(piOracleModel("local2")).toBe("gpt-6.1-sol")
+    expect(piOracleThinking("local2")).toBe("high")
   })
 
-  test("the local oracle file stays emitted, pinned to the local tier", () => {
-    // Omitting the file would un-shadow Pi's builtin `oracle`, which also owns
-    // the `advisor` alias and is pinned to a model of its own choosing. The
-    // role, its nesting grant and the shadowing stay; only the model moves.
+  test("local emits no oracle file and disables the builtin one", () => {
+    // Dropping the file alone would un-shadow Pi's builtin `oracle`, which
+    // also owns the `advisor` alias and is pinned to a model of its own
+    // choosing. The settings override closes that slot.
     const derived = buildPiAgentFiles("local")
-    expect(derived["agents/oracle.md"]).toContain("model: gh-router/opus")
-    expect(derived["agents/oracle.md"]).not.toContain("gpt-6.1-sol")
+    expect(Object.keys(derived).some((k) => k.includes("oracle"))).toBe(false)
+    expect(
+      Object.values(derived).some((content) => content.includes("oracle")),
+    ).toBe(false)
+    const settings = buildPiSettingsJson({
+      profileId: "local",
+      searchEnabled: false,
+      browseEnabled: false,
+    }) as { subagents?: { agentOverrides?: Record<string, { disabled?: boolean }> } }
+    expect(settings.subagents?.agentOverrides?.["oracle"]).toEqual({ disabled: true })
+    // The nesting grant must not name an agent the roster lacks.
+    expect(derived["agents/general-purpose.md"]).toContain("allowedAgents: reviewer\n")
+    expect(derived["agents/general-purpose.md"]).not.toContain("oracle")
+
+    // `local2` keeps both: the file on the contracted Copilot model, and no
+    // disable override.
+    const local2 = buildPiAgentFiles("local2")
+    expect(local2["agents/oracle.md"]).toContain("model: gh-router/gpt-6.1-sol")
+    const local2Settings = buildPiSettingsJson({
+      profileId: "local2",
+      searchEnabled: false,
+      browseEnabled: false,
+    }) as { subagents?: { agentOverrides?: Record<string, { disabled?: boolean }> } }
+    expect(local2Settings.subagents?.agentOverrides?.["oracle"]).toBeUndefined()
   })
 })
 

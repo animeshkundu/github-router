@@ -242,6 +242,21 @@ describe("pi settings builtin disables", () => {
     }
   })
 
+  test("local has no oracle file, so it disables the builtin that would fill the slot", () => {
+    // Our file is what shadows the builtin (and its `advisor` alias). Dropping
+    // the file without the override would resurrect a role with a model of its
+    // own choosing on the profile that may bill no Copilot model at all.
+    const settings = buildPiSettingsJson({ profileId: "local", searchEnabled: false, browseEnabled: false })
+    expect(settings.subagents?.agentOverrides?.["oracle"]).toEqual({ disabled: true })
+    // Everything else is the shared list, unchanged.
+    expect(settings.subagents?.agentOverrides?.["scout"]).toEqual({ disabled: true })
+    expect(settings.subagents?.agentOverrides?.["delegate"]).toBeUndefined()
+
+    // local2 keeps its own oracle file, so no override entry.
+    const local2 = buildPiSettingsJson({ profileId: "local2", searchEnabled: false, browseEnabled: false })
+    expect(local2.subagents?.agentOverrides?.["oracle"]).toBeUndefined()
+  })
+
   test("peerless launches emit no subagents key", () => {
     const settings = buildPiSettingsJson({
       profileId: "cheapest",

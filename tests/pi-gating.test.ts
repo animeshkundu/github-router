@@ -223,26 +223,25 @@ describe("pi --swe owns the pipeline surface", () => {
   })
 })
 
-describe("pi local profiles route consults to the endpoint they can reach", () => {
-  test("the default oracle skill follows whether the MCP tool exists", () => {
-    for (const profileId of ["local", "local2"] as const) {
-      expect(buildPiSkills({ profileId }).map((s) => s.dir)).toEqual(["gh-oracle"])
-    }
-    // `local` filters the peers group down to the artifact tools, so
-    // `mcp__gh-router-peers__oracle` answers -32601 there. The skill routes to
-    // the agent file instead of naming a tool that would waste a turn.
-    const local = buildPiSkills({ profileId: "local" })[0]
-    expect(local.content).not.toContain("mcp__gh-router-peers__oracle")
-    expect(local.content).toContain("`oracle` subagent")
-    const local2 = buildPiSkills({ profileId: "local2" })[0]
-    expect(local2.content).toContain("mcp__gh-router-peers__oracle")
+describe("pi local profiles carry only the consultants they can reach", () => {
+  test("the oracle skill follows whether the profile has an oracle at all", () => {
+    // `local` has no consultant: no MCP persona (the peers group filters it
+    // out), no agent file, no skill. Advertising one there is a wasted turn.
+    expect(buildPiSkills({ profileId: "local" })).toEqual([])
+    // `local2` keeps the stateless MCP persona and names it directly.
+    const local2 = buildPiSkills({ profileId: "local2" })
+    expect(local2.map((s) => s.dir)).toEqual(["gh-oracle"])
+    expect(local2[0].content).toContain("mcp__gh-router-peers__oracle")
   })
 
   test("--swe names only the consultant the profile actually has", () => {
+    // No oracle, no advisor: the roster sentence names neither and reads
+    // cleanly (no dangling comma).
     const local = buildPiSkills({ profileId: "local", swe: true })
-    expect(local.map((s) => s.dir)).toEqual(["gh-oracle", "gh-delegate"])
+    expect(local.map((s) => s.dir)).toEqual(["gh-delegate"])
     const localDelegate = local.find((s) => s.dir === "gh-delegate")
-    expect(localDelegate?.content).toContain("`oracle` for consults")
+    expect(localDelegate?.content).toContain("`reviewer`\nfor verification. (Builtin")
+    expect(localDelegate?.content).not.toContain("oracle")
     expect(localDelegate?.content).not.toContain("`advisor`")
 
     const local2 = buildPiSkills({ profileId: "local2", swe: true })
