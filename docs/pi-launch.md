@@ -491,7 +491,7 @@ sandbox. `bash` is allowed in plan mode, so a model that wanted to write
 trade Claude Code makes, and the right one for a mode whose purpose is to keep a
 cooperative model from getting ahead of the user — not to contain a hostile one.
 
-What replaces them is prose — about 1,800 characters of it, roughly the length
+What replaces them is prose — under 1,900 characters of it, roughly the length
 of Claude Code's own plan-mode reminder. The brief says the user does not want
 execution yet, that this supersedes any instruction to do the work now, and
 that the plan file is the single exception. It then gives the workflow: reuse
