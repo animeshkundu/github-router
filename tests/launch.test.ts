@@ -474,8 +474,11 @@ describe("forwardTerminalResize — reflow for the detached CLI", () => {
       Object.defineProperty(process, "platform", original)
     }
     // The override is restored, so a later test in this file is not silently
-    // running under a faked platform.
-    expect(Object.getOwnPropertyDescriptor(process, "platform")!.value).not.toBe("win32")
+    // running under a faked platform. Compare against the value captured
+    // before the override, not against a literal: on a win32 runner the real
+    // platform IS "win32", so asserting `!== "win32"` fails there for the one
+    // reason the test exists to rule out — and would have passed on a fake.
+    expect(Object.getOwnPropertyDescriptor(process, "platform")!.value).toBe(original.value)
   })
 
   test("a dead group is a no-op, not a throw", () => {
