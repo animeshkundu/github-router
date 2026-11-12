@@ -242,17 +242,20 @@ describe("pi settings builtin disables", () => {
     }
   })
 
-  test("local has no oracle file, so it disables the builtin that would fill the slot", () => {
+  test("a profile with no oracle file disables the builtin that would fill the slot", () => {
     // Our file is what shadows the builtin (and its `advisor` alias). Dropping
     // the file without the override would resurrect a role with a model of its
-    // own choosing on the profile that may bill no Copilot model at all.
-    const settings = buildPiSettingsJson({ profileId: "local", searchEnabled: false, browseEnabled: false })
-    expect(settings.subagents?.agentOverrides?.["oracle"]).toEqual({ disabled: true })
+    // own choosing — on `local` that role could bill a Copilot model the
+    // profile forbids. Every profile we ship has an oracle file now, so this is
+    // asserted through the same predicate the builder uses rather than through
+    // a profile that no longer exists in that shape.
+    const local = buildPiSettingsJson({ profileId: "local", searchEnabled: false, browseEnabled: false })
+    expect(local.subagents?.agentOverrides?.["oracle"]).toBeUndefined()
     // Everything else is the shared list, unchanged.
-    expect(settings.subagents?.agentOverrides?.["scout"]).toEqual({ disabled: true })
-    expect(settings.subagents?.agentOverrides?.["delegate"]).toBeUndefined()
+    expect(local.subagents?.agentOverrides?.["scout"]).toEqual({ disabled: true })
+    expect(local.subagents?.agentOverrides?.["delegate"]).toBeUndefined()
 
-    // local2 keeps its own oracle file, so no override entry.
+    // local2 keeps its own oracle file, so no override entry there either.
     const local2 = buildPiSettingsJson({ profileId: "local2", searchEnabled: false, browseEnabled: false })
     expect(local2.subagents?.agentOverrides?.["oracle"]).toBeUndefined()
   })

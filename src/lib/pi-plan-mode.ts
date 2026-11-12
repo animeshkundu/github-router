@@ -1,35 +1,53 @@
 /**
- * Plan mode: a Claude Code-style read-only exploration mode for `github-router pi`.
+ * Plan mode: a Claude Code-style planning mode for `github-router pi`.
  *
  * Pi ships no plan mode (upstream README: "skips features like sub-agents and
  * plan mode"); the reference implementation is an *example*
  * (`examples/extensions/plan-mode/`) that the user must install separately.
- * This module ports that behaviour into the router's own generated extension so
- * every launch has it, with these deliberate divergences:
+ * This module ports the behaviour into the router's own generated extension so
+ * every launch has it, tuned for FRONTIER models rather than for a defensive
+ * worst case.
  *
- * 1. **Always on, no `--plan` flag.** The user toggles with `Ctrl+Alt+P` or
+ * The design follows Claude Code's own plan mode (`2.1.322`), whose prompt is
+ * reproduced here as behaviour rather than quoted, plus the published
+ * guidance from Anthropic and OpenAI on planning before coding:
+ *
+ * 1. **One barrier, the one that matters.** `edit`, `write` and `apply_patch`
+ *    leave the active set, and a call that arrives anyway is refused. Nothing
+ *    else is gated: bash, powershell, MCP tools, delegation and todo writes are
+ *    all available, because a frontier model asked to investigate a codebase
+ *    needs them and a hand-maintained read-only command table is both
+ *    impossible to keep correct (`awk 'BEGIN{system("sh")}'`) and insulting to
+ *    a model that was told what the mode is for. Claude Code gates tools by
+ *    capability, not by parsing command strings, and so does this.
+ * 2. **One file may be written: the plan.** Claude Code's plan mode is not
+ *    read-only, it is *one-write* mode — the model builds its plan
+ *    incrementally in a single designated file and the user can open, edit and
+ *    approve that file. The file is pinned by the extension (never chosen by
+ *    the model), so the exception cannot widen: `write`/`edit` are refused
+ *    unless the resolved path is exactly the plan path.
+ * 3. **Always on, no `--plan` flag.** The user toggles with `Ctrl+Alt+P` or
  *    `/plan`. A registered flag would have to survive `collectPiPassthroughArgs`
  *    and pi's own unknown-flag rejection; registering nothing keeps that path
  *    untouched.
- * 2. **Exact tool save/restore.** Upstream re-derives the normal set from a
+ * 4. **Exact tool save/restore.** Upstream re-derives the normal set from a
  *    hardcoded `NORMAL_MODE_TOOLS`, which would silently re-enable `edit` and
  *    `write` that a caller's `--tools` narrowing had removed. We snapshot
  *    `pi.getActiveTools()` on entry and restore that array verbatim.
- * 3. **Writes blocked by name as well as removed from the active set.** Two
- *    independent barriers: the model cannot see `edit`/`write`, and a tool call
- *    that arrives anyway is refused. `powershell` is refused outright; the
- *    upstream allowlist also lives here without the metacharacter gap, and
- *    wider than upstream: MCP tools are denied by namespace, `todo`'s writer
- *    actions are refused, and so are `subagent_launch`/`workflow`/
- *    `send_to_session` (see `PLAN_MCP_READ_TOOLS`).
- * 4. **No `@earendil-works/pi-agent-core` import.** Upstream imports its message
+ * 5. **No `@earendil-works/pi-agent-core` import.** Upstream imports its message
  *    types; generated extensions may only import host-provided specifiers
  *    (`typebox`, `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`,
  *    `@earendil-works/pi-tui`), so the emitted source carries local structural
  *    types and zero runtime imports.
- * 5. **Step text keeps its verb.** Upstream strips a leading `Read`/`Add`/`Use`,
+ * 6. **Step text keeps its verb.** Upstream strips a leading `Read`/`Add`/`Use`,
  *    turning "Read the launcher" into "Launcher"; the checklist is what the user
  *    reads while the plan runs, so the action stays.
+ *
+ * The prompt itself is two blocks, not two hundred lines: the mode contract
+ * (what is closed and why) and the workflow (explore, ask, design, write the
+ * plan, hand over). Both are modelled on Claude Code's, including its tolerance
+ * for the model's judgement — "read-only actions" is a rule the model applies,
+ * not a table the harness enforces.
  *
  * Every API the emitted source touches was verified against the pi 1.3.0 tarball
  * (`PI_MIN_VERSION`), not just the current docs: `getActiveTools`/`setActiveTools`
@@ -49,192 +67,6 @@ export interface PlanStep {
   step: number
   text: string
   completed: boolean
-}
-
-/**
- * Commands that mutate state. Blocked regardless of position: a read-only
- * prefix such as `git log && rm -rf x` must not slip through on the strength of
- * its first word, so the destructive check is unconditional.
- */
-export function isPlanUnsafeCommand(command: string): boolean {
-  // Writers and process killers, anchored at a COMMAND position: the start, or
-  // just after a separator that could begin one. Plain whitespace is not in that
-  // set, and that is the point — a word sitting in an ARGUMENT is not a command:
-  // `rg code src` searches for the word "code", `rg tee lib` for "tee". A bare
-  // `\bcp\b` would refuse `ls -cp`; a bare `\brm\b` would refuse `cat rm.md`.
-  // Nothing is lost by dropping `\s`: a second command needs `;`, `&&`, a bare
-  // `&` or `$(`, and `isPlanSafeCommand` refuses all of them before the
-  // allowlist runs. The separator set stays as the belt for a future edit that
-  // relaxes that guard.
-  const destructive = [
-    /(^|[;|&(])\s*(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|chgrp|ln|tee|truncate|dd|shred|sudo|su|killall|pkill|kill)(?=$|\s)/i,
-    /(^|[^<])>(?!>)/,
-    />>/,
-    /\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
-    /\byarn\s+(add|remove|install|publish)/i,
-    /\bpnpm\s+(add|remove|install|publish)/i,
-    /\bpip\s+(install|uninstall)/i,
-    /\bapt(-get)?\s+(install|remove|purge|update|upgrade)/i,
-    /\bbrew\s+(install|uninstall|upgrade)/i,
-    /\bgit\s+(add|commit|push|pull|merge|rebase|reset|checkout|switch|restore|clean|stash|cherry-pick|revert|tag|init|clone|apply|am)\b/i,
-    /\bgit\s+branch\s+-[dDmMcC]/i,
-    /\breboot\b/i,
-    /\bshutdown\b/i,
-    /\bsystemctl\s+(start|stop|restart|enable|disable)/i,
-    /\bservice\s+\S+\s+(start|stop|restart)/i,
-    /(^|[;|&(])\s*(?:vim?|nano|emacs|subl|code)(?=$|\s)/i,
-    // Writers that the read allowlist would otherwise admit on the strength of
-    // a read-only first word. Each of these READS like its harmless neighbour,
-    // so plain prefix matching is not enough: `find . -delete` deletes, `sort
-    // -o out in` writes, and any `--output` flag redirects git's output to a
-    // file without a `>` for the metacharacter guard to catch.
-    /\bfind\b[^|;]*\s-(delete|exec|execdir|ok|okdir|fprint|fprint0|fprintf|fls)\b/i,
-    // `fd` is the modern `find`: -x/-X/--exec run a command per result.
-    /\bfd\b[^|;]*\s(-x|-X|--exec)/i,
-    // `jq` in place (gojq/jaq spell it -i, jq itself has no such flag).
-    /\bjq\b[^|;]*\s(-i|--in-place)\b/i,
-    // A pager that can be told to run something (`bat --pager="sh -c ..."`).
-    /\bbat\b[^|;]*--pager/i,
-    /\bsort\b[^|;]*\s-o/i,
-    // `sort -T dir` only picks where the spill files go; it still writes them.
-    // Case-SENSITIVE on purpose: the whole table is `/i`, and sort's field
-    // separator `-t` must not trip this (`sort -t, -k2 f` is a plain read).
-    /\bsort\b[^|;]*\s-T/,
-    /\btree\b[^|;]*\s-o/i,
-    // `file -C -m magic` compiles the magic database next to it. Also
-    // case-sensitive, so `file -c` (the check-only report) stays a read.
-    /\bfile\b[^|;]*\s-C\b/,
-    /\bnpm\s+audit\s+(fix|--fix)\b/i,
-    /\brg\b[^|;]*\s--pre\b/i,
-    /\bdate\b[^|;]*\s--?s(et)?\b/i,
-    // Flags that run a program the command line does not spell out: a pager
-    // (`sort --compress-program`), an external differ, or a textconv filter.
-    /--compress-program/i,
-    /\bgit\b[^|;]*--(ext-diff|textconv)\b/i,
-    // git's transport helpers: `git ls-remote --upload-pack='touch x' .` names
-    // a program on the command line and git runs it.
-    /\bgit\b[^|;]*--(upload-pack|receive-pack|exec)\b/i,
-    /--output(-file)?[= ]/i,
-  ]
-  return destructive.some((pattern) => pattern.test(command))
-}
-
-/** Read-only commands plan mode permits. Anything else is refused. */
-export function isPlanReadOnlyCommand(command: string): boolean {
-  const safe = [
-    /^\s*cat\b/,
-    // `less` and `more` are absent on purpose: they write (`less -o log`) and
-    // execute (`less +!cmd`), and they are interactive, which a captured bash
-    // tool cannot use. `cat`, `head`, `tail` cover the reads they were used for.
-    /^\s*head\b/,
-    /^\s*tail\b/,
-    /^\s*grep\b/,
-    /^\s*find\b/,
-    /^\s*ls\b/,
-    /^\s*pwd\b/,
-    /^\s*echo\b/,
-    /^\s*printf\b/,
-    /^\s*wc\b/,
-    /^\s*sort\b/,
-    // `uniq` is absent on purpose: `uniq a b` writes `b`, a positional write no
-    // flag scan can see, and the useful form (`sort | uniq`) needs a pipe that
-    // the metacharacter guard already refuses.
-    /^\s*diff\b/,
-    /^\s*file\b/,
-    /^\s*stat\b/,
-    /^\s*du\b/,
-    /^\s*df\b/,
-    /^\s*tree\b/,
-    /^\s*which\b/,
-    /^\s*whereis\b/,
-    /^\s*type\b/,
-    // `env` is absent on purpose: `env <cmd>` runs `<cmd>`, so the allowlist
-    // would only be vetting the word `env` and
-    // `env python3 -c 'open("x","w").write()'` would pass every other guard.
-    // `printenv` stays: it takes only variable names.
-    /^\s*printenv\b/,
-    /^\s*uname\b/,
-    /^\s*whoami\b/,
-    /^\s*id\b/,
-    /^\s*cal\b/,
-    // `date` is pattern-matched rather than prefix-matched: the positional and
-    // `-j` forms set the system clock with no `-s` for the deny list to see.
-    /^\s*date\s*(\+[\w%:.\-/+, ]*)?$/,
-    /^\s*date\s+-u\s*(\+[\w%:.\-/+, ]*)?$/,
-    /^\s*uptime\b/,
-    /^\s*ps\b/,
-    /^\s*free\b/,
-    /^\s*git\s+(status|log|diff|show|blame|describe)\b/i,
-    /^\s*git\s+(rev-parse|ls-files|ls-tree|ls-remote|shortlog|show-ref)\b/i,
-    /^\s*git\s+branch\s*$/i,
-    /^\s*git\s+branch\s+(-a|-r|-v|-vv|--list|--show-current)\b/i,
-    /^\s*git\s+remote\s*(-v)?\s*$/i,
-    /^\s*git\s+config\s+--get\b/i,
-    /^\s*npm\s+(list|ls|view|info|search|outdated|audit)/i,
-    /^\s*yarn\s+(list|info|why|audit)/i,
-    // `--version` short-circuits, but the pattern must not license trailing
-    // tokens: `node --version -e '<js>'` is only saved by the interpreter's own
-    // argument order, which is not a contract worth betting reads on.
-    /^\s*node\s+--version\s*$/i,
-    /^\s*python3?\s+--version\s*$/i,
-    /^\s*jq\b/,
-    // `sed` and `awk` are deliberately ABSENT: both take a script, and a script
-    // can shell out (`awk 'BEGIN{system("sh")}'`, `sed -n '1e sh'`,
-    // `sed -n '1w /tmp/x'`) with no `|`, `;` or `>` for the guards above to see.
-    // A read-only allowlist that has to check a script interpreter for escapes
-    // is not a read-only allowlist. `grep`, `rg`, `head`, `tail` and `jq` cover
-    // the reads those two were used for.
-    /^\s*rg\b/,
-    /^\s*fd\b/,
-    /^\s*bat\b/,
-    /^\s*eza\b/,
-  ]
-  return safe.some((pattern) => pattern.test(command))
-}
-
-/**
- * The string bash will actually run, as far as the quoting rules go.
- *
- * Every check below reads a command as TEXT, but bash does not: it removes
- * quotes, eats backslashes, and expands a few shell parameters before any
- * program sees an argument. That gap is not theoretical — as raw text,
- * `find . '-delete'`, `find . -del''ete` and `find${IFS}.${IFS}-delete` all
- * spell a harmless word, and all three run `find . -delete`.
- *
- * So the checks run on this normalization instead:
- *   - `${IFS}`, `$IFS` and `$@`/`$*` expand to whitespace or to argv, and are
- *     replaced with a space (the worst case for us);
- *   - a backslash-escaped character loses the backslash, as bash does;
- *   - quotes are removed, which is what they do — they group, they do not join.
- *
- * Anything still holding a `$` afterwards is refused by the caller: a variable
- * can expand to `-delete` just as easily as to a path, and no reading of the
- * raw text can tell which.
- */
-export function planNormalizeCommand(command: string): string {
-  return String(command)
-    .replace(/\$\{IFS\}|\$IFS\b|\$[@*]/g, " ")
-    .replace(/\\([\s\S])/g, "$1")
-    .replace(/['"]/g, "")
-}
-
-/** True when plan mode may execute this bash command. */
-export function isPlanSafeCommand(command: string): boolean {
-  if (typeof command !== "string") return false
-  const trimmed = command.trim()
-  if (!trimmed) return false
-  const normalized = planNormalizeCommand(trimmed)
-  if (isPlanUnsafeCommand(normalized)) return false
-  // Shell metacharacters are refused: a pipe or substitution can smuggle a
-  // write into an otherwise allowlisted prefix (`ls $(rm -rf /)`), and a second
-  // command after `;`, `&&` or a bare `&` never reaches the allowlist check at
-  // all. The bare `&` is the one that bites: `ls & node -e '…'` backgrounds the
-  // read and runs the writer, and `ls&rm -rf x` needs no space at all.
-  // Process substitution (`cat <(cmd)`, `cat >(cmd)`) does the same job with no
-  // pipe for this test to see, so the bracket forms are refused too. A `$` that
-  // survived normalization is a variable, which can expand to a flag.
-  if (/[|;&\n`$]|<(?=\()|>(?=\()/.test(normalized)) return false
-  return isPlanReadOnlyCommand(normalized)
 }
 
 /**
@@ -338,18 +170,20 @@ export function planAllStepsComplete(message: string): boolean {
 }
 
 /**
- * Read tools plan mode keeps available (intersected with the tools this pi
- * actually has — a narrowed `--tools` launch may not have all of them).
+ * Tools plan mode removes from the active set AND refuses by name.
+ *
+ * Two independent barriers, exactly as before — what changed is the SCOPE.
+ * Claude Code's plan mode is `disallowedTools: [Edit, Write, NotebookEdit]`;
+ * everything else (bash, MCP, subagents, the todo store) stays available and the
+ * model is trusted to apply "explore, do not implement". Every extra entry this
+ * list used to carry was a claim that a frontier model could not be trusted
+ * with a shell it was told to only read with, and each such claim cost
+ * capability the planning turn actually needed (`git log`, `rg`, a build to see
+ * whether the tests pass).
+ *
+ * `apply_patch` is here because some hosts expose a patch tool that writes by
+ * another name; pi's own writers are `edit` and `write`.
  */
-export const PLAN_READ_TOOLS: ReadonlyArray<string> = Object.freeze([
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "bash",
-])
-
-/** Tools plan mode refuses by name even if a call slips through. */
 export const PLAN_BLOCKED_TOOLS: ReadonlyArray<string> = Object.freeze([
   "edit",
   "write",
@@ -357,74 +191,17 @@ export const PLAN_BLOCKED_TOOLS: ReadonlyArray<string> = Object.freeze([
 ])
 
 /**
- * `todo` is a file-backed store (`.pi/todos/*.md`), so its WRITE actions are
- * writes like any other — but its read actions are exactly what a planning turn
- * wants, and blocking the tool outright would take the user's own todo list away
- * from the model for the whole mode. Only the writer actions are refused.
- */
-export const PLAN_TODO_READ_ACTIONS: ReadonlyArray<string> = Object.freeze([
-  "list",
-  "list-all",
-  "get",
-])
-
-/**
- * Delegation tools, refused during plan mode for a subtler reason than
- * `PLAN_BLOCKED_TOOLS`: a child session is a separate process with its own
- * tool roster, so `subagent` is a write vector this extension cannot gate —
- * the barrier has no visibility into what the child was told to do. Blocking
- * it is what keeps the mode's promise ("nothing on disk may change") true.
- */
-export const PLAN_BLOCKED_DELEGATION: ReadonlyArray<string> = Object.freeze([
-  "subagent",
-  // The rest of the family: `subagent_launch` is the workflow-flavoured entry
-  // point, and `send_to_session` hands a message to a DIFFERENT session that is
-  // not in this mode at all. Same escape as `subagent`, only further from the
-  // barrier.
-  "subagent_launch",
-  "send_to_session",
-  // `workflow` runs a JavaScript orchestration script that spawns its own
-  // agents; the script is the payload, so no per-tool rule can vet it.
-  "workflow",
-])
-
-/**
- * Shells plan mode refuses outright: unlike `bash`, a PowerShell allowlist is
- * not safely derivable from a command string (aliases, cmdlets that write by
- * default), so plan mode simply has no powershell.
- */
-export const PLAN_BLOCKED_SHELLS: ReadonlyArray<string> = Object.freeze(["powershell"])
-
-/**
- * The only MCP tools plan mode lets through.
+ * The plan file, relative to the workspace.
  *
- * Every other MCP tool is refused by namespace prefix (`mcp__<server>__<tool>`),
- * because a tool's NAME is not evidence about what it does:
- * `mcp__gh-router-peers__explore` and `mcp__gh-router-peers__implement` differ by
- * one word, and the second edits files in a worktree. `workers` (`implement`,
- * `worker_defaults`), `cloudagent` (`create_job`), `browser` (clicks and types)
- * and the peers `implement`/`test` family are all reachable from a plan-mode
- * turn if this is left to the active-set barrier.
- *
- * That barrier cannot carry this weight: MCP servers are published `deferred`,
- * so their tools are absent from the snapshot plan mode narrows, and
- * `tool_search` can activate one at any point. The `tool_call` handler is the
- * only place that sees these calls.
- *
- * Our own groups declare no `readOnlyHint` (and a server's hint would be the
- * server's own claim, unverified by pi), so the rule is default-deny with an
- * allowlist of the two search tools whose handlers this repo owns and whose
- * bodies only read.
- *
- * Pi's own resource readers (`list_mcp_resources`, `read_mcp_resource`, …) are
- * deliberately NOT listed: they carry no `mcp__` prefix, pi implements them, and
- * pi marks them `readOnlyHint: true` (`extensions/mcp/resources.js:153`), so
- * they fall outside the namespace rule and stay available for free.
+ * Claude Code pins one path per session and tells the model "this is the only
+ * file you are allowed to edit". Ours is the repository's existing convention
+ * (`.github-router/plans/<slug>/plan.md`, the same artifact `/gh-plan` writes and
+ * `/gh-implement` reads), with a stable slug so a resumed session keeps editing
+ * the plan it started rather than opening a second one.
  */
-export const PLAN_MCP_READ_TOOLS: ReadonlyArray<string> = Object.freeze([
-  "mcp__gh-router-search__code",
-  "mcp__gh-router-search__web",
-])
+export function planFilePath(): string {
+  return ".github-router/plans/pi-plan/plan.md"
+}
 
 /** Session entry type for persisting plan state across resume. */
 export const PLAN_MODE_ENTRY = "gh-router-plan-mode"
@@ -440,22 +217,67 @@ export const PLAN_DONE_TYPE = "gh-router-plan-done"
 export const PLAN_LIST_TYPE = "gh-router-plan-list"
 
 /**
+ * Resolve `path` against `cwd` and decide whether it IS the plan file.
+ *
+ * Deliberately dumb and deliberately strict: this is the one hole in the write
+ * barrier, so it compares `path.resolve`d strings rather than doing prefix
+ * arithmetic on the raw input. A model that writes `plan.md` in the right
+ * directory passes; `../plan.md`, `<cwd>/plan.md/../secret`, and a symlink-free
+ * absolute path to the same target all normalize to the same string, which is
+ * the property that matters.
+ *
+ * The emitted copy cannot import `node:path` (the generated extension and this
+ * module have different allowed specifiers), so it carries its own tiny
+ * resolver: POSIX normalisation plus a Windows drive/UNC guard. It is not a
+ * general path library — it only has to agree with itself between the
+ * comparison here and the value `planFilePath()` produces, which is why the
+ * relative plan path is a PARAMETER: a `toString()`-serialized function cannot
+ * see module scope, and a captured constant would be `undefined` at runtime.
+ */
+export function isPlanFilePath(cwd: string, target: unknown, rel: string): boolean {
+  const raw = typeof target === "string" ? target.trim() : ""
+  if (!raw) return false
+  const normalize = (input: string): string => {
+    const isWindows = /^[a-zA-Z]:[\\/]/.test(input) || input.indexOf("\\") >= 0
+    const sep = isWindows ? /\\+/g : /\/+/g
+    const unified = input.replace(sep, "/")
+    const absolute = isWindows ? unified : unified.startsWith("/") ? unified : "/" + unified
+    const parts: Array<string> = []
+    for (const segment of absolute.split("/")) {
+      if (!segment || segment === ".") continue
+      if (segment === "..") {
+        parts.pop()
+        continue
+      }
+      parts.push(segment)
+    }
+    return (isWindows ? "" : "/") + parts.join("/")
+  }
+  if (typeof rel !== "string" || !rel) return false
+  const base = typeof cwd === "string" && cwd.trim() ? cwd.trim() : "/"
+  const resolved = raw.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(raw) || raw.indexOf("\\") === 0
+    ? normalize(raw)
+    : normalize(base + "/" + raw)
+  return resolved === normalize(base + "/" + rel)
+}
+
+/**
  * The emitted extension section.
  *
  * Pure helpers ride `.toString()` (the same technique the statusline footer
  * uses for `buildPiStatusPayload`) so the code that runs in the product is
  * byte-identical to the code the unit tests exercise — a hand-copied duplicate
- * could drift from its tested twin without any test noticing. They keep their
- * original NAMES on purpose: `isPlanSafeCommand` calls `isPlanUnsafeCommand` and
- * `isPlanReadOnlyCommand` by name, so renaming at emission time would leave
- * dangling references that only fail at runtime.
+ * could drift from its tested twin without any test noticing.
  */
 export function buildPiPlanModeSection(): Array<string> {
   return [
-    `  // ---- plan mode: Claude-Code-style read-only exploration (always on) ----`,
+    `  // ---- plan mode: Claude-Code-style planning (always on) ----`,
     `  // /plan or Ctrl+Alt+P toggles it. The active tool set is snapshotted on entry`,
     `  // and restored VERBATIM on exit, so a caller's --tools narrowing survives a`,
     `  // toggle instead of being re-derived from a hardcoded "normal mode" list.`,
+    `  // ONE barrier: the three writer tools are removed and refused. Everything`,
+    `  // else stays, because a frontier model told to explore and not implement`,
+    `  // needs a shell and can be trusted with one.`,
     `  try {`,
     `    const PLAN_STATUS_KEY = ${JSON.stringify(PLAN_STATUS_KEY)};`,
     `    const PLAN_WIDGET_KEY = ${JSON.stringify(PLAN_WIDGET_KEY)};`,
@@ -464,17 +286,10 @@ export function buildPiPlanModeSection(): Array<string> {
     `    const PLAN_EXEC_TYPE = ${JSON.stringify(PLAN_EXEC_TYPE)};`,
     `    const PLAN_DONE_TYPE = ${JSON.stringify(PLAN_DONE_TYPE)};`,
     `    const PLAN_LIST_TYPE = ${JSON.stringify(PLAN_LIST_TYPE)};`,
-    `    const PLAN_READ_TOOLS = ${JSON.stringify([...PLAN_READ_TOOLS])};`,
     `    const PLAN_BLOCKED = new Set(${JSON.stringify([...PLAN_BLOCKED_TOOLS])});`,
-    `    const PLAN_NO_DELEGATION = new Set(${JSON.stringify([...PLAN_BLOCKED_DELEGATION])});`,
-    `    const PLAN_NO_SHELL = new Set(${JSON.stringify([...PLAN_BLOCKED_SHELLS])});`,
-    `    const PLAN_MCP_READ = new Set(${JSON.stringify([...PLAN_MCP_READ_TOOLS])});`,
-    `    const PLAN_TODO_READ = new Set(${JSON.stringify([...PLAN_TODO_READ_ACTIONS])});`,
-    `    const PLAN_MCP_READ_LIST = ${JSON.stringify(PLAN_MCP_READ_TOOLS.join(", "))};`,
-    `    const planNormalizeCommand = (${planNormalizeCommand.toString()});`,
-    `    const isPlanUnsafeCommand = (${isPlanUnsafeCommand.toString()});`,
-    `    const isPlanReadOnlyCommand = (${isPlanReadOnlyCommand.toString()});`,
-    `    const isPlanSafeCommand = (${isPlanSafeCommand.toString()});`,
+    `    const PLAN_FILE_REL = ${JSON.stringify(planFilePath())};`,
+    `    const planFilePathOf = (${planFilePath.toString()});`,
+    `    const isPlanFilePath = (${isPlanFilePath.toString()});`,
     `    const cleanPlanStepText = (${cleanPlanStepText.toString()});`,
     `    const extractPlanSteps = (${extractPlanSteps.toString()});`,
     `    const extractDoneSteps = (${extractDoneSteps.toString()});`,
@@ -485,32 +300,12 @@ export function buildPiPlanModeSection(): Array<string> {
     `    let planExecuting = false;`,
     `    let planSteps = [];`,
     `    let toolsBeforePlan = null;`,
+    `    let planCwd = "";`,
     `    // Set while the "what next?" prompt is open. agent_end can fire again for`,
     `    // the same plan (a queued follow-up run ends too), and a second prompt on`,
     `    // top of the first would let two Execute answers each send an execution`,
     `    // kick, resetting progress and paying for a redundant turn.`,
     `    let planPromptOpen = false;`,
-    ``,
-    `    // Only add read tools this Pi actually has: the roster differs by profile`,
-    `    // (a narrowed --tools launch, MCP-provided tools, no questionnaire here).`,
-    `    function planKnownTools(names) {`,
-    `      try {`,
-    `        const all = typeof pi.getAllTools === "function" ? pi.getAllTools() : [];`,
-    `        const known = new Set((all || []).map((t) => (t && t.name) || "").filter(Boolean));`,
-    `        if (known.size === 0) return names;`,
-    `        return names.filter((n) => known.has(n));`,
-    `      } catch { return names; }`,
-    `    }`,
-    ``,
-    // MCP server tools are `mcp__<server>__<tool>` with `-` flattened to `_` (pi
-    // `mcp-servers.js` mcpNamespace + `extensions/mcp/tools.js`). Unknown is
-    // denied: the active-set barrier never saw these names, so a call that
-    // arrives here is the whole decision. Tools without the prefix are not this
-    // rule's business — including pi's own `read_mcp_resource` readers.
-    `    function planBlockedMcp(name) {`,
-    `      if (name.indexOf("mcp__") !== 0) return false;`,
-    `      return !PLAN_MCP_READ.has(name);`,
-    `    }`,
     ``,
     `    function planPaint(ctx, text, color) {`,
     `      try {`,
@@ -572,13 +367,10 @@ export function buildPiPlanModeSection(): Array<string> {
     `      try {`,
     `        if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;`,
     `        if (toolsBeforePlan === null) toolsBeforePlan = [...pi.getActiveTools()];`,
-    `        const snapshot = toolsBeforePlan;`,
-    `        const kept = snapshot.filter((n) => !PLAN_BLOCKED.has(n) && !PLAN_NO_DELEGATION.has(n) && !planBlockedMcp(n));`,
-    `        // Entry may only NARROW. A read tool the caller already removed (a`,
-    `        // --tools launch, or a profile that never had it) stays removed: adding`,
-    `        // it here would hand the model a tool the launch deliberately withheld.`,
-    `        const reads = planKnownTools(PLAN_READ_TOOLS).filter((n) => snapshot.indexOf(n) >= 0 && kept.indexOf(n) < 0);`,
-    `        pi.setActiveTools([...kept, ...reads]);`,
+    `        const kept = toolsBeforePlan.filter((n) => !PLAN_BLOCKED.has(n));`,
+    `        // Entry never ADDS a tool: a read tool the caller removed (a --tools`,
+    `        // launch) stays removed. With no allowlist there is nothing to add.`,
+    `        pi.setActiveTools([...kept]);`,
     `      } catch {}`,
     `    }`,
     ``,
@@ -597,8 +389,9 @@ export function buildPiPlanModeSection(): Array<string> {
     `      planExecuting = false;`,
     `      planPromptOpen = false;`,
     `      planSteps = [];`,
+    `      try { if (ctx && typeof ctx.cwd === "string" && ctx.cwd) planCwd = ctx.cwd; } catch {}`,
     `      planApplyRestriction();`,
-    `      try { ctx.ui.notify("Plan mode on: read-only. edit/write/delegate disabled, bash allowlisted. Ctrl+Alt+P or /plan to leave.", "info"); } catch {}`,
+    `      try { ctx.ui.notify("Plan mode on: edits disabled except " + PLAN_FILE_REL + ". Investigate, then write the plan there. Ctrl+Alt+P or /plan to leave.", "info"); } catch {}`,
     `      planUpdateUi(ctx);`,
     `      planPersist();`,
     `    }`,
@@ -622,7 +415,7 @@ export function buildPiPlanModeSection(): Array<string> {
     ``,
     `    try {`,
     `      pi.registerCommand("plan", {`,
-    `        description: "Toggle plan mode (read-only exploration)",`,
+    `        description: "Toggle plan mode (edits disabled; plan file only)",`,
     `        handler: async (_args, ctx) => { planToggle(ctx); },`,
     `      });`,
     `    } catch {}`,
@@ -654,37 +447,24 @@ export function buildPiPlanModeSection(): Array<string> {
     `      });`,
     `    } catch {}`,
     ``,
-    `    // Barrier 2: a write call that arrives anyway is refused, whatever the`,
-    `    // model believes about its own tool set.`,
+    `    // Barrier 2: the ONE write exception, enforced by path. A write or edit`,
+    `    // whose resolved target is the pinned plan file passes; everything else is`,
+    `    // refused, whatever the model believes. The path comes from the extension`,
+    `    // and never from the model, which is the property that keeps the exception`,
+    `    // from widening into a general write permission.`,
     `    try {`,
-    `      pi.on("tool_call", async (event) => {`,
+    `      pi.on("tool_call", async (event, ctx) => {`,
     `        if (!planEnabled || !event) return undefined;`,
     `        const name = String(event.toolName || "");`,
-    `        if (PLAN_BLOCKED.has(name)) {`,
-    `          return { block: true, reason: "Plan mode is read-only: " + name + " is disabled. Present the plan, then leave plan mode (/plan or Ctrl+Alt+P) to make changes." };`,
-    `        }`,
-    `        if (PLAN_NO_SHELL.has(name)) {`,
-    `          return { block: true, reason: "Plan mode is read-only: " + name + " is unavailable. Use bash with a read-only command, or leave plan mode first." };`,
-    `        }`,
-    `        if (PLAN_NO_DELEGATION.has(name)) {`,
-    `          return { block: true, reason: "Plan mode is read-only: " + name + " would hand the work to a child session whose tool set this mode cannot gate. Investigate here, then leave plan mode (/plan or Ctrl+Alt+P) to delegate." };`,
-    `        }`,
-    `        if (planBlockedMcp(name)) {`,
-    `          return { block: true, reason: "Plan mode is read-only: " + name + " is an MCP tool whose handler this mode cannot vouch for. Leave plan mode (/plan or Ctrl+Alt+P) to use it, or explore with the built-in read tools, the bash allowlist, and " + PLAN_MCP_READ_LIST + "." };`,
-    `        }`,
-    `        if (name === "todo") {`,
-    `          const action = String((event.input && event.input.action) || "");`,
-    `          if (!PLAN_TODO_READ.has(action)) {`,
-    `            return { block: true, reason: "Plan mode is read-only: todo/" + (action || "?") + " writes to the todo store. Use list/list-all/get to read it, or leave plan mode (/plan or Ctrl+Alt+P) to edit it." };`,
-    `          }`,
-    `        }`,
-    `        if (name === "bash") {`,
-    `          const command = (event.input && event.input.command) || "";`,
-    `          if (!isPlanSafeCommand(String(command))) {`,
-    `            return { block: true, reason: "Plan mode: command blocked (not on the read-only allowlist). Leave plan mode first (/plan or Ctrl+Alt+P).\\nCommand: " + command };`,
-    `          }`,
-    `        }`,
-    `        return undefined;`,
+    `        if (!PLAN_BLOCKED.has(name)) return undefined;`,
+    `        try { if (ctx && typeof ctx.cwd === "string" && ctx.cwd) planCwd = ctx.cwd; } catch {}`,
+    `        const input = (event.input || {});`,
+    `        const target = input.path !== undefined ? input.path : input.file_path;`,
+    `        if (isPlanFilePath(planCwd, target, PLAN_FILE_REL)) return undefined;`,
+    `        return {`,
+    `          block: true,`,
+    `          reason: "Plan mode: edits are disabled. The only file you may write is " + PLAN_FILE_REL + ". Record the plan there, or leave plan mode (/plan or Ctrl+Alt+P) to change code.",`,
+    `        };`,
     `      });`,
     `    } catch {}`,
     ``,
@@ -693,10 +473,6 @@ export function buildPiPlanModeSection(): Array<string> {
     `    // reach this handler as role "custom" with customType intact, which is the`,
     `    // load-bearing check; the text marker is the belt for a host (or an`,
     `    // imported transcript) that flattened the custom role into a user message.`,
-    `    // The belt for a host (or an imported transcript) that flattened the custom`,
-    `    // role into a plain user message and lost customType. The check above is`,
-    `    // the load-bearing one; this only rescues transcripts dumped and reloaded`,
-    `    // elsewhere.`,
     `    const PLAN_STALE_MARKERS = [`,
     `      { marker: "[PLAN MODE ACTIVE]", live: () => planEnabled },`,
     `      { marker: "[EXECUTING PLAN", live: () => planExecuting },`,
@@ -744,6 +520,46 @@ export function buildPiPlanModeSection(): Array<string> {
     `      });`,
     `    } catch {}`,
     ``,
+    `    // The planning contract, modelled on Claude Code's plan-mode reminder: the`,
+    `    // mode is closed, the plan file is the ONE exception, and the model is`,
+    `    // trusted with everything else. Frontier-model tuning lives here — a`,
+    `    // command allowlist, a delegation ban and an MCP namespace deny all told a`,
+    `    // capable model to be less useful than it is, and none of them is needed`,
+    `    // now that "edits are disabled" is the whole rule and the plan file is the`,
+    `    // only write. The workflow is Claude's five phases compressed to what Pi`,
+    `    // has: Explore/General-Purpose subagents exist, but the roster is`,
+    `    // profile-dependent, so the phase text names the intent, not an agent.`,
+    `    const PLAN_BRIEF = [`,
+    `      "[PLAN MODE ACTIVE]",`,
+    `      "",`,
+    `      "Plan mode is active. The user does not want you to execute yet -- you must not edit files,",`,
+    `      "run a command that changes the code, or otherwise act on the plan. This supersedes any other",`,
+    `      "instruction you have received about doing the work now.",`,
+    `      "",`,
+    `      "One exception, and it is the whole of it: you may write your plan to",`,
+    `      "  " + PLAN_FILE_REL,`,
+    `      "Edit and write are refused for every other path. Read, search, and run read-only commands",`,
+    `      "freely -- explore enough that the plan is grounded in what the code actually does.",`,
+    `      "",`,
+    `      "Work the plan like this:",`,
+    `      "1. Understand the request, and look for what already exists (functions, utilities, patterns)",`,
+    `      "   before proposing anything new. Delegate broad or parallel discovery when that is faster",`,
+    `      "   than reading serially yourself.",`,
+    `      "2. Ask the user whatever you cannot settle from the code. Do it once, up front, and never",`,
+    `      "   ask what exploration could answer.",`,
+    `      "3. Design the approach far enough that an implementer would have no open decisions left:",`,
+    `      "   which files, what changes in each, what each change is done when, and what would prove it.",`,
+    `      "4. Write the plan to the plan file: a short Context section, the recommended approach only,",`,
+    `      "   the critical files, the verification steps, and any residual risk. Keep it scannable.",`,
+    `      "5. Summarise the plan in your reply too, so the user can answer without opening the file.",`,
+    `      "",`,
+    `      "Do NOT open an ask_user question or a prose prompt for plan approval. Leaving plan mode is",`,
+    `      "the user's action (/plan or Ctrl+Alt+P) -- asking permission to stop planning is the one",`,
+    `      "question this mode does not want, and approval you grant yourself is not approval.",`,
+    `      "If the user asks for changes, revise the SAME plan file rather than writing a second one.",`,
+    `      "The test for every other action: if it would reasonably be described as DOING the work",`,
+    `      "rather than planning it, it waits until plan mode is off.",`,
+    `    ].join("\\n");`,
     ``,
     `    // Cost contract: inject NOTHING unless plan mode is actually engaged, and`,
     `    // only for a real user turn (a background notification must not re-add it).`,
@@ -751,27 +567,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `      pi.on("before_agent_start", async (event) => {`,
     `        if (!event || event.messageType !== "user") return undefined;`,
     `        if (planEnabled) {`,
-    `          const content = [`,
-    `            "[PLAN MODE ACTIVE]",`,
-    `            "You are in plan mode - a read-only exploration mode for safe code analysis.",`,
-    `            "",`,
-    `            "Restrictions:",`,
-    `            "- The edit and write tools are disabled; a call to them is refused.",`,
-    `            "- Delegation is disabled: a child session would escape these restrictions.",`,
-    `            "- MCP tools are refused, except the read-only search tools and resources.",`,
-    `            "- todo may be read (list/get) but not written.",`,
-    `            "- Bash is restricted to an allowlist of read-only commands.",`,
-    `            "- Nothing on disk may change.",`,
-    `            "",`,
-    `            'Investigate the code, then create a detailed numbered plan under a "Plan:" header:',`,
-    `            "",`,
-    `            "Plan:",`,
-    `            "1. First step description",`,
-    `            "2. Second step description",`,
-    `            "",`,
-    `            "Do NOT attempt to make changes - describe exactly what you would do.",`,
-    `          ].join("\\n");`,
-    `          return { message: { customType: PLAN_CONTEXT_TYPE, content, display: false } };`,
+    `          return { message: { customType: PLAN_CONTEXT_TYPE, content: PLAN_BRIEF, display: false } };`,
     `        }`,
     `        if (planExecuting && planSteps.length > 0) {`,
     `          const remaining = planSteps.filter((s) => !s.completed).map((s) => s.step + ". " + s.text).join("\\n");`,
@@ -888,7 +684,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `    } catch {}`,
     ``,
     `    // Restore after resume: the entry is the source of truth, and the tool set`,
-    `    // is re-applied so a resumed plan-mode session is genuinely read-only.`,
+    `    // is re-applied so a resumed plan-mode session is genuinely write-blocked.`,
     `    // State is assigned UNCONDITIONALLY: a fresh session (/new, /fork into an`,
     `    // empty branch) has no entry, and leaving the previous session's flags in`,
     `    // place would keep a stale badge and re-apply a tool snapshot taken from a`,
@@ -896,6 +692,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `    try {`,
     `      pi.on("session_start", async (_event, ctx) => {`,
     `        try {`,
+    `          if (ctx && typeof ctx.cwd === "string" && ctx.cwd) planCwd = ctx.cwd;`,
     `          const entries = ctx.sessionManager && typeof ctx.sessionManager.getEntries === "function"`,
     `            ? ctx.sessionManager.getEntries()`,
     `            : [];`,

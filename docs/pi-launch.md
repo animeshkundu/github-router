@@ -112,8 +112,8 @@ background runner demonstrably drops `read`/`bash` from its tool registry
 failing every strict-allowlist child it touches. `contact_supervisor`
 appears only on `General-Purpose` (blocked-writer escalation); leaves
 never page the supervisor.
-`General-Purpose` may nest `reviewer`/`oracle` (`local` grants `reviewer`
-only — it has no oracle), balanced `reviewer` may nest
+`General-Purpose` may nest `reviewer`/`oracle` (`local` grants `oracle`
+only — it has no Advisor), balanced `reviewer` may nest
 `Explore` (ceiling raised to 3 via `PI_SUBAGENT_MAX_DEPTH`). Handoff is
 inline prose in the delegating brief — no `context.md`/`progress.md` file
 bindings, so runs write nothing into the repo. `--swe` without `--peers`
@@ -455,58 +455,56 @@ equivalent into its own `local:gh-router-pi` extension, always on, for every
 profile — no flag, no package, no model-facing tool.
 
 **Toggle** with `Ctrl+Alt+P` or `/plan`; `/plan-status` prints the current
-state and the step list. While plan mode is on:
+step list. Plan mode closes exactly one door:
 
 - `edit`, `write` and `apply_patch` leave the active tool set AND are refused
   by a `tool_call` handler — two independent barriers, so a model that
-  believes it can still write is still stopped. `subagent` is refused too, and
-  removed from the active set: a child session is a separate process with its
-  own tool roster, so delegation is the one write vector this mode cannot
-  gate. `subagent_launch`, `workflow` and `send_to_session` are refused for the
-  same reason — a workflow script spawns its own agents, and
-  `send_to_session` messages a session that is not in plan mode at all. Claude
-  Code keeps its read-only Explore subagent available in plan mode; here the
-  agent catalog mixes read-only and writer agents and the handler cannot tell
-  them apart, so delegation resumes on `/plan` instead of being half-gated.
-- `powershell` is refused outright (no allowlist can be derived safely from a
-  PowerShell command string); `bash` is allowlisted to read-only commands
-  (`git status|log|diff|show|blame`, `ls`, `cat`, `rg`, `npm ls`, …). The
-  destructive list wins over the allowlist, and any pipe, `;`, `&&`, a bare
-  `&`, a backtick, `$(…)`, or process substitution (`<(...)`, `>(...)`) is
-  refused — a bare `&` is the one that bites, since `ls & node -e '…'`
-  backgrounds the read and runs the writer, and `ls&rm -rf x` needs no space.
-  So `git log && rm -rf dist` cannot launder itself either.
-- Read-only first words with a write in their flags are refused too
-  (`find -delete`, `sort -o`, `sort -T`, `git log --output=`, `file -C`), as
-  are `sed`, `awk`, `env`, `less`/`more`: the first two take a script,
-  `env <cmd>` runs `<cmd>`, and a pager writes (`less -o`) and executes
-  (`less +!cmd`), so all of them can act with no metacharacter for the guard to
-  see. `fd -x`, `jq -i`, `sort --compress-program`, `bat --pager`,
-  `git --ext-diff`/`--textconv` and `git ls-remote --upload-pack` are refused
-  for the same reason — they name or run a program. `todo` may be *read*
-  (`list`, `list-all`, `get`) but its writer actions are refused: the store is
-  files under `.pi/todos/`, so a create is a write like any other. The plan
-  checklist itself is plan mode's own widget, never the todo store.
-- **MCP tools are denied by namespace.** Everything published as
-  `mcp__<server>__<tool>` is refused except a short allowlist
-  (`mcp__gh-router-search__code` and `…__web`; pi's own `read_mcp_resource`
-  family has no `mcp__` prefix and is untouched) —
-  `mcp__gh-router-peers__implement` edits files in a worktree and
-  `mcp__gh-router-cloudagent__create_job` spends compute, and neither is
-  distinguishable from its read-only sibling by name alone. The active-tool
-  barrier cannot cover this on its own: servers are published `deferred`, so
-  their tools are not in the set plan mode narrows, and `tool_search` can
-  activate one mid-session. The `tool_call` handler is the only place that
-  sees them.
-- The checks read the command **after de-quoting it**: quotes and backslashes
-  are removed and `${IFS}`/`$IFS`/`$@`/`$*` become spaces, because bash does
-  exactly that before any program sees an argument. Without it, `find .
-  '-delete'`, `find . -del''ete` and `find${IFS}.${IFS}-delete` all read as
-  harmless words while running `find . -delete`. Any `$` left after that
-  normalization is refused outright — a variable can expand to a flag just as
-  easily as to a path. The cost is a false refusal of *quoted* metacharacters
-  (`rg 'a|b' src`, `git log --grep='fix && test'`, `ls 2>&1`); split the
-  pattern instead (`rg -e a -e b src`).
+  believes it can still write is still stopped. This is Claude Code's own
+  shape (`disallowedTools: [Edit, Write, NotebookEdit]`): a capability gate,
+  not a command parser.
+- **One file is writable: the plan.** `.github-router/plans/pi-plan/plan.md`
+  — the path is pinned by the extension and never chosen by the model, and a
+  `write`/`edit` is admitted only when the *resolved* path equals it. Claude
+  Code's plan mode is a one-write mode (the plan is an editable Doc); without
+  the exception our model would have no artifact to hand back. The comparison
+  runs on a normalized absolute path, so `./…`, `//`, and traversal that lands
+  on the plan file are admitted while a sibling (`notes.md`), a look-alike
+  (`plan.md.bak`), another plan directory, or `../plan.md` are not.
+  `apply_patch` has no single target to check, so it has no exception.
+
+Everything else stays available, deliberately. `bash` and `powershell` are
+both allowed; so are MCP tools, `subagent`/`workflow`, `todo` writes, and
+every other tool in the roster. An earlier revision maintained a read-only
+allowlist for `bash`, a destructive-flag table, a de-quoting pass to defeat
+`find${IFS}.-delete`, a PowerShell ban, a delegation block and an MCP namespace
+deny. All of it is gone, for three reasons: a command string cannot be
+classified (each of `sed -n '1e sh'`, `awk 'BEGIN{system("sh")}'`,
+`sort --compress-program=sh` needed its own row, and the next trick always
+had none); every rule was a bet that a frontier model cannot be trusted with a
+shell it was just told to only read with; and each one cost capability the
+planning turn actually needed — `git log`, `rg`, running the test suite to see
+what it does, or delegating a parallel survey of the repo.
+
+Be clear about what this is: a **norm enforced with two mechanical edges**, not a
+sandbox. `bash` is allowed in plan mode, so a model that wanted to write
+`src/x.ts` could `echo > src/x.ts` and no handler would see it. That is the same
+trade Claude Code makes, and the right one for a mode whose purpose is to keep a
+cooperative model from getting ahead of the user — not to contain a hostile one.
+
+What replaces them is prose — about 1,800 characters of it, roughly the length
+of Claude Code's own plan-mode reminder. The brief says the user does not want
+execution yet, that this supersedes any instruction to do the work now, and
+that the plan file is the single exception. It then gives the workflow: reuse
+what already exists, ask only what exploration cannot answer, design until an
+implementer has no open decisions left, write Context / recommended approach /
+critical files / verification to the plan file, summarise in the reply. It
+ends with the two norms a frontier model actually needs — leaving plan mode is
+the user's action, so never ask for plan approval through `ask_user` or prose;
+and if an action would be described as *doing* the work rather than *planning*
+it, it waits — plus the rule that a user who asks for changes gets a revision
+of the same file, not a second plan. That is how a capable model is kept in
+planning mode; a 600-line command table was how a weak one was fenced in.
+
 - The injected context is `display: false` and only appears on a real user
   turn — a background notification cannot re-add it. Pi appends and persists
   each injected block, so the transcript keeps only the newest block of each
@@ -515,13 +513,13 @@ state and the step list. While plan mode is on:
   the "full access" notice), and everything is gone once plan mode ends.
 
 The active tool set is **snapshotted** on entry and restored verbatim on exit,
-and entry only ever *narrows* it: read tools are added back only when the
-snapshot already had them, so a `--tools` narrowing survives the toggle in both
-directions. (The upstream example re-derives "normal mode" from a hardcoded
-list, which would resurrect the tools the narrowing removed.) Plan state
-persists through a custom session entry — one per real change, not per turn —
-so resuming a plan-mode session re-applies the read-only tool set, and starting
-a fresh session (`/new`, a fork into an empty branch) releases it.
+and entry only ever *narrows* it: nothing is added back that the snapshot did
+not have, so a `--tools` narrowing survives the toggle in both directions.
+(The upstream example re-derives "normal mode" from a hardcoded list, which
+would resurrect the tools the narrowing removed.) Plan state persists through a
+custom session entry — one per real change, not per turn — so resuming a
+plan-mode session re-applies the write barrier, and starting a fresh session
+(`/new`, a fork into an empty branch) releases it.
 
 **Checklist.** The model's numbered `Plan:` block is parsed into steps and
 rendered as a resident widget above the editor, plus a footer badge —

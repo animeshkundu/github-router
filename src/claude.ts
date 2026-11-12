@@ -1429,7 +1429,9 @@ export const claude = defineCommand({
         // A local consult transport (`cheaplocal`) moves the Advisor and
         // Oracle off Copilot, so neither has a catalog entry to resolve and
         // neither can drift. The reviewer check below still applies: it is a
-        // Copilot native either way.
+        // Copilot native either way. Local-family launches never reach this
+        // block (`!isLocalProfile`), so the cheapest family is the only one
+        // that can be here with a local transport.
         const consultIsLocal =
           isCheapestFamily(launchProfileId)
           && cheapestContractFor(launchProfileId).consultTransport === "local"

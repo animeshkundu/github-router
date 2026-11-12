@@ -333,14 +333,13 @@ describe("pi models.json local profiles", () => {
     }
   })
 
-  test("roster: bare tier ids and no consultant at all on local", () => {
+  test("roster: bare tier ids and a LOCAL-tier consultant on local", () => {
     const json = buildPiModelsJson({
       serverUrl: "http://127.0.0.1:8787",
       profileId: "local",
     })
-    // No Copilot-served row at all: `local` allows no Copilot model, so it
-    // carries no consultant either — nothing on this profile names a model
-    // the launch refuses to bill.
+    // No Copilot-served row at all: `local` may bill no Copilot model, so the
+    // only rows are the tier ids the local endpoint answers.
     expect(
       json.providers["gh-router"].models.map((m) => m.id).sort(),
     ).toEqual(["haiku", "opus", "sonnet"])
@@ -356,46 +355,61 @@ describe("pi models.json local profiles", () => {
       model: "gpt-6.1-sol",
       thinking: "high",
     })
-    // The consultant is absent, not merely re-pointed: `local` runs every
-    // agent turn locally, so an oracle could only exist as a Copilot call.
-    expect(piOracleEnabled("local")).toBe(false)
-    expect(piOracleModel("local")).toBeUndefined()
-    expect(piOracleThinking("local")).toBeUndefined()
+    // The consultant EXISTS but is pinned to the local lead tier: an oracle
+    // that runs on `opus` bills the local endpoint, so the zero-Copilot
+    // invariant holds while the role stays available. Pointing it at a
+    // Copilot slug here would be the violation, not the role itself.
+    expect(piOracleEnabled("local")).toBe(true)
+    expect(piOracleModel("local")).toBe("opus")
+    expect(piOracleThinking("local")).toBe("high")
     // `local2` keeps the contracted Copilot consultant.
     expect(piOracleEnabled("local2")).toBe(true)
     expect(piOracleModel("local2")).toBe("gpt-6.1-sol")
     expect(piOracleThinking("local2")).toBe("high")
   })
 
-  test("local emits no oracle file and disables the builtin one", () => {
-    // Dropping the file alone would un-shadow Pi's builtin `oracle`, which
-    // also owns the `advisor` alias and is pinned to a model of its own
-    // choosing. The settings override closes that slot.
+  test("local's oracle is one-shot and runs on the local tier", () => {
+    // `piOracleEnabled` no longer gates `local` out; what keeps the role honest
+    // is the model pin below plus the empty tool list, which is what makes the
+    // consult a single cold-start call on every transport.
     const derived = buildPiAgentFiles("local")
-    expect(Object.keys(derived).some((k) => k.includes("oracle"))).toBe(false)
-    expect(
-      Object.values(derived).some((content) => content.includes("oracle")),
-    ).toBe(false)
+    expect(derived["agents/oracle.md"]).toContain("model: gh-router/opus")
+    expect(derived["agents/oracle.md"]).toContain('tools: ""')
+    // The nesting grant names the agent the roster actually has.
+    expect(derived["agents/general-purpose.md"]).toContain("allowedAgents: reviewer, oracle")
+    // No disable override: our file shadows the builtin, and the shadowed role
+    // is exactly the one we want.
     const settings = buildPiSettingsJson({
       profileId: "local",
       searchEnabled: false,
       browseEnabled: false,
     }) as { subagents?: { agentOverrides?: Record<string, { disabled?: boolean }> } }
-    expect(settings.subagents?.agentOverrides?.["oracle"]).toEqual({ disabled: true })
-    // The nesting grant must not name an agent the roster lacks.
-    expect(derived["agents/general-purpose.md"]).toContain("allowedAgents: reviewer\n")
-    expect(derived["agents/general-purpose.md"]).not.toContain("oracle")
+    expect(settings.subagents?.agentOverrides?.["oracle"]).toBeUndefined()
 
-    // `local2` keeps both: the file on the contracted Copilot model, and no
-    // disable override.
+    // `local2` differs only in the model behind the same tool-less role.
     const local2 = buildPiAgentFiles("local2")
     expect(local2["agents/oracle.md"]).toContain("model: gh-router/gpt-6.1-sol")
-    const local2Settings = buildPiSettingsJson({
-      profileId: "local2",
-      searchEnabled: false,
-      browseEnabled: false,
-    }) as { subagents?: { agentOverrides?: Record<string, { disabled?: boolean }> } }
-    expect(local2Settings.subagents?.agentOverrides?.["oracle"]).toBeUndefined()
+    expect(local2["agents/oracle.md"]).toContain('tools: ""')
+  })
+
+  test("every profile's oracle is tool-less", () => {
+    // The oracle contract is one shot with no tools (the MCP persona already
+    // is). A Pi oracle that could read the repo would answer questions it was
+    // not given and cost a turn per call.
+    for (const profileId of [
+      "cheapest",
+      "cheapest2",
+      "balanced",
+      "balanced2",
+      "local",
+      "local2",
+    ] as const) {
+      const files = buildPiAgentFiles(profileId)
+      const oracle = files["agents/oracle.md"]
+      expect(oracle).toBeDefined()
+      expect(oracle).toContain('tools: ""')
+      expect(oracle).not.toContain("tools: read")
+    }
   })
 })
 

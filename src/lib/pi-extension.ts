@@ -578,8 +578,10 @@ export function buildPiSkills(opts: {
     // profile actually has. Copilot profiles carry the stateless MCP persona
     // (and the same-named subagent for follow-ups); a profile whose peer group
     // filters the persona out carries only the subagent, so naming the MCP tool
-    // there would send the model after a tool that answers -32601. `local` has
-    // no oracle of either kind and gets no skill at all.
+    // there would send the model after a tool that answers -32601. Every shipped
+    // profile reaches the persona today (including `local`, whose consult runs
+    // on the local tier); the subagent-only wording stays for a profile that
+    // ever narrows the allowlist back.
     const oracleReachable = piOracleToolReachable(opts.profileId)
     const oracleBody = oracleReachable
       ? [
@@ -594,9 +596,9 @@ export function buildPiSkills(opts: {
       : [
           "Delegate to the `oracle` subagent through the `subagent` tool with the",
           "decision, the options considered, and the missing-context gaps. The",
-          "oracle is cold-start: it sees only what you pass, plus whatever it reads",
-          "itself. Its verdict is advisory — verify with tests and code, never",
-          "substitute votes for verification.",
+          "oracle is cold-start and tool-less: it sees only what you pass, and it",
+          "cannot read the repository on its own. Its verdict is advisory — verify",
+          "with tests and code, never substitute votes for verification.",
         ]
     skills.push({
       dir: "gh-oracle",
@@ -634,9 +636,9 @@ export function buildPiSkills(opts: {
   if (opts.swe === true && peers) {
     // The roster line must not name a consultant this profile has neither a
     // tool nor an agent file for: balanced and `local` are advisor-free, so
-    // they name the oracle alone; `local` has no consultant at all, so it names
-    // neither. Composing the sentence per case keeps a `, .` (or a comma before
-    // nothing) out of the prose.
+    // they name the oracle alone. Composing the sentence per case keeps a `, .`
+    // (or a comma before nothing) out of the prose — which is also what a
+    // profile with neither consultant would get.
     const advisor = piAdvisorModel(opts.profileId)
     const oracle = piOracleEnabled(opts.profileId)
     const consults = advisor

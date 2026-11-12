@@ -151,9 +151,13 @@ export const CHEAPLOCAL_PROFILE_CONTRACT = Object.freeze({
 export type CheaplocalProfileContract = typeof CHEAPLOCAL_PROFILE_CONTRACT
 
 /**
- * Where the profile's two consultants are served. Every consumer branches on
- * this value rather than on the profile id, so a future local-consult variant
- * inherits the wiring instead of needing a parallel branch in each site.
+ * Where a profile's consultant is served. Every consumer branches on this value
+ * rather than on the profile id, so a future local-consult variant inherits the
+ * wiring instead of needing a parallel branch in each site.
+ *
+ * Two members today: `cheaplocal` (its Advisor and Oracle) and `local` (its
+ * Oracle). `local2` deliberately stays `"copilot"`: its Oracle and curated
+ * Advisor are billed, so they resolve and gate against the live catalog.
  */
 export type ConsultTransport =
   (typeof CHEAPEST_PROFILE_CONTRACT)["consultTransport"] | "local"

@@ -174,28 +174,25 @@ export function piOracleToolReachable(profileId: PiProfileId): boolean {
 /**
  * Whether this profile has a consultant at all.
  *
- * `local` is the one profile with none. Its contract is a statement about the
- * local endpoint: every agent turn — lead, natives, consultants — is a local
- * turn, and the Oracle is the only role that could not be one. Rather than run
- * it on a Copilot model the profile exists to avoid, the role is absent: no
- * agent file, no skill, no prompt prose, no `allowedAgents` edge, and the
- * builtin `oracle` is disabled in settings so dropping our file cannot
- * un-shadow it (the same rule already applied to the disabled scout/worker
- * builtins).
+ * Every Pi profile does. `local` used to be the exception on the reading that
+ * the Oracle is necessarily a Copilot call — it is not: the contract's
+ * `consultTransport` decides, and `local` declares `"local"`, so its Oracle is
+ * a consult of the same endpoint its lead already uses. The role therefore
+ * exists on every profile and `piOracleModel` never returns `undefined` for one
+ * of them; the transport, not the presence, is what differs.
  */
-export function piOracleEnabled(profileId: PiProfileId): boolean {
-  return profileId !== "local"
+export function piOracleEnabled(_profileId: PiProfileId): boolean {
+  return true
 }
 
 /**
- * Which model answers the `oracle` subagent, or `undefined` when the profile
- * has no oracle (`local`).
+ * Which model answers the `oracle` subagent.
  *
- * Every Copilot profile's oracle is a Copilot-served consultant pinned by its
- * family contract. `local` has none: returning the lead tier there would name
- * a model the profile may run but a role it must not carry, and a caller that
- * ignored the distinction would re-introduce a consultant the profile bans.
- * The `undefined` is deliberate — it puts the decision at every call site.
+ * Always a real id: a Copilot slug on every profile whose consult is billed,
+ * and the local lead tier (`opus`) on `local`, whose consult goes to the local
+ * endpoint like the rest of its turns. The transport is not this function's
+ * business — `piContractFor(profileId).consultTransport` is — so a caller that
+ * needs to know where the consult runs must ask the contract.
  */
 export function piOracleModel(profileId: PiProfileId): string | undefined {
   return piOracleEnabled(profileId)
@@ -1171,10 +1168,10 @@ export function buildPiSettingsJson(opts: {
               "codex-exec-writer": { disabled: true },
               "cursor-agent": { disabled: true },
               "cursor-agent-writer": { disabled: true },
-              // `local` carries no consultant (see `piOracleEnabled`), so its
-              // own file is gone. Without this entry the builtin `oracle`
-              // would take the empty slot and reintroduce both the role and
-              // the `advisor` alias it owns, on a model of its choosing.
+              // Every profile emits an oracle file today, so this entry is the
+              // belt: a profile that ever drops its own file would otherwise
+              // hand the slot to the builtin `oracle`, which also owns the
+              // `advisor` alias, on a model of its choosing.
               ...(piOracleEnabled(opts.profileId) ? {} : { oracle: { disabled: true } }),
             },
           },
@@ -1188,13 +1185,23 @@ function agentFileName(name: string): string {
 }
 
 /**
- * The read-only tool set every consultant carries.
+ * The oracle's tool set: empty, on purpose.
  *
- * No `edit`/`write`: the oracle advises, it never lands a change. No
- * `subagent` either, which is what makes `allowedAgents` inert on this file.
- * The list is shared with the advisor so the two consultants cannot drift.
+ * The Oracle contract is ONE SHOT — ask and answer — on every transport. The
+ * MCP persona already conforms (`dispatchModelCall` sends `instructions` plus a
+ * single user message over `/v1/responses`, `stream: false`, `writeCapable:
+ * false`); a Pi subagent with read/grep/bash was the odd one out, because it
+ * could run its own investigation loop and answer from something the caller
+ * never saw. A consult that reads its own evidence is not a second opinion on
+ * the caller's evidence, it is a third party guessing at it.
+ *
+ * `tools: ""` parses to an EMPTY allowlist with `explicitToolAllowlist: true`
+ * (pi-subagents `parseFrontmatterList("")` → `[]`), which is a genuinely
+ * tool-less child, verified by driving `discoverAgentsAll` against an emitted
+ * mirror. Dropping the key would instead leave `explicitToolAllowlist: false`
+ * and inherit EVERY tool — the opposite of the intent.
  */
-const ORACLE_TOOLS = "read, grep, find, ls, bash"
+const ORACLE_TOOLS = ""
 
 /**
  * Deep-merge the `subagents` settings key across the snapshot/user and
@@ -1237,8 +1244,8 @@ function roleDescription(
   // role with a nesting grant, so only it can consult the oracle subagent
   // directly. Explore/reviewer are leaves; they surface open questions in
   // their report and the lead (or General-Purpose) consults oracle. `local`
-  // has no oracle at all, so the note must not name one: an advertised target
-  // the roster lacks is a wasted turn for whoever follows it.
+  // may have no oracle, and the note must not name one then: an advertised
+  // target the roster lacks is a wasted turn for whoever follows it.
   const consultNote = piOracleEnabled(profileId)
     ? " May consult the oracle subagent when a decision feels risky."
     : ""
@@ -1358,9 +1365,9 @@ export function buildPiAgentFiles(
       // `implementer/develop`, all builtin-worker aliases);
       // `acceptanceRole: writer` restores the builtin worker's acceptance
       // inference that shadowing would otherwise drop. The oracle edge is
-      // conditional: a grant naming an agent the roster lacks (`local`) is a
-      // dangling target, and the nesting grant itself only exists to reach
-      // reviewer there.
+      // conditional on the role actually existing: a grant naming an agent the
+      // roster lacks is a dangling target, and an advertised target the model
+      // cannot reach is a wasted turn for whoever follows it.
       lines.push(
         "aliases: worker, developer, coder, implementer, develop",
         "acceptanceRole: writer",
@@ -1416,7 +1423,8 @@ export function buildPiAgentFiles(
       "---",
       "name: oracle",
       "description: Second opinion before acting. Challenges assumptions without editing. Use when the decision itself feels risky.",
-      `tools: ${ORACLE_TOOLS}`,
+      // Empty on purpose — see ORACLE_TOOLS. The consult is one shot.
+      `tools: ${ORACLE_TOOLS ? ORACLE_TOOLS : '""'}`,
       `model: ${PI_PROVIDER_NAME}/${oracleModel}`,
       `thinking: ${piOracleThinking(profileId) as string}`,
       "advertise: true",
@@ -1426,10 +1434,12 @@ export function buildPiAgentFiles(
       "defaultContext: fresh",
       "---",
       "",
-      "You are an oracle: a second set of eyes. You see only the task context",
-      "you are given — you have no repo memory beyond what you read now.",
-      "Inspect the code yourself with read/grep/find/ls before opining.",
-      "Challenge assumptions, name what is missing, recommend; never execute.",
+      "You are an oracle: a second set of eyes, consulted once per question.",
+      "You have no tools on purpose. You cannot read the repository, run",
+      "anything, or fetch what the caller did not paste in — so do not ask to.",
+      "Answer from the context you are given: name the assumptions it rests on,",
+      "say which missing fact would change your recommendation, and recommend.",
+      "Never claim to have verified, executed, approved, or merged anything.",
     ].join("\n");
     files[`agents/${agentFileName("oracle")}`] = `${oracle}\n`;
   }

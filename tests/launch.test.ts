@@ -5,6 +5,7 @@ import path from "node:path"
 
 import {
   buildLaunchCommand,
+  forwardTerminalResize,
   isExecutableAvailable,
   sanitizeParentEnv,
   windowsLaunchNeedsShell,
@@ -398,3 +399,100 @@ describe("windowsLaunchNeedsShell — drop the cmd.exe intermediary", () => {
     expect(windowsLaunchNeedsShell("C:/path/claude.EXE")).toBe(false)
   })
 })
+
+describe("forwardTerminalResize — reflow for the detached CLI", () => {
+  // The bug: the CLI is spawned POSIX `detached: true`, so it leads its own
+  // process group and is never the terminal's foreground group. The kernel
+  // delivers SIGWINCH only to the foreground group, so without a forward the
+  // CLI never learns the window changed and keeps drawing for the old size.
+  // A live pty harness (pty.fork + TIOCSWINSZ) proved all three legs: attached
+  // child receives SIGWINCH, detached child receives nothing, and
+  // kill(-pid, SIGWINCH) delivers it. These tests pin the launcher half.
+
+  test("delivers to the child's process GROUP, not just the child", async () => {
+    if (process.platform === "win32") return
+    // The listener is a GRANDCHILD on purpose. A grandchild shares the detached
+    // group but is not the direct child, so this test fails on `kill(pid)` and
+    // passes only on `kill(-pid)` — the exact difference the fix is about.
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "winch-"))
+    const marker = path.join(dir, "got")
+    const ready = `${marker}.ready`
+    try {
+      const { spawn } = await import("node:child_process")
+      const grandchild = `
+        const fs = require("fs");
+        process.on("SIGWINCH", () => fs.writeFileSync(${JSON.stringify(marker)}, "got"));
+        fs.writeFileSync(${JSON.stringify(ready)}, "1");
+        setInterval(() => {}, 1000);`
+      // Direct child: detached group leader, does NOT listen for SIGWINCH.
+      const child = spawn(
+        process.execPath,
+        [
+          "-e",
+          `require("child_process").spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" });
+           setInterval(() => {}, 1000);`,
+        ],
+        { detached: true, stdio: "ignore" },
+      )
+      try {
+        const deadline = Date.now() + 10000
+        while (!(await fileExists(ready)) && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 25))
+        }
+        expect(await fileExists(ready)).toBe(true)
+        expect(forwardTerminalResize(child.pid)).toBe(true)
+        const settle = Date.now() + 5000
+        while (!(await fileExists(marker)) && Date.now() < settle) {
+          await new Promise((r) => setTimeout(r, 25))
+        }
+        expect(await fileExists(marker)).toBe(true)
+      } finally {
+        try {
+          if (child.pid) process.kill(-child.pid, "SIGKILL")
+        } catch {
+          // The group may already be gone; the test's own assertion is above.
+        }
+      }
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("Windows never signals: it has no SIGWINCH and no process groups", () => {
+    // The guard is a hard return, not a fallback: on win32 the console resizes
+    // the child directly, and `process.kill(-pid, "SIGWINCH")` would either
+    // throw or hit the wrong target.
+    const original = Object.getOwnPropertyDescriptor(process, "platform")!
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true })
+    try {
+      // A live pid, so a `try/catch`-only implementation would report `true`
+      // having sent nothing — `process.kill` on win32 accepts SIGWINCH as a
+      // no-op string on some Node builds, which is exactly why the guard is
+      // tested with the success value, not just the absence of a throw.
+      expect(forwardTerminalResize(process.pid)).toBe(false)
+    } finally {
+      Object.defineProperty(process, "platform", original)
+    }
+    // The override is restored, so a later test in this file is not silently
+    // running under a faked platform.
+    expect(Object.getOwnPropertyDescriptor(process, "platform")!.value).not.toBe("win32")
+  })
+
+  test("a dead group is a no-op, not a throw", () => {
+    // Shutdown races a resize constantly: cleanup() reaps the group, then a
+    // queued SIGWINCH handler runs. It must not turn a clean exit into a crash.
+    expect(() => forwardTerminalResize(undefined)).not.toThrow()
+    expect(forwardTerminalResize(undefined)).toBe(false)
+    expect(() => forwardTerminalResize(2 ** 22 + 12345)).not.toThrow()
+    expect(forwardTerminalResize(2 ** 22 + 12345)).toBe(false)
+  })
+})
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await fs.stat(p)
+    return true
+  } catch {
+    return false
+  }
+}

@@ -223,25 +223,27 @@ describe("pi --swe owns the pipeline surface", () => {
   })
 })
 
-describe("pi local profiles carry only the consultants they can reach", () => {
-  test("the oracle skill follows whether the profile has an oracle at all", () => {
-    // `local` has no consultant: no MCP persona (the peers group filters it
-    // out), no agent file, no skill. Advertising one there is a wasted turn.
-    expect(buildPiSkills({ profileId: "local" })).toEqual([])
-    // `local2` keeps the stateless MCP persona and names it directly.
+describe("pi local profiles carry the consultants they can reach locally", () => {
+  test("the oracle skill is emitted for every profile, including local", () => {
+    // `local`'s consult runs on the LOCAL tier, so the role exists there and is
+    // advertised: it is a plain consult of the endpoint the lead already uses.
+    // Withholding the skill would have hidden a role the model is allowed to
+    // use, which is worse than either emitting or omitting the persona.
+    const local = buildPiSkills({ profileId: "local" })
+    expect(local.map((s) => s.dir)).toEqual(["gh-oracle"])
+    expect(local[0].content).toContain("mcp__gh-router-peers__oracle")
+    // `local2` keeps the same stateless MCP persona, billed to Sol.
     const local2 = buildPiSkills({ profileId: "local2" })
     expect(local2.map((s) => s.dir)).toEqual(["gh-oracle"])
     expect(local2[0].content).toContain("mcp__gh-router-peers__oracle")
   })
 
-  test("--swe names only the consultant the profile actually has", () => {
-    // No oracle, no advisor: the roster sentence names neither and reads
-    // cleanly (no dangling comma).
+  test("--swe names the consultant both local profiles actually have", () => {
     const local = buildPiSkills({ profileId: "local", swe: true })
-    expect(local.map((s) => s.dir)).toEqual(["gh-delegate"])
+    expect(local.map((s) => s.dir)).toEqual(["gh-oracle", "gh-delegate"])
     const localDelegate = local.find((s) => s.dir === "gh-delegate")
-    expect(localDelegate?.content).toContain("`reviewer`\nfor verification. (Builtin")
-    expect(localDelegate?.content).not.toContain("oracle")
+    expect(localDelegate?.content).toContain("`oracle` for consults")
+    // No Advisor on `local`: the roster sentence must not promise one.
     expect(localDelegate?.content).not.toContain("`advisor`")
 
     const local2 = buildPiSkills({ profileId: "local2", swe: true })
