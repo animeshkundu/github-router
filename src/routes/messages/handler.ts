@@ -544,12 +544,13 @@ export async function handleCompletion(c: Context) {
   // compared against a profile id: `cheaplocal` is the family member whose
   // Advisor and Oracle leave Copilot, and every branch below keys on this value.
   const curatedLocalConsult = curatedAdvisorContract?.consultTransport === "local"
-  // A local consult transmits one fixed `max` request from the shared local
-  // body (`LOCAL_CONSULT_EFFORT`), not the contract's declared Copilot effort,
-  // so the declared value rides through for logging only instead of being
-  // resolved. `resolveAdvisorEffort` would call `resolveModel("opus")` and
-  // clamp a local slug against a Copilot catalog row this profile has refused
-  // to look up, producing a number that is both unreadable and irrelevant.
+  // A local consult transmits the contract's DECLARED effort verbatim (the
+  // same value `LOCAL_CONSULT_EFFORT` names, since the contract is derived from
+  // it) rather than a Copilot-resolved one. `resolveAdvisorEffort` would call
+  // `resolveModel("opus")` and clamp a local slug against a Copilot catalog row
+  // this profile has refused to look up, producing a number that is both
+  // unreadable and irrelevant. Riding through unresolved is what keeps the
+  // declaration, the wire and every prompt surface on one value.
   const curatedAdvisorLocalEffort = curatedLocalConsult
     ? curatedAdvisorContract?.advisorEffort
     : undefined

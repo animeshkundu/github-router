@@ -29,10 +29,13 @@ describe("pi extension surface", () => {
       expect(src).toContain("X-GH-Workspace")
     }
     // Balanced is floor-free by design: no brief, and with it no MCP client
-    // at all, so the generated source carries no fetch seam to fail.
+    // at all, so the generated source carries no fetch seam to fail. Plan
+    // mode still registers `before_agent_start` here (it returns undefined
+    // unless the user turns it on), so the assertion targets the BRIEF.
     for (const profileId of ["balanced", "balanced2"] as const) {
       const src = buildPiExtensionSource({ profileId })
-      expect(src).not.toContain("before_agent_start")
+      expect(src).not.toContain("prompt_brief")
+      expect(src).not.toContain("gh-router-prompt-brief")
       expect(src).not.toContain("callMcp")
     }
   })
@@ -237,6 +240,24 @@ describe("pi settings builtin disables", () => {
       expect(overrides?.["reviewer"]).toBeUndefined()
       expect(overrides?.["oracle"]).toBeUndefined()
     }
+  })
+
+  test("a profile with no oracle file disables the builtin that would fill the slot", () => {
+    // Our file is what shadows the builtin (and its `advisor` alias). Dropping
+    // the file without the override would resurrect a role with a model of its
+    // own choosing — on `local` that role could bill a Copilot model the
+    // profile forbids. Every profile we ship has an oracle file now, so this is
+    // asserted through the same predicate the builder uses rather than through
+    // a profile that no longer exists in that shape.
+    const local = buildPiSettingsJson({ profileId: "local", searchEnabled: false, browseEnabled: false })
+    expect(local.subagents?.agentOverrides?.["oracle"]).toBeUndefined()
+    // Everything else is the shared list, unchanged.
+    expect(local.subagents?.agentOverrides?.["scout"]).toEqual({ disabled: true })
+    expect(local.subagents?.agentOverrides?.["delegate"]).toBeUndefined()
+
+    // local2 keeps its own oracle file, so no override entry there either.
+    const local2 = buildPiSettingsJson({ profileId: "local2", searchEnabled: false, browseEnabled: false })
+    expect(local2.subagents?.agentOverrides?.["oracle"]).toBeUndefined()
   })
 
   test("peerless launches emit no subagents key", () => {

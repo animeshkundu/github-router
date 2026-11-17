@@ -569,6 +569,23 @@ export const FRESH_CONSULT_CONTRACT =
 export const ORACLE_ONLY_CONSULT_CONTRACT =
   "Consulting `oracle` (a small budget — choose wisely): you have roughly 8-10 oracle calls for this session, and each costs real time and money, so spend them only where direction changes the outcome. Oracle gives you COUNSEL on HOW — and sometimes WHAT — to do: the shortest path, what to consider or look at, planning, strategy, and direction. It never replaces evidence you can gather yourself: anything a search, read, build, test, or run can settle, settle it yourself — never spend a consult on it. Spend a consult on: (1) a pre-commit framing check, after you have oriented but before you lock an approach on a non-trivial task; (2) an unresolvable judgment call — conflicting evidence, or a stale-knowledge / high-consequence risk or severity call; (3) a pre-presentation framing check on the final plan. Do NOT spend one on routine progress, reassurance, completion ritual, or a moment that belongs to `reviewer` (verify/reproduce a change). Make the brief self-contained: Oracle reads only what you write, so state the objective, your current job, what you verified / suspect is missing / ruled irrelevant, your confidence and what being wrong would cost, and one neutral question phrased with any competing hypotheses. Never paste raw tool output or ask it to \"review the whole thing\". State your confidence after you have committed to a position, not before, and weigh the reply against verified repository evidence — counsel is direction, not dictation, and you own the decision.\n\n"
 
+/**
+ * The same contract for a launch whose Oracle-only consult leaves for the local
+ * endpoint (`local`, and any future Oracle-only local-consult member).
+ *
+ * Derived rather than retyped, and derived from the ORACLE-ONLY contract, so the
+ * budget, anchors, disqualifiers and discriminator stay verbatim. The single
+ * difference is the caller half of the redaction contract, which
+ * `ORACLE_ONLY_CONSULT_CONTRACT` never carried: until this existed, `local`
+ * received the Oracle-only wording with no redaction instruction at all, on any
+ * surface, while sending briefs to an endpoint nobody here operates.
+ */
+export const ORACLE_ONLY_LOCAL_CONSULT_CONTRACT =
+  ORACLE_ONLY_CONSULT_CONTRACT.replace(
+    "Never paste raw tool output",
+    `${LOCAL_CONSULT_REDACTION_LINE} Never paste raw tool output`,
+  )
+
 /** Short, always-resident pointer to `ORACLE_ONLY_CONSULT_CONTRACT`. */
 export const ORACLE_ONLY_CONSULT_CONTRACT_POINTER =
   "Consulting `oracle` (small budget, ~8-10 calls — choose wisely): use it for how/what — shortest path, what to consider, planning, strategy, direction — never for anything a search, read, or run settles, nor for routine progress, reassurance, or completion ritual; do not spend one where `reviewer` owns the moment. Full how-to (when to spend, the call brief) is in your CLAUDE.md project instructions.\n\n"
@@ -576,12 +593,14 @@ export const ORACLE_ONLY_CONSULT_CONTRACT_POINTER =
 /**
  * Contract for a launch that carries neither consultant.
  *
- * `-m local` exposes no `peers` group at all, so neither the Advisor nor the
- * Oracle exists on its surface. Both siblings above are written around a budget
- * of consults and a discriminator between the two roles, and naming either role
- * here would point the lead at a tool the session cannot reach. What survives
- * is the part that was never about them: settle what evidence can settle, and
- * make the reasoning explicit where it cannot.
+ * No profile reaches this today — every one of them has an Oracle, and the
+ * cheapest/balanced families add an Advisor — but the fallback is kept rather
+ * than deleted: both siblings above are written around a budget of consults and
+ * a discriminator between the two roles, so a future profile that ships neither
+ * (or a launch whose peers group failed to resolve) must still get a coherent
+ * sentence instead of a claim about a tool the session cannot reach. What it
+ * says is the part that was never about the consultants: settle what evidence
+ * can settle, and make the reasoning explicit where it cannot.
  */
 export const DIRECT_EVIDENCE_CONTRACT =
   "Consultation budget: this launch has no consultant, so every unresolved question is settled by direct evidence: a search, a read, a build, a test, or a run. Where you would otherwise want a second opinion, state the competing hypotheses explicitly, choose the one the evidence supports, and record your confidence and what being wrong would cost so the user can correct course early. Counsel is never a substitute for verification you can perform yourself.\n\n"
@@ -626,10 +645,11 @@ export function buildOperatingDefaultsDirective(
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
-    // `local` runs no Copilot model, so it has no Oracle either: its `peers`
-    // group, when the artifact panel publishes it, carries the human-review
-    // tools only, and nothing else on that launch could answer a consult.
-    const hasOracle = !(isLocal && opts.profile === "local")
+    // Every profile has an Oracle, including both local ones: `local` consults
+    // the endpoint its lead already uses (`consultTransport: "local"`) and
+    // `local2` bills a Copilot consult. The egress policy is about Copilot
+    // MODELS, not about consultants, so presence is not a per-family question.
+    const hasOracle = true
     // The cheapest family and `local2` grant `reviewer` a capped Advisor
     // (at most 5 rounds per review), so "lead-only" is false on those
     // launches; the surfaces below say who else may consult instead.
@@ -661,12 +681,12 @@ export function buildOperatingDefaultsDirective(
     const consultIsLocal = familyContract?.consultTransport === "local"
     // A local consult renders no identity and no tier: the endpoint was never
     // asked what answers there, and neither its window nor its effort is
-    // something this prose should claim. The profile does request `max` effort
-    // and a 4096 output budget, but that is a property of the request body
-    // (`LOCAL_CONSULT_EFFORT` / `LOCAL_CONSULT_MAX_OUTPUT_TOKENS` in
-    // `local-egress.ts`), not a fact to teach the lead. Only the Oracle carries
-    // a descriptor in this builder (the Advisor's is written by the
-    // consultation ladder below, from the same contract).
+    // something this prose should claim. The profile does state an effort and a
+    // 4096 output budget, but that is a property of the declared request (the
+    // same `effort` this contract's `oracleEffort` names), not a fact to teach
+    // the lead. Only the Oracle carries a descriptor in this builder (the
+    // Advisor's is written by the consultation ladder below, from the same
+    // contract).
     const oracleDescriptor = consultIsLocal
       ? "the local model"
       : familyContract
@@ -779,7 +799,9 @@ export function buildOperatingDefaultsDirective(
             ? CHEAPLOCAL_CONSULT_CONTRACT
             : CHEAPEST_CONSULT_CONTRACT
           : hasOracle
-            ? ORACLE_ONLY_CONSULT_CONTRACT
+            ? consultIsLocal
+              ? ORACLE_ONLY_LOCAL_CONSULT_CONTRACT
+              : ORACLE_ONLY_CONSULT_CONTRACT
             : DIRECT_EVIDENCE_CONTRACT)
       : isBalanced
         ? `${profileLabel} launch profile. The lead coordinates execution across specialized native roles: `
@@ -942,10 +964,11 @@ export function buildOperatingDefaultsDigest(
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
-    // `local` runs no Copilot model, so it has no Oracle either: its `peers`
-    // group, when the artifact panel publishes it, carries the human-review
-    // tools only, and nothing else on that launch could answer a consult.
-    const hasOracle = !(isLocal && opts.profile === "local")
+    // Every profile has an Oracle, including both local ones: `local` consults
+    // the endpoint its lead already uses (`consultTransport: "local"`) and
+    // `local2` bills a Copilot consult. The egress policy is about Copilot
+    // MODELS, not about consultants, so presence is not a per-family question.
+    const hasOracle = true
     // The cheapest family and `local2` grant `reviewer` a capped Advisor
     // (at most 5 rounds per review), so "lead-only" is false on those
     // launches; the surfaces below say who else may consult instead.
@@ -974,12 +997,11 @@ export function buildOperatingDefaultsDigest(
     // Every family here is lead-only on Oracle (none has a Plan role), so one
     // contract-derived form serves them all: `balanced` Grok 4.6 →
     // `balanced2` Grok 4.7, `cheapest` GPT-5.6 Sol → `cheapest2` GPT-6.1 Sol,
-    // and local's contract keeps Oracle on the same Copilot slug. A local
+    // and local2's contract keeps Oracle on the same Copilot slug. A local
     // consult contributes no identity at all: no slug, no catalog lookup and
-    // no tier. The consult still requests `max` (`LOCAL_CONSULT_EFFORT` in
-    // `local-egress.ts`, deliberately not imported here so launch-time prose
-    // generation stays free of the egress module graph), but that is a request
-    // field, not something to state as a property of the endpoint.
+    // no tier. The consult still sends the effort its contract declares, but
+    // that is a request field, not something to state as a property of an
+    // endpoint nobody asked about.
     const oracleDescriptor = consultIsLocal
       ? "(local model, lead-only)"
       : familyContract

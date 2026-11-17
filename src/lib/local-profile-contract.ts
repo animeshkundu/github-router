@@ -18,9 +18,13 @@
  *
  * Declared deltas only:
  *   - `models` / `nativeModels` — the local tier ids.
- *   - `oracleModel` — `cheapest2`'s `gpt-6.1-sol`, because the Oracle is an MCP
- *     persona that still runs on Copilot: it is a consult the local lead makes,
- *     not a local turn.
+ *   - `oracleModel` — the LEAD tier (`opus`), and `consultTransport: "local"`.
+ *     The Oracle is a consult the lead makes, and on this profile it is a consult
+ *     of the SAME endpoint the lead already talks to: `local` may bill no Copilot
+ *     model at all, so pinning its consultant to a Copilot slug (which is what
+ *     `local2` still does) would make the role unavailable by construction. The
+ *     transport field is what every consumer branches on, so the one local
+ *     profile whose consult is billed keeps `"copilot"` while this one does not.
  *   - NO `leadEffort`. The launcher seeds `CLAUDE_CODE_EFFORT_LEVEL` for the
  *     cheapest family, and we know nothing about the local server's effort
  *     ladder, so the client's own picker decides. The type-level absence is
@@ -36,12 +40,12 @@ import {
   CHEAPEST_PROFILE_DELEGATION_GRAPH,
   CHEAPEST_PROFILE_NATIVE_AGENT_NAMES,
   CHEAPEST_PROFILE_NATIVE_EFFORTS,
-  CHEAPEST_PROFILE_ORACLE_EFFORT,
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
   CHEAPEST_PROFILE_SYNTHESIZED_PEERS,
   type CheapestProfileNativeAgentName,
 } from "./cheapest-profile-contract"
 import { CHEAPEST2_SOL_MODEL } from "./cheapest2-profile-contract"
+import { LOCAL_CONSULT_EFFORT } from "./local-egress-constants"
 
 /**
  * The three ids the local endpoint resolves. Claude Code's `/model` picker and
@@ -60,8 +64,18 @@ export const LOCAL_PROFILE_MODELS = Object.freeze({
   explore: LOCAL_PROFILE_TIER_MODELS.haiku,
   "General-Purpose": LOCAL_PROFILE_TIER_MODELS.sonnet,
   reviewer: LOCAL_PROFILE_TIER_MODELS.opus,
-  /** Copilot-served MCP persona, inherited from `cheapest2`. */
-  oracle: CHEAPEST2_SOL_MODEL,
+  /**
+   * The lead tier: a local consult of the endpoint the lead already uses.
+   *
+   * This is the one place where the "an oracle is a Copilot consult" default is
+   * deliberately not taken. `local` may bill no Copilot model at all, so a
+   * Copilot-served Oracle would not be an expensive consultant — it would be an
+   * unreachable role, and the launch would advertise a tool whose every call is
+   * refused by the egress policy. `local2` keeps the inherited Copilot slug
+   * (see `LOCAL2_PROFILE_CONTRACT`), which is what makes the two profiles
+   * differ by transport rather than by tier name.
+   */
+  oracle: LOCAL_PROFILE_TIER_MODELS.opus,
 } as const)
 
 export const LOCAL_PROFILE_NATIVE_AGENT_NAMES = CHEAPEST_PROFILE_NATIVE_AGENT_NAMES
@@ -89,7 +103,23 @@ export const LOCAL_PROFILE_SUBAGENT_CONTEXT_TOKENS =
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS
 
 export const LOCAL_PROFILE_ORACLE_MODEL = LOCAL_PROFILE_MODELS.oracle
-export const LOCAL_PROFILE_ORACLE_EFFORT = CHEAPEST_PROFILE_ORACLE_EFFORT
+
+/**
+ * The effort this profile's Oracle requests.
+ *
+ * NOT the cheapest profile's value, and not a claim about the server: it is
+ * `LOCAL_CONSULT_EFFORT`, the one number a local consult asks for. This
+ * declaration is the SOURCE of that number on every surface — the descriptor,
+ * the Pi agent frontmatter and the `output_config.effort` the wire carries are
+ * all read from it (the Oracle path passes `oracleEffort` straight into
+ * `sendLocalMessages`).
+ *
+ * Three surfaces used to disagree about one role: the contract and the Pi agent
+ * file said `high` while `sendLocalMessages` wrote its own constant `max`, so a
+ * descriptor, a frontmatter and a request body described three different
+ * consults and no code path could notice.
+ */
+export const LOCAL_PROFILE_ORACLE_EFFORT = LOCAL_CONSULT_EFFORT
 
 export const LOCAL_PROFILE_SYNTHESIZED_PEERS = CHEAPEST_PROFILE_SYNTHESIZED_PEERS
 export type LocalProfileSynthesizedPeer =
@@ -115,12 +145,15 @@ export const LOCAL_PROFILE_CONTRACT = Object.freeze({
   synthesizedPeers: LOCAL_PROFILE_SYNTHESIZED_PEERS,
   delegationGraph: LOCAL_PROFILE_DELEGATION_GRAPH,
   /**
-   * The consultants here are Copilot dispatches even though the LEAD is local:
-   * `local`'s Oracle persona and `local2`'s curated Advisor both run on the
-   * inherited Copilot slug. Declared so the cheapest family's transport field
-   * is present across every contract a curated-Advisor call site can hold.
+   * The consultant here is served by the local endpoint, not Copilot.
+   *
+   * This field, not the profile id, is what the Oracle descriptor, the catalog
+   * gate, the dispatch branch and the Pi agent-file emitter branch on, so a
+   * future member can move its consult without touching those sites. `local2`
+   * overrides it back to `"copilot"` together with the Sol slug, because its
+   * Advisor is billed and must stay inside the `{sol, luna}` ceiling.
    */
-  consultTransport: "copilot" as const,
+  consultTransport: "local" as const,
 })
 
 export type LocalProfileContract = typeof LOCAL_PROFILE_CONTRACT
@@ -154,6 +187,21 @@ export const LOCAL2_PROFILE_ADVISOR_EFFORT = "high" as const
  */
 export const LOCAL2_PROFILE_CONTRACT = Object.freeze({
   ...LOCAL_PROFILE_CONTRACT,
+  /**
+   * `local2`'s consultants stay BILLED, so this profile has to undo both of the
+   * base contract's local-consult declarations. The Oracle keeps the inherited
+   * Copilot slug and the transport says so; the Advisor block below is Copilot
+   * for the same reason. Without these two overrides the spread would silently
+   * move the Advisor onto the local endpoint and the `{sol, luna}` egress
+   * ceiling would never be exercised.
+   */
+  models: { ...LOCAL_PROFILE_MODELS, oracle: CHEAPEST2_SOL_MODEL } as const,
+  oracleModel: CHEAPEST2_SOL_MODEL,
+  // The Oracle is Copilot-served again, so it must ALSO stop inheriting the base
+  // contract's local-consult effort: `max` is the local wire's rung, and this
+  // consult is catalog-gated against the effort it declares.
+  oracleEffort: "high" as const,
+  consultTransport: "copilot" as const,
   advisorModel: LOCAL2_PROFILE_ADVISOR_MODEL,
   advisorClientModel: LOCAL2_PROFILE_ADVISOR_CLIENT_MODEL,
   advisorContextTokens: LOCAL2_PROFILE_ADVISOR_CONTEXT_TOKENS,

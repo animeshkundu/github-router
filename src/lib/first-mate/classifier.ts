@@ -2,6 +2,7 @@ import consola from "consola"
 
 import { extractAndRecordAic } from "~/lib/aic-ledger"
 import { copilotBaseUrl, copilotHeaders } from "~/lib/api-config"
+import { isCopilotModelAllowed } from "~/lib/copilot-model-policy"
 import { state } from "~/lib/state"
 import { resolveTierModel } from "~/lib/first-mate/model-tiers"
 import { resolveModel } from "~/lib/utils"
@@ -52,6 +53,19 @@ export async function microClassify<T>(
 ): Promise<{ value: T; confidence: number } | null> {
   const model = resolveTierModel("T0")
   if (!model) return null
+
+  // Every Copilot model call funnels through `copilot-model-policy`, and this
+  // classifier bypasses the `create-*` services, so it has to consult the same
+  // guard by hand. A `-m local` launch must not bill a Copilot tier for a
+  // background judgment: declining (null) is the documented "no verdict"
+  // answer here, and every caller already treats it as such (Tier1 then
+  // escalates instead of auto-accepting).
+  if (!isCopilotModelAllowed(model)) {
+    consola.debug(
+      `first-mate classifier skipped: ${model} is not permitted on this launch`,
+    )
+    return null
+  }
 
   let response: Response
   try {

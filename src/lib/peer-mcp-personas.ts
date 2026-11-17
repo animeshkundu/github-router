@@ -728,9 +728,11 @@ export function buildPeerAwarenessSnippet(opts: {
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one. Balanced has none.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
-    // `local` runs no Copilot model, so it has no Oracle either: its launch
-    // carries no `peers` group and nothing that could answer one.
-    const hasOracle = !(isLocal && opts.profile === "local")
+    // Every profile has an Oracle, including both local ones: `local` consults
+    // the endpoint its lead already uses (`consultTransport: "local"`) and
+    // `local2` bills a Copilot consult. The egress policy is about Copilot
+    // MODELS, not about consultants, so presence is not a per-family question.
+    const hasOracle = true
     // Families label themselves by their own id so `cheapest2`/`balanced2`
     // never claim to be the base profile; the cheap pair stays on its shared
     // `cheap` label.
@@ -801,9 +803,10 @@ export function buildPeerAwarenessSnippet(opts: {
     // owns planning directly (no Plan role).
     const balancedRosterClause = "Native Task roster: the lead owns planning, implementation, and verification by default. `Explore` (targeted breadth only when search is insufficient, launch in parallel), `General-Purpose` (mixed execution; delegate FREELY for multi-step work and drive to a verified end state), and `reviewer` (repo-aware verification; invoke ONLY when genuinely behavior-changing, cross-boundary, or risk-sensitive, lead owns verification by default; narrows scope with search first and may invoke `Explore` for targeted discovery). Verify claims with concrete repository evidence and tests before declaring done."
     // Profiles without an Advisor surface (`balanced`, `local`) funnel unknowns
-    // search → Explore; `balanced` then has Oracle (a second opinion on a framed
-    // question, never discovery), while `local` has no consultant at all and
-    // stops at Explore. The reviewer may invoke Explore for targeted discovery.
+    // search → Explore, and both then have Oracle (a second opinion on a framed
+    // question, never discovery): on `local` that consult runs on the endpoint
+    // its lead already uses. The reviewer may invoke Explore for targeted
+    // discovery.
     // Cheapest, balanced and local have no Plan role: Oracle is lead-only there.
     // Cost framing is a claim about the endpoint being billed, and a `local`
     // launch bills the operator's own endpoint at a rate the profile knows
@@ -1074,9 +1077,11 @@ export function buildPeerAwarenessSummary(opts: {
     const isLocal = isLocalFamily(opts.profile)
     // `local` is Advisor-free; only `local2` carries one. Balanced has none.
     const hasAdvisor = !isBalanced && !(isLocal && opts.profile !== "local2")
-    // `local` runs no Copilot model, so it has no Oracle either: its launch
-    // carries no `peers` group and nothing that could answer one.
-    const hasOracle = !(isLocal && opts.profile === "local")
+    // Every profile has an Oracle, including both local ones: `local` consults
+    // the endpoint its lead already uses (`consultTransport: "local"`) and
+    // `local2` bills a Copilot consult. The egress policy is about Copilot
+    // MODELS, not about consultants, so presence is not a per-family question.
+    const hasOracle = true
     // The cheapest family and `local2` grant `reviewer` a capped Advisor (at
     // most 5 rounds per review), so "lead-only" is false on those launches.
     const advisorReviewerGranted = hasAdvisor && (isCheapest || isLocal)

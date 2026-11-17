@@ -146,6 +146,29 @@ export function localContractFor(
 }
 
 /**
+ * Whether a launch's consultants leave Copilot for the local endpoint.
+ *
+ * FAMILY-GUARDED on purpose. Both accessors fall back to a base contract for an
+ * id they do not own — `localContractFor` answers the base local contract for
+ * `cheapest`, `cheapestContractFor` answers the base cheapest contract for
+ * `balanced` — so asking a contract directly reports "local transport" for
+ * launches that never touch the endpoint. That is not a hypothetical: it shipped
+ * once, handing `cheapest`/`balanced` a local egress they never read.
+ *
+ * Every caller that has only a profile id goes through here rather than
+ * re-deriving the guard, so the definition of "local consult" cannot drift
+ * between the Oracle descriptor, the egress resolution, the redaction contract
+ * and the Pi agent files.
+ */
+export function consultIsLocalTransport(
+  profileId: string | null | undefined,
+): boolean {
+  if (isLocalFamily(profileId)) return localContractFor(profileId).consultTransport === "local"
+  if (isCheapestFamily(profileId)) return cheapestContractFor(profileId).consultTransport === "local"
+  return false
+}
+
+/**
  * The `local2` contract including its Advisor block.
  *
  * A dedicated accessor rather than a widening of `localContractFor`: the base

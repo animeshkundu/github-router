@@ -36,11 +36,11 @@ import {
   CHEAPEST_PROFILE_MODELS,
   CHEAPEST_PROFILE_NATIVE_AGENT_NAMES,
   CHEAPEST_PROFILE_NATIVE_EFFORTS,
-  CHEAPEST_PROFILE_ORACLE_EFFORT,
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
   CHEAPEST_PROFILE_SYNTHESIZED_PEERS,
   type CheapestProfileNativeAgentName,
 } from "./cheapest-profile-contract"
+import { LOCAL_CONSULT_EFFORT } from "./local-egress-constants"
 
 /**
  * The one model id this profile sends to the local endpoint.
@@ -114,17 +114,19 @@ export const CHEAPLOCAL_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_MAX =
   CHEAPEST_PROFILE_ADVISOR_TRANSCRIPT_TOKENS_MAX
 
 /**
- * The declared effort is inherited but never transmitted: the local transport
- * sends one fixed `max` request (`LOCAL_CONSULT_EFFORT`) instead of the
- * family's Copilot effort, so the field exists only so the family contract
- * stays a complete object.
+ * The declared effort is the one the wire sends.
+ *
+ * The local transport ignores the family's Copilot effort in favour of
+ * `LOCAL_CONSULT_EFFORT`, so declaring the inherited value made three surfaces
+ * describe one consult: the contract and the Pi agent frontmatter said
+ * `medium`/`high` while `sendLocalMessages` wrote its own `max`. Declaring it
+ * here makes the contract the source, and the sender now takes the value as a
+ * parameter instead of holding a second copy.
  */
-export const CHEAPLOCAL_PROFILE_ADVISOR_EFFORT =
-  CHEAPEST_PROFILE_CONTRACT.advisorEffort
+export const CHEAPLOCAL_PROFILE_ADVISOR_EFFORT = LOCAL_CONSULT_EFFORT
 
 export const CHEAPLOCAL_PROFILE_ORACLE_MODEL = CHEAPLOCAL_PROFILE_MODELS.oracle
-export const CHEAPLOCAL_PROFILE_ORACLE_EFFORT =
-  CHEAPEST_PROFILE_ORACLE_EFFORT
+export const CHEAPLOCAL_PROFILE_ORACLE_EFFORT = LOCAL_CONSULT_EFFORT
 
 export const CHEAPLOCAL_PROFILE_SYNTHESIZED_PEERS =
   CHEAPEST_PROFILE_SYNTHESIZED_PEERS
@@ -144,6 +146,7 @@ export const CHEAPLOCAL_PROFILE_CONTRACT = Object.freeze({
   advisorClientModel: CHEAPLOCAL_PROFILE_ADVISOR_CLIENT_MODEL,
   advisorEffort: CHEAPLOCAL_PROFILE_ADVISOR_EFFORT,
   oracleModel: CHEAPLOCAL_PROFILE_ORACLE_MODEL,
+  oracleEffort: CHEAPLOCAL_PROFILE_ORACLE_EFFORT,
   rewriteModel: CHEAPLOCAL_PROFILE_REWRITE_MODEL,
   consultTransport: "local" as const,
 })
@@ -151,9 +154,13 @@ export const CHEAPLOCAL_PROFILE_CONTRACT = Object.freeze({
 export type CheaplocalProfileContract = typeof CHEAPLOCAL_PROFILE_CONTRACT
 
 /**
- * Where the profile's two consultants are served. Every consumer branches on
- * this value rather than on the profile id, so a future local-consult variant
- * inherits the wiring instead of needing a parallel branch in each site.
+ * Where a profile's consultant is served. Every consumer branches on this value
+ * rather than on the profile id, so a future local-consult variant inherits the
+ * wiring instead of needing a parallel branch in each site.
+ *
+ * Two members today: `cheaplocal` (its Advisor and Oracle) and `local` (its
+ * Oracle). `local2` deliberately stays `"copilot"`: its Oracle and curated
+ * Advisor are billed, so they resolve and gate against the live catalog.
  */
 export type ConsultTransport =
   (typeof CHEAPEST_PROFILE_CONTRACT)["consultTransport"] | "local"

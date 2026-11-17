@@ -272,7 +272,7 @@ The client-visible Advisor pin is `local`, not `opus`. The launcher sets it with
 
 `cheaplocal` assumes nothing about the local model beyond its base URL, the same way the local family does: no endpoint probe, no model discovery, no capability claim. The consult body requests `max` effort, but that is a field of the request rather than a claim: no prompt surface states a window or an effort for either consultant. Its prompt surfaces name the lead and natives as the Luna roles they are, and describe the two consultants by transport only, as the local model.
 
-Both halves of the redaction contract are prompt text, not a filter, and they are the only guard against sending a credential to the operator's endpoint. The caller-facing surfaces carry one line telling the caller to replace every credential, token, key, password, and connection string with a placeholder and to keep secret file contents out of the transcript: the `oracle` tool description, the `advisor` tool descriptions on both transports, the lead's consult contract in the mirrored `CLAUDE.md` (`CHEAPLOCAL_CONSULT_CONTRACT`), and the reviewer's protege appendix. The consultant-side system prompts carry the matching note that a placeholder is an unknown value it must not ask to see. A mechanical proxy-side scrub was rejected deliberately: it cannot tell a credential from an identifier, so it would either miss secrets or corrupt the code excerpts the consult depends on.
+Both halves of the redaction contract are prompt text, not a filter, and they are the only guard against sending a credential to the operator's endpoint. The rule is scoped to the **transport**, not to a profile id: `consultIsLocalTransport(profileId)` is the single predicate, family-guarded so the base-contract fallbacks cannot claim a local egress they do not have. Every surface that can route a brief off Copilot carries the caller's line — replace every credential, token, key, password, and connection string with a placeholder, and keep secret file contents out of the transcript: the `oracle` tool description, the `advisor` tool descriptions, the lead's consult contract in the mirrored `CLAUDE.md` (`CHEAPLOCAL_CONSULT_CONTRACT` where an Advisor exists, `ORACLE_ONLY_LOCAL_CONSULT_CONTRACT` where only an Oracle does), the Pi lead digest, and the reviewer's protege appendix. The consultant-side system prompts carry the matching note that a placeholder is an unknown value it must not ask to see — including Pi's own `oracle` agent body. `local` is covered on all four caller surfaces and its Oracle's prompt because the predicate asks what the transport is; an earlier revision asked which profile it was (`isCheaplocalProfile`), and quietly skipped the profile whose Oracle *is* a local consult. A mechanical proxy-side scrub was rejected deliberately: it cannot tell a credential from an identifier, so it would either miss secrets or corrupt the code excerpts the consult depends on.
 
 Copilot egress is capped to the `{sol, luna}` family set (`LOCAL2_COPILOT_MODEL_FAMILIES`), which is the strict reading of "only the consultants move": the Luna lead and natives, the `gpt-5.6-sol` prompt-rewrite brief, `web` search, `dispatchModelCall`, and the `browse` page-compressor carve-out keep working, while a Copilot model outside that set is refused with the existing actionable error. One consequence is deliberate rather than special-cased: the `workers` group stays on the cheapest group set, and its `plan` default (`claude-opus-5.5`) and `review` default (`gemini-3.1-pro-preview`) fall outside the cap, so those two modes are refused at call time while `explore` (Luna) and `implement` (`gpt-5.6-sol`) work. A caller can still pass a `model` inside the cap.
 
@@ -306,9 +306,9 @@ The raw aliases `local` and `local2` point the MAIN agent loop at a local infere
 | `Explore` | `haiku` | same |
 | `General-Purpose` | `sonnet` | same |
 | Advisor | none (the tool is disabled, see below) | `gpt-6.1-sol` / high, served by Copilot |
-| Oracle peer | none | `gpt-6.1-sol` / high, served by Copilot |
+| Oracle peer | `opus` / `max`, served by the local endpoint | `gpt-6.1-sol` / high, served by Copilot |
 | Window / roster | 200K / the three natives above, no `Plan`, no coordinator | same |
-| MCP groups | `peers` (artifact tools only), `search`, `browser`, `ado`, `kusto`, `cloudagent` | same, and `peers` also answers the Oracle |
+| MCP groups | `peers` (artifact tools + the Oracle), `search`, `browser`, `ado`, `kusto`, `cloudagent` | same |
 | Prompts | the local family's own, assumption-free | same |
 
 Local is a third family, not a cheapest sibling: its egress and model ids differ, its roster and per-role efforts are inherited from `CHEAPEST_PROFILE_CONTRACT`, and its prompt surfaces are rendered for the local family so they name only the agents and tools it emits and make no claim about the endpoint, the model behind it, its speed or its cost. `-m cheaplocal` is the mirror image and does stay in the cheapest family: the whole session runs exactly as `cheapest` does and only the two consultants leave Copilot, so its prompt surfaces keep the cheapest roster and scrub only the sentences that would describe a consultant.
@@ -319,9 +319,24 @@ Local is a third family, not a cheapest sibling: its egress and model ids differ
 
 `local2` adds exactly two Copilot consumers: the Advisor and the Oracle, both `gpt-6.1-sol`.
 
-That is a runtime guard, not prompt guidance. `src/lib/copilot-model-policy.ts` derives a process policy from the launch registry (`activeCopilotModelPolicy`, most restrictive wins) and every Copilot egress asserts it: `createChatCompletions`, `createResponses`, `createMessages`/`countTokens` (via `assertCopilotMessagesBodyAllowed`), and the MCP `dispatchModelCall`. Under `local` the verdict is `forbidden`, and under `local2` it is the hardcoded family set `{sol, luna}` (`LOCAL2_COPILOT_MODEL_FAMILIES`). `forbidden` admits one named surface carve-out, `browse`: the `--browse` extension's page compressor runs a Copilot model over page text, which is a browser feature rather than a subagent, and it stays available on both profiles. Everything else that is Copilot-backed carries no model and is untouched: `web` search (GitHub PAT), the `browser_*` tools' own mechanics, and the `ado`/`kusto`/`cloudagent` data groups.
+`local` has an Oracle too, and it costs nothing: the contract declares
+`consultTransport: "local"`, so the consult is one Anthropic Messages call to the
+same endpoint the lead already uses, carrying the bare `opus` id and the minimal
+Consult body (`max_tokens`, `system`, one user message, `output_config: { effort }`).
+The egress policy is about Copilot MODELS, not about consultants, so the role
+survives the move. Nothing in that path reads the Copilot catalog, and the
+consult is recorded at zero cost under the raw `opus` id, so the status line
+still reads `[AIC 0.00]` after a consult.
 
-The `workers` group is absent on both, because a worker subagent resolves and runs a Copilot model. `peers` stays permitted for the artifact review tools (human review, not inference) and is published only while the artifact panel is enabled; `local2`'s Oracle rides the same group.
+The absence of an Advisor on `local` is a different fact: the Advisor is a
+server-side Copilot loop with its own reviewer, so it is the one consultant that
+still cannot run locally. The Advisor tool is therefore disabled outright
+(`subagents.agentOverrides.oracle` is NOT involved; see `LOCAL_PROFILE`'s
+`personaAllowlist` for the Oracle and the curated-Advisor gate for the Advisor).
+
+That is a runtime guard, not prompt guidance. `src/lib/copilot-model-policy.ts` derives a process policy from the launch registry (`activeCopilotModelPolicy`, most restrictive wins) and every Copilot egress asserts it: `createChatCompletions`, `createResponses`, `createMessages`/`countTokens` (via `assertCopilotMessagesBodyAllowed`), the MCP `dispatchModelCall`, and the two first-mate background judges (the micro-classifier and the Tier1 shadow judge), which build their own `/chat/completions` request instead of going through a `create-*` service and therefore consult the policy by hand. Those two decline with a `null` verdict rather than throwing, so a local launch escalates instead of auto-accepting — fail-closed, with no change on an unrestricted profile. Under `local` the verdict is `forbidden`, and under `local2` it is the hardcoded family set `{sol, luna}` (`LOCAL2_COPILOT_MODEL_FAMILIES`). `forbidden` admits one named surface carve-out, `browse`: the `--browse` extension's page compressor runs a Copilot model over page text, which is a browser feature rather than a subagent, and it stays available on both profiles. Everything else that is Copilot-backed carries no model and is untouched: `web` search (GitHub PAT), the `browser_*` tools' own mechanics, and the `ado`/`kusto`/`cloudagent` data groups.
+
+The `workers` group is absent on both, because a worker subagent resolves and runs a Copilot model. `peers` stays permitted for two things and only those: the artifact review tools (human review, not inference) and the Oracle. With the artifact panel off the group still holds the Oracle and is still published; the persona allow-list is what keeps every other Copilot-served peer unlisted and therefore uncallable.
 
 ### Endpoint configuration
 
@@ -361,7 +376,7 @@ A local lead turn costs nothing, and the ledger says so rather than staying sile
 
 ### Pi
 
-`github-router pi -m local [--localport <port> | --localurl <url>]` configures the endpoint through the same resolver, so both subcommands accept the same spellings. Pi's `models.json` provider speaks `anthropic-messages`, the tier rows are the three bare ids at a 200K window carrying the launch's session id as a per-model header, and no `cost` or `thinkingLevelMap` is emitted for them (the ladder is unknown, so it is omitted rather than guessed). Copilot-served rows (the Oracle, and the `local2` advisor) are pinned to `openai-responses`, because a Copilot row left on the local provider default would send a real Copilot id to the local server.
+`github-router pi -m local [--localport <port> | --localurl <url>]` configures the endpoint through the same resolver, so both subcommands accept the same spellings. Pi's `models.json` provider speaks `anthropic-messages`, the tier rows are the three bare ids at a 200K window carrying the launch's session id as a per-model header, and no `cost` or `thinkingLevelMap` is emitted for them (the ladder is unknown, so it is omitted rather than guessed). Copilot-served rows (the `local2` Oracle and Advisor) are pinned to `openai-responses`, because a Copilot row left on the local provider default would send a real Copilot id to the local server. `local` emits no such row: its Oracle is one of the three tier ids, which is why its provider carries exactly `opus`/`sonnet`/`haiku` and the Oracle agent file is pinned to the tier its lead already uses.
 
 ### Non-assumptions
 

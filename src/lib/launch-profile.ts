@@ -246,23 +246,26 @@ export const BALANCED2_PROFILE: LaunchProfileDescriptor = Object.freeze({
  * coordinator), with every role's model swapped for the local endpoint's tier
  * id.
  *
- * No agent turn on a local launch reaches a Copilot model, so every group
- * whose tools spawn one is absent: `workers` (the Pi workers resolve Copilot
- * models) and every group built for model ties. `peers` is permitted only
- * because the artifact tools live there and human review is not model
- * inference, and the empty allow-list means no persona is listed or callable:
- * with the artifact panel off the group holds nothing and neither launcher
- * publishes it. What remains is the surface that is not an agent model call —
- * `search` (in-process lexical/ColBERT plus the PAT-backed web search),
- * `browser` (a local extension, whose page compressor is the one model-backed
- * exception and carries its own fixed chain), and the three Azure data groups.
- * The egress guard in `copilot-model-policy.ts` enforces the same rule from
- * the other side, so a path that somehow reaches Copilot still refuses.
+ * No agent turn on a local launch reaches a Copilot model, so every group whose
+ * tools spawn one is absent: `workers` (the Pi workers resolve Copilot models)
+ * and every group built for model ties. `peers` is permitted for two reasons and
+ * only those: the artifact tools (human review, not model inference) and the
+ * `oracle` persona, whose consultant is the local endpoint itself
+ * (`consultTransport: "local"` on the contract). The allow-list is what keeps it
+ * to that one persona — every other peer stays unlisted and therefore
+ * uncallable. With the artifact panel off the group holds just the Oracle and
+ * both launchers still publish it. What remains is the surface that is not an
+ * agent model call — `search` (in-process lexical/ColBERT plus the PAT-backed
+ * web search), `browser` (a local extension, whose page compressor is the one
+ * model-backed exception and carries its own fixed chain), and the three Azure
+ * data groups. The egress guard in `copilot-model-policy.ts` enforces the same
+ * rule from the other side, so a path that somehow reaches Copilot still
+ * refuses.
  */
 export const LOCAL_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "local",
   nativeRoster: new Set(localContractFor("local").nativeAgentNames),
-  personaAllowlist: new Set<string>(),
+  personaAllowlist: new Set(["oracle"]),
   allowedGroups: new Set(["peers", "search", "browser", "ado", "kusto", "cloudagent", "workiq"]),
   hasCoordinator: false,
 })

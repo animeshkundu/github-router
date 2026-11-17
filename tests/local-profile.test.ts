@@ -66,18 +66,22 @@ describe("local profile identity", () => {
     expect(profileDescriptor("local2").nativeRoster).toEqual(local.nativeRoster)
   })
 
-  test("local keeps the `peers` group for artifacts but no persona", () => {
+  test("local keeps the `peers` group for artifacts and exactly one persona", () => {
     const local = profileDescriptor("local")
     // The group has to be registered for the artifact tools to list at all
-    // (`ARTIFACT_GROUP` is `peers`), while an empty persona allow-list keeps
-    // every Copilot-served critic out.
+    // (`ARTIFACT_GROUP` is `peers`). The Oracle is in it because `local`'s
+    // consult now runs on the LOCAL tier: the invariant is "no Copilot model
+    // is billed", not "no consultant exists", so the only persona that survives
+    // is the one the local consult transport can serve.
     expect(local.allowedGroups!.has("peers")).toBe(true)
-    expect([...local.personaAllowlist!]).toEqual([])
+    expect([...local.personaAllowlist!]).toEqual(["oracle"])
   })
 
-  test("local2 adds exactly the Oracle on top of local's groups", () => {
+  test("local2 adds no persona that local lacks, only a Copilot-served Oracle", () => {
     const local = profileDescriptor("local")
     const local2 = profileDescriptor("local2")
+    // Same persona SET; the difference is the transport behind it, which the
+    // profile contract carries (`local` = local tier, `local2` = Sol).
     expect([...local2.personaAllowlist!]).toEqual(["oracle"])
     expect([...local2.allowedGroups!].sort()).toEqual([...local.allowedGroups!].sort())
   })

@@ -14,8 +14,10 @@ import {
 } from "~/lib/launch-profile"
 import {
   CHEAPLOCAL_CONSULT_MODEL,
+  CHEAPLOCAL_PROFILE_ADVISOR_EFFORT,
   CHEAPLOCAL_PROFILE_CONTRACT,
   CHEAPLOCAL_PROFILE_MODELS,
+  CHEAPLOCAL_PROFILE_ORACLE_EFFORT,
 } from "~/lib/cheaplocal-profile-contract"
 import {
   activeLocalLaunchProfile,
@@ -163,6 +165,13 @@ describe("the contract derives from cheapest by spread", () => {
     advisorModel: "opus",
     advisorClientModel: "local",
     oracleModel: "opus",
+    // The two consultants' declared efforts are a delta too: the cheapest
+    // family resolves its consultants' efforts from a Copilot catalog row,
+    // and a local consult declares the one number the wire actually carries
+    // (`LOCAL_CONSULT_EFFORT`). Declaring the inherited value was the bug —
+    // the contract said `medium`/`high` while the request body said `max`.
+    advisorEffort: CHEAPLOCAL_PROFILE_ADVISOR_EFFORT,
+    oracleEffort: CHEAPLOCAL_PROFILE_ORACLE_EFFORT,
     rewriteModel: "gpt-5.6-sol",
     consultTransport: "local",
   }

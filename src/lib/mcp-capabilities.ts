@@ -592,10 +592,11 @@ export function cheapestAdvisorModel(profileId?: string): string | undefined {
  * present, serve enough prompt/window for the family's subagent budget, offer
  * the contract's effort, and route over `/responses`.
  *
- * The local profiles use it too. Their LEAD turns go to the local endpoint, but
- * the Oracle is still a Copilot persona, so it is gated against the live
- * catalog exactly like the cheapest family's rather than falling back to the
- * fast-profile default.
+ * This is the COPILOT gate and nothing else: a contract whose consult runs
+ * locally (`cheaplocal`, and `local` since its Oracle moved to the lead's own
+ * endpoint) must not reach it at all, because there is no slug to look up. The
+ * two callers branch on `consultTransport` first — `cheapestFamilyOracleGate`
+ * and `localOracleModel` — so this function stays one job.
  */
 function familyOracleModelFor(contract: {
   oracleModel: string
@@ -618,23 +619,37 @@ export function cheapestOracleModel(profileId?: string): string | undefined {
 }
 
 /**
- * Oracle gate for `cheaplocal`, whose Oracle is a local consult.
+ * Oracle gate for a local consult: `local` and `cheaplocal`.
  *
- * Always true, and it says nothing about a catalog because there is nothing to
- * check: the persona resolves no Copilot slug, sends no catalog-derived
- * effort, and routes no `/responses` call. Running `familyOracleModelFor`
- * here would DROP the tool on
- * any catalog that happens not to carry an Opus row, and would gate a local
- * consult on a Copilot model's window, which is exactly the assumption this
- * profile refuses to make. The launch's own `allowedPersonas` still gates it.
+ * Answers the sentinel rather than a slug, and says nothing about a catalog
+ * because there is nothing to check. Running the catalog gate here would DROP
+ * the tool on any catalog that happens not to carry an Opus row, and would gate
+ * a local consult on a Copilot model's window, which is exactly the assumption
+ * these profiles refuse to make. The launch's own `allowedPersonas` still gates
+ * it.
  */
 export function cheaplocalOracleModel(): true {
   return true
 }
 
-/** Copilot-served Oracle for `local` / `local2` at the 200K default window. */
-export function localOracleModel(profileId?: string): string | undefined {
-  return familyOracleModelFor(localContractFor(profileId))
+/**
+ * Oracle gate for the `local` family, whose two transports need different
+ * checks.
+ *
+ * `local` consults the endpoint its lead already uses: no Copilot slug is
+ * resolved and no `/responses` call is routed, so every check in
+ * `familyOracleModelFor` would be a gate on a model that is not answering — an
+ * Opus row missing from the catalog would DROP a tool that works, and the
+ * window/effort assertions are Copilot facts the local endpoint was never asked
+ * to satisfy. It answers `true` (the same shape `cheaplocalOracleModel` uses);
+ * `local2` kept a billed Copilot Oracle and is catalog-gated exactly like the
+ * cheapest family's. The launch's own `allowedPersonas` still gates the tool.
+ */
+export function localOracleModel(profileId?: string): string | true | undefined {
+  const contract = localContractFor(profileId)
+  return contract.consultTransport === "local"
+    ? true
+    : familyOracleModelFor(contract)
 }
 
 /** Luna/max reviewer for the cheapest family at the 200K default window. */

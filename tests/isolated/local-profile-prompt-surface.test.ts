@@ -180,20 +180,44 @@ describe.each(LOCAL_PROFILES)("%s injects no claim about the endpoint", (profile
     expect(all).toContain("200K")
   })
 
-  test("the Oracle is named only where the launch can reach it", () => {
+  test("the Oracle is named on both local profiles, never as a Copilot consult", () => {
+    // `local`'s consult runs on the LOCAL tier (`consultTransport: "local"`), so
+    // the persona is reachable and the surfaces may name it — but the prose must
+    // describe a local-model consult, never a Copilot one. Naming it under a
+    // Copilot description would be the leak this file exists to catch.
     const surfaces = text(profile)
-    if (profile === "local2") {
-      expect(surfaces.directive).toContain("mcp__peers__oracle")
-      expect(surfaces.digest).toContain("`oracle`")
-      expect(surfaces.snippet).toContain("mcp__peers__oracle")
-      expect(surfaces.summary).toContain("mcp__peers__oracle")
+    expect(surfaces.directive).toContain("mcp__peers__oracle")
+    expect(surfaces.digest).toContain("`oracle`")
+    expect(surfaces.snippet).toContain("mcp__peers__oracle")
+    expect(surfaces.summary).toContain("mcp__peers__oracle")
+    if (profile === "local") {
+      // The consult is the same endpoint the lead already uses.
+      expect(surfaces.directive).toContain("the local model")
+      expect(joined(profile).toLowerCase()).not.toContain("copilot")
     } else {
-      // `local` admits no `peers` persona and, with the artifact panel off,
-      // registers no `peers` group at all, so naming Oracle would point the
-      // lead at a tool the session lacks.
-      for (const surface of SURFACE_NAMES) {
-        expect(surfaces[surface].toLowerCase()).not.toContain("oracle")
-      }
+      // `local2`'s consult IS Copilot-served (Sol), and must say so.
+      expect(joined(profile)).toContain("sol")
+    }
+  })
+
+  // The redaction contract has two halves — the caller's instruction and the
+  // consultant's note — and both used to ship only on `cheaplocal`, because the
+  // check was a profile id rather than the transport. `local`'s Oracle is a
+  // local consult too, so it was briefing an endpoint nobody here operates with
+  // no redaction instruction on any surface. Derived from `consultTransport`
+  // now, so any future local-consult member inherits it.
+  test("a local consult carries the caller's redaction ask", () => {
+    // The directive holds the FULL consult contract, so that is the surface the
+    // ask rides — exactly like `cheaplocal`. The digest carries the short
+    // pointer, which prices nothing and names no model; the two surfaces are
+    // resident together, so the instruction still reaches the lead every turn.
+    const { directive } = text(profile)
+    if (profile === "local") {
+      expect(directive).toContain("Replace every credential, token, key, password")
+    } else {
+      // `local2` bills a Copilot consult, so the ask would describe a transport
+      // that never happens on this launch.
+      expect(directive).not.toContain("Replace every credential, token, key, password")
     }
   })
 

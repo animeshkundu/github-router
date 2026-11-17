@@ -125,3 +125,38 @@ describe("Tier1 shadow — Tier Router", () => {
     expect((await logLines(dir)).length).toBe(0)
   })
 })
+
+describe("Tier1 shadow — Copilot egress ceiling", () => {
+  test("a -m local launch declines the Tier1 judge and escalates, never bills", async () => {
+    // The Tier1 judge posts to Copilot directly instead of going through the
+    // `create-*` services that own the profile ceiling. A `-m local` launch
+    // must bill no Copilot model, so the judge declines: `route` then takes the
+    // null-verdict path, which escalates rather than auto-accepting.
+    const { defaultTier1Judge } = await import("~/lib/first-mate/scheduler/shadow")
+    const { registerLaunch, unregisterLaunch } = await import("~/lib/launch-registry")
+    const { state } = await import("~/lib/state")
+    const models = state.models
+    const token = state.copilotToken
+    const apiUrl = state.copilotApiUrl
+    const originalFetch = globalThis.fetch
+    let calls = 0
+    state.models = { data: [{ id: "gpt-5.4-mini" }] } as unknown as typeof state.models
+    state.copilotToken = "t"
+    state.copilotApiUrl = "https://copilot.test"
+    globalThis.fetch = (async () => {
+      calls += 1
+      return new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }] }))
+    }) as unknown as typeof globalThis.fetch
+    const launch = registerLaunch({ profileId: "local", nonce: "d".repeat(64), secret: "e".repeat(64) })
+    try {
+      await expect(defaultTier1Judge({ requestId: "rL", kind: "author_fix" })).resolves.toBeNull()
+      expect(calls).toBe(0)
+    } finally {
+      unregisterLaunch(launch.launchId)
+      globalThis.fetch = originalFetch
+      state.models = models
+      state.copilotToken = token
+      state.copilotApiUrl = apiUrl
+    }
+  })
+})

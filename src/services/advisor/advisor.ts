@@ -61,7 +61,6 @@ import {
 } from "~/lib/anthropic-usage"
 import { isClaudeModel } from "~/lib/anthropic-translate/classifier"
 import {
-  LOCAL_CONSULT_EFFORT,
   LOCAL_CONSULT_MAX_OUTPUT_TOKENS,
   LOCAL_CONSULT_REDACTION_LINE,
   LOCAL_CONSULT_REDACTION_NOTE,
@@ -630,12 +629,12 @@ export const LOCAL_ADVISOR_TOOL_INSTRUCTIONS = buildCheapestAdvisorToolInstructi
 /** `cheaplocal` lead variant. The consult leaves Copilot, and this launch has
  *  been told nothing about what answers its local endpoint, so the prose names
  *  no model, no window, no effort and no cost: it states only that the
- *  consultant is local and what it is shown. The request still asks for `max`
- *  effort (`LOCAL_CONSULT_EFFORT`), but that is a field of the consult body,
- *  not a property to teach the lead; every surface states the transport and
- *  stops there. It is also the only variant that asks for a redacted brief: it
- *  is the only profile whose consult leaves Copilot for an endpoint the proxy
- *  knows nothing about. */
+ *  consultant is local and what it is shown. The request asks for the profile's
+ *  declared effort, but that is a field of the consult body, not a property to
+ *  teach the lead; every surface states the transport and stops there. It asks
+ *  for a redacted brief because its consult leaves Copilot for an endpoint the
+ *  proxy knows nothing about — the rule that decides that is the transport,
+ *  `consultIsLocalTransport`, which also covers `local`'s Oracle. */
 export const CHEAPLOCAL_ADVISOR_TOOL_INSTRUCTIONS = buildCheapestAdvisorToolInstructions(
   "which sees a curated view of this session",
   "the local model",
@@ -1669,11 +1668,11 @@ async function runAdvisor(
     advisorLocalEgress
       ? "local"
       : advisorTransport(resolvedAdvisorModel, fastProfile)
-  // Report the effort the request actually carries. A local consult ignores
-  // the Copilot-era `advisorEffort` in favour of the profile's declared
-  // `LOCAL_CONSULT_EFFORT`, so logging the former would describe a body that
-  // was never sent.
-  const dispatchEffort = advisorLocalEgress ? LOCAL_CONSULT_EFFORT : advisorEffort
+  // The effort the request actually carries. A local consult now sends the
+  // profile's DECLARED effort rather than a second constant inside
+  // `sendLocalMessages`: the declaration is the source of truth on every
+  // surface, so there is nothing left here to reconcile.
+  const dispatchEffort = advisorEffort
   if (fastProfile) {
     consola.warn(
       `fast Advisor dispatch: model=${resolvedAdvisorModel} transport=${transport} effort=${dispatchEffort}`,
@@ -1713,6 +1712,7 @@ async function runAdvisor(
           system: advisorSystem,
           userText: conversationText,
           maxTokens: ADVISOR_FALLBACK_MAX_OUTPUT_TOKENS,
+          effort: dispatchEffort,
           signal,
         }),
       { signal, label: resolvedAdvisorModel },
