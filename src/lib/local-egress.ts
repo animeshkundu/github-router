@@ -23,29 +23,20 @@ export const LOCAL_DEFAULT_PORT = 11111
 export const LOCAL_DEFAULT_BASE_URL = `https://localhost:${LOCAL_DEFAULT_PORT}/v1`
 
 /**
- * Output cap for a local consultant turn (Advisor and Oracle).
- *
- * One number for both, and deliberately a small one: a consultant answers a
- * single question, and every larger value would be a claim about how much room
- * the model behind the endpoint has. The Copilot paths keep their own
- * catalog-derived budgets; this is only ever the catalog-less fallback, so a
- * launch whose consultants left Copilot is no worse off than the branch that
- * existed before it.
+ * The consult's request-shaping numbers live in a leaf module so the profile
+ * contracts can declare the same effort this module sends — the contracts are
+ * the SOURCE of that value, and `sendLocalMessages` takes it as a parameter
+ * rather than holding a copy. Re-exported here so every caller that already
+ * imports this module keeps one import.
  */
-export const LOCAL_CONSULT_MAX_OUTPUT_TOKENS = 4096
-
-/**
- * Reasoning effort requested on every local consultant turn.
- *
- * This is the operator's setting for the two `cheaplocal` consults, not an
- * observation about the endpoint. `output_config.effort` is the same Anthropic
- * field Claude Code sends on its own requests, and `max` is its top rung. No
- * catalog lookup and no clamp apply, because the profile has no reasoning
- * ladder to clamp against and a guessed rung would be an assumption. An
- * endpoint that rejects the field fails the consult visibly; the proxy does
- * not quietly retry with a different body.
- */
-export const LOCAL_CONSULT_EFFORT = "max" as const
+import {
+  LOCAL_CONSULT_EFFORT,
+  LOCAL_CONSULT_MAX_OUTPUT_TOKENS,
+} from "./local-egress-constants"
+export {
+  LOCAL_CONSULT_EFFORT,
+  LOCAL_CONSULT_MAX_OUTPUT_TOKENS,
+}
 
 /**
  * The redaction contract lives in a leaf module so the prompt builders can
@@ -266,8 +257,13 @@ export function localSessionId(c: Context, launchSessionId?: string): string {
  *
  * `output_config.effort` is the exception, and it is not a claim: it is the
  * same Anthropic spelling Claude Code itself sends, and it states what the
- * operator asked for (`LOCAL_CONSULT_EFFORT`) rather than what the endpoint is.
- * The proxy does not clamp it against a reasoning ladder it has never read.
+ * profile DECLARED for this consult rather than what the endpoint is. The proxy
+ * does not clamp it against a reasoning ladder it has never read.
+ *
+ * `effort` is therefore a parameter, not a constant read in here. The value is
+ * declared on the profile contract (`oracleEffort` / `advisorEffort`) and this
+ * function must send the declaration rather than a second copy of it: a copy is
+ * exactly how the wire came to say `max` while `local`'s contract said `high`.
  *
  * `maxTokens` is a caller decision rather than a constant here so the two
  * consultants can keep their own budgets; both pass the catalog-less fallback,
@@ -287,6 +283,8 @@ export async function sendLocalMessages(req: {
   system: string
   userText: string
   maxTokens: number
+  /** The profile's declared consult effort; sent verbatim as `output_config.effort`. */
+  effort: string
   signal?: AbortSignal
 }): Promise<string> {
   const body = JSON.stringify({
@@ -294,7 +292,7 @@ export async function sendLocalMessages(req: {
     max_tokens: req.maxTokens,
     system: req.system,
     messages: [{ role: "user", content: req.userText }],
-    output_config: { effort: LOCAL_CONSULT_EFFORT },
+    output_config: { effort: req.effort },
   })
   const response = await createMessages(body, {}, req.signal, false, req.egress)
   const json = (await response.json()) as { content?: unknown }

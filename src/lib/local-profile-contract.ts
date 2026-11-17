@@ -40,12 +40,12 @@ import {
   CHEAPEST_PROFILE_DELEGATION_GRAPH,
   CHEAPEST_PROFILE_NATIVE_AGENT_NAMES,
   CHEAPEST_PROFILE_NATIVE_EFFORTS,
-  CHEAPEST_PROFILE_ORACLE_EFFORT,
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS,
   CHEAPEST_PROFILE_SYNTHESIZED_PEERS,
   type CheapestProfileNativeAgentName,
 } from "./cheapest-profile-contract"
 import { CHEAPEST2_SOL_MODEL } from "./cheapest2-profile-contract"
+import { LOCAL_CONSULT_EFFORT } from "./local-egress-constants"
 
 /**
  * The three ids the local endpoint resolves. Claude Code's `/model` picker and
@@ -103,7 +103,23 @@ export const LOCAL_PROFILE_SUBAGENT_CONTEXT_TOKENS =
   CHEAPEST_PROFILE_SUBAGENT_CONTEXT_TOKENS
 
 export const LOCAL_PROFILE_ORACLE_MODEL = LOCAL_PROFILE_MODELS.oracle
-export const LOCAL_PROFILE_ORACLE_EFFORT = CHEAPEST_PROFILE_ORACLE_EFFORT
+
+/**
+ * The effort this profile's Oracle requests.
+ *
+ * NOT the cheapest profile's value, and not a claim about the server: it is
+ * `LOCAL_CONSULT_EFFORT`, the one number a local consult asks for. This
+ * declaration is the SOURCE of that number on every surface — the descriptor,
+ * the Pi agent frontmatter and the `output_config.effort` the wire carries are
+ * all read from it (the Oracle path passes `oracleEffort` straight into
+ * `sendLocalMessages`).
+ *
+ * Three surfaces used to disagree about one role: the contract and the Pi agent
+ * file said `high` while `sendLocalMessages` wrote its own constant `max`, so a
+ * descriptor, a frontmatter and a request body described three different
+ * consults and no code path could notice.
+ */
+export const LOCAL_PROFILE_ORACLE_EFFORT = LOCAL_CONSULT_EFFORT
 
 export const LOCAL_PROFILE_SYNTHESIZED_PEERS = CHEAPEST_PROFILE_SYNTHESIZED_PEERS
 export type LocalProfileSynthesizedPeer =
@@ -181,6 +197,10 @@ export const LOCAL2_PROFILE_CONTRACT = Object.freeze({
    */
   models: { ...LOCAL_PROFILE_MODELS, oracle: CHEAPEST2_SOL_MODEL } as const,
   oracleModel: CHEAPEST2_SOL_MODEL,
+  // The Oracle is Copilot-served again, so it must ALSO stop inheriting the base
+  // contract's local-consult effort: `max` is the local wire's rung, and this
+  // consult is catalog-gated against the effort it declares.
+  oracleEffort: "high" as const,
   consultTransport: "copilot" as const,
   advisorModel: LOCAL2_PROFILE_ADVISOR_MODEL,
   advisorClientModel: LOCAL2_PROFILE_ADVISOR_CLIENT_MODEL,

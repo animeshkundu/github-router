@@ -48,8 +48,9 @@ import {
  * Plan mode (always on): Claude Code ships plan mode as a mode; Pi ships it
  * only as an example extension a user has to install. `src/lib/pi-plan-mode.ts`
  * generates the equivalent into this same package — see
- * `buildPiPlanModeSection` for the two independent write barriers, the
- * snapshot/restore of the tool set, and the divergences from upstream.
+ * `buildPiPlanModeSection` for the single reachable write barrier (the path
+ * gate; the tool roster is deliberately untouched) and the divergences from
+ * upstream.
  */
 
 /**

@@ -200,6 +200,27 @@ describe.each(LOCAL_PROFILES)("%s injects no claim about the endpoint", (profile
     }
   })
 
+  // The redaction contract has two halves — the caller's instruction and the
+  // consultant's note — and both used to ship only on `cheaplocal`, because the
+  // check was a profile id rather than the transport. `local`'s Oracle is a
+  // local consult too, so it was briefing an endpoint nobody here operates with
+  // no redaction instruction on any surface. Derived from `consultTransport`
+  // now, so any future local-consult member inherits it.
+  test("a local consult carries the caller's redaction ask", () => {
+    // The directive holds the FULL consult contract, so that is the surface the
+    // ask rides — exactly like `cheaplocal`. The digest carries the short
+    // pointer, which prices nothing and names no model; the two surfaces are
+    // resident together, so the instruction still reaches the lead every turn.
+    const { directive } = text(profile)
+    if (profile === "local") {
+      expect(directive).toContain("Replace every credential, token, key, password")
+    } else {
+      // `local2` bills a Copilot consult, so the ask would describe a transport
+      // that never happens on this launch.
+      expect(directive).not.toContain("Replace every credential, token, key, password")
+    }
+  })
+
   test("`local` names no Copilot model anywhere", () => {
     if (profile !== "local") return
     const all = joined(profile)

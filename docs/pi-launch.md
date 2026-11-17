@@ -457,11 +457,16 @@ profile — no flag, no package, no model-facing tool.
 **Toggle** with `Ctrl+Alt+P` or `/plan`; `/plan-status` prints the current
 step list. Plan mode closes exactly one door:
 
-- `edit`, `write` and `apply_patch` leave the active tool set AND are refused
-  by a `tool_call` handler — two independent barriers, so a model that
-  believes it can still write is still stopped. This is Claude Code's own
-  shape (`disallowedTools: [Edit, Write, NotebookEdit]`): a capability gate,
-  not a command parser.
+- `edit`, `write` and `apply_patch` are refused by a `tool_call` handler. They
+  stay in the active tool set — deliberately. An earlier revision also removed
+  them from it and called the pair "two independent barriers"; they were not
+  independent, they were *stacked*. Pi resolves a call against the declared
+  tool list and answers `Tool write not found` **before** the `tool_call` hook
+  runs, so the narrower barrier sat in front of the wider one, the plan-file
+  exception could never admit anything, and the documented refusal was never
+  shown. One barrier the model can reach and read beats two that shadow each
+  other; a `write` attempt now costs one turn and comes back with the sentence
+  that says where the plan goes.
 - **One file is writable: the plan.** `.github-router/plans/pi-plan/plan.md`
   — the path is pinned by the extension and never chosen by the model, and a
   `write`/`edit` is admitted only when the *resolved* path equals it. Claude
@@ -485,13 +490,13 @@ shell it was just told to only read with; and each one cost capability the
 planning turn actually needed — `git log`, `rg`, running the test suite to see
 what it does, or delegating a parallel survey of the repo.
 
-Be clear about what this is: a **norm enforced with two mechanical edges**, not a
+Be clear about what this is: a **norm enforced with one mechanical edge**, not a
 sandbox. `bash` is allowed in plan mode, so a model that wanted to write
 `src/x.ts` could `echo > src/x.ts` and no handler would see it. That is the same
 trade Claude Code makes, and the right one for a mode whose purpose is to keep a
 cooperative model from getting ahead of the user — not to contain a hostile one.
 
-What replaces them is prose — under 1,900 characters of it, roughly the length
+What replaces them is prose — under 2,000 characters of it, roughly the length
 of Claude Code's own plan-mode reminder. The brief says the user does not want
 execution yet, that this supersedes any instruction to do the work now, and
 that the plan file is the single exception. It then gives the workflow: reuse
@@ -512,19 +517,22 @@ planning mode; a 600-line command table was how a weak one was fenced in.
   instructions disappear the moment execution starts (they would contradict
   the "full access" notice), and everything is gone once plan mode ends.
 
-The active tool set is **snapshotted** on entry and restored verbatim on exit,
-and entry only ever *narrows* it: nothing is added back that the snapshot did
-not have, so a `--tools` narrowing survives the toggle in both directions.
-(The upstream example re-derives "normal mode" from a hardcoded list, which
-would resurrect the tools the narrowing removed.) Plan state persists through a
-custom session entry — one per real change, not per turn — so resuming a
-plan-mode session re-applies the write barrier, and starting a fresh session
-(`/new`, a fork into an empty branch) releases it.
+Plan mode **never touches the tool set** — not on entry, not on exit, not on
+resume. It owns the gate, not the roster. Two bugs came from owning both: the
+stacked barrier above, and a resume path that re-applied a saved snapshot
+verbatim, so a session started under `--tools read,bash,edit` handed `edit`
+back to a later launch that had deliberately dropped it. Resuming now restores
+plan state (the mode, the step list, the widget) and nothing else, and a test
+asserts that a saved `toolsBeforePlan` cannot widen a narrower live roster.
+Plan state persists through a custom session entry — one per real change, not
+per turn — and starting a fresh session (`/new`, a fork into an empty branch)
+releases it.
 
-**Checklist.** The model's numbered `Plan:` block is parsed into steps and
-rendered as a resident widget above the editor, plus a footer badge —
+**Checklist.** A numbered list under a plan heading — `Plan:`, `## Plan`,
+`## Recommended approach`, `## Steps`, `## Implementation plan` — is parsed into
+steps and rendered as a resident widget above the editor, plus a footer badge —
 `⏸ plan` while planning, `📋 2/5` while executing. Accepting "Execute the
-plan" restores full tool access, kicks off the first step, and tracks
+plan" kicks off the first step and tracks
 progress from `[DONE:n]` tags (text *and* thinking blocks, since
 reasoning-max models often tag in thinking); "All steps complete" is honoured
 as a fallback. Completion is posted as a `nextTurn` message rather than

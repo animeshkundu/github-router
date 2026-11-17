@@ -9,9 +9,13 @@
  *   - the emitted JavaScript parses, and every helper that rides
  *     `Function.prototype.toString()` keeps working after the round trip
  *     (a helper that referenced a module-scope name would throw here first);
- *   - toggling plan mode snapshots and restores the EXACT tool set, including a
- *     `--tools` narrowing that a hardcoded "normal mode" list would resurrect;
- *   - both barriers work: `edit`/`write` leave the active set AND a call to
+ *   - plan mode never touches the tool roster: not on entry, not on exit, not
+ *     on resume. It must NOT narrow either — pi answers "Tool write not found"
+ *     before the `tool_call` hook, so a narrowed writer makes the one-plan-file
+ *     exception unreachable. The reachability test below is the regression that
+ *     pins it, and it is why this suite drives `tool_call` the way pi does
+ *     rather than only asserting on the handler's return value;
+ *   - the path gate is the barrier: `edit`/`write` are offered and a call to
  *     them is refused — except for the one pinned plan file;
  *   - `before_agent_start` injects nothing unless plan mode is engaged, and
  *     nothing for a non-`user` message even when it is;
@@ -257,6 +261,65 @@ describe("plan mode: pure helpers", () => {
     expect(steps.every((s) => s.completed === false)).toBe(true)
   })
 
+  test("the reply shape the brief itself asks for parses", () => {
+    // The brief tells the model to write Context / recommended approach /
+    // critical files / verification, and to finish with a numbered list. A reply
+    // that follows THAT structure is the canonical case, and it used to parse as
+    // ZERO steps — which silently disabled the checklist, the "what next?"
+    // prompt and the Execute kick. Transcribed from the brief's own sections.
+    const reply = [
+      "## Context",
+      "",
+      "Plan mode narrows the tool roster on entry, and pi resolves calls against",
+      "that roster before the `tool_call` hook runs.",
+      "",
+      "## Recommended approach",
+      "",
+      "### 1. Stop narrowing the writers",
+      "Keep the gate, delete the roster mutation.",
+      "",
+      "### 2. Widen the step parser",
+      "Accept the headings the brief already produces.",
+      "",
+      "## Critical files",
+      "",
+      "- `src/lib/pi-plan-mode.ts`",
+      "- `tests/pi-plan-mode.test.ts`",
+      "",
+      "## Verification",
+      "",
+      "1. Run the plan-mode suite.",
+      "2. Mutation-check the path gate.",
+    ].join("\n")
+    const steps = extractPlanSteps(reply)
+    // The `## Recommended approach` section is the plan; the `## Verification`
+    // list below it is a different section and must not be absorbed.
+    expect(steps.map((s) => s.text)).toEqual([
+      "Stop narrowing the writers",
+      "Widen the step parser",
+    ])
+    expect(steps.map((s) => s.step)).toEqual([1, 2])
+  })
+
+  test("the accepted headings, and the shapes that must not match", () => {
+    const numbered = "1. Read the launcher\n2. Add the section"
+    expect(extractPlanSteps("Plan:\n" + numbered)).toHaveLength(2)
+    expect(extractPlanSteps("## Plan\n" + numbered)).toHaveLength(2) // no colon
+    expect(extractPlanSteps("### Plan\n" + numbered)).toHaveLength(2)
+    expect(extractPlanSteps("**Plan:**\n" + numbered)).toHaveLength(2)
+    expect(extractPlanSteps("## Steps\n" + numbered)).toHaveLength(2)
+    expect(extractPlanSteps("## Implementation plan\n" + numbered)).toHaveLength(2)
+
+    // Prose that merely mentions the word must not open a section: the heading
+    // has to be alone on its line.
+    expect(extractPlanSteps("Steps: we will read the launcher first\n" + numbered)).toHaveLength(0)
+    expect(extractPlanSteps("The plan is simple.\n" + numbered)).toHaveLength(0)
+    // A numbered list inside a fence is code being shown, not a plan.
+    expect(extractPlanSteps("Plan:\n```\n1. not a step\n2. also not\n```\n")).toHaveLength(0)
+    // Checkboxes are not the numbered contract; the brief asks for a number.
+    expect(extractPlanSteps("## Plan\n- [ ] read the launcher\n- [ ] add the section")).toHaveLength(0)
+  })
+
   test("step text drops markdown but keeps the action verb", () => {
     // Divergence from upstream: the checklist is what the user reads while the
     // plan runs, so "Read the launcher" must not collapse to "Launcher".
@@ -307,6 +370,11 @@ describe("plan mode: emission", () => {
     expect(section).toContain(extractPlanSteps.toString())
     expect(section).toContain(applyDoneSteps.toString())
     expect(section).toContain(planAllStepsComplete.toString())
+    // A helper is serialized with `toString()`, which carries its body and not
+    // its module scope. A regex hoisted to a module-level const compiles fine in
+    // this file and throws `PLAN_HEADER_RE is not defined` in the emitted one —
+    // which is exactly how the widened parser failed the first time it ran.
+    expect(section).not.toContain("PLAN_HEADER_RE")
   })
 })
 
@@ -320,26 +388,57 @@ describe("plan mode: generated module runs", () => {
     }
   })
 
-  test("toggling removes writes and restores the EXACT prior set", async () => {
-    // A `--tools` narrowing: `grep` was dropped by the caller, so a hardcoded
-    // "normal mode" restore list would wrongly resurrect it.
+  test("entering and leaving plan mode never touches the tool roster", async () => {
+    // A `--tools` narrowing: `grep` was dropped by the caller. Plan mode must
+    // not add it back — and must not remove anything either.
     const harness = await loadPlanExtension(
       "restore",
       stubPi({ activeTools: ["read", "bash", "edit", "write"] }),
     )
     const ctx = ctxFor(harness)
     const plan = harness.commands.get("plan")!
+    const before = [...harness.tools.active]
 
     await plan.handler("", ctx)
-    expect(harness.tools.active).not.toContain("edit")
-    expect(harness.tools.active).not.toContain("write")
-    // Entry only NARROWS: `grep` was removed by the caller, so plan mode must not
-    // add it back. Adding it would hand the model a tool the launch withheld.
-    expect(harness.tools.active).not.toContain("grep")
-    expect(harness.tools.active).toEqual(["read", "bash"])
+    expect(harness.tools.active).toEqual(before)
+    expect(harness.tools.sets).toHaveLength(0)
 
     await plan.handler("", ctx)
-    expect(harness.tools.active).toEqual(["read", "bash", "edit", "write"])
+    expect(harness.tools.active).toEqual(before)
+    expect(harness.tools.sets).toHaveLength(0)
+  })
+
+  test("REACHABILITY: the writers stay offered, so the path gate can actually fire", async () => {
+    // The regression this whole design turns on. Both behaviours are asserted,
+    // because either one alone is satisfiable by the broken design:
+    //   - `write` is in the ACTIVE set, so pi's dispatcher resolves the call and
+    //     reaches `beforeToolCall`. If this fails, pi answers
+    //     "Tool write not found" and the plan file below is unwritable.
+    //   - the same call is then answered by the handler: refused for any other
+    //     path, allowed for the plan file.
+    const harness = await loadPlanExtension(
+      "reachability",
+      stubPi({ activeTools: ["read", "bash", "edit", "write"] }),
+    )
+    const ctx = ctxFor(harness, { cwd: "/work/repo" })
+    const toolCall = harness.handlers.get("tool_call")!
+    await harness.commands.get("plan")!.handler("", ctx)
+
+    expect(harness.tools.active).toContain("write")
+    expect(harness.tools.active).toContain("edit")
+    // Asked through the same host API pi's dispatcher reads, not the harness's
+    // own array: the point is that the declared tool list contains `write`.
+    const declared = (harness.pi as { getActiveTools: () => string[] }).getActiveTools()
+    expect(declared).toContain("write")
+
+    expect(
+      await toolCall({ toolName: "write", input: { path: planFilePath(), content: "# p" } }, ctx),
+    ).toBeUndefined()
+    expect(
+      ((await toolCall({ toolName: "write", input: { path: "src/x.ts", content: "x" } }, ctx)) as {
+        block?: boolean
+      })?.block,
+    ).toBe(true)
   })
 
   test("only the writer tools are refused; everything else a planner needs runs", async () => {
@@ -513,6 +612,12 @@ describe("plan mode: generated module runs", () => {
     expect(brief).toContain("Leaving plan mode is")
     // Codex's planning-vs-doing test, in one sentence.
     expect(brief).toContain("DOING the work")
+    // The brief and the parser are one contract: the checklist cannot paint
+    // without a numbered list in the reply, so the brief has to ask for one.
+    // Pinned as containment, not as a comment, because this line went missing
+    // once and the whole tail of the feature — widget, "what next?" prompt, the
+    // Execute kick — silently stopped being reachable.
+    expect(brief).toContain("numbered list of the steps")
     // The brief must never grow into the enumeration it replaced.
     expect(brief.length).toBeLessThan(2600)
   })
@@ -639,7 +744,9 @@ describe("plan mode: generated module runs", () => {
     )
     const planCtx = ctxFor(harness)
     await harness.commands.get("plan")!.handler("", planCtx)
-    expect(harness.tools.active).not.toContain("edit")
+    // Entering did not narrow: the roster is the caller's, untouched. Writes are
+    // stopped by the gate, not by hiding the tool.
+    expect(harness.tools.active).toEqual(["read", "bash", "edit", "write"])
 
     await harness.handlers.get("agent_end")!(
       endEvent("Plan:\n1. Read the launcher\n2. Add the section"),
@@ -721,7 +828,7 @@ describe("plan mode: generated module runs", () => {
     expect(String(out.messages[3].content)).toContain("v2")
   })
 
-  test("resume restores state from the custom entry and re-applies the restriction", async () => {
+  test("resume restores state without touching the roster", async () => {
     const harness = stubPi({ activeTools: ["read", "bash", "edit", "write"] })
     const entries = [
       {
@@ -731,7 +838,6 @@ describe("plan mode: generated module runs", () => {
           enabled: true,
           executing: false,
           steps: [{ step: 1, text: "Read the launcher", completed: false }],
-          toolsBeforePlan: ["read", "bash", "edit", "write"],
         },
       },
     ]
@@ -747,11 +853,49 @@ describe("plan mode: generated module runs", () => {
     )
     expect(harness.statuses.get(PLAN_STATUS_KEY)).toContain("plan")
     expect(harness.widgets.get(PLAN_WIDGET_KEY)).toHaveLength(1)
-    expect(harness.tools.active).not.toContain("edit")
+    expect(harness.tools.active).toEqual(["read", "bash", "edit", "write"])
+    expect(harness.tools.sets).toHaveLength(0)
 
-    // Leaving afterwards restores the snapshotted set, not a hardcoded one.
     await harness.commands.get("plan")!.handler("", ctxFor(harness))
     expect(harness.tools.active).toEqual(["read", "bash", "edit", "write"])
+    expect(harness.tools.sets).toHaveLength(0)
+  })
+
+  test("resuming under a narrower launch cannot widen the roster", async () => {
+    // The old design stored `toolsBeforePlan` and re-applied it on session_start,
+    // so a session saved under `--tools read,bash,edit` resurrected `edit` in a
+    // launch that had deliberately dropped it. Disclosure of a withheld tool is a
+    // security-adjacent failure, so it is pinned even though the field is gone:
+    // plans restore state, they never install a roster.
+    const harness = stubPi({ activeTools: ["read", "bash"] })
+    const entries = [
+      {
+        type: "custom",
+        customType: PLAN_MODE_ENTRY,
+        data: {
+          enabled: true,
+          executing: false,
+          steps: [{ step: 1, text: "Read the launcher", completed: false }],
+          // A stale snapshot from a wider launch. It must be ignored, not applied.
+          toolsBeforePlan: ["read", "bash", "grep", "edit", "write"],
+        },
+      },
+    ]
+    mkdirSync(SANDBOX, { recursive: true })
+    const file = join(SANDBOX, "resume-narrow.ts")
+    writeFileSync(file, buildPiExtensionSource({ profileId: "balanced" }), "utf8")
+    const mod = (await import(file)) as { default: (pi: unknown) => void }
+    mod.default(harness.pi)
+
+    await harness.handlers.get("session_start")!(
+      { type: "session_start" },
+      ctxFor(harness, { sessionManager: { getEntries: () => entries } }),
+    )
+    expect(harness.tools.active).toEqual(["read", "bash"])
+    expect(harness.tools.sets).toHaveLength(0)
+    // And leaving later still does not hand back the withheld tools.
+    await harness.commands.get("plan")!.handler("", ctxFor(harness))
+    expect(harness.tools.active).toEqual(["read", "bash"])
   })
 
   test("a fresh session clears plan state instead of inheriting the old session's", async () => {

@@ -26,6 +26,7 @@ import { WORKIQ_TOKEN_ENV, WORKIQ_TOKEN_PATH_ENV } from "../src/lib/workiq/const
 import { resetWorkiqTokenStateForTesting } from "../src/lib/workiq/token"
 import { aicSnapshot } from "../src/lib/aic-ledger"
 import { configureLocalEgress, LOCAL_CONSULT_MAX_OUTPUT_TOKENS } from "../src/lib/local-egress"
+import { LOCAL_PROFILE_CONTRACT } from "../src/lib/local-profile-contract"
 import { MAX_INFLIGHT_TOOLS_CALL } from "../src/lib/mcp-inflight"
 import { state } from "../src/lib/state"
 import type { ModelsResponse } from "../src/services/copilot/get-models"
@@ -4491,6 +4492,12 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       ])
       expect(captured.body?.model).toBe("opus")
       expect(captured.body?.max_tokens).toBe(LOCAL_CONSULT_MAX_OUTPUT_TOKENS)
+      // The effort on the wire is the one the CONTRACT declares, not a second
+      // constant inside the sender. `local` used to declare `high` in its
+      // contract and the Pi agent frontmatter while this body said `max`, so
+      // three surfaces described three different consults.
+      expect(LOCAL_PROFILE_CONTRACT.oracleEffort).toBe("max")
+      expect(captured.body?.output_config).toEqual({ effort: LOCAL_PROFILE_CONTRACT.oracleEffort })
       const messages = captured.body?.messages as Array<{ role: string; content: unknown }>
       expect(messages).toHaveLength(1)
       // No Copilot credential leaves, and the consult is filed at zero AIC
@@ -4508,6 +4515,66 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
     } finally {
       state.sessionId = savedSessionId
       configureLocalEgress({})
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
+  // The redaction ask is a property of the TRANSPORT, not of one profile id.
+  // It used to be gated on `isCheaplocalProfile(...)`, so `local` — whose Oracle
+  // IS a local consult — advertised the tool with no redaction instruction at
+  // all, on any surface, while briefing an endpoint nobody here operates.
+  test("local Oracle: the tool description carries the caller's redaction ask", async () => {
+    // Not "f": the fast-launch fixture in this describe block already owns it.
+    const REDACT_NONCE = "b".repeat(64)
+    const launch = registerLaunch({
+      profileId: "local",
+      nonce: REDACT_NONCE,
+      secret: "local-redact-secret",
+      allowedGroups: new Set(["peers"]),
+      allowedPersonas: new Set(["oracle"]),
+    })
+    try {
+      configureLocalEgress({ profileId: "local", baseUrl: "http://127.0.0.1:9933/v1" })
+      const { json } = await rpc(
+        { jsonrpc: "2.0", id: 95, method: "tools/list" },
+        { auth: `Bearer ${REDACT_NONCE}` },
+      )
+      const tools = (json.result as { tools: Array<{ name: string; description?: string }> }).tools
+      const description = tools.find((t) => t.name === "oracle")?.description ?? ""
+      expect(description).toContain("Replace every credential, token, key, password")
+      expect(description).not.toContain("has been replaced with a placeholder")
+    } finally {
+      configureLocalEgress({})
+      unregisterLaunch(launch.launchId)
+    }
+  })
+
+  test("a Copilot Oracle keeps the description free of the local redaction ask", async () => {
+    // The other half of the same contract: the line names the endpoint's
+    // constraint, so a billed consult that never leaves Copilot must not claim
+    // it. `cheapest` is the control.
+    const NOCONSULT_NONCE = "a".repeat(64)
+    const launch = registerLaunch({
+      profileId: "cheapest",
+      nonce: NOCONSULT_NONCE,
+      secret: "cheapest-redact-secret",
+      allowedGroups: new Set(["peers"]),
+      allowedPersonas: new Set(["oracle"]),
+    })
+    const saved = state.models
+    try {
+      state.models = { object: "list", data: [fakeModel("gpt-5.6-sol")] } as never
+      const { json } = await rpc(
+        { jsonrpc: "2.0", id: 96, method: "tools/list" },
+        { auth: `Bearer ${NOCONSULT_NONCE}` },
+      )
+      const tools = (json.result as { tools: Array<{ name: string; description?: string }> }).tools
+      const oracleTool = tools.find((t) => t.name === "oracle")
+      if (oracleTool) {
+        expect(oracleTool.description ?? "").not.toContain("Replace every credential")
+      }
+    } finally {
+      state.models = saved
       unregisterLaunch(launch.launchId)
     }
   })

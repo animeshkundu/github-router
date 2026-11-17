@@ -1,10 +1,15 @@
 import { FRESH_CONSULT_CONTRACT } from "./claude-md-injection"
+import {
+  LOCAL_CONSULT_REDACTION_LINE,
+  LOCAL_CONSULT_REDACTION_NOTE,
+} from "./local-consult-redaction"
 import { profileDescriptor } from "./launch-profile"
 import { LOCAL_PROFILE_TIER_MODELS } from "./local-profile-contract"
 import { LAUNCH_SECRET_HEADER } from "./messages-identity-preflight"
 import {
   balancedContractFor,
   cheapestContractFor,
+  consultIsLocalTransport,
   isBalancedFamily,
   isCheapestFamily,
   isLocalFamily,
@@ -1440,6 +1445,14 @@ export function buildPiAgentFiles(
       "Answer from the context you are given: name the assumptions it rests on,",
       "say which missing fact would change your recommendation, and recommend.",
       "Never claim to have verified, executed, approved, or merged anything.",
+      // The consultant half of the redaction contract, on the transport that
+      // needs it. This body is the ORACLE's own prompt, so it gets the note
+      // ("what you receive is a placeholder"), not the caller's instruction; the
+      // caller half rides the lead digest — see `buildPiAgentsMd`. Neither
+      // existed for `local` before: the pair only ever shipped in the cheaplocal
+      // prose, so the profile whose Oracle IS a local consult had no redaction
+      // contract on any surface.
+      ...(consultIsLocalTransport(profileId) ? [LOCAL_CONSULT_REDACTION_NOTE] : []),
     ].join("\n");
     files[`agents/${agentFileName("oracle")}`] = `${oracle}\n`;
   }
@@ -1568,6 +1581,13 @@ export function buildPiAppendSystem(
           : `- There is no advisor in this mode: oracle is the only consultant.`,
         `- Verify, don't vote: consultant verdicts never substitute for running the tests.`,
       )
+      // The caller half of the redaction contract. Pi has no mirrored CLAUDE.md
+      // for the launcher to write, so `buildPiAgentsMd` is the only surface the
+      // lead reads every turn: without this line a `local` consult would send a
+      // brief — and whatever credential it quoted — to an endpoint nobody here
+      // operates. The Claude launcher derives the same sentence from the same
+      // transport, so the two front-ends cannot drift.
+      if (consultIsLocalTransport(profileId)) lines.push(`- ${LOCAL_CONSULT_REDACTION_LINE}`)
     }
     lines.push(
       `- After any subagent work completes, always write the final answer yourself.`,

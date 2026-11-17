@@ -103,7 +103,7 @@ import {
   displayModelName,
   isBalancedFamily,
   isCheapestFamily,
-  isCheaplocalProfile,
+  consultIsLocalTransport,
   isLocalFamily,
   isPinnedLaunchProfile,
   localContractFor,
@@ -465,16 +465,17 @@ function activePersonas(launch?: LaunchRegistryEntry): Array<PersonaSpec> {
 /** Oracle descriptor derived from the family contract, so a model swap in the
  *  contract renames itself here instead of leaving stale prose behind. */
 function familyOracleDescriptor(profileId: string): string | undefined {
-  // Before the family branches: `cheaplocal` IS a cheapest-family member, and
-  // its Oracle is a local consult. No slug and no catalog lookup, so nothing
-  // here is read off Copilot's metadata. No window and no effort either: the
-  // consult's `output_config: { effort: "max" }` is a field of the request
-  // (`LOCAL_CONSULT_EFFORT`), not a property this description may assert about
-  // an endpoint nobody has asked about. The descriptor names the transport and
-  // stops there.
-  if (isCheaplocalProfile(profileId)) {
-    return "the local model"
-  }
+  // The TRANSPORT decides the wording, before any family branch: a local
+  // consult resolves no slug and reads no catalog, so nothing here may be read
+  // off Copilot's metadata. No window and no effort either — the request's
+  // `output_config.effort` is a field of the body, not a property this
+  // description may assert about an endpoint nobody has asked about. The
+  // descriptor names the transport and stops there.
+  //
+  // Asked through the shared predicate rather than by id, because `local` is
+  // not a cheapest-family member and would otherwise need its own copy of this
+  // rule (it had one, and the two drifted).
+  if (consultIsLocalTransport(profileId)) return "the local model"
   if (isCheapestFamily(profileId)) {
     const contract = cheapestContractFor(profileId)
     return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
@@ -484,13 +485,11 @@ function familyOracleDescriptor(profileId: string): string | undefined {
     return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
   }
   if (isLocalFamily(profileId)) {
-    // The transport, not the family, decides the wording: `local` consults the
-    // endpoint its lead already uses (so no identity may be claimed), while
-    // `local2` keeps a billed Copilot Oracle and names the contract model so a
-    // swap renames itself here rather than leaving the fast-profile default
-    // ("exact Opus 5.5") in the description of a gpt-6.1-sol tool.
+    // Only `local2` reaches here (both local-consult members returned above).
+    // It keeps a billed Copilot Oracle, so it names the contract model — a swap
+    // renames itself rather than leaving the fast-profile default ("exact Opus
+    // 5.5") in the description of a gpt-6.1-sol tool.
     const contract = localContractFor(profileId)
-    if (contract.consultTransport === "local") return "the local model"
     return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
   }
   return undefined
@@ -796,6 +795,12 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
             ? cheapOracleModel()
             : fastOracleModel()
     const oracleDescriptor = familyOracleDescriptor(launch.profileId)
+    // The redaction ask belongs to the TRANSPORT, not to one profile id: any
+    // launch whose consult leaves for the local endpoint is asking the caller to
+    // scrub a brief that nobody has vouched for. This used to be
+    // `isCheaplocalProfile(...)`, which silently skipped `local` — the profile
+    // whose Oracle *is* a local consult.
+    const oracleRedactsBrief = consultIsLocalTransport(launch.profileId)
     const entries: Array<ToolEntry> = []
     if (
       (scope === "all" || scope === "peers")
@@ -809,7 +814,7 @@ function toolEntries(scope: McpScope, launch: LaunchRegistryEntry, audience: Mcp
           astraAvailable,
           oracleDescriptor,
           advisorAvailable,
-          isCheaplocalProfile(launch.profileId),
+          oracleRedactsBrief,
         ),
       )
     }
@@ -1766,6 +1771,13 @@ async function handleToolsCall(
     const oracleInstructions = oracleIsLocalConsult
       ? `You are Oracle, an expert architectural and technical consultant. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action. ${LOCAL_CONSULT_REDACTION_NOTE}`
       : `You are Oracle, an expert architectural and technical consultant running on ${displayModelName(oracleModel)}. You have no tools or repository access. Answer from the supplied context and state assumptions explicitly, noting which facts would change the recommendation. Never claim to execute, verify, approve, merge, or authorize an action.`
+    // `allowedEfforts`/`defaultEffort` are a DISPATCH shape: they clamp what
+    // `dispatchModelCall` sends. A local consult never reaches it — its effort
+    // rides `output_config.effort` in `sendLocalMessages` and is declared on the
+    // contract as `max`, which is not in the Copilot effort union. The local
+    // branch below therefore uses the persona only for its instructions, and the
+    // Copilot branches (whose contracts never declare `max`) get the real value.
+    const oraclePersonaEffort: Effort = isEffort(oracleEffort) ? oracleEffort : "high"
     const oraclePersona: PersonaSpec = {
       agentName: "oracle",
       toolNameHttp: "oracle",
@@ -1776,8 +1788,8 @@ async function handleToolsCall(
       agentPrompt: "",
       writeCapable: false,
       requiresHttp: true,
-      allowedEfforts: [oracleEffort],
-      defaultEffort: oracleEffort,
+      allowedEfforts: [oraclePersonaEffort],
+      defaultEffort: oraclePersonaEffort,
     }
     // The window guard is a CATALOG check: it resolves the persona's id and
     // compares against that entry's `max_prompt_tokens`. A local consult has
@@ -1825,6 +1837,11 @@ async function handleToolsCall(
               system: oraclePersona.baseInstructions,
               userText: oracleInput,
               maxTokens: LOCAL_CONSULT_MAX_OUTPUT_TOKENS,
+              // The DECLARED consult effort, sent verbatim. This is the surface
+              // that used to disagree: the contract said `high` while
+              // `sendLocalMessages` wrote its own `max`, so the wire, the tool
+              // description and the Pi frontmatter described three consults.
+              effort: oracleEffort,
               signal: aborter.signal,
             }),
           { signal: aborter.signal, label: oracleModel },
@@ -1839,7 +1856,7 @@ async function handleToolsCall(
           endpoint: oracleEndpoint,
           instructions: oraclePersona.baseInstructions,
           userText: oracleInput,
-          effort: oracleEffort,
+          effort: oraclePersonaEffort,
           signal: aborter.signal,
         })
       }
@@ -2562,8 +2579,7 @@ export async function handleMcpPost(
   // "local transport" for `cheapest` and `balanced` too and resolve an egress
   // no branch on those launches reads.
   const localConsultEgress: LocalMessagesEgress | undefined =
-    isCheaplocalProfile(launch.profileId)
-    || (isLocalFamily(launch.profileId) && localContractFor(launch.profileId).consultTransport === "local")
+    consultIsLocalTransport(launch.profileId)
       ? { baseUrl: localBaseUrl(), sessionId: localSessionId(c, launch.sessionId) }
       : undefined
 

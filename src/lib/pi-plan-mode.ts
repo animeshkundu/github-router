@@ -30,10 +30,13 @@
  *    `/plan`. A registered flag would have to survive `collectPiPassthroughArgs`
  *    and pi's own unknown-flag rejection; registering nothing keeps that path
  *    untouched.
- * 4. **Exact tool save/restore.** Upstream re-derives the normal set from a
- *    hardcoded `NORMAL_MODE_TOOLS`, which would silently re-enable `edit` and
- *    `write` that a caller's `--tools` narrowing had removed. We snapshot
- *    `pi.getActiveTools()` on entry and restore that array verbatim.
+ * 4. **The tool set is never touched.** Upstream both re-derives "normal mode"
+ *    from a hardcoded `NORMAL_MODE_TOOLS` and narrows the set on entry. We do
+ *    neither: narrowing put the model's tool list in front of the `tool_call`
+ *    gate, so pi answered `Tool write not found` before the gate ran and the
+ *    one-write exception below could never admit anything. Adding a roster
+ *    mutation also meant a resumed snapshot could widen the roster a narrower
+ *    current launch had installed. Plan mode owns the *gate*, not the roster.
  * 5. **No `@earendil-works/pi-agent-core` import.** Upstream imports its message
  *    types; generated extensions may only import host-provided specifiers
  *    (`typebox`, `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`,
@@ -50,12 +53,12 @@
  * not a table the harness enforces.
  *
  * Every API the emitted source touches was verified against the pi 1.3.0 tarball
- * (`PI_MIN_VERSION`), not just the current docs: `getActiveTools`/`setActiveTools`
- * (types.d.ts:1282/1291), `registerShortcut` (:1233), `registerCommand` (:1231),
- * `appendEntry` (:1272), `getAllTools` (:1285), `ui.setStatus` (:84),
- * `ui.setWidget` (:101), `ui.theme` (:179), `sessionManager.getEntries`
- * (session-manager.d.ts:334), and `before_agent_start` carrying `messageType`
- * (:729/737). No 1.4/1.5-only API is used, so the 1.3.0 floor stands.
+ * (`PI_MIN_VERSION`), not just the current docs: `registerShortcut` (:1233),
+ * `registerCommand` (:1231), `appendEntry` (:1272), `getAllTools` (:1285),
+ * `ui.setStatus` (:84), `ui.setWidget` (:101), `ui.theme` (:179),
+ * `sessionManager.getEntries` (session-manager.d.ts:334), and
+ * `before_agent_start` carrying `messageType` (:729/737). No 1.4/1.5-only API is
+ * used, so the 1.3.0 floor stands.
  *
  * Fail-open by construction: the emitted factory feature-probes every API it
  * uses, so a pi that grew or dropped one degrades to "no plan mode" rather than
@@ -88,20 +91,51 @@ export function cleanPlanStepText(text: string): string {
 /**
  * Parse the model's numbered plan into steps.
  *
- * Takes the LAST `Plan:` section on purpose: the caller feeds this everything
+ * Takes the LAST matching heading on purpose: the caller feeds this everything
  * the model wrote for a turn, including thinking blocks, and with reasoning-max
  * models a draft plan often lands in thinking before the visible one. The
  * visible text block comes last in content order, so last-wins picks the plan
  * the user actually saw.
+ *
+ * Fenced code is stripped first: a numbered list inside a snippet is not a plan.
+ *
+ * Which headings count: the brief asks for a `Plan:` list, and that is what an
+ * obedient reply ends with. It is not the only shape a good reply takes — the
+ * brief also says to write Context / recommended approach / critical files /
+ * verification, and a reply that follows THAT structure and closes its summary
+ * under `## Recommended approach` used to parse as ZERO steps, leaving the
+ * checklist, the "what next?" prompt and the Execute kick silently unreachable.
+ * So the conventional headings are accepted too. The heading must be alone on
+ * its line (prose like "Steps: we will ..." never matches).
+ *
+ * The regex is inline, not module scope: this function is serialized with
+ * `toString()` into the generated extension, where module scope does not exist.
  */
 export function extractPlanSteps(message: string): Array<PlanStep> {
   const items: Array<PlanStep> = []
-  const text = String(message ?? "")
-  const headers = [...text.matchAll(/\*{0,2}Plan:\*{0,2}\s*\n/gi)]
+  const text = String(message ?? "").replace(/^[ \t]*(?:```|~~~)[\s\S]*?^[ \t]*(?:```|~~~)[ \t]*$/gm, "")
+  const headers = [
+    ...text.matchAll(
+      /^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*|__)?[ \t]*(?:plan|recommended approach|steps|implementation plan)[ \t]*(?::[ \t]*)?(?:\*\*|__)?[ \t]*$/gim,
+    ),
+  ]
   if (headers.length === 0) return items
   const lastHeader = headers[headers.length - 1]!
-  const planSection = text.slice((lastHeader.index ?? 0) + lastHeader[0].length)
-  const numbered = /^\s*(\d+)[.)]\s+(.+)$/gm
+  let planSection = text.slice((lastHeader.index ?? 0) + lastHeader[0].length)
+  // A section ends at the next heading of the same or a higher level, so a
+  // `## Verification` list after `## Recommended approach` is not mistaken for
+  // plan steps. A headingless marker (`Plan:` / `**Plan:**`) has no level to
+  // compare against and keeps the historical whole-tail behaviour.
+  const level = (lastHeader[0].match(/^[ \t]*(#{1,6})/) || [])[1]
+  if (level) {
+    const boundary = new RegExp("^[ \\t]*#{1," + level.length + "}[ \\t]+", "m")
+    const rest = planSection.slice(1)
+    const hit = rest.search(boundary)
+    if (hit >= 0) planSection = planSection.slice(0, hit + 1)
+  }
+  // A step may be a list item or a sub-heading (`### 3. Do the thing`); both are
+  // how a model writes an ordered plan, and the checklist reads the same.
+  const numbered = /^[ \t]*(?:#{1,6}[ \t]*)?(\d+)[.)][ \t]+(.+)$/gm
   const used = new Set<number>()
   for (const match of planSection.matchAll(numbered)) {
     const raw = (match[2] ?? "").trim().replace(/\*{1,2}$/, "").trim()
@@ -170,19 +204,25 @@ export function planAllStepsComplete(message: string): boolean {
 }
 
 /**
- * Tools plan mode removes from the active set AND refuses by name.
+ * Tools plan mode refuses, by name, through the `tool_call` handler.
  *
- * Two independent barriers, exactly as before — what changed is the SCOPE.
- * Claude Code's plan mode is `disallowedTools: [Edit, Write, NotebookEdit]`;
- * everything else (bash, MCP, subagents, the todo store) stays available and the
- * model is trusted to apply "explore, do not implement". Every extra entry this
- * list used to carry was a claim that a frontier model could not be trusted
- * with a shell it was told to only read with, and each such claim cost
- * capability the planning turn actually needed (`git log`, `rg`, a build to see
- * whether the tests pass).
+ * These stay ACTIVE. An earlier revision also removed them from the active
+ * tool set, described as "two independent barriers" — they were not
+ * independent, they were *stacked*: pi resolves a call against the declared
+ * tool list in `prepareToolCall()` and answers `Tool <name> not found` BEFORE
+ * `beforeToolCall` (the `tool_call` hook) ever runs. So the narrower barrier
+ * sat in front of the wider one, the path exception below was unreachable, the
+ * model was told a tool it had just been told to use did not exist, and the
+ * documented refusal string was never displayed. An obedient model fell back to
+ * `bash` — which is allowed — so the unsanctioned route silently won.
  *
- * `apply_patch` is here because some hosts expose a patch tool that writes by
- * another name; pi's own writers are `edit` and `write`.
+ * With the narrowing gone there is ONE barrier and it is reachable: the model
+ * gets a call it can make, and a refusal sentence it can act on. The honest
+ * scope is unchanged and already documented: `bash` is allowed, so this
+ * redirects a cooperative model, it does not contain a hostile one.
+ *
+ * `apply_patch` has no single target path to compare and is therefore refused
+ * outright — that refusal is also reachable for the first time.
  */
 export const PLAN_BLOCKED_TOOLS: ReadonlyArray<string> = Object.freeze([
   "edit",
@@ -272,12 +312,14 @@ export function isPlanFilePath(cwd: string, target: unknown, rel: string): boole
 export function buildPiPlanModeSection(): Array<string> {
   return [
     `  // ---- plan mode: Claude-Code-style planning (always on) ----`,
-    `  // /plan or Ctrl+Alt+P toggles it. The active tool set is snapshotted on entry`,
-    `  // and restored VERBATIM on exit, so a caller's --tools narrowing survives a`,
-    `  // toggle instead of being re-derived from a hardcoded "normal mode" list.`,
-    `  // ONE barrier: the three writer tools are removed and refused. Everything`,
-    `  // else stays, because a frontier model told to explore and not implement`,
-    `  // needs a shell and can be trusted with one.`,
+    `  // /plan or Ctrl+Alt+P toggles it. The tool set is NEVER touched: it used to`,
+    `  // be snapshotted on entry and restored on exit, and removing the writers from`,
+    `  // it made the path gate below unreachable (pi answers "Tool write not found"`,
+    `  // before any handler runs), plus a restored snapshot could widen the roster a`,
+    `  // narrower launch installed. ONE barrier instead: the writers stay offered`,
+    `  // and the gate refuses every target except the plan file. Everything else`,
+    `  // stays, because a frontier model told to explore and not implement needs a`,
+    `  // shell and can be trusted with one.`,
     `  try {`,
     `    const PLAN_STATUS_KEY = ${JSON.stringify(PLAN_STATUS_KEY)};`,
     `    const PLAN_WIDGET_KEY = ${JSON.stringify(PLAN_WIDGET_KEY)};`,
@@ -288,7 +330,6 @@ export function buildPiPlanModeSection(): Array<string> {
     `    const PLAN_LIST_TYPE = ${JSON.stringify(PLAN_LIST_TYPE)};`,
     `    const PLAN_BLOCKED = new Set(${JSON.stringify([...PLAN_BLOCKED_TOOLS])});`,
     `    const PLAN_FILE_REL = ${JSON.stringify(planFilePath())};`,
-    `    const planFilePathOf = (${planFilePath.toString()});`,
     `    const isPlanFilePath = (${isPlanFilePath.toString()});`,
     `    const cleanPlanStepText = (${cleanPlanStepText.toString()});`,
     `    const extractPlanSteps = (${extractPlanSteps.toString()});`,
@@ -299,7 +340,6 @@ export function buildPiPlanModeSection(): Array<string> {
     `    let planEnabled = false;`,
     `    let planExecuting = false;`,
     `    let planSteps = [];`,
-    `    let toolsBeforePlan = null;`,
     `    let planCwd = "";`,
     `    // Set while the "what next?" prompt is open. agent_end can fire again for`,
     `    // the same plan (a queued follow-up run ends too), and a second prompt on`,
@@ -354,33 +394,12 @@ export function buildPiPlanModeSection(): Array<string> {
     `          enabled: planEnabled,`,
     `          executing: planExecuting,`,
     `          steps: planSteps.map((s) => ({ step: s.step, text: s.text, completed: s.completed })),`,
-    `          toolsBeforePlan,`,
     `        };`,
     `        const key = JSON.stringify(data);`,
     `        if (key === planPersistKey) return;`,
     `        planPersistKey = key;`,
     `        pi.appendEntry(PLAN_ENTRY, data);`,
     `      } catch {}`,
-    `    }`,
-    ``,
-    `    function planApplyRestriction() {`,
-    `      try {`,
-    `        if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;`,
-    `        if (toolsBeforePlan === null) toolsBeforePlan = [...pi.getActiveTools()];`,
-    `        const kept = toolsBeforePlan.filter((n) => !PLAN_BLOCKED.has(n));`,
-    `        // Entry never ADDS a tool: a read tool the caller removed (a --tools`,
-    `        // launch) stays removed. With no allowlist there is nothing to add.`,
-    `        pi.setActiveTools([...kept]);`,
-    `      } catch {}`,
-    `    }`,
-    ``,
-    `    function planRestoreTools() {`,
-    `      try {`,
-    `        if (toolsBeforePlan !== null && typeof pi.setActiveTools === "function") {`,
-    `          pi.setActiveTools([...toolsBeforePlan]);`,
-    `        }`,
-    `      } catch {}`,
-    `      toolsBeforePlan = null;`,
     `    }`,
     ``,
     `    function planEnter(ctx) {`,
@@ -390,8 +409,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `      planPromptOpen = false;`,
     `      planSteps = [];`,
     `      try { if (ctx && typeof ctx.cwd === "string" && ctx.cwd) planCwd = ctx.cwd; } catch {}`,
-    `      planApplyRestriction();`,
-    `      try { ctx.ui.notify("Plan mode on: edits disabled except " + PLAN_FILE_REL + ". Investigate, then write the plan there. Ctrl+Alt+P or /plan to leave.", "info"); } catch {}`,
+    `      try { ctx.ui.notify("Plan mode on: writes refused except " + PLAN_FILE_REL + ". Investigate, then write the plan there. Ctrl+Alt+P or /plan to leave.", "info"); } catch {}`,
     `      planUpdateUi(ctx);`,
     `      planPersist();`,
     `    }`,
@@ -401,9 +419,8 @@ export function buildPiPlanModeSection(): Array<string> {
     `      planEnabled = false;`,
     `      planExecuting = false;`,
     `      planPromptOpen = false;`,
-    `      planRestoreTools();`,
     `      planSteps = [];`,
-    `      try { ctx.ui.notify("Plan mode off: full tool access restored.", "info"); } catch {}`,
+    `      try { ctx.ui.notify("Plan mode off: writes allowed everywhere again.", "info"); } catch {}`,
     `      planUpdateUi(ctx);`,
     `      planPersist();`,
     `    }`,
@@ -447,11 +464,14 @@ export function buildPiPlanModeSection(): Array<string> {
     `      });`,
     `    } catch {}`,
     ``,
-    `    // Barrier 2: the ONE write exception, enforced by path. A write or edit`,
-    `    // whose resolved target is the pinned plan file passes; everything else is`,
-    `    // refused, whatever the model believes. The path comes from the extension`,
-    `    // and never from the model, which is the property that keeps the exception`,
-    `    // from widening into a general write permission.`,
+    `    // THE barrier: one write exception, enforced by resolved path. A write or`,
+    `    // edit whose target is the pinned plan file passes; every other target is`,
+    `    // refused whatever the model believes. The path comes from the extension`,
+    `    // and never from the model, which is what keeps the exception from widening`,
+    `    // into a general write permission. It has to be the ONLY barrier: narrowing`,
+    `    // the tool set as well would hide these tools from the model, so pi would`,
+    `    // answer "Tool write not found" before this handler and the exception could`,
+    `    // never fire — see PLAN_BLOCKED_TOOLS.`,
     `    try {`,
     `      pi.on("tool_call", async (event, ctx) => {`,
     `        if (!planEnabled || !event) return undefined;`,
@@ -463,7 +483,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `        if (isPlanFilePath(planCwd, target, PLAN_FILE_REL)) return undefined;`,
     `        return {`,
     `          block: true,`,
-    `          reason: "Plan mode: edits are disabled. The only file you may write is " + PLAN_FILE_REL + ". Record the plan there, or leave plan mode (/plan or Ctrl+Alt+P) to change code.",`,
+    `          reason: "Plan mode: this write is refused. The only file you may write is " + PLAN_FILE_REL + " (pass exactly that path). Record the plan there, or leave plan mode (/plan or Ctrl+Alt+P) to change code.",`,
     `        };`,
     `      });`,
     `    } catch {}`,
@@ -551,7 +571,8 @@ export function buildPiPlanModeSection(): Array<string> {
     `      "   which files, what changes in each, what each change is done when, and what would prove it.",`,
     `      "4. Write the plan to the plan file: a short Context section, the recommended approach only,",`,
     `      "   the critical files, the verification steps, and any residual risk. Keep it scannable.",`,
-    `      "5. Summarise the plan in your reply too, so the user can answer without opening the file.",`,
+    `      "5. Summarise the plan in your reply too, so the user can answer without opening the file,",`,
+    `      "   finishing with a numbered list of the steps -- that list becomes the checklist.",`,
     `      "",`,
     `      "Do NOT open an ask_user question or a prose prompt for plan approval. Leaving plan mode is",`,
     `      "the user's action (/plan or Ctrl+Alt+P) -- asking permission to stop planning is the one",`,
@@ -664,7 +685,6 @@ export function buildPiPlanModeSection(): Array<string> {
     `        if (String(choice).indexOf("Execute") === 0) {`,
     `          planEnabled = false;`,
     `          planExecuting = true;`,
-    `          planRestoreTools();`,
     `          planUpdateUi(ctx);`,
     `          planPersist();`,
     `          const list = planSteps.map((s) => s.step + ". " + s.text).join("\\n");`,
@@ -683,12 +703,12 @@ export function buildPiPlanModeSection(): Array<string> {
     `      });`,
     `    } catch {}`,
     ``,
-    `    // Restore after resume: the entry is the source of truth, and the tool set`,
-    `    // is re-applied so a resumed plan-mode session is genuinely write-blocked.`,
+    `    // Restore after resume: the ENTRY is the source of truth for the mode, the`,
+    `    // step list and the badge — and nothing else. The gate below needs no`,
+    `    // restore because it reads the live flag.`,
     `    // State is assigned UNCONDITIONALLY: a fresh session (/new, /fork into an`,
     `    // empty branch) has no entry, and leaving the previous session's flags in`,
-    `    // place would keep a stale badge and re-apply a tool snapshot taken from a`,
-    `    // different session's roster.`,
+    `    // place would keep a stale badge for a mode that is not gating anything.`,
     `    try {`,
     `      pi.on("session_start", async (_event, ctx) => {`,
     `        try {`,
@@ -702,10 +722,11 @@ export function buildPiPlanModeSection(): Array<string> {
     `          }`,
     `          const nextEnabled = !!saved && saved.enabled === true;`,
     `          const nextExecuting = !!saved && saved.executing === true;`,
-    `          // A restriction left behind by the previous session must not leak`,
-    `          // into one that does not want it: this closure survives a session`,
-    `          // replacement, and nothing guarantees pi re-derives the roster.`,
-    `          if (!nextEnabled && toolsBeforePlan !== null) planRestoreTools();`,
+    `          // Nothing here touches the active tool set. Plan mode does not own`,
+    `          // it: the only thing that ever changed the roster was the restriction`,
+    `          // this design deleted, and a resumed snapshot must never widen the`,
+    `          // roster a narrower current launch installed (that was a real bug:`,
+    `          // resuming under --tools read,bash silently restored grep).`,
     `          planEnabled = nextEnabled;`,
     `          planExecuting = nextExecuting;`,
     `          planPromptOpen = false;`,
@@ -713,12 +734,10 @@ export function buildPiPlanModeSection(): Array<string> {
     `          planSteps = saved && Array.isArray(saved.steps)`,
     `            ? saved.steps.map((s) => ({ step: Number(s.step) || 0, text: String(s.text || ""), completed: s.completed === true }))`,
     `            : [];`,
-    `          toolsBeforePlan = saved && Array.isArray(saved.toolsBeforePlan) ? [...saved.toolsBeforePlan] : null;`,
     `          // An execution with no steps is a dead end: the checklist is empty and`,
     `          // every execution branch bails on steps.length, so treat it as off.`,
     `          if (planExecuting && planSteps.length === 0) planExecuting = false;`,
     `        } catch {}`,
-    `        if (planEnabled) planApplyRestriction();`,
     `        planUpdateUi(ctx);`,
     `      });`,
     `    } catch {}`,

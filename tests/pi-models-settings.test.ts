@@ -361,7 +361,15 @@ describe("pi models.json local profiles", () => {
     // Copilot slug here would be the violation, not the role itself.
     expect(piOracleEnabled("local")).toBe(true)
     expect(piOracleModel("local")).toBe("opus")
-    expect(piOracleThinking("local")).toBe("high")
+    // `max` is the effort the local wire actually sends: it is the value
+    // `LOCAL_PROFILE_CONTRACT.oracleEffort` declares and the value the Oracle
+    // path passes into `sendLocalMessages` as `output_config.effort`. The
+    // frontmatter used to declare `high` while the request carried `max`, so one
+    // role was described two ways. Pi's own clamp still lands `max` on `high`
+    // for a models.json row with no `thinkingLevelMap`
+    // (`clampThinkingLevel`, agent-session.js:19), so nothing about the
+    // effective turn changes; the declaration stops contradicting the request.
+    expect(piOracleThinking("local")).toBe("max")
     // `local2` keeps the contracted Copilot consultant.
     expect(piOracleEnabled("local2")).toBe(true)
     expect(piOracleModel("local2")).toBe("gpt-6.1-sol")
