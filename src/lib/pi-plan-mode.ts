@@ -233,16 +233,66 @@ export const PLAN_BLOCKED_TOOLS: ReadonlyArray<string> = Object.freeze([
 ])
 
 /**
- * The plan file, relative to the workspace.
+ * The fallback plan file, relative to the workspace.
  *
- * Claude Code pins one path per session and tells the model "this is the only
- * file you are allowed to edit". Ours is the repository's existing convention
- * (`.github-router/plans/<slug>/plan.md`, the same artifact `/gh-plan` writes and
- * `/gh-implement` reads), with a stable slug so a resumed session keeps editing
- * the plan it started rather than opening a second one.
+ * Used only when the host cannot report a session id. It is deliberately the
+ * SAME single path every id-less host shares — there is nothing better to
+ * choose, and a fixed path keeps `/plan-status` honest about where the plan
+ * went rather than naming a directory that cannot be derived.
  */
 export function planFilePath(): string {
-  return ".github-router/plans/pi-plan/plan.md"
+  // Delegates rather than retyping the layout: one source of truth, so the
+  // fallback cannot drift from the session-derived shape beside it.
+  return planFilePathForSession("")
+}
+
+/**
+ * The plan file for ONE session, relative to the workspace.
+ *
+ * A fixed path was the original design and it does not survive parallel use.
+ * Two sessions in the same repo both passed the path gate — the gate compares a
+ * resolved path against this value and has no notion of ownership — so the
+ * second plan silently replaced the first, and an `edit` written against the
+ * old text failed with a message about fuzzy matching instead of naming the
+ * collision. The rest of plan mode was already per-session: the mode flag, the
+ * steps and the execution flag live in a `PLAN_MODE_ENTRY` in each session's
+ * own transcript. The file was the last piece of shared mutable state.
+ *
+ * The Claude front-end already does this — its artifact hook reads
+ * `tool_input.planFilePath` "per-session; never the globally-newest file in the
+ * shared plans dir" (`src/internal-artifact-open.ts`). This is the same
+ * contract, with the name derived rather than model-chosen:
+ *
+ *  - **Derived, not chosen.** A generated three-word name would have to survive
+ *    the model restating it, and a resumed session that picked a different name
+ *    would fork the plan. A session id is unforgeable and resume-stable for
+ *    free, and it keeps the gate an exact-path comparison.
+ *  - **Full id, not a hash or a prefix.** The id already appears in the
+ *    transcript filename, so a plan directory traces back to the session that
+ *    wrote it. UUIDv7 is time-ordered at the front, so a prefix would collide
+ *    for launches in the same millisecond.
+ *  - **One `<slug>` segment**, so the repository's existing convention
+ *    (`.github-router/plans/<slug>/plan.md`, what `/gh-plan` writes and
+ *    `/gh-implement` reads, `.complete` beside it) still describes the shape.
+ *
+ * Sanitized to `[A-Za-z0-9_-]` as belt-and-braces: the id is host-generated,
+ * but sanitizing also makes traversal structurally impossible — `..` and path
+ * separators cannot survive — which is cheaper to prove than to assume.
+ *
+ * Emitted via `.toString()`, so this body carries no module-scope references —
+ * the layout strings are inline for that reason, not by preference.
+ */
+export function planFilePathForSession(sessionId: unknown): string {
+  const raw = typeof sessionId === "string" ? sessionId.trim() : ""
+  let slug = ""
+  for (const ch of raw) {
+    if (/[A-Za-z0-9_-]/.test(ch)) slug += ch
+    else if (slug.length > 0 && !slug.endsWith("-")) slug += "-"
+  }
+  slug = slug.replace(/^-+|-+$/g, "")
+  if (slug.length > 96) slug = slug.slice(0, 96).replace(/-+$/g, "")
+  if (!slug) return ".github-router/plans/pi-plan/plan.md"
+  return ".github-router/plans/pi-plan-" + slug + "/plan.md"
 }
 
 /** Session entry type for persisting plan state across resume. */
@@ -272,9 +322,10 @@ export const PLAN_LIST_TYPE = "gh-router-plan-list"
  * module have different allowed specifiers), so it carries its own tiny
  * resolver: POSIX normalisation plus a Windows drive/UNC guard. It is not a
  * general path library — it only has to agree with itself between the
- * comparison here and the value `planFilePath()` produces, which is why the
- * relative plan path is a PARAMETER: a `toString()`-serialized function cannot
- * see module scope, and a captured constant would be `undefined` at runtime.
+ * comparison here and the value `planFilePathForSession()` produces, which is
+ * why the relative plan path is a PARAMETER: a `toString()`-serialized function
+ * cannot see module scope, and a captured constant would be `undefined` at
+ * runtime.
  */
 export function isPlanFilePath(cwd: string, target: unknown, rel: string): boolean {
   const raw = typeof target === "string" ? target.trim() : ""
@@ -333,7 +384,8 @@ export function buildPiPlanModeSection(): Array<string> {
     `    const PLAN_DONE_TYPE = ${JSON.stringify(PLAN_DONE_TYPE)};`,
     `    const PLAN_LIST_TYPE = ${JSON.stringify(PLAN_LIST_TYPE)};`,
     `    const PLAN_BLOCKED = new Set(${JSON.stringify([...PLAN_BLOCKED_TOOLS])});`,
-    `    const PLAN_FILE_REL = ${JSON.stringify(planFilePath())};`,
+    `    const PLAN_FALLBACK_REL = ${JSON.stringify(planFilePath())};`,
+    `    const planFilePathForSession = (${planFilePathForSession.toString()});`,
     `    const isPlanFilePath = (${isPlanFilePath.toString()});`,
     `    const cleanPlanStepText = (${cleanPlanStepText.toString()});`,
     `    const extractPlanSteps = (${extractPlanSteps.toString()});`,
@@ -345,11 +397,34 @@ export function buildPiPlanModeSection(): Array<string> {
     `    let planExecuting = false;`,
     `    let planSteps = [];`,
     `    let planCwd = "";`,
+    `    // The plan file, resolved from THIS session's id and cached for the run.`,
+    `    // A fixed path was the original design and it does not survive parallel`,
+    `    // use: two sessions in one repo both cleared the gate, so the second plan`,
+    `    // silently replaced the first. Resolving from the session id gives each`,
+    `    // session its own file with no lock and no coordination, and because the`,
+    `    // id is stable across resume the same session keeps editing the same file.`,
+    `    // Sticky on the FALLBACK (not on the id): a host that cannot report an id`,
+    `    // must not re-derive on every call, and the fallback never changes.`,
+    `    let planRel = "";`,
     `    // Set while the "what next?" prompt is open. agent_end can fire again for`,
     `    // the same plan (a queued follow-up run ends too), and a second prompt on`,
     `    // top of the first would let two Execute answers each send an execution`,
     `    // kick, resetting progress and paying for a redundant turn.`,
     `    let planPromptOpen = false;`,
+    ``,
+    `    // Resolve (once per session) the ONE file this session may write. Every`,
+    `    // read site goes through here so the notify, the status line, the brief`,
+    `    // and the gate can never disagree about the path.`,
+    `    function planRelFor(ctx) {`,
+    `      if (planRel) return planRel;`,
+    `      let id = "";`,
+    `      try {`,
+    `        const sm = ctx && ctx.sessionManager;`,
+    `        if (sm && typeof sm.getSessionId === "function") id = sm.getSessionId();`,
+    `      } catch {}`,
+    `      planRel = planFilePathForSession(id) || PLAN_FALLBACK_REL;`,
+    `      return planRel;`,
+    `    }`,
     ``,
     `    function planPaint(ctx, text, color) {`,
     `      try {`,
@@ -413,7 +488,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `      planPromptOpen = false;`,
     `      planSteps = [];`,
     `      try { if (ctx && typeof ctx.cwd === "string" && ctx.cwd) planCwd = ctx.cwd; } catch {}`,
-    `      try { ctx.ui.notify("Plan mode on: writes refused except " + PLAN_FILE_REL + ". Investigate, then write the plan there. Shift+Tab (or /plan) to leave.", "info"); } catch {}`,
+    `      try { ctx.ui.notify("Plan mode on: writes refused except " + planRelFor(ctx) + ". Investigate, then write the plan there. Shift+Tab (or /plan) to leave.", "info"); } catch {}`,
     `      planUpdateUi(ctx);`,
     `      planPersist();`,
     `    }`,
@@ -477,7 +552,9 @@ export function buildPiPlanModeSection(): Array<string> {
     `            ? "No steps parsed yet. Ask for a numbered Plan: block."`,
     `            : planSteps.map((s) => (s.completed ? "\\u2713 " : "\\u25CB ") + s.step + ". " + s.text).join("\\n");`,
     `          const head = planExecuting ? "Executing plan (" + done + "/" + planSteps.length + ")" : "Plan mode active";`,
-    `          try { ctx.ui.notify(head + "\\n" + body, "info"); } catch {}`,
+    `          // Name THIS session's file: with a per-session path, "the plan file"`,
+    `          // is no longer a single answer, and the human needs the real one.`,
+    `          try { ctx.ui.notify(head + "\\n" + planRelFor(ctx) + "\\n" + body, "info"); } catch {}`,
     `        },`,
     `      });`,
     `    } catch {}`,
@@ -498,10 +575,11 @@ export function buildPiPlanModeSection(): Array<string> {
     `        try { if (ctx && typeof ctx.cwd === "string" && ctx.cwd) planCwd = ctx.cwd; } catch {}`,
     `        const input = (event.input || {});`,
     `        const target = input.path !== undefined ? input.path : input.file_path;`,
-    `        if (isPlanFilePath(planCwd, target, PLAN_FILE_REL)) return undefined;`,
+    `        const planFileRel = planRelFor(ctx);`,
+    `        if (isPlanFilePath(planCwd, target, planFileRel)) return undefined;`,
     `        return {`,
     `          block: true,`,
-    `          reason: "Plan mode: this write is refused. The only file you may write is " + PLAN_FILE_REL + " (pass exactly that path). Record the plan there, or leave plan mode (/plan or Shift+Tab) to change code.",`,
+    `          reason: "Plan mode: this write is refused. The only file you may write is " + planFileRel + " (pass exactly that path). Record the plan there, or leave plan mode (/plan or Shift+Tab) to change code.",`,
     `        };`,
     `      });`,
     `    } catch {}`,
@@ -567,46 +645,56 @@ export function buildPiPlanModeSection(): Array<string> {
     `    // only write. The workflow is Claude's five phases compressed to what Pi`,
     `    // has: Explore/General-Purpose subagents exist, but the roster is`,
     `    // profile-dependent, so the phase text names the intent, not an agent.`,
-    `    const PLAN_BRIEF = [`,
-    `      "[PLAN MODE ACTIVE]",`,
-    `      "",`,
-    `      "Plan mode is active. The user does not want you to execute yet -- you must not edit files,",`,
-    `      "run a command that changes the code, or otherwise act on the plan. This supersedes any other",`,
-    `      "instruction you have received about doing the work now.",`,
-    `      "",`,
-    `      "One exception, and it is the whole of it: you may write your plan to",`,
-    `      "  " + PLAN_FILE_REL,`,
-    `      "Edit and write are refused for every other path. Read, search, and run read-only commands",`,
-    `      "freely -- explore enough that the plan is grounded in what the code actually does.",`,
-    `      "",`,
-    `      "Work the plan like this:",`,
-    `      "1. Understand the request, and look for what already exists (functions, utilities, patterns)",`,
-    `      "   before proposing anything new. Delegate broad or parallel discovery when that is faster",`,
-    `      "   than reading serially yourself.",`,
-    `      "2. Ask the user whatever you cannot settle from the code. Do it once, up front, and never",`,
-    `      "   ask what exploration could answer.",`,
-    `      "3. Design the approach far enough that an implementer would have no open decisions left:",`,
-    `      "   which files, what changes in each, what each change is done when, and what would prove it.",`,
-    `      "4. Write the plan to the plan file: a short Context section, the recommended approach only,",`,
-    `      "   the critical files, the verification steps, and any residual risk. Keep it scannable.",`,
-    `      "5. Summarise the plan in your reply too, so the user can answer without opening the file,",`,
-    `      "   finishing with a numbered list of the steps -- that list becomes the checklist.",`,
-    `      "",`,
-    `      "Do NOT open an ask_user question or a prose prompt for plan approval. Leaving plan mode is",`,
-    `      "the user's action (/plan or Shift+Tab) -- asking permission to stop planning is the one",`,
-    `      "question this mode does not want, and approval you grant yourself is not approval.",`,
-    `      "If the user asks for changes, revise the SAME plan file rather than writing a second one.",`,
-    `      "The test for every other action: if it would reasonably be described as DOING the work",`,
-    `      "rather than planning it, it waits until plan mode is off.",`,
-    `    ].join("\\n");`,
+    `    // Built per resolved path rather than as a module constant: the plan file`,
+    `    // is per-session now, so a constant would name the wrong file for every`,
+    `    // session but one. Called once per session (the result is cached on the`,
+    `    // resolved path), not once per turn.`,
+    `    let planBriefCache = { rel: "", text: "" };`,
+    `    function planBriefFor(rel) {`,
+    `      if (planBriefCache.rel === rel) return planBriefCache.text;`,
+    `      const planBriefLines = [`,
+    `        "[PLAN MODE ACTIVE]",`,
+    `        "",`,
+    `        "Plan mode is active. The user does not want you to execute yet -- you must not edit files,",`,
+    `        "run a command that changes the code, or otherwise act on the plan. This supersedes any other",`,
+    `        "instruction you have received about doing the work now.",`,
+    `        "",`,
+    `        "One exception, and it is the whole of it: you may write your plan to",`,
+    `        "  " + rel,`,
+    `        "Edit and write are refused for every other path. Read, search, and run read-only commands",`,
+    `        "freely -- explore enough that the plan is grounded in what the code actually does.",`,
+    `        "",`,
+    `        "Work the plan like this:",`,
+    `        "1. Understand the request, and look for what already exists (functions, utilities, patterns)",`,
+    `        "   before proposing anything new. Delegate broad or parallel discovery when that is faster",`,
+    `        "   than reading serially yourself.",`,
+    `        "2. Ask the user whatever you cannot settle from the code. Do it once, up front, and never",`,
+    `        "   ask what exploration could answer.",`,
+    `        "3. Design the approach far enough that an implementer would have no open decisions left:",`,
+    `        "   which files, what changes in each, what each change is done when, and what would prove it.",`,
+    `        "4. Write the plan to the plan file: a short Context section, the recommended approach only,",`,
+    `        "   the critical files, the verification steps, and any residual risk. Keep it scannable.",`,
+    `        "5. Summarise the plan in your reply too, so the user can answer without opening the file,",`,
+    `        "   finishing with a numbered list of the steps -- that list becomes the checklist.",`,
+    `        "",`,
+    `        "Do NOT open an ask_user question or a prose prompt for plan approval. Leaving plan mode is",`,
+    `        "the user's action (/plan or Shift+Tab) -- asking permission to stop planning is the one",`,
+    `        "question this mode does not want, and approval you grant yourself is not approval.",`,
+    `        "If the user asks for changes, revise the SAME plan file rather than writing a second one.",`,
+    `        "The test for every other action: if it would reasonably be described as DOING the work",`,
+    `        "rather than planning it, it waits until plan mode is off.",`,
+    `      ].join("\\n");`,
+    `      planBriefCache = { rel: rel, text: planBriefLines };`,
+    `      return planBriefLines;`,
+    `    }`,
     ``,
     `    // Cost contract: inject NOTHING unless plan mode is actually engaged, and`,
     `    // only for a real user turn (a background notification must not re-add it).`,
     `    try {`,
-    `      pi.on("before_agent_start", async (event) => {`,
+    `      pi.on("before_agent_start", async (event, ctx) => {`,
     `        if (!event || event.messageType !== "user") return undefined;`,
     `        if (planEnabled) {`,
-    `          return { message: { customType: PLAN_CONTEXT_TYPE, content: PLAN_BRIEF, display: false } };`,
+    `          return { message: { customType: PLAN_CONTEXT_TYPE, content: planBriefFor(planRelFor(ctx)), display: false } };`,
     `        }`,
     `        if (planExecuting && planSteps.length > 0) {`,
     `          const remaining = planSteps.filter((s) => !s.completed).map((s) => s.step + ". " + s.text).join("\\n");`,
@@ -731,6 +819,11 @@ export function buildPiPlanModeSection(): Array<string> {
     `      pi.on("session_start", async (_event, ctx) => {`,
     `        try {`,
     `          if (ctx && typeof ctx.cwd === "string" && ctx.cwd) planCwd = ctx.cwd;`,
+    `          // Re-resolve the plan file for THIS session. The id is stable across`,
+    `          // resume, so a resumed session lands back on the file it started; a`,
+    `          // fork or a new session gets its own, which is the whole point.`,
+    `          planRel = "";`,
+    `          planRelFor(ctx);`,
     `          const entries = ctx.sessionManager && typeof ctx.sessionManager.getEntries === "function"`,
     `            ? ctx.sessionManager.getEntries()`,
     `            : [];`,

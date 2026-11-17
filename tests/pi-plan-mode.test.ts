@@ -42,6 +42,7 @@ import {
   extractDoneSteps,
   extractPlanSteps,
   isPlanFilePath,
+  planFilePathForSession,
   planAllStepsComplete,
   planFilePath,
   type PlanStep,
@@ -140,12 +141,17 @@ function stubPi(opts: {
   return harness
 }
 
+/** The one session id every default harness reports; `ctxFor` can override. */
+const SESSION_ID = "sess-1"
+/** The plan path a default harness therefore pins. */
+const sessionPlanPath = (sessionId: string = SESSION_ID) => planFilePathForSession(sessionId)
+
 const ctxFor = (harness: Harness, extra: Record<string, unknown> = {}) => {
   const ui = (harness as unknown as { ui: Record<string, unknown> }).ui
   return {
     hasUI: true,
     ui,
-    sessionManager: { getEntries: () => [], getSessionId: () => "sess-1" },
+    sessionManager: { getEntries: () => [], getSessionId: () => SESSION_ID },
     ...extra,
   }
 }
@@ -187,6 +193,48 @@ describe("plan mode: pure helpers", () => {
     ]) {
       expect(exported[deleted]).toBeUndefined()
     }
+  })
+
+  test("a session's plan path is derived from its id, not chosen", () => {
+    // The whole point: two sessions in one repo must not share a plan file.
+    // Derived rather than generated because a resumed session has to land back
+    // on the file it started, and the id is the only thing stable across resume.
+    expect(planFilePathForSession("sess-1")).toBe(".github-router/plans/pi-plan-sess-1/plan.md")
+    expect(planFilePathForSession("01a1c84b-2c16-7448-a8d7-ccc499d6059f")).toBe(
+      ".github-router/plans/pi-plan-01a1c84b-2c16-7448-a8d7-ccc499d6059f/plan.md",
+    )
+    // Distinct ids never collide, and the SAME id is a fixed point — that pair
+    // is the entire safety argument for parallel sessions and for resume.
+    expect(planFilePathForSession("a")).not.toBe(planFilePathForSession("b"))
+    expect(planFilePathForSession("sess-1")).toBe(planFilePathForSession("sess-1"))
+    // The shape stays one `<slug>` segment under the repository's plans dir, so
+    // /gh-plan's `<slug>/plan.md` convention still describes it.
+    for (const id of ["a", "sess-1", "x".repeat(80)]) {
+      const rel = planFilePathForSession(id)
+      expect(rel.startsWith(".github-router/plans/pi-plan")).toBe(true)
+      expect(rel.endsWith("/plan.md")).toBe(true)
+      expect(rel.split("/")).toHaveLength(4)
+    }
+
+    // Sanitization is belt-and-braces (the id is host-generated), but it makes
+    // traversal structurally impossible rather than merely unlikely.
+    for (const hostile of ["../../etc/passwd", "a/b", "a\\b", "/abs", "a b", "a.b", "..a.."]) {
+      const rel = planFilePathForSession(hostile)
+      expect(rel).not.toContain("..")
+      expect(rel.startsWith(".github-router/plans/pi-plan-")).toBe(true)
+      expect(rel.endsWith("/plan.md")).toBe(true)
+    }
+    expect(planFilePathForSession("../../etc/passwd")).toBe(".github-router/plans/pi-plan-etc-passwd/plan.md")
+
+    // An id we cannot use falls back to the single shared path, which is the
+    // only honest answer: there is nothing per-session to derive.
+    // `".."` and `"..."` are the interesting members: they survive as
+    // characters but sanitize to an empty slug, so they must NOT produce
+    // `pi-plan-...` — a path made of dots is the traversal case wearing a hat.
+    for (const empty of ["", "   ", "..", "...", "\u0000\n", null, undefined, 42, {}, []]) {
+      expect(planFilePathForSession(empty)).toBe(planFilePath())
+    }
+    expect(planFilePath()).toBe(".github-router/plans/pi-plan/plan.md")
   })
 
   test("the plan file is the only path the write barrier admits", () => {
@@ -371,6 +419,9 @@ describe("plan mode: emission", () => {
   test("the embedded helpers are verbatim copies of the tested functions", () => {
     const section = buildPiPlanModeSection().join("\n")
     expect(section).toContain(isPlanFilePath.toString())
+    // The session-path helper rides the same round trip: a module-scope
+    // reference inside it would be `undefined` in the emitted copy.
+    expect(section).toContain(planFilePathForSession.toString())
     expect(section).toContain(extractPlanSteps.toString())
     expect(section).toContain(applyDoneSteps.toString())
     expect(section).toContain(planAllStepsComplete.toString())
@@ -436,7 +487,7 @@ describe("plan mode: generated module runs", () => {
     expect(declared).toContain("write")
 
     expect(
-      await toolCall({ toolName: "write", input: { path: planFilePath(), content: "# p" } }, ctx),
+      await toolCall({ toolName: "write", input: { path: sessionPlanPath(), content: "# p" } }, ctx),
     ).toBeUndefined()
     expect(
       ((await toolCall({ toolName: "write", input: { path: "src/x.ts", content: "x" } }, ctx)) as {
@@ -504,18 +555,18 @@ describe("plan mode: generated module runs", () => {
     await harness.commands.get("plan")!.handler("", ctx)
 
     expect(
-      await toolCall({ toolName: "write", input: { path: planFilePath(), content: "# plan" } }, ctx),
+      await toolCall({ toolName: "write", input: { path: sessionPlanPath(), content: "# plan" } }, ctx),
     ).toBeUndefined()
     expect(
       await toolCall(
-        { toolName: "write", input: { path: "/work/repo/" + planFilePath(), content: "# plan" } },
+        { toolName: "write", input: { path: "/work/repo/" + sessionPlanPath(), content: "# plan" } },
         ctx,
       ),
     ).toBeUndefined()
     // An edit of the same file is the same permission (upstream's plan file is
     // an editable Doc, not an append-only log).
     expect(
-      await toolCall({ toolName: "edit", input: { path: planFilePath(), oldText: "a", newText: "b" } }, ctx),
+      await toolCall({ toolName: "edit", input: { path: sessionPlanPath(), oldText: "a", newText: "b" } }, ctx),
     ).toBeUndefined()
 
     // The exception cannot widen: a sibling file, a look-alike, or a traversal
@@ -526,14 +577,14 @@ describe("plan mode: generated module runs", () => {
       ".github-router/plans/other/plan.md",
       "plan.md",
       "../plan.md",
-      planFilePath() + "/../../evil.ts",
+      sessionPlanPath() + "/../../evil.ts",
     ]) {
       const result = (await toolCall({ toolName: "write", input: { path, content: "x" } }, ctx)) as {
         block?: boolean
         reason?: string
       }
       expect(result?.block).toBe(true)
-      expect(result?.reason).toContain(planFilePath())
+      expect(result?.reason).toContain(sessionPlanPath())
     }
     // `apply_patch` has no single target to check, so it has no exception.
     const patch = (await toolCall(
@@ -541,6 +592,157 @@ describe("plan mode: generated module runs", () => {
       ctx,
     )) as { block?: boolean }
     expect(patch?.block).toBe(true)
+  })
+
+  test("two sessions in one repo cannot write each other's plan", async () => {
+    // The regression this change exists for. Before the fix both sessions
+    // resolved the SAME path, so the gate admitted both and the second plan
+    // silently replaced the first — no error, no warning, no trace. Asserted in
+    // BOTH directions, because a gate that refuses everything would also make
+    // the one-directional version pass.
+    const harnessA = await loadPlanExtension("sessions-a", stubPi())
+    const harnessB = await loadPlanExtension("sessions-b", stubPi())
+    const ctxA = ctxFor(harnessA, { cwd: "/work/repo" })
+    const ctxB = ctxFor(harnessB, {
+      cwd: "/work/repo",
+      sessionManager: { getEntries: () => [], getSessionId: () => "sess-B" },
+    })
+    const callA = harnessA.handlers.get("tool_call")!
+    const callB = harnessB.handlers.get("tool_call")!
+    await harnessA.commands.get("plan")!.handler("", ctxA)
+    await harnessB.commands.get("plan")!.handler("", ctxB)
+
+    expect(sessionPlanPath("sess-1")).not.toBe(sessionPlanPath("sess-B"))
+
+    // Own file: allowed.
+    expect(
+      await callA({ toolName: "write", input: { path: sessionPlanPath("sess-1"), content: "A" } }, ctxA),
+    ).toBeUndefined()
+    expect(
+      await callB({ toolName: "write", input: { path: sessionPlanPath("sess-B"), content: "B" } }, ctxB),
+    ).toBeUndefined()
+
+    // The other session's file: refused, and the refusal names THIS session's
+    // path so the model is told where to go instead of only where it cannot.
+    for (const [call, ctx, other] of [
+      [callA, ctxA, sessionPlanPath("sess-B")],
+      [callB, ctxB, sessionPlanPath("sess-1")],
+    ] as const) {
+      for (const toolName of ["write", "edit"]) {
+        const result = (await call({ toolName, input: { path: other, content: "x", oldText: "a", newText: "b" } }, ctx)) as {
+          block?: boolean
+          reason?: string
+        }
+        expect(result?.block).toBe(true)
+        expect(result?.reason).not.toContain(other)
+      }
+    }
+
+    // The shared fallback path is nobody's file while a session id exists, so
+    // it is refused too — otherwise a session could still clobber the one place
+    // an id-less host would write.
+    for (const [call, ctx] of [
+      [callA, ctxA],
+      [callB, ctxB],
+    ] as const) {
+      expect(
+        ((await call({ toolName: "write", input: { path: planFilePath(), content: "x" } }, ctx)) as {
+          block?: boolean
+        })?.block,
+      ).toBe(true)
+    }
+  })
+
+  test("a resumed session lands back on the file it started", async () => {
+    // Resume stability is what makes the derived path safe: if a resumed
+    // session resolved a different file, the plan it wrote would be orphaned
+    // behind a brief that says "revise the SAME plan file".
+    const harness = await loadPlanExtension("resume-path", stubPi())
+    const toolCall = harness.handlers.get("tool_call")!
+    const plan = harness.commands.get("plan")!
+    const sessionStart = harness.handlers.get("session_start")!
+
+    // A first session writes its plan.
+    const first = ctxFor(harness, { cwd: "/work/repo" })
+    await plan.handler("", first)
+    expect(
+      await toolCall({ toolName: "write", input: { path: sessionPlanPath(), content: "# p" } }, first),
+    ).toBeUndefined()
+
+    // Resuming with the SAME id after a session_start still writes there.
+    await sessionStart({}, first)
+    await plan.handler("", first)
+    expect(
+      await toolCall({ toolName: "write", input: { path: sessionPlanPath(), content: "# p" } }, first),
+    ).toBeUndefined()
+
+    // A different id on the same module instance re-resolves: session_start is
+    // the point where the path is allowed to change.
+    const second = ctxFor(harness, {
+      cwd: "/work/repo",
+      sessionManager: { getEntries: () => [], getSessionId: () => "sess-2" },
+    })
+    await sessionStart({}, second)
+    await plan.handler("", second)
+    expect(
+      await toolCall({ toolName: "write", input: { path: sessionPlanPath("sess-2"), content: "# p" } }, second),
+    ).toBeUndefined()
+    expect(
+      ((await toolCall({ toolName: "write", input: { path: sessionPlanPath(), content: "x" } }, second)) as {
+        block?: boolean
+      })?.block,
+    ).toBe(true)
+  })
+
+  test("the notify, the status line and the brief all name the session's file", async () => {
+    // Four read sites, one resolver. Asserted together because the failure mode
+    // of a missed site is not a crash — it is a UI confidently naming somebody
+    // else's file, which is exactly how the shared-path bug stayed invisible.
+    const harness = await loadPlanExtension("path-sites", stubPi())
+    const ctx = ctxFor(harness, { cwd: "/work/repo" })
+    const n = harness.notifications.length
+    await harness.commands.get("plan")!.handler("", ctx)
+    expect(harness.notifications.slice(n).join("\n")).toContain(sessionPlanPath())
+    expect(harness.notifications.slice(n).join("\n")).not.toContain(planFilePath())
+
+    const beforeStatus = harness.notifications.length
+    await harness.commands.get("plan-status")!.handler("", ctx)
+    const status = harness.notifications.slice(beforeStatus).join("\n")
+    expect(status).toContain(sessionPlanPath())
+    expect(status).not.toContain(planFilePath())
+
+    const brief = (
+      (await harness.handlers.get("before_agent_start")!({ messageType: "user", prompt: "hi" }, ctx)) as {
+        message?: { content: string }
+      }
+    ).message!.content
+    expect(brief).toContain(sessionPlanPath())
+    expect(brief).not.toContain(planFilePath())
+  })
+
+  test("a host that cannot report a session id falls back instead of throwing", async () => {
+    // The fail-open rule every new API touch follows. A host without
+    // getSessionId, a throwing one, and a non-string return are all the same
+    // answer: the shared fallback path, which is exactly the old behaviour.
+    // `sessionManager: undefined` on purpose: `ctxFor` spreads this over its
+    // default harness, so an omitted key would silently keep `sess-1` and the
+    // case would prove nothing.
+    const cases: Array<[string, unknown]> = [
+      ["no sessionManager", { sessionManager: undefined }],
+      ["no getSessionId", { sessionManager: {} }],
+      ["getSessionId throws", { sessionManager: { getSessionId: () => { throw new Error("nope") } } }],
+      ["getSessionId returns undefined", { sessionManager: { getSessionId: () => undefined } }],
+      ["getSessionId returns empty", { sessionManager: { getEntries: () => [], getSessionId: () => "" } }],
+    ]
+    for (const [name, extra] of cases) {
+      const harness = await loadPlanExtension(`fallback-${name.replace(/\W+/g, "-")}`, stubPi())
+      const ctx = ctxFor(harness, { cwd: "/work/repo", ...(extra as Record<string, unknown>) })
+      await harness.commands.get("plan")!.handler("", ctx)
+      const toolCall = harness.handlers.get("tool_call")!
+      expect(
+        await toolCall({ toolName: "write", input: { path: planFilePath(), content: "# p" } }, ctx),
+      ).toBeUndefined()
+    }
   })
 
   test("the plan file is still writable after a toggle round trip", async () => {
@@ -555,7 +757,7 @@ describe("plan mode: generated module runs", () => {
     await plan.handler("", ctx)
     await plan.handler("", ctx)
     expect(
-      await toolCall({ toolName: "write", input: { path: planFilePath(), content: "x" } }, ctx),
+      await toolCall({ toolName: "write", input: { path: sessionPlanPath(), content: "x" } }, ctx),
     ).toBeUndefined()
     expect(
       ((await toolCall({ toolName: "write", input: { path: "src/x.ts", content: "x" } }, ctx)) as {
@@ -600,7 +802,7 @@ describe("plan mode: generated module runs", () => {
     expect(brief).toContain("[PLAN MODE ACTIVE]")
     expect(brief).toContain("must not edit files")
     expect(brief).toContain("supersedes")
-    expect(brief).toContain(planFilePath())
+    expect(brief).toContain(sessionPlanPath())
     // Everything else is explicitly open, so the model does not under-use its
     // tools now that no allowlist tells it what is read-only.
     expect(brief).toContain("Read, search, and run read-only commands")
