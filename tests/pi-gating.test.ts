@@ -11,8 +11,13 @@ import {
 } from "~/lib/pi-extension"
 import {
   buildPiAppendSystem,
+  buildPiKeybindingsJson,
   buildPiModelsJson,
   buildPiSettingsJson,
+  mergePiKeybindingsSettings,
+  PI_THINKING_CYCLE_ACTION,
+  PI_THINKING_CYCLE_REBIND,
+  PI_TOOL_PREFERENCE_LINE,
   piProfileModelIds,
 } from "~/lib/pi-models-settings"
 import {
@@ -337,6 +342,117 @@ describe("pi-subagents package loads extensions only", () => {
         skills: [],
         prompts: [],
       })
+    }
+  })
+})
+
+describe("pi keybindings: shift+tab is freed for plan mode", () => {
+  test("exactly one action moves, and it is pi's thinking cycle", () => {
+    // `app.thinking.cycle` is pi's own default owner of shift+tab
+    // (dist/core/keybindings.js:13) and it is listed in
+    // RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS, which is what makes a bare
+    // extension registration die with "conflicts with built-in shortcut".
+    // Moving the action off shift+tab is the way past it: the conflict table is
+    // built by key, so the old key simply stops being reserved.
+    expect(buildPiKeybindingsJson()).toEqual({
+      "app.thinking.cycle": [PI_THINKING_CYCLE_REBIND],
+    })
+  })
+
+  test("the freed key is the only one touched — no incidental re-mapping", () => {
+    const built = buildPiKeybindingsJson()
+    // A template that emptied or moved every default would keep the shift+tab
+    // test green while silently taking ctrl+o, ctrl+t, escape and the rest.
+    expect(Object.keys(built)).toHaveLength(1)
+    expect(PI_THINKING_CYCLE_ACTION).toBe("app.thinking.cycle")
+    // Emitting [] would ALSO free the key, but it costs a working pi binding
+    // for a toggle `/plan` already provides. The rebind keeps cycling alive.
+    expect(built["app.thinking.cycle"]).not.toEqual([])
+    expect(built["app.thinking.cycle"]).not.toContain("shift+tab")
+  })
+
+  test("the replacement key is not claimed by pi or a bundled extension", () => {
+    // pi's own table plus every shortcut the bundled packages register
+    // (ctrl+shift+o/e/r, ctrl+., alt+t — verified against the installed tree).
+    const taken = ["shift+tab", "ctrl+o", "ctrl+t", "ctrl+l", "ctrl+g", "ctrl+p",
+      "ctrl+shift+o", "ctrl+shift+e", "ctrl+shift+r", "ctrl+.", "alt+t"]
+    expect(taken).not.toContain(PI_THINKING_CYCLE_REBIND)
+  })
+
+  test("a user's other bindings survive", () => {
+    const merged = mergePiKeybindingsSettings(
+      { "app.message.copy": ["ctrl+y"] },
+      buildPiKeybindingsJson(),
+    )
+    expect(merged["app.message.copy"]).toEqual(["ctrl+y"])
+    // Absent means pi's default is in force, which still claims shift+tab, so
+    // the built value is applied.
+    expect(merged["app.thinking.cycle"]).toEqual([PI_THINKING_CYCLE_REBIND])
+  })
+
+  test("a user who still routes shift+tab through the action gets moved", () => {
+    // ["shift+tab", "F2"] and the bare string form both still claim the key;
+    // leaving either would cost plan mode the binding with no diagnostic.
+    for (const userValue of [["shift+tab"], "shift+tab", ["F2", "shift+tab"], ["Shift+Tab"]]) {
+      const merged = mergePiKeybindingsSettings(
+        { "app.thinking.cycle": userValue },
+        buildPiKeybindingsJson(),
+      )
+      expect(merged["app.thinking.cycle"]).toEqual([PI_THINKING_CYCLE_REBIND])
+    }
+  })
+
+  test("a user who already moved it keeps their own key", () => {
+    // The invariant is "shift+tab is unbound", not "our value wins". F2 has no
+    // shift+tab in it, so the key is already free and their choice stands.
+    const merged = mergePiKeybindingsSettings(
+      { "app.thinking.cycle": ["F2"] },
+      buildPiKeybindingsJson(),
+    )
+    expect(merged["app.thinking.cycle"]).toEqual(["F2"])
+  })
+
+  test("a corrupt or non-object file is discarded rather than spread", () => {
+    // JSON.parse can legally return a string, a number or an array. Spreading
+    // any of those into the object would plant junk keys in the mirror.
+    const expected = { "app.thinking.cycle": [PI_THINKING_CYCLE_REBIND] }
+    expect(mergePiKeybindingsSettings("nope", buildPiKeybindingsJson())).toEqual(expected)
+    expect(mergePiKeybindingsSettings(["ctrl+x"], buildPiKeybindingsJson())).toEqual(expected)
+    expect(mergePiKeybindingsSettings(null, buildPiKeybindingsJson())).toEqual(expected)
+  })
+})
+
+describe("pi digest: native tools first, shell when it is the better tool", () => {
+  test("every profile carries the steer, peers or not", () => {
+    for (const profileId of ["cheapest", "local", "balanced2", "cheapest2"] as const) {
+      for (const peers of [true, false]) {
+        expect(buildPiAppendSystem(profileId, { peers })).toContain(PI_TOOL_PREFERENCE_LINE)
+      }
+    }
+  })
+
+  test("both halves are present — the steer is not a blanket shell ban", () => {
+    // The first half is the Claude-shaped "use the dedicated tool"; the second
+    // half keeps rg/jq/ast-grep/git/build available for the jobs those tools
+    // cannot express. Dropping either half makes the agent worse, so pin both.
+    expect(PI_TOOL_PREFERENCE_LINE).toContain("read/write/edit")
+    expect(PI_TOOL_PREFERENCE_LINE).toContain("grep/find/ls")
+    for (const tool of ["rg", "jq", "ast-grep", "git"]) {
+      expect(PI_TOOL_PREFERENCE_LINE).toContain(tool)
+    }
+  })
+
+  test("the steer names tools the launch actually emits", () => {
+    // Names must match the built-in roster the settings writer installs, or the
+    // digest is telling the lead to reach for a tool it does not have.
+    const settings = buildPiSettingsJson({
+      profileId: "cheapest",
+      searchEnabled: false,
+      browseEnabled: false,
+    })
+    const tools = settings.defaultTools ?? []
+    for (const tool of ["read", "write", "edit", "grep", "find", "ls", "bash"]) {
+      expect(tools).toContain(tool)
     }
   })
 })

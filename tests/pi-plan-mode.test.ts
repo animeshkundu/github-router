@@ -353,7 +353,11 @@ describe("plan mode: emission", () => {
     for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
       const source = buildPiExtensionSource({ profileId })
       expect(source).toContain('registerCommand("plan"')
-      expect(source).toContain("ctrl+alt+p")
+      // Shift+Tab is the Claude Code key; the mirror's keybindings.json frees
+      // it by emptying pi's app.thinking.cycle binding. Ctrl+Alt+P stays as the
+      // fallback for a host whose keybindings we did not write.
+      expect(source).toContain('registerShortcut("shift+tab"')
+      expect(source).toContain('registerShortcut("ctrl+alt+p"')
       expect(source).toContain('on("tool_call"')
       expect(source).toContain(PLAN_CONTEXT_TYPE)
       expect(source).toContain(PLAN_MODE_ENTRY)
@@ -382,7 +386,7 @@ describe("plan mode: generated module runs", () => {
   test("registers commands, shortcut and handlers", async () => {
     const harness = await loadPlanExtension("registers", stubPi())
     expect([...harness.commands.keys()].sort()).toEqual(["plan", "plan-status"])
-    expect([...harness.shortcuts.keys()]).toEqual(["ctrl+alt+p"])
+    expect([...harness.shortcuts.keys()].sort()).toEqual(["ctrl+alt+p", "shift+tab"])
     for (const event of ["tool_call", "context", "before_agent_start", "turn_end", "agent_end", "session_start"]) {
       expect(harness.handlers.has(event)).toBe(true)
     }

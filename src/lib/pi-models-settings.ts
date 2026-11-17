@@ -105,6 +105,30 @@ export const PI_PROVIDER_NAME = "gh-router" as const
 const PI_MIN_VERSION_NOTE = `Requires Pi >= ${PI_MIN_VERSION} and Node >= 22.19.`
 
 /**
+ * The tool-preference steer the digest carries.
+ *
+ * Pi's own per-tool guidelines cover `read`/`write`/`edit` but leave `grep`,
+ * `find` and `ls` with empty arrays (`dist/core/tools/*.js`), and its "use bash
+ * for ls, rg, find" rule fires only when those dedicated tools are ABSENT
+ * (`dist/core/system-prompt.js:46`). A launch with all eight active is told
+ * nothing, so the digest has to say it.
+ *
+ * Both halves are load-bearing. The first half stops the model shelling out to
+ * `sed`/`cat`/`python` for work the dedicated tools do better and with the
+ * harness's own approval and diff handling. The second half exists because the
+ * first is not true without it: a `jq` pipeline over a JSON blob, an `ast-grep`
+ * structural query, `git log -S`, or a build/test command all belong in bash,
+ * and a blanket "never shell out" would make the agent worse at exactly the
+ * tasks where the shell is the right instrument. Naming the tools is the point
+ * — "use the best tool" alone gives no signal.
+ *
+ * Single constant so the test suite pins one sentence rather than scraping the
+ * digest for keywords.
+ */
+export const PI_TOOL_PREFERENCE_LINE =
+  "- Use the dedicated tools where they fit — read/write/edit for files and grep/find/ls for search — instead of shelling out to cat, sed, or python; but reach for rg, jq, ast-grep, git, and the build/test commands whenever those are the better tool for the job."
+
+/**
  * The Copilot-backed family contract for a Pi profile. `cheapest2` and
  * `balanced2` are derived from their bases, so every resolver below reads one
  * object and a `-2` launch cannot pick up a base literal by omission.
@@ -1039,6 +1063,86 @@ export const PI_DEFAULT_TOOLS: ReadonlyArray<string> = Object.freeze([
 ])
 
 /**
+ * The pi keybinding action that owns `shift+tab` by default.
+ *
+ * Named rather than spelled inline so the keybindings writer and the test that
+ * pins it cannot drift: `dist/core/keybindings.js:13` declares this action with
+ * `defaultKeys: "shift+tab"`, and `RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS`
+ * in `dist/core/extensions/runner.js:9-26` lists it, which is what makes an
+ * extension's `shift+tab` registration die with "conflicts with built-in
+ * shortcut. Skipping."
+ */
+export const PI_THINKING_CYCLE_ACTION = "app.thinking.cycle"
+
+/** The key `shift+tab` moves to when plan mode claims it. */
+export const PI_THINKING_CYCLE_REBIND = "ctrl+shift+t"
+
+/**
+ * Build the per-launch `keybindings.json` that frees `shift+tab` for plan mode.
+ *
+ * Claude Code binds `shift+tab` to its permission-mode ring, and the whole point
+ * of this file is that a user arriving from Claude Code presses the same key
+ * here. Pi routes the key to `app.thinking.cycle` and *reserves* it against
+ * extension overrides, so an extension cannot claim it — but
+ * `buildBuiltinKeybindings` skips every action whose configured value is an
+ * empty list (`runner.js:31-49`), which leaves the key unbound and free for an
+ * extension registration to take.
+ *
+ * The action is MOVED rather than emptied. Emptying was the first cut and it
+ * costs a working pi binding for a plan-mode toggle that `/plan` already
+ * provides; moving it keeps thinking-level cycling reachable. `ctrl+shift+t`
+ * is free in pi's own table (`keybindings.js`) and among every shortcut the
+ * bundled packages register (verified: ctrl+shift+o/e/r, ctrl+., alt+t).
+ *
+ * Only this one action is touched. Every other pi default is left to pi, so
+ * this file cannot silently re-map a binding the user relies on. A user's own
+ * `keybindings.json` is merged UNDER it, matching how `settings.json` is
+ * layered — with one refinement in `mergePiKeybindingsSettings`: a user who
+ * already moved thinking-cycle off `shift+tab` keeps their key, because the
+ * invariant this file enforces is "shift+tab is unbound", not "our value wins".
+ */
+export function buildPiKeybindingsJson(): Record<string, ReadonlyArray<string>> {
+  return { [PI_THINKING_CYCLE_ACTION]: [PI_THINKING_CYCLE_REBIND] }
+}
+
+/** Does this configured binding still claim `shift+tab`? */
+function boundToShiftTab(value: unknown): boolean {
+  const keys = Array.isArray(value) ? value : [value]
+  return keys.some((k) => typeof k === "string" && k.trim().toLowerCase() === "shift+tab")
+}
+
+/**
+ * Lay our freed key over a snapshotted user `keybindings.json`.
+ *
+ * The invariant is "`shift+tab` is unbound", not "our value wins". So the
+ * built value is applied only when the user's file still routes `shift+tab`
+ * through `app.thinking.cycle` (absent counts as still-bound: that is the pi
+ * default). A user who already moved it elsewhere — `F2`, `ctrl+shift+t`,
+ * anything without `shift+tab` — keeps their binding, and the key is free
+ * either way. Forcing our value there would silently undo a preference with no
+ * gain to plan mode.
+ *
+ * Every other user binding survives untouched. Non-object input (corrupt JSON
+ * parsed to a string, or an array) is discarded rather than spread, so a broken
+ * file cannot plant junk keys in the launch mirror.
+ */
+export function mergePiKeybindingsSettings(
+  userKeybindings: unknown,
+  built: Record<string, ReadonlyArray<string>>,
+): Record<string, unknown> {
+  const user =
+    userKeybindings && typeof userKeybindings === "object" && !Array.isArray(userKeybindings)
+      ? (userKeybindings as Record<string, unknown>)
+      : {}
+  const merged: Record<string, unknown> = { ...user }
+  for (const [action, keys] of Object.entries(built)) {
+    // Absent means pi's default is in force, and that default IS shift+tab.
+    if (!(action in merged) || boundToShiftTab(merged[action])) merged[action] = keys
+  }
+  return merged
+}
+
+/**
  * Build the per-launch `settings.json`. Additive over the snapshotted
  * user settings (the launcher merges lists it owns): narrow model
  * scope, fixed thinking, limited toolset, derived compaction, and the
@@ -1559,6 +1663,7 @@ export function buildPiAppendSystem(
     `# gh-router ${profileId} mode`,
     "",
     `- Lead owns planning directly; there is no Plan subagent.`,
+    PI_TOOL_PREFERENCE_LINE,
   ];
   if (peers) {
     const oracle = piOracleEnabled(profileId)

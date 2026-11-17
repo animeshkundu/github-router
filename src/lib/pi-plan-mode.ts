@@ -26,10 +26,12 @@
  *    approve that file. The file is pinned by the extension (never chosen by
  *    the model), so the exception cannot widen: `write`/`edit` are refused
  *    unless the resolved path is exactly the plan path.
- * 3. **Always on, no `--plan` flag.** The user toggles with `Ctrl+Alt+P` or
- *    `/plan`. A registered flag would have to survive `collectPiPassthroughArgs`
- *    and pi's own unknown-flag rejection; registering nothing keeps that path
- *    untouched.
+ * 3. **Always on, no `--plan` flag.** The user toggles with `Shift+Tab` (the
+ *    Claude Code key; the launcher's `keybindings.json` moves pi's
+ *    `app.thinking.cycle` off it, to `Ctrl+Shift+T`), `Ctrl+Alt+P` as the
+ *    fallback, or `/plan`. A registered flag would have to survive
+ *    `collectPiPassthroughArgs` and pi's own unknown-flag rejection;
+ *    registering nothing keeps that path untouched.
  * 4. **The tool set is never touched.** Upstream both re-derives "normal mode"
  *    from a hardcoded `NORMAL_MODE_TOOLS` and narrows the set on entry. We do
  *    neither: narrowing put the model's tool list in front of the `tool_call`
@@ -312,7 +314,9 @@ export function isPlanFilePath(cwd: string, target: unknown, rel: string): boole
 export function buildPiPlanModeSection(): Array<string> {
   return [
     `  // ---- plan mode: Claude-Code-style planning (always on) ----`,
-    `  // /plan or Ctrl+Alt+P toggles it. The tool set is NEVER touched: it used to`,
+    `  // /plan, Shift+Tab (freed: the mirror's keybindings.json moves thinking-`,
+    `  // level cycling to Ctrl+Shift+T) or Ctrl+Alt+P (the fallback on a host`,
+    `  // without that file) toggles it. The tool set is NEVER touched: it used to`,
     `  // be snapshotted on entry and restored on exit, and removing the writers from`,
     `  // it made the path gate below unreachable (pi answers "Tool write not found"`,
     `  // before any handler runs), plus a restored snapshot could widen the roster a`,
@@ -409,7 +413,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `      planPromptOpen = false;`,
     `      planSteps = [];`,
     `      try { if (ctx && typeof ctx.cwd === "string" && ctx.cwd) planCwd = ctx.cwd; } catch {}`,
-    `      try { ctx.ui.notify("Plan mode on: writes refused except " + PLAN_FILE_REL + ". Investigate, then write the plan there. Ctrl+Alt+P or /plan to leave.", "info"); } catch {}`,
+    `      try { ctx.ui.notify("Plan mode on: writes refused except " + PLAN_FILE_REL + ". Investigate, then write the plan there. Shift+Tab (or /plan) to leave.", "info"); } catch {}`,
     `      planUpdateUi(ctx);`,
     `      planPersist();`,
     `    }`,
@@ -437,12 +441,26 @@ export function buildPiPlanModeSection(): Array<string> {
     `      });`,
     `    } catch {}`,
     `    try {`,
+    `      // Claude Code's plan-mode key. Pi binds app.thinking.cycle to shift+tab`,
+    `      // and reserves it against extension overrides, so the launcher moves that`,
+    `      // action off shift+tab in the mirror's keybindings.json — this`,
+    `      // registration takes the freed key. Registering anyway is safe when the`,
+    `      // key is still bound: pi drops the extension shortcut with a diagnostic`,
+    `      // instead of throwing, which is the honest failure mode.`,
+    `      pi.registerShortcut("shift+tab", {`,
+    `        description: "Toggle plan mode",`,
+    `        handler: async (ctx) => { planToggle(ctx); },`,
+    `      });`,
+    `    } catch {}`,
+    `    try {`,
     `      // Literal KeyId rather than Key.ctrlAlt("p"): the generated source then`,
     `      // needs no pi-tui import at all, which keeps it loadable on every build`,
     `      // whose host-provided specifier list is smaller than today's. The value`,
     `      // is exactly what Key.ctrlAlt("p") returns (pi-tui keys.js:118).`,
+    `      // Kept as the fallback for a host whose keybindings.json we did not`,
+    `      // write (older launcher, hand-run pi against this extension).`,
     `      pi.registerShortcut("ctrl+alt+p", {`,
-    `        description: "Toggle plan mode",`,
+    `        description: "Toggle plan mode (alternate)",`,
     `        handler: async (ctx) => { planToggle(ctx); },`,
     `      });`,
     `    } catch {}`,
@@ -451,7 +469,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `        description: "Show plan mode state and the current step list",`,
     `        handler: async (_args, ctx) => {`,
     `          if (!planEnabled && !planExecuting && planSteps.length === 0) {`,
-    `            try { ctx.ui.notify("Plan mode is off. /plan (or Ctrl+Alt+P) to start planning.", "info"); } catch {}`,
+    `            try { ctx.ui.notify("Plan mode is off. /plan (or Shift+Tab) to start planning.", "info"); } catch {}`,
     `            return;`,
     `          }`,
     `          const done = planSteps.filter((s) => s.completed).length;`,
@@ -483,7 +501,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `        if (isPlanFilePath(planCwd, target, PLAN_FILE_REL)) return undefined;`,
     `        return {`,
     `          block: true,`,
-    `          reason: "Plan mode: this write is refused. The only file you may write is " + PLAN_FILE_REL + " (pass exactly that path). Record the plan there, or leave plan mode (/plan or Ctrl+Alt+P) to change code.",`,
+    `          reason: "Plan mode: this write is refused. The only file you may write is " + PLAN_FILE_REL + " (pass exactly that path). Record the plan there, or leave plan mode (/plan or Shift+Tab) to change code.",`,
     `        };`,
     `      });`,
     `    } catch {}`,
@@ -575,7 +593,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `      "   finishing with a numbered list of the steps -- that list becomes the checklist.",`,
     `      "",`,
     `      "Do NOT open an ask_user question or a prose prompt for plan approval. Leaving plan mode is",`,
-    `      "the user's action (/plan or Ctrl+Alt+P) -- asking permission to stop planning is the one",`,
+    `      "the user's action (/plan or Shift+Tab) -- asking permission to stop planning is the one",`,
     `      "question this mode does not want, and approval you grant yourself is not approval.",`,
     `      "If the user asks for changes, revise the SAME plan file rather than writing a second one.",`,
     `      "The test for every other action: if it would reasonably be described as DOING the work",`,
@@ -679,7 +697,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `        planPromptOpen = false;`,
     `        if (!choice) return;`,
     `        // The user may have left plan mode while the prompt was open (slash`,
-    `        // /plan, Ctrl+Alt+P, /new). Honouring Execute there would silently`,
+    `        // /plan, Shift+Tab, /new). Honouring Execute there would silently`,
     `        // re-enter a mode they just exited.`,
     `        if (!planEnabled) return;`,
     `        if (String(choice).indexOf("Execute") === 0) {`,

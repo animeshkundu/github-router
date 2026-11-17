@@ -155,8 +155,9 @@ plus the mode identity. Each surface rides a flag:
 
 Always injected regardless of flags (like Claude's operating
 defaults): `models.json` (routing is load-bearing), `mcp.json` (the
-`search` group at minimum), minimal `settings.json`, `APPEND_SYSTEM.md`
-digest, statusline footer (built into
+`search` group at minimum), minimal `settings.json`, `keybindings.json`
+(frees `shift+tab` for plan mode — see [Plan mode](#plan-mode)),
+`APPEND_SYSTEM.md` digest, statusline footer (built into
 the `gh-router-pi` extension — no third-party package; opt out with
 `GH_ROUTER_DISABLE_AIC_STATUSLINE=1`), plan mode (built into the same
 extension — see [Plan mode](#plan-mode); no flag, no package), toolbelt PATH
@@ -356,6 +357,15 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   ceiling — the Pi-native analogue of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. The
   extension's `session_before_compact` handler observes only and always
   falls back to native.
+- **Tool choice steered in the digest, not narrowed.** Pi's own per-tool
+  guidelines ship for `read`/`write`/`edit` but not for `grep`/`find`/`ls`,
+  and its "use bash for ls, rg, find" rule fires only when those dedicated
+  tools are absent — so a full-roster launch is told nothing. The digest
+  carries one line (`PI_TOOL_PREFERENCE_LINE`) saying both halves of the
+  policy: prefer `read`/`write`/`edit`/`grep`/`find`/`ls` over shelling out to
+  `cat`/`sed`/`python`, and still reach for `rg`, `jq`, `ast-grep`, `git` and
+  the build/test commands when those are the better instrument. No tool is
+  removed from the roster to enforce it.
 - **Pi lifecycle respected.** Version floor Pi ≥ 1.3.0 (`PI_MIN_VERSION`,
   `src/lib/pi-version-check.ts`) / Node ≥ 22.19. Startup never waits on npm:
   a fast local `pi --version` probe gates
@@ -454,8 +464,17 @@ extension a user has to install. `github-router pi` therefore generates the
 equivalent into its own `local:gh-router-pi` extension, always on, for every
 profile — no flag, no package, no model-facing tool.
 
-**Toggle** with `Ctrl+Alt+P` or `/plan`; `/plan-status` prints the current
-step list. Plan mode closes exactly one door:
+**Toggle** with `Shift+Tab` — the Claude Code key — or `/plan`;
+`/plan-status` prints the current step list. Pi binds `shift+tab` to
+`app.thinking.cycle` and treats it as reserved, so an extension cannot claim
+it. The launcher therefore writes `<mirror>/keybindings.json` moving that one
+action to `Ctrl+Shift+T` (free in pi's table and in every bundled package),
+which frees the key without costing thinking-level cycling. Your own
+`keybindings.json` merges underneath: other bindings survive, and a
+`app.thinking.cycle` you already moved off `shift+tab` is left alone. The
+invariant enforced is "`shift+tab` is unbound", never "our value wins".
+`Ctrl+Alt+P` stays registered as the fallback for a host where the keybindings
+file is absent. Plan mode closes exactly one door:
 
 - `edit`, `write` and `apply_patch` are refused by a `tool_call` handler. They
   stay in the active tool set — deliberately. An earlier revision also removed
@@ -547,8 +566,8 @@ first is interactive exploration, the second is an artifact other agents read.
 
 Fail-open throughout: every Pi API the section touches is feature-probed, so a
 Pi build that grew or dropped one degrades to "no plan mode" rather than a
-broken session. `Ctrl+Alt+P` can be intercepted by some terminals; `/plan` is
-the fallback.
+broken session. `Shift+Tab` follows the converted binding, so a terminal that
+swallows the sequence loses it too; `/plan` is the fallback that always works.
 
 ## Files
 

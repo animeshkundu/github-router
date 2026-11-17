@@ -53,9 +53,11 @@ import {
   applyCosmeticUserOverrides,
   buildPiAgentFiles,
   buildPiAppendSystem,
+  buildPiKeybindingsJson,
   buildPiLaunchCard,
   buildPiModelsJson,
   buildPiSettingsJson,
+  mergePiKeybindingsSettings,
   mergeSubagentsSettings,
   piLeadModel,
   piProfileModelIds,
@@ -561,6 +563,28 @@ export const pi = defineCommand({
         ...builtSettings,
         ...cosmeticOverrides,
         ...(mergedSubagents ? { subagents: mergedSubagents } : {}),
+      })
+
+      // Free `shift+tab` for plan mode. Pi reserves `app.thinking.cycle`
+      // against extension overrides, so a registration alone is dropped with
+      // "conflicts with built-in shortcut"; the conflict table is keyed by
+      // key, so MOVING the action off `shift+tab` is what frees it. Moving
+      // rather than emptying keeps thinking-level cycling reachable, and a
+      // user who already moved it keeps their own key (see the merge helper).
+      // Same layered shape as settings.json above.
+      const keybindingsPath = path.join(mirror, "keybindings.json")
+      let userKeybindings: Record<string, unknown> = {}
+      try {
+        const raw = await fs.readFile(keybindingsPath, "utf8")
+        const parsedKeybindings = JSON.parse(raw) as unknown
+        if (parsedKeybindings && typeof parsedKeybindings === "object") {
+          userKeybindings = parsedKeybindings as Record<string, unknown>
+        }
+      } catch {
+        userKeybindings = {}
+      }
+      await writeJsonFile(keybindingsPath, {
+        ...mergePiKeybindingsSettings(userKeybindings, buildPiKeybindingsJson()),
       })
       // Pre-seed <mirror>/npm from the durable package cache so Pi's
       // per-boot `packages[]` install is a no-op on a hit (faster + silent:
