@@ -387,6 +387,19 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   `cat`/`sed`/`python`, and still reach for `rg`, `jq`, `ast-grep`, `git` and
   the build/test commands when those are the better instrument. No tool is
   removed from the roster to enforce it.
+
+  **Search order, only when the launch serves it.** When this launch publishes
+  the `code` group (`--search` or Bluebird), the digest adds one more line
+  (`PI_SEARCH_ORDER_LINE`): narrow with semantic `code` search first, then
+  reach for `rg`/`grep` for what meaning cannot answer — every occurrence, an
+  exact token, a regex, a filename. The tool's own description already says
+  semantic-first with a labelled lexical fallback, but a description is read
+  once at roster time while the digest is read every turn, and without the
+  ordering the model reaches for `grep` first on exact strings. Both halves
+  matter: semantic-only would leave concepts un-grepped, and the fallback
+  alone would not fix the order. The line is gated on
+  `surfaces.codeSearch` — the same predicate that publishes the MCP group — so
+  a launch without search is never pointed at a tool it does not have.
 - **Pi lifecycle respected.** Version floor Pi ≥ 1.3.0 (`PI_MIN_VERSION`,
   `src/lib/pi-version-check.ts`) / Node ≥ 22.19. Startup never waits on npm:
   a fast local `pi --version` probe gates
