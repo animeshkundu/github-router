@@ -92,42 +92,60 @@ export const COLGREP_BIN: Record<string, ColbertAsset> = {
 
 /**
  * ONNX Runtime CPU dylib archive, keyed `<platform>-<arch>`. `member`
- * is the VERSIONED dylib basename inside the archive's `lib/` dir. The
- * Windows `.zip` ALSO ships a 377 MB `.pdb` (debug symbols) and `.lib`
- * import libs — we extract ONLY the `.dll`. On POSIX the archive ships
- * the versioned dylib plus an unversioned soname symlink; the
- * provisioner re-creates the soname symlink colgrep's `ORT_LIB_NAME`
+ * is the VERSIONED dylib basename inside the archive. The provisioner
+ * re-creates the unversioned soname symlink colgrep's `ORT_LIB_NAME`
  * expects (`libonnxruntime.so` → `…so.1.23.0`,
  * `libonnxruntime.dylib` → `…1.23.0.dylib`).
+ *
+ * These used to be the official GitHub release tarballs. On 2026-11-17
+ * `github.com/microsoft/onnxruntime` — repo, releases and every tag —
+ * started returning 404, with no redirect, no rename and no GitHub-side
+ * notice, while every OTHER GitHub release we pin stayed up. The CUDA
+ * postinstall of `onnxruntime-node` broke on it in CI the same day
+ * (`tests/dependency-install-safety.test.ts`). A sidecar that cannot be
+ * provisioned is a silent semantic-search outage, so the source moved to
+ * the CPU wheels on PyPI, which are versioned, immutable, and served from
+ * `files.pythonhosted.org` rather than a single vendor page.
+ *
+ * A wheel is a zip, so `extractZipMember` reads it as-is: it matches on
+ * BASENAME, and each wheel ships exactly one `libonnxruntime*`/
+ * `onnxruntime.dll`, so the nested `onnxruntime/capi/` path is harmless.
+ * The `cp312` builds are pinned because the dylib and `.so` differ
+ * byte-wise per Python ABI; which build we take is arbitrary as long as
+ * it is pinned, since the dylib is loaded via `ORT_DYLIB_PATH` by
+ * `colgrep`, not by Python. The NuGet CPU package carries the SAME
+ * `libonnxruntime` bytes (verified byte-for-byte for osx-arm64), so this
+ * is a mirror move, not an upgrade: `ORT_VERSION`, the soname suffix and
+ * colgrep's own pinned runtime are unchanged.
  */
 export const ORT_LIB: Record<
   string,
   ColbertAsset & { soname?: string }
 > = {
   "win32-x64": {
-    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/onnxruntime-win-x64-1.23.0.zip",
-    sha256: "72c23470310ec79a7d42d27fe9d257e6c98540c73fa5a1db1f67f538c6c16f2f",
+    url: "https://files.pythonhosted.org/packages/19/90/d5b4ea0bd6805f3f21aac2fe549a5b58ee10d1c99c499d867539620a002b/onnxruntime-1.23.0-cp312-cp312-win_amd64.whl",
+    sha256: "e100f3869da4c12b17a9b942934a96a542406f860eb8beb74a68342ea43aaa55",
     archive: "zip",
     member: "onnxruntime.dll",
   },
   "darwin-arm64": {
-    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/onnxruntime-osx-arm64-1.23.0.tgz",
-    sha256: "8182db0ebb5caa21036a3c78178f17fabb98a7916bdab454467c8f4cf34bcfdf",
-    archive: "tar.gz",
+    url: "https://files.pythonhosted.org/packages/fb/33/ec5395c9539423246e4976d6ec7c4e7a4624ad8bcbe783fea5c629d7980a/onnxruntime-1.23.0-cp312-cp312-macosx_13_0_arm64.whl",
+    sha256: "5921f2e106f5faf2b32095b2ecdfae047e445c3bce063e439dadc75c212e7be7",
+    archive: "zip",
     member: "libonnxruntime.1.23.0.dylib",
     soname: "libonnxruntime.dylib",
   },
   "darwin-x64": {
-    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/onnxruntime-osx-x86_64-1.23.0.tgz",
-    sha256: "a8e43edcaa349cbfc51578a7fc61ea2b88793ccf077b4bc65aca58999d20cf0f",
-    archive: "tar.gz",
+    url: "https://files.pythonhosted.org/packages/f0/3c/d1976a9933e075291a3d67f4e949c667ff36a3e3a4a0cbd883af3c4eae5a/onnxruntime-1.23.0-cp312-cp312-macosx_13_0_x86_64.whl",
+    sha256: "053df2f9c6522b258055bce4b776aa9ea3adb4b28d2530ab07b204a3d4b04bf9",
+    archive: "zip",
     member: "libonnxruntime.1.23.0.dylib",
     soname: "libonnxruntime.dylib",
   },
   "linux-x64": {
-    url: "https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/onnxruntime-linux-x64-1.23.0.tgz",
-    sha256: "b6deea7f2e22c10c043019f294a0ea4d2a6c0ae52a009c34847640db75ec5580",
-    archive: "tar.gz",
+    url: "https://files.pythonhosted.org/packages/0b/62/84f23952d01e07ce8aa02e657e3a0c8fa40aba0d5e11a0e9904a9063af76/onnxruntime-1.23.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+    sha256: "05f67edb93678cab5cd77eda89b65bb1b58f3d4c0742058742cfad8b172cfa83",
+    archive: "zip",
     member: "libonnxruntime.so.1.23.0",
     soname: "libonnxruntime.so",
   },

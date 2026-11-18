@@ -63,7 +63,10 @@ interface Harness {
   commands: Map<string, { handler: (args: string, ctx: unknown) => unknown }>
   shortcuts: Map<string, { handler: (ctx: unknown) => unknown }>
   tools: { active: string[]; sets: string[][] }
-  entries: Array<{ customType: string; data: unknown }>
+  // `type: "custom"` mirrors what pi writes to the session file; the extension's
+  // resume path filters on it, so entries recorded without it would exercise a
+  // branch no real host reaches.
+  entries: Array<{ type?: "custom"; customType: string; data: unknown }>
   messages: Array<{ customType: string; content: unknown; display?: boolean; options?: unknown }>
   statuses: Map<string, string | undefined>
   widgets: Map<string, string[] | undefined>
@@ -128,7 +131,10 @@ function stubPi(opts: {
     },
     getAllTools: () => allToolNames.map((name) => ({ name })),
     appendEntry: (customType: string, data: unknown) => {
-      harness.entries.push({ customType, data })
+      // `type: "custom"` mirrors what pi actually writes to the session file —
+      // the extension's resume path filters on it, so a stub without it silently
+      // tests a branch no real host reaches.
+      harness.entries.push({ type: "custom", customType, data })
     },
     sendMessage: (message: unknown, options?: unknown) => {
       const m = message as { customType: string; content: unknown; display?: boolean }
@@ -217,14 +223,39 @@ describe("plan mode: pure helpers", () => {
     }
 
     // Sanitization is belt-and-braces (the id is host-generated), but it makes
-    // traversal structurally impossible rather than merely unlikely.
-    for (const hostile of ["../../etc/passwd", "a/b", "a\\b", "/abs", "a b", "a.b", "..a.."]) {
+    // traversal structurally impossible rather than merely unlikely: no
+    // separator and no unpunctuated dot-run can survive the segment.
+    for (const hostile of ["../../etc/passwd", "a/b", "a\\b", "/abs", "a b", "..a.."]) {
       const rel = planFilePathForSession(hostile)
-      expect(rel).not.toContain("..")
-      expect(rel.startsWith(".github-router/plans/pi-plan-")).toBe(true)
+      const segment = rel.split("/")[2]
+      expect(segment.startsWith("pi-plan-")).toBe(true)
+      expect(segment).not.toContain("/")
+      expect(segment).not.toContain("\\")
+      // `..` may appear only as interior punctuation of a literal name
+      // (`pi-plan-a.b`), never as a whole segment.
+      expect(segment).not.toBe("..")
+      expect(segment.startsWith("..")).toBe(false)
       expect(rel.endsWith("/plan.md")).toBe(true)
     }
-    expect(planFilePathForSession("../../etc/passwd")).toBe(".github-router/plans/pi-plan-etc-passwd/plan.md")
+    // Lossy sanitizing must not merge two legal ids into one file. pi's own id
+    // validator admits `.`, so `a.b` and `a-b` can both be real session ids —
+    // a naive `replace(/[^A-Za-z0-9_-]/g, "-")` maps them together and hands
+    // two sessions the same plan file, which is the bug this path exists to fix.
+    expect(planFilePathForSession("a.b")).not.toBe(planFilePathForSession("a-b"))
+    expect(planFilePathForSession("a.b")).toBe(".github-router/plans/pi-plan-a.b/plan.md")
+    // Anything the sanitizer had to CHANGE carries a digest of the original, so
+    // it cannot land on the unaltered id it resembles.
+    expect(planFilePathForSession("../../etc/passwd")).toMatch(
+      /^\.github-router\/plans\/pi-plan-etc-passwd-[0-9a-f]{8}\/plan\.md$/,
+    )
+    expect(planFilePathForSession("a b")).not.toBe(planFilePathForSession("a-b"))
+    // The 96-char cap is lossy in the same way, so capped ids are distinguished
+    // by the id they were truncated from rather than sharing a directory, and
+    // the whole path stays bounded however long the id is.
+    const longA = "x".repeat(96) + "A"
+    const longB = "x".repeat(96) + "B"
+    expect(planFilePathForSession(longA)).not.toBe(planFilePathForSession(longB))
+    expect(planFilePathForSession("x".repeat(10_000)).length).toBeLessThanOrEqual(160)
 
     // An id we cannot use falls back to the single shared path, which is the
     // only honest answer: there is nothing per-session to derive.
@@ -234,7 +265,6 @@ describe("plan mode: pure helpers", () => {
     for (const empty of ["", "   ", "..", "...", "\u0000\n", null, undefined, 42, {}, []]) {
       expect(planFilePathForSession(empty)).toBe(planFilePath())
     }
-    expect(planFilePath()).toBe(".github-router/plans/pi-plan/plan.md")
   })
 
   test("the plan file is the only path the write barrier admits", () => {
@@ -594,6 +624,59 @@ describe("plan mode: generated module runs", () => {
     expect(patch?.block).toBe(true)
   })
 
+  test("the path gate holds on a Windows cwd", async () => {
+    // CI runs Windows, and every gate test above uses a POSIX cwd — so the
+    // separator and drive-letter branches of `isPlanFilePath` were never
+    // exercised against the host they exist for. A gate that admitted
+    // `C:\work\repo\.github-router\…` while refusing `…\notes.md` only on POSIX
+    // would be a plan-mode bypass on a platform we ship.
+    const harness = await loadPlanExtension("win-cwd", stubPi())
+    const ctx = ctxFor(harness, { cwd: "C:\\work\\repo" })
+    const toolCall = harness.handlers.get("tool_call")!
+    await harness.commands.get("plan")!.handler("", ctx)
+    const rel = sessionPlanPath()
+
+    // The plan file, spelled every way a model actually spells it on Windows:
+    // backslashes, forward slashes, mixed, an absolute path, and `.\`-prefixed.
+    const win = rel.split("/").join("\\")
+    const admitted = [
+      win,
+      rel,
+      rel.replace("/", "\\"),
+      "C:\\work\\repo\\" + win,
+      "C:/work/repo/" + rel,
+      ".\\" + win,
+    ]
+    // The paths must actually DIFFER from one another, or this loop proves only
+    // that one spelling works (the others could be silently identical strings).
+    expect(new Set(admitted).size).toBe(admitted.length)
+    for (const path of admitted) {
+      expect(await toolCall({ toolName: "write", input: { path, content: "# p" } }, ctx), path).toBeUndefined()
+    }
+
+    // Close, but not it. `..` segments that climb out, a sibling file, another
+    // drive, a UNC share, another session's directory, and a look-alike.
+    const refused = [
+      "src\\x.ts",
+      "plan.md",
+      "notes.md",
+      ".github-router\\plans\\pi-plan\\notes.md",
+      ".github-router\\plans\\pi-plan-sess-B\\plan.md",
+      win + "\\..\\..\\evil.ts",
+      "..\\..\\evil.ts",
+      "D:\\work\\repo\\" + win,
+      "\\\\server\\share\\repo\\" + win,
+      "C:\\work\\other\\" + win,
+      win + ".bak",
+    ]
+    for (const path of refused) {
+      const result = (await toolCall({ toolName: "write", input: { path, content: "x" } }, ctx)) as {
+        block?: boolean
+      }
+      expect(result?.block, path).toBe(true)
+    }
+  })
+
   test("two sessions in one repo cannot write each other's plan", async () => {
     // The regression this change exists for. Before the fix both sessions
     // resolved the SAME path, so the gate admitted both and the second plan
@@ -656,7 +739,7 @@ describe("plan mode: generated module runs", () => {
   test("a resumed session lands back on the file it started", async () => {
     // Resume stability is what makes the derived path safe: if a resumed
     // session resolved a different file, the plan it wrote would be orphaned
-    // behind a brief that says "revise the SAME plan file".
+    // behind a brief that promises "this one plan file".
     const harness = await loadPlanExtension("resume-path", stubPi())
     const toolCall = harness.handlers.get("tool_call")!
     const plan = harness.commands.get("plan")!
@@ -692,6 +775,53 @@ describe("plan mode: generated module runs", () => {
         block?: boolean
       })?.block,
     ).toBe(true)
+  })
+
+  test("a fork inherits the plan state but not the right to write the parent's file", async () => {
+    // Pi copies the parent's entries (including our PLAN_MODE_ENTRY) into the
+    // forked session and gives it a NEW id, so the fork resumes in plan mode
+    // with the parent's steps — while its own plan file has never been written.
+    // That combination is the one place the two per-session designs collide, so
+    // it is pinned: the inherited state must not come with the inherited path.
+    const parent = await loadPlanExtension("fork-parent", stubPi())
+    const parentCtx = ctxFor(parent, { cwd: "/work/repo" })
+    await parent.commands.get("plan")!.handler("", parentCtx)
+    const saved = parent.entries[parent.entries.length - 1]
+    expect(saved.customType).toBe(PLAN_MODE_ENTRY)
+
+    // The fork: same harness shape, new session id, the parent's entry copied in.
+    const fork = await loadPlanExtension("fork-child", stubPi())
+    const forkCtx = ctxFor(fork, {
+      cwd: "/work/repo",
+      sessionManager: { getEntries: () => [saved], getSessionId: () => "sess-fork" },
+    })
+    await fork.handlers.get("session_start")!({ type: "session_start", reason: "fork" }, forkCtx)
+
+    // Plan mode carried over...
+    expect(fork.statuses.get(PLAN_STATUS_KEY)).toBe("⏸ plan")
+    // ...but the writable path is the fork's own, which does not exist yet.
+    const toolCall = fork.handlers.get("tool_call")!
+    expect(
+      await toolCall({ toolName: "write", input: { path: sessionPlanPath("sess-fork"), content: "# f" } }, forkCtx),
+    ).toBeUndefined()
+    // The parent's plan is refused, in the fork's own words — a fork cannot
+    // rewrite the plan it branched from, which is what makes forking safe.
+    const blocked = (await toolCall(
+      { toolName: "write", input: { path: sessionPlanPath(), content: "# f" } },
+      forkCtx,
+    )) as { block?: boolean; reason?: string }
+    expect(blocked?.block).toBe(true)
+    expect(blocked?.reason).toContain(sessionPlanPath("sess-fork"))
+    expect(blocked?.reason).not.toContain(sessionPlanPath())
+    // And the brief names the fork's file, so the model is not told to revise a
+    // file it is not allowed to touch.
+    const brief = (
+      (await fork.handlers.get("before_agent_start")!({ messageType: "user", prompt: "hi" }, forkCtx)) as {
+        message?: { content: string }
+      }
+    ).message!.content
+    expect(brief).toContain(sessionPlanPath("sess-fork"))
+    expect(brief).not.toContain(sessionPlanPath())
   })
 
   test("the notify, the status line and the brief all name the session's file", async () => {

@@ -238,25 +238,37 @@ platform dylib from `microsoft/onnxruntime` GitHub releases
 (`onnx_runtime.rs:595-718`) - **with no checksum.** github-router pre-supplies it
 the same way:
 
-| `platform-arch` | Archive (from `get_download_info`) | Member |
+| `platform-arch` | Archive | Member |
 |---|---|---|
-| `win32-x64` | `onnxruntime-win-x64-1.23.0.zip` | `lib/onnxruntime.dll` |
-| `darwin-arm64` | `onnxruntime-osx-arm64-1.23.0.tgz` | `lib/libonnxruntime.1.23.0.dylib` |
-| `darwin-x64` | `onnxruntime-osx-x86_64-1.23.0.tgz` | `lib/libonnxruntime.1.23.0.dylib` |
-| `linux-x64` | `onnxruntime-linux-x64-1.23.0.tgz` | `lib/libonnxruntime.so.1.23.0` |
+| `win32-x64` | `onnxruntime-1.23.0-cp312-cp312-win_amd64.whl` | `onnxruntime.dll` |
+| `darwin-arm64` | `onnxruntime-1.23.0-cp312-cp312-macosx_13_0_arm64.whl` | `libonnxruntime.1.23.0.dylib` |
+| `darwin-x64` | `onnxruntime-1.23.0-cp312-cp312-macosx_13_0_x86_64.whl` | `libonnxruntime.1.23.0.dylib` |
+| `linux-x64` | `onnxruntime-1.23.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl` | `libonnxruntime.so.1.23.0` |
 
-Base URL: `https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/`.
+Base: `https://files.pythonhosted.org/packages/…` (the immutable URL PyPI's
+JSON API names for each file).
 
-- SHA256-pin each archive in the manifest. Windows `.zip` → `extractZipMember`;
-  macOS/Linux `.tgz` → `extractTarGzMember` (these are **gzip**, unlike the
-  colgrep `.tar.xz` - so the existing gzip extractor covers all three POSIX ORT
-  archives). Extract the named dylib into
-  `<router>/colbert/onnxruntime/1.23.0/cpu/<libname>`. **Note:** the ORT archive
-  ships more than one file (versioned dylib, possibly a symlink/companion); on
-  Windows the `onnxruntime.dll` may have **dependent DLLs / require a soname
-  symlink** on POSIX. Extract whatever the loader needs into the same dir (not
-  just the one named member), and on POSIX create the `libonnxruntime.so` →
-  `libonnxruntime.so.1.23.0` soname symlink colgrep's `ORT_LIB_NAME` expects.
+**Superseded source, and why.** The design first pinned the upstream release
+tarballs from `https://github.com/microsoft/onnxruntime/releases/download/v1.23.0/`.
+On 2026-11-17 that repository — releases, tags and all — began returning 404
+with no redirect and no rename, breaking provisioning on every platform at
+once, so the source moved to the CPU wheels on PyPI. A wheel is a zip, so it
+needs no new extractor, and each wheel contains exactly one dylib, so
+basename-only `extractZipMember` is unambiguous. The bytes are equivalent to,
+though not bit-identical with, the tarballs (the build flags differ slightly;
+the dylib is loaded by colgrep via `ORT_DYLIB_PATH`, not by Python, so the
+`cp312` ABI choice is arbitrary as long as it is pinned). The digests above are
+whole-wheel SHA256s, and `scripts/gen-colbert-manifest.ts` re-derives them from
+PyPI's JSON API.
+
+- SHA256-pin each archive in the manifest (as implemented: the whole wheel).
+  A wheel is a `.zip`, so `extractZipMember` covers all four platforms — the
+tar.gz path this section originally described is no longer used for ORT.
+  Extract the named dylib into `<router>/colbert/onnxruntime/1.23.0/cpu/<libname>`.
+  **Note:** the wheel's dylib is self-contained (it is the same library the
+  tarballs carried), so nothing else has to be extracted; on POSIX create the
+  `libonnxruntime.so` → `libonnxruntime.so.1.23.0` soname symlink colgrep's
+  `ORT_LIB_NAME` expects.
 - Pass `ORT_DYLIB_PATH=<that file>` in the colgrep child env. colgrep validates
   it loads (`is_valid_ort_dylib`) and uses it directly - **but if the path is
   invalid it CLEARS the env and falls through to its own unverified GH download**

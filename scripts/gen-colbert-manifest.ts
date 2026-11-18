@@ -59,22 +59,32 @@ for (const [pa, asset] of Object.entries(COLGREP_ASSETS)) {
   }
 }
 
-// --- ONNX Runtime archive (download + compute) -------------------------
-const ORT_ASSETS: Record<string, string> = {
-  "win32-x64": `onnxruntime-win-x64-${ORT_VERSION}.zip`,
-  "darwin-arm64": `onnxruntime-osx-arm64-${ORT_VERSION}.tgz`,
-  "darwin-x64": `onnxruntime-osx-x86_64-${ORT_VERSION}.tgz`,
-  "linux-x64": `onnxruntime-linux-x64-${ORT_VERSION}.tgz`,
+// --- ONNX Runtime CPU wheels (download + compute) ----------------------
+// PyPI, not GitHub releases: the ORT GitHub repo and every release asset
+// started 404ing on 2026-11-17 (see `ORT_LIB` in the manifest). The digest
+// pinned here is the WHOLE WHEEL, which `extractZipMember` reads directly.
+const ORT_WHEELS: Record<string, string> = {
+  "win32-x64": `onnxruntime-${ORT_VERSION}-cp312-cp312-win_amd64.whl`,
+  "darwin-arm64": `onnxruntime-${ORT_VERSION}-cp312-cp312-macosx_13_0_arm64.whl`,
+  "darwin-x64": `onnxruntime-${ORT_VERSION}-cp312-cp312-macosx_13_0_x86_64.whl`,
+  "linux-x64": `onnxruntime-${ORT_VERSION}-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl`,
 }
 
-console.error(`# onnxruntime ${ORT_VERSION}`)
+console.error(`# onnxruntime ${ORT_VERSION} (pypi wheels)`)
 const ortOut: Record<string, string> = {}
-for (const [pa, asset] of Object.entries(ORT_ASSETS)) {
-  const url = `https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${asset}`
+for (const [pa, filename] of Object.entries(ORT_WHEELS)) {
   try {
-    const { sha, size } = await sha256(url)
-    ortOut[pa] = sha
-    console.error(`  ${pa}: ${asset} ${sha.slice(0, 12)}… (${size} bytes)`)
+    // pypi.org/pypi/<pkg>/<ver>/json names the immutable files.pythonhosted
+    // URL per file, which is what belongs in the manifest.
+    const meta = (await (
+      await fetch(`https://pypi.org/pypi/onnxruntime/${ORT_VERSION}/json`, {
+        headers: UA,
+      })
+    ).json()) as { urls: Array<{ filename: string; url: string; digests: { sha256: string } }> }
+    const entry = meta.urls.find((u) => u.filename === filename)
+    if (!entry) throw new Error(`no wheel named ${filename}`)
+    ortOut[pa] = entry.digests.sha256
+    console.error(`  ${pa}: ${filename} ${entry.digests.sha256.slice(0, 12)}… -> ${entry.url}`)
   } catch (e) {
     console.error(`  ${pa}: FAIL ${(e as Error).message}`)
   }

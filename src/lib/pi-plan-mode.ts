@@ -275,23 +275,59 @@ export function planFilePath(): string {
  *    (`.github-router/plans/<slug>/plan.md`, what `/gh-plan` writes and
  *    `/gh-implement` reads, `.complete` beside it) still describes the shape.
  *
- * Sanitized to `[A-Za-z0-9_-]` as belt-and-braces: the id is host-generated,
- * but sanitizing also makes traversal structurally impossible — `..` and path
- * separators cannot survive — which is cheaper to prove than to assume.
+ * Sanitized to `[A-Za-z0-9._-]` as belt-and-braces: the id is host-generated,
+ * but sanitizing also makes traversal structurally impossible — path separators
+ * cannot survive, and a segment that is entirely dots is unreachable anyway
+ * because every one of these starts with `pi-plan-`.
+ *
+ * Sanitizing is LOSSY, and lossy is a collision. pi's own id validator
+ * (`assertValidSessionId`) admits `.`, so `a.b` and `a-b` are both legal ids,
+ * and `--session-id` lets an operator pick either; mapping one onto the other
+ * would reinstate, for that pair, the very bug this function exists to prevent.
+ * Dots are therefore KEPT (they are inert inside a prefixed segment). Anything
+ * that still had to be ALTERED — a character dropped, or the length cap hit —
+ * carries a digest of its original bytes instead of silently merging with its
+ * neighbours. Generated UUIDv7 ids are `[0-9a-f-]` and are untouched, so the
+ * readable form that traces to the transcript filename stays the common case.
+ * FNV-1a rather than a cryptographic digest because this has to survive being
+ * inlined into the emitted extension (a `toString()` copy cannot import
+ * `node:crypto`), and telling two host-generated ids apart does not need
+ * resistance to an attacker who could pick the path outright.
  *
  * Emitted via `.toString()`, so this body carries no module-scope references —
- * the layout strings are inline for that reason, not by preference.
+ * the layout strings are inline for that reason, not by preference, and the
+ * digest is hand-rolled because `node:crypto` is not importable there.
  */
 export function planFilePathForSession(sessionId: unknown): string {
   const raw = typeof sessionId === "string" ? sessionId.trim() : ""
   let slug = ""
+  let altered = false
   for (const ch of raw) {
-    if (/[A-Za-z0-9_-]/.test(ch)) slug += ch
-    else if (slug.length > 0 && !slug.endsWith("-")) slug += "-"
+    if (/[A-Za-z0-9._-]/.test(ch)) slug += ch
+    else {
+      altered = true
+      if (slug.length > 0 && !slug.endsWith("-")) slug += "-"
+    }
   }
-  slug = slug.replace(/^-+|-+$/g, "")
-  if (slug.length > 96) slug = slug.slice(0, 96).replace(/-+$/g, "")
+  slug = slug.replace(/^[.-]+|[.-]+$/g, "")
+  if (slug.length > 96) {
+    slug = slug.slice(0, 96).replace(/[.-]+$/g, "")
+    altered = true
+  }
+  // `altered` so far only tracks dropped characters; a trim that silently
+  // shortens a slug is the same loss, so it counts too.
+  if (slug !== raw) altered = true
   if (!slug) return ".github-router/plans/pi-plan/plan.md"
+  if (altered) {
+    // Distinct originals must not share a directory just because the readable
+    // part of both sanitized to the same text.
+    let hash = 0x811c9dc5
+    for (let i = 0; i < raw.length; i++) {
+      hash ^= raw.charCodeAt(i)
+      hash = Math.imul(hash, 0x01000193) >>> 0
+    }
+    slug += "-" + hash.toString(16).padStart(8, "0")
+  }
   return ".github-router/plans/pi-plan-" + slug + "/plan.md"
 }
 
@@ -384,7 +420,6 @@ export function buildPiPlanModeSection(): Array<string> {
     `    const PLAN_DONE_TYPE = ${JSON.stringify(PLAN_DONE_TYPE)};`,
     `    const PLAN_LIST_TYPE = ${JSON.stringify(PLAN_LIST_TYPE)};`,
     `    const PLAN_BLOCKED = new Set(${JSON.stringify([...PLAN_BLOCKED_TOOLS])});`,
-    `    const PLAN_FALLBACK_REL = ${JSON.stringify(planFilePath())};`,
     `    const planFilePathForSession = (${planFilePathForSession.toString()});`,
     `    const isPlanFilePath = (${isPlanFilePath.toString()});`,
     `    const cleanPlanStepText = (${cleanPlanStepText.toString()});`,
@@ -403,8 +438,8 @@ export function buildPiPlanModeSection(): Array<string> {
     `    // silently replaced the first. Resolving from the session id gives each`,
     `    // session its own file with no lock and no coordination, and because the`,
     `    // id is stable across resume the same session keeps editing the same file.`,
-    `    // Sticky on the FALLBACK (not on the id): a host that cannot report an id`,
-    `    // must not re-derive on every call, and the fallback never changes.`,
+    `    // Cached, then re-resolved on every session_start: the derive is cheap but`,
+    `    // it must run once per (possibly changing) session, not once per gate hit.`,
     `    let planRel = "";`,
     `    // Set while the "what next?" prompt is open. agent_end can fire again for`,
     `    // the same plan (a queued follow-up run ends too), and a second prompt on`,
@@ -422,7 +457,10 @@ export function buildPiPlanModeSection(): Array<string> {
     `        const sm = ctx && ctx.sessionManager;`,
     `        if (sm && typeof sm.getSessionId === "function") id = sm.getSessionId();`,
     `      } catch {}`,
-    `      planRel = planFilePathForSession(id) || PLAN_FALLBACK_REL;`,
+    `      // No second fallback here: planFilePathForSession ALWAYS returns a usable`,
+    `      // path (an unusable id becomes the shared fallback inside it), so a`,
+    `      // "|| fallback" would be dead code that reads like a live guard.`,
+    `      planRel = planFilePathForSession(id);`,
     `      return planRel;`,
     `    }`,
     ``,
@@ -680,7 +718,7 @@ export function buildPiPlanModeSection(): Array<string> {
     `        "Do NOT open an ask_user question or a prose prompt for plan approval. Leaving plan mode is",`,
     `        "the user's action (/plan or Shift+Tab) -- asking permission to stop planning is the one",`,
     `        "question this mode does not want, and approval you grant yourself is not approval.",`,
-    `        "If the user asks for changes, revise the SAME plan file rather than writing a second one.",`,
+    `        "If the user asks for changes, revise this one plan file in place rather than writing a second plan.",`,
     `        "The test for every other action: if it would reasonably be described as DOING the work",`,
     `        "rather than planning it, it waits until plan mode is off.",`,
     `      ].join("\\n");`,

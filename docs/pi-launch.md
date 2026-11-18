@@ -511,14 +511,37 @@ file is absent. Plan mode closes exactly one door:
   free and no plan registry is needed. The full id is used rather than a hash or
   a prefix so a plan directory traces to the session that wrote it; UUIDv7 is
   time-ordered, so a prefix would collide for launches in the same millisecond.
-  The id is sanitized to `[A-Za-z0-9_-]`, which makes traversal structurally
-  impossible. It is still one `<slug>` segment under
+  The id is sanitized to `[A-Za-z0-9._-]`, which makes traversal structurally
+  impossible (no separator survives, and every segment is prefixed with
+  `pi-plan-`, so a dots-only segment is unreachable). Sanitizing is lossy, and
+  lossy is a collision: Pi's own id validator admits `.`, so `a.b` and `a-b`
+  are both legal ids — which is why dots are kept rather than replaced, and why
+  an id the sanitizer had to CHANGE (a dropped character, a trim, or the
+  96-character cap) carries an eight-hex digest of its original bytes instead of
+  silently merging with the id it resembles. Generated UUIDv7 ids never take
+  that path, so the readable form that traces to the transcript filename is the
+  common case. It is still one `<slug>` segment under
   `.github-router/plans/`, so the `/gh-plan` → `<slug>/plan.md` convention
   still describes the shape.
 
   A host that cannot report a session id (an older Pi, a `getSessionId` that
   throws) falls back to the single `.github-router/plans/pi-plan/plan.md`,
   which is exactly the previous behaviour — fail-open, never fail-closed.
+
+  A fork (`session_start` with `reason: "fork"`) is where the two designs meet.
+  Pi copies the parent's entries into the forked session, so a fork inherits the
+  plan *mode* and the checkbox state — while resolving a **new** id, so its plan
+  file has never been written and the parent's is refused. That is the intended
+  trade: a fork cannot rewrite the plan it branched from, and it starts from an
+  empty file rather than a stale copy. The brief is worded for that — "this one
+  plan file", not "the SAME file" — because the model is told to keep ONE plan,
+  not told to keep the parent's.
+
+  The path gate is platform-agnostic: separators are unified before comparison,
+  so on a Windows cwd (`C:\work\repo`) the backslash, forward-slash, mixed,
+  drive-absolute and `.\`-relative spellings of the plan file are all admitted,
+  while a sibling, a look-alike, another drive, a UNC share and another
+  session's plan directory are all refused.
 
   The comparison runs on a normalized absolute path, so `./…`, `//`, and
   traversal that lands on this session's plan file are admitted while a sibling
@@ -555,9 +578,10 @@ critical files / verification to the plan file, summarise in the reply. It
 ends with the two norms a frontier model actually needs — leaving plan mode is
 the user's action, so never ask for plan approval through `ask_user` or prose;
 and if an action would be described as *doing* the work rather than *planning*
-it, it waits — plus the rule that a user who asks for changes gets a revision
-of the same file, not a second plan. That is how a capable model is kept in
-planning mode; a 600-line command table was how a weak one was fenced in.
+it, it waits — plus the rule that this session keeps ONE plan file: a user who
+asks for changes gets a revision in place, not a second plan. That is how a
+capable model is kept in planning mode; a 600-line command table was how a weak
+one was fenced in.
 
 - The injected context is `display: false` and only appears on a real user
   turn — a background notification cannot re-add it. Pi appends and persists
