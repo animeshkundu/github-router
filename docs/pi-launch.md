@@ -357,6 +357,27 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   ceiling — the Pi-native analogue of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. The
   extension's `session_before_compact` handler observes only and always
   falls back to native.
+
+  **Local launches compact at 80% (160K), on purpose.** The local endpoint has
+  no price cliff, and the live catalog carries no `max_prompt_tokens` for the
+  `opus`/`sonnet`/`haiku` rows, so the derivation above would fall through to
+  Pi's 16384 default and trigger at 183.6K. That is too late: with `thinking`
+  enabled the endpoint caps generation at `thinking.budget_tokens`, **not**
+  `max_tokens` (measured: `max_tokens=25904, budget=16384` returns exactly
+  16384 output tokens with `stop_reason: max_tokens`; `budget=30000` returns
+  30000), and Pi turns that stop into
+  `Compaction failed: Summarization failed: generation hit the token cap and
+  the summary is incomplete`. At 183.6K Pi's `clampMaxTokensToContext` leaves
+  only 12288, so the provider trims the budget to 11264 — smaller than the
+  16384 it would have used, and far too small for a real summary (5 of the 19
+  compactions in the reference session reported output above 16384, up to
+  21643). So `local`/`local2` take a flat `PI_LOCAL_COMPACTION_RESERVE_TOKENS`
+  (40000 → trigger at 160K, 80% of the window) **and** emit
+  `thinkingBudgets: { high: 32768 }` (`PI_LOCAL_THINKING_BUDGETS`), which puts
+  the wire budget at 31744 — double the old ceiling, with room for both the
+  reasoning and the summary text. `thinkingBudgets` is emitted for local
+  profiles only; on Copilot the same numbers would be billed reasoning tokens
+  on every turn.
 - **Tool choice steered in the digest, not narrowed.** Pi's own per-tool
   guidelines ship for `read`/`write`/`edit` but not for `grep`/`find`/`ls`,
   and its "use bash for ls, rg, find" rule fires only when those dedicated

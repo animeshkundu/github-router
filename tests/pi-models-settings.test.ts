@@ -29,6 +29,8 @@ import {
   piThinkingLevelMapFor,
   piUsdCostFor,
   PI_MAX_TOKENS_FALLBACK,
+  PI_LOCAL_COMPACTION_RESERVE_TOKENS,
+  PI_LOCAL_THINKING_BUDGETS,
   PI_PROFILE_CONTEXT_TOKENS,
 } from "~/lib/pi-models-settings"
 import { EFFORT_ORDER } from "~/lib/reasoning-effort"
@@ -933,6 +935,128 @@ describe("pi compaction derivation", () => {
       keepRecentTokens: 20_000,
       modelOverrides: {},
     })
+  })
+
+  test("local family triggers at 80% of the window regardless of catalog", () => {
+    // The local endpoint advertises no `max_prompt_tokens`, so the price-cliff
+    // derivation has nothing to read. The reserve is flat by construction: the
+    // trigger must leave Pi's clamp enough room for the local thinking budget.
+    for (const profileId of ["local", "local2"] as const) {
+      for (const variant of [undefined, [], catalog]) {
+        const s = derivePiCompactionSettings(
+          variant as Parameters<typeof derivePiCompactionSettings>[0],
+          ["opus", "sonnet", "haiku"],
+          profileId,
+        )
+        expect(s.reserveTokens).toBe(PI_LOCAL_COMPACTION_RESERVE_TOKENS)
+        expect(PI_PROFILE_CONTEXT_TOKENS - s.reserveTokens).toBe(160_000)
+        expect(s.modelOverrides["gh-router/opus"].reserveTokens).toBe(
+          PI_LOCAL_COMPACTION_RESERVE_TOKENS,
+        )
+        expect(s.modelOverrides["gh-router/haiku"].reserveTokens).toBe(
+          PI_LOCAL_COMPACTION_RESERVE_TOKENS,
+        )
+      }
+    }
+  })
+
+  test("copilot profiles never take the local reserve", () => {
+    // Mutation guard: dropping the profile argument (or inverting the family
+    // check) would flatten the price-cliff derivation to one constant.
+    const s = derivePiCompactionSettings(catalog, ["gpt-6-luna", "gpt-5.6-sol"])
+    expect(s.reserveTokens).toBe(40_800)
+    const explicit = derivePiCompactionSettings(catalog, ["gpt-6-luna", "gpt-5.6-sol"], "balanced")
+    expect(explicit.reserveTokens).toBe(40_800)
+    expect(explicit.reserveTokens).not.toBe(PI_LOCAL_COMPACTION_RESERVE_TOKENS)
+  })
+})
+
+describe("pi local compaction headroom", () => {
+  /**
+   * Reimplements Pi's own arithmetic (`clampMaxTokensToContext` +
+   * `adjustMaxTokensForThinking` in the installed bundle) so the assertion is
+   * about the WIRE values the endpoint sees, not about a settings shape.
+   *
+   * Why it matters: the local endpoint caps generation at
+   * `thinking.budget_tokens` when thinking is on (`max_tokens=25904,
+   * budget=16384` → exactly 16384 output tokens, `stop_reason: max_tokens`),
+   * and Pi turns that into "generation hit the token cap". So the budget pi
+   * sends IS the summarization ceiling, and it must clear the level's budget
+   * with room left for the summary text.
+   */
+  const CONTEXT_SAFETY_TOKENS = 4096
+  const CONTEXT_SAFETY_RATIO = 0.15
+  const MIN_OUTPUT_WITH_RATIO_MARGIN = 32768
+  const MIN_ANSWER_TOKENS = 1024
+
+  function clampMaxTokensToContext(input: number, maxTokens: number): number {
+    const margin = Math.max(CONTEXT_SAFETY_TOKENS, Math.ceil(input * CONTEXT_SAFETY_RATIO))
+    let room = PI_PROFILE_CONTEXT_TOKENS - input - margin
+    if (room < MIN_OUTPUT_WITH_RATIO_MARGIN) {
+      room = Math.min(MIN_OUTPUT_WITH_RATIO_MARGIN, PI_PROFILE_CONTEXT_TOKENS - input - CONTEXT_SAFETY_TOKENS)
+    }
+    return Math.min(maxTokens, Math.max(1, room))
+  }
+
+  function wireCeiling(input: number, budget: number) {
+    // base.maxTokens is already context-clamped; adjustMaxTokensForThinking
+    // adds the budget, then re-clamps; the provider sends
+    // min(budget, max_tokens − 1024) as budget_tokens.
+    const base = clampMaxTokensToContext(input, PI_MAX_TOKENS_FALLBACK)
+    const maxTokens = clampMaxTokensToContext(input, Math.min(base + budget, PI_MAX_TOKENS_FALLBACK))
+    const sentBudget = Math.min(budget, Math.max(0, maxTokens - MIN_ANSWER_TOKENS))
+    // Endpoint behaviour: with thinking on, output is capped at budget_tokens.
+    return { maxTokens, sentBudget, endpointCeiling: sentBudget }
+  }
+
+  test("the budget the endpoint receives is larger than the stock 16384", () => {
+    expect(PI_LOCAL_THINKING_BUDGETS["high"]).toBe(32_768)
+    const trigger = PI_PROFILE_CONTEXT_TOKENS - PI_LOCAL_COMPACTION_RESERVE_TOKENS
+    const { sentBudget } = wireCeiling(trigger, PI_LOCAL_THINKING_BUDGETS["high"] as number)
+    expect(sentBudget).toBe(31_744)
+    expect(sentBudget).toBeGreaterThan(16_384)
+    // Real summaries in the reference session reached 21_643 output tokens;
+    // the old 16384 ceiling truncated them, the new one does not.
+    expect(sentBudget).toBeGreaterThan(21_643)
+  })
+
+  test("the reserve is what makes that budget reachable", () => {
+    const level = PI_LOCAL_THINKING_BUDGETS["high"] as number
+    const shipped = wireCeiling(
+      PI_PROFILE_CONTEXT_TOKENS - PI_LOCAL_COMPACTION_RESERVE_TOKENS,
+      level,
+    )
+    // At Pi's own 183616 trigger the clamp leaves 12288, so the provider trims
+    // the budget back to 11264 — the raised budget alone buys nothing there.
+    const unbudgeted = wireCeiling(
+      PI_PROFILE_CONTEXT_TOKENS - 16_384,
+      level,
+    )
+    expect(unbudgeted.sentBudget).toBe(11_264)
+    expect(shipped.sentBudget).toBeGreaterThan(unbudgeted.sentBudget * 2)
+  })
+
+  test("settings emit thinking budgets for local only", () => {
+    for (const profileId of ["local", "local2"] as const) {
+      const settings = buildPiSettingsJson({
+        profileId,
+        searchEnabled: false,
+        browseEnabled: false,
+      })
+      expect(settings.thinkingBudgets).toEqual({ high: 32_768 })
+      expect(settings.compaction.reserveTokens).toBe(PI_LOCAL_COMPACTION_RESERVE_TOKENS)
+    }
+    for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
+      const settings = buildPiSettingsJson({
+        profileId,
+        searchEnabled: false,
+        browseEnabled: false,
+      })
+      // Absent, not `{}`: an empty object would also override nothing, but its
+      // presence in the mirror is a lie about what the launch configured.
+      expect(settings.thinkingBudgets).toBeUndefined()
+      expect("thinkingBudgets" in settings).toBe(false)
+    }
   })
 })
 
