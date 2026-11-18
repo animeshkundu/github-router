@@ -155,8 +155,9 @@ plus the mode identity. Each surface rides a flag:
 
 Always injected regardless of flags (like Claude's operating
 defaults): `models.json` (routing is load-bearing), `mcp.json` (the
-`search` group at minimum), minimal `settings.json`, `APPEND_SYSTEM.md`
-digest, statusline footer (built into
+`search` group at minimum), minimal `settings.json`, `keybindings.json`
+(frees `shift+tab` for plan mode — see [Plan mode](#plan-mode)),
+`APPEND_SYSTEM.md` digest, statusline footer (built into
 the `gh-router-pi` extension — no third-party package; opt out with
 `GH_ROUTER_DISABLE_AIC_STATUSLINE=1`), plan mode (built into the same
 extension — see [Plan mode](#plan-mode); no flag, no package), toolbelt PATH
@@ -356,6 +357,15 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   ceiling — the Pi-native analogue of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. The
   extension's `session_before_compact` handler observes only and always
   falls back to native.
+- **Tool choice steered in the digest, not narrowed.** Pi's own per-tool
+  guidelines ship for `read`/`write`/`edit` but not for `grep`/`find`/`ls`,
+  and its "use bash for ls, rg, find" rule fires only when those dedicated
+  tools are absent — so a full-roster launch is told nothing. The digest
+  carries one line (`PI_TOOL_PREFERENCE_LINE`) saying both halves of the
+  policy: prefer `read`/`write`/`edit`/`grep`/`find`/`ls` over shelling out to
+  `cat`/`sed`/`python`, and still reach for `rg`, `jq`, `ast-grep`, `git` and
+  the build/test commands when those are the better instrument. No tool is
+  removed from the roster to enforce it.
 - **Pi lifecycle respected.** Version floor Pi ≥ 1.3.0 (`PI_MIN_VERSION`,
   `src/lib/pi-version-check.ts`) / Node ≥ 22.19. Startup never waits on npm:
   a fast local `pi --version` probe gates
@@ -454,8 +464,17 @@ extension a user has to install. `github-router pi` therefore generates the
 equivalent into its own `local:gh-router-pi` extension, always on, for every
 profile — no flag, no package, no model-facing tool.
 
-**Toggle** with `Ctrl+Alt+P` or `/plan`; `/plan-status` prints the current
-step list. Plan mode closes exactly one door:
+**Toggle** with `Shift+Tab` — the Claude Code key — or `/plan`;
+`/plan-status` prints the current step list. Pi binds `shift+tab` to
+`app.thinking.cycle` and treats it as reserved, so an extension cannot claim
+it. The launcher therefore writes `<mirror>/keybindings.json` moving that one
+action to `Ctrl+Shift+T` (free in pi's table and in every bundled package),
+which frees the key without costing thinking-level cycling. Your own
+`keybindings.json` merges underneath: other bindings survive, and a
+`app.thinking.cycle` you already moved off `shift+tab` is left alone. The
+invariant enforced is "`shift+tab` is unbound", never "our value wins".
+`Ctrl+Alt+P` stays registered as the fallback for a host where the keybindings
+file is absent. Plan mode closes exactly one door:
 
 - `edit`, `write` and `apply_patch` are refused by a `tool_call` handler. They
   stay in the active tool set — deliberately. An earlier revision also removed
@@ -467,15 +486,68 @@ step list. Plan mode closes exactly one door:
   shown. One barrier the model can reach and read beats two that shadow each
   other; a `write` attempt now costs one turn and comes back with the sentence
   that says where the plan goes.
-- **One file is writable: the plan.** `.github-router/plans/pi-plan/plan.md`
-  — the path is pinned by the extension and never chosen by the model, and a
+- **One file is writable: this session's plan.**
+  `.github-router/plans/pi-plan-<session-id>/plan.md` — derived by the extension
+  from `ctx.sessionManager.getSessionId()`, never chosen by the model, and a
   `write`/`edit` is admitted only when the *resolved* path equals it. Claude
   Code's plan mode is a one-write mode (the plan is an editable Doc); without
-  the exception our model would have no artifact to hand back. The comparison
-  runs on a normalized absolute path, so `./…`, `//`, and traversal that lands
-  on the plan file are admitted while a sibling (`notes.md`), a look-alike
-  (`plan.md.bak`), another plan directory, or `../plan.md` are not.
-  `apply_patch` has no single target to check, so it has no exception.
+  the exception our model would have no artifact to hand back.
+
+  The session id is what makes parallel use safe. A single pinned
+  `.github-router/plans/pi-plan/plan.md` was the original design and it does not
+  survive two sessions in one repo: both resolved the same path, so both cleared
+  the gate — there is no ownership in a path comparison — and the second plan
+  silently replaced the first. An `edit` written against the old text then
+  failed with a message about fuzzy matching, which describes the symptom and
+  not the collision. Everything else in plan mode was already per-session (the
+  mode, the steps and the execution flag live in the session's own transcript);
+  the file was the last piece of shared mutable state. Claude Code solves the
+  same problem the same way — its artifact hook reads `tool_input.planFilePath`
+  "per-session; never the globally-newest file in the shared plans dir".
+
+  Derived rather than generated: a resumed session has to land back on the file
+  it started, and the session id is the only thing stable across resume (it is
+  in the session-file header and restored on `--resume`), so resume safety is
+  free and no plan registry is needed. The full id is used rather than a hash or
+  a prefix so a plan directory traces to the session that wrote it; UUIDv7 is
+  time-ordered, so a prefix would collide for launches in the same millisecond.
+  The id is sanitized to `[A-Za-z0-9._-]`, which makes traversal structurally
+  impossible (no separator survives, and every segment is prefixed with
+  `pi-plan-`, so a dots-only segment is unreachable). Sanitizing is lossy, and
+  lossy is a collision: Pi's own id validator admits `.`, so `a.b` and `a-b`
+  are both legal ids — which is why dots are kept rather than replaced, and why
+  an id the sanitizer had to CHANGE (a dropped character, a trim, or the
+  96-character cap) carries an eight-hex digest of its original bytes instead of
+  silently merging with the id it resembles. Generated UUIDv7 ids never take
+  that path, so the readable form that traces to the transcript filename is the
+  common case. It is still one `<slug>` segment under
+  `.github-router/plans/`, so the `/gh-plan` → `<slug>/plan.md` convention
+  still describes the shape.
+
+  A host that cannot report a session id (an older Pi, a `getSessionId` that
+  throws) falls back to the single `.github-router/plans/pi-plan/plan.md`,
+  which is exactly the previous behaviour — fail-open, never fail-closed.
+
+  A fork (`session_start` with `reason: "fork"`) is where the two designs meet.
+  Pi copies the parent's entries into the forked session, so a fork inherits the
+  plan *mode* and the checkbox state — while resolving a **new** id, so its plan
+  file has never been written and the parent's is refused. That is the intended
+  trade: a fork cannot rewrite the plan it branched from, and it starts from an
+  empty file rather than a stale copy. The brief is worded for that — "this one
+  plan file", not "the SAME file" — because the model is told to keep ONE plan,
+  not told to keep the parent's.
+
+  The path gate is platform-agnostic: separators are unified before comparison,
+  so on a Windows cwd (`C:\work\repo`) the backslash, forward-slash, mixed,
+  drive-absolute and `.\`-relative spellings of the plan file are all admitted,
+  while a sibling, a look-alike, another drive, a UNC share and another
+  session's plan directory are all refused.
+
+  The comparison runs on a normalized absolute path, so `./…`, `//`, and
+  traversal that lands on this session's plan file are admitted while a sibling
+  (`notes.md`), a look-alike (`plan.md.bak`), another plan directory — including
+  **another session's** plan directory — or `../plan.md` are not. `apply_patch`
+  has no single target to check, so it has no exception.
 
 Everything else stays available, deliberately. `bash` and `powershell` are
 both allowed; so are MCP tools, `subagent`/`workflow`, `todo` writes, and
@@ -506,9 +578,10 @@ critical files / verification to the plan file, summarise in the reply. It
 ends with the two norms a frontier model actually needs — leaving plan mode is
 the user's action, so never ask for plan approval through `ask_user` or prose;
 and if an action would be described as *doing* the work rather than *planning*
-it, it waits — plus the rule that a user who asks for changes gets a revision
-of the same file, not a second plan. That is how a capable model is kept in
-planning mode; a 600-line command table was how a weak one was fenced in.
+it, it waits — plus the rule that this session keeps ONE plan file: a user who
+asks for changes gets a revision in place, not a second plan. That is how a
+capable model is kept in planning mode; a 600-line command table was how a weak
+one was fenced in.
 
 - The injected context is `display: false` and only appears on a real user
   turn — a background notification cannot re-add it. Pi appends and persists
@@ -526,7 +599,8 @@ plan state (the mode, the step list, the widget) and nothing else, and a test
 asserts that a saved `toolsBeforePlan` cannot widen a narrower live roster.
 Plan state persists through a custom session entry — one per real change, not
 per turn — and starting a fresh session (`/new`, a fork into an empty branch)
-releases it.
+releases it. The plan FILE is per-session too (see above), so a fork into a new
+session gets its own file and cannot edit the one it forked from.
 
 **Checklist.** A numbered list under a plan heading — `Plan:`, `## Plan`,
 `## Recommended approach`, `## Steps`, `## Implementation plan` — is parsed into
@@ -544,11 +618,14 @@ plan and a todo list stay separate stores.
 the `gh-plan` skill (only with `--swe`) writes a durable `plan.md` plus a
 `.complete` marker for a multi-agent pipeline. Both exist on purpose — the
 first is interactive exploration, the second is an artifact other agents read.
+They differ in one property worth knowing: plan mode's file name is derived from
+the session, so two parallel Pi sessions cannot collide. `gh-plan`'s slug is
+chosen by the model, so two parallel `--swe` runs in one repo still can.
 
 Fail-open throughout: every Pi API the section touches is feature-probed, so a
 Pi build that grew or dropped one degrades to "no plan mode" rather than a
-broken session. `Ctrl+Alt+P` can be intercepted by some terminals; `/plan` is
-the fallback.
+broken session. `Shift+Tab` follows the converted binding, so a terminal that
+swallows the sequence loses it too; `/plan` is the fallback that always works.
 
 ## Files
 
