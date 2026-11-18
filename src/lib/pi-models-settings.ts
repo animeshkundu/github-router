@@ -129,6 +129,24 @@ export const PI_TOOL_PREFERENCE_LINE =
   "- Use the dedicated tools where they fit — read/write/edit for files and grep/find/ls for search — instead of shelling out to cat, sed, or python; but reach for rg, jq, ast-grep, git, and the build/test commands whenever those are the better tool for the job."
 
 /**
+ * The search-order steer, emitted only when this launch serves `code`.
+ *
+ * The tool's own description already says semantic-first with a labelled
+ * lexical fallback, but a description is read once at roster time and the
+ * model still reaches for `grep` first on exact strings. This sentence is the
+ * ordering, stated where it is read every turn: narrow by meaning first,
+ * because a semantic hit set is ranked and small, then fall back to
+ * `rg`/`grep` for what meaning cannot answer — every occurrence, a literal
+ * token, a regex, a filename.
+ *
+ * Only emitted when the launch actually serves the tool (`surfaces.codeSearch`,
+ * i.e. `--search` or Bluebird). Naming a tool that is not in the roster is the
+ * failure mode the digest exists to avoid.
+ */
+export const PI_SEARCH_ORDER_LINE =
+  "- When code search is available, narrow with semantic `code` search first — it ranks by meaning and returns a small relevant set — then reach for rg/grep for what meaning cannot answer: every occurrence, an exact token, a regex, or a filename."
+
+/**
  * The Copilot-backed family contract for a Pi profile. `cheapest2` and
  * `balanced2` are derived from their bases, so every resolver below reads one
  * object and a `-2` launch cannot pick up a base literal by omission.
@@ -1655,7 +1673,7 @@ export function buildPiLaunchCard(opts: PiLaunchCardOpts): string {
  */
 export function buildPiAppendSystem(
   profileId: PiProfileId,
-  opts: { peers?: boolean } = {},
+  opts: { peers?: boolean; codeSearch?: boolean } = {},
 ): string {
   const peers = opts.peers !== false;
   const advisor = peers ? piAdvisorModel(profileId) : undefined;
@@ -1664,6 +1682,7 @@ export function buildPiAppendSystem(
     "",
     `- Lead owns planning directly; there is no Plan subagent.`,
     PI_TOOL_PREFERENCE_LINE,
+    ...(opts.codeSearch === true ? [PI_SEARCH_ORDER_LINE] : []),
   ];
   if (peers) {
     const oracle = piOracleEnabled(profileId)

@@ -17,9 +17,11 @@ import {
   mergePiKeybindingsSettings,
   PI_THINKING_CYCLE_ACTION,
   PI_THINKING_CYCLE_REBIND,
+  PI_SEARCH_ORDER_LINE,
   PI_TOOL_PREFERENCE_LINE,
   piProfileModelIds,
 } from "~/lib/pi-models-settings"
+import { resolvePiSurfaces } from "~/lib/pi-mcp-config"
 import {
   CHEAPEST_CONSULT_CONTRACT,
   CHEAPEST_CONSULT_CONTRACT_POINTER,
@@ -453,6 +455,85 @@ describe("pi digest: native tools first, shell when it is the better tool", () =
     const tools = settings.defaultTools ?? []
     for (const tool of ["read", "write", "edit", "grep", "find", "ls", "bash"]) {
       expect(tools).toContain(tool)
+    }
+  })
+})
+
+describe("pi digest: semantic search narrows, rg/grep answers what meaning cannot", () => {
+  test("the line rides only when this launch serves `code`", () => {
+    // A launch without `--search` (and without Bluebird) has no `code` tool in
+    // the roster, so naming it would be a dead pointer — the exact failure the
+    // digest exists to prevent.
+    for (const profileId of ["cheapest", "local", "balanced2"] as const) {
+      expect(buildPiAppendSystem(profileId, { codeSearch: true })).toContain(
+        PI_SEARCH_ORDER_LINE,
+      )
+      expect(buildPiAppendSystem(profileId, { codeSearch: false })).not.toContain(
+        PI_SEARCH_ORDER_LINE,
+      )
+      // Absent means no code search: the default must not advertise one.
+      expect(buildPiAppendSystem(profileId)).not.toContain(PI_SEARCH_ORDER_LINE)
+    }
+  })
+
+  test("the ordering is semantic first and names the shell fallback", () => {
+    // Both halves are load-bearing, same as the tool-preference steer: the
+    // ordering alone would leave the model grepping for concepts, and the
+    // fallback alone would not say which way round they go.
+    expect(PI_SEARCH_ORDER_LINE).toContain("semantic")
+    expect(PI_SEARCH_ORDER_LINE).toContain("first")
+    for (const tool of ["rg", "grep"]) {
+      expect(PI_SEARCH_ORDER_LINE).toContain(tool)
+    }
+    // Meaning cannot answer these; the model must know the shell still owns them.
+    for (const job of ["every occurrence", "exact token", "regex", "filename"]) {
+      expect(PI_SEARCH_ORDER_LINE).toContain(job)
+    }
+    expect(PI_SEARCH_ORDER_LINE.indexOf("semantic")).toBeLessThan(
+      PI_SEARCH_ORDER_LINE.indexOf("rg/grep"),
+    )
+  })
+
+  test("the surface flag follows --search and Bluebird, not the profile", () => {
+    // `surfaces.codeSearch` is the same predicate the MCP config uses to
+    // publish the group, so digest and roster cannot disagree.
+    for (const bluebirdEnabled of [false, true]) {
+      const on = resolvePiSurfaces({
+        profileId: "local",
+        searchEnabled: true,
+        bluebirdEnabled,
+        adoEnabled: false,
+        kustoEnabled: false,
+        cloudAgentEnabled: false,
+        workiqEnabled: false,
+        browseAgentAvailable: false,
+        directBrowserAvailable: false,
+        artifactToolsAvailable: false,
+        peersEnabled: true,
+      })
+      const off = resolvePiSurfaces({
+        profileId: "local",
+        searchEnabled: false,
+        bluebirdEnabled,
+        adoEnabled: false,
+        kustoEnabled: false,
+        cloudAgentEnabled: false,
+        workiqEnabled: false,
+        browseAgentAvailable: false,
+        directBrowserAvailable: false,
+        artifactToolsAvailable: false,
+        peersEnabled: true,
+      })
+      if (bluebirdEnabled) {
+        // Bluebird answers `code` with or without --search.
+        expect(off.codeSearch).toBe(true)
+      } else {
+        expect(on.codeSearch).toBe(true)
+        expect(off.codeSearch).toBe(false)
+      }
+      expect(buildPiAppendSystem("local", { codeSearch: on.codeSearch })).toContain(
+        PI_SEARCH_ORDER_LINE,
+      )
     }
   })
 })

@@ -686,7 +686,7 @@ export const pi = defineCommand({
       for (const prompt of buildPiPrompts({ profileId, swe: sweEnabled, peers: peersEnabled })) {
         await writeTextFile(path.join(mirror, "prompts", `${prompt.name}.md`), prompt.content)
       }
-      await writeTextFile(path.join(mirror, "APPEND_SYSTEM.md"), buildPiAppendSystem(profileId, { peers: peersEnabled }))
+      await writeTextFile(path.join(mirror, "APPEND_SYSTEM.md"), buildPiAppendSystem(profileId, { peers: peersEnabled, codeSearch: surfaces.codeSearch }))
 
       // Static bridge synthesis into mirror AGENTS.md (Pi-native candidate).
       // Uses the collection stashed above; idempotent via fenced replace.
