@@ -651,6 +651,45 @@ export interface PiCompactionSettings {
 }
 
 /**
+ * Local-family compaction reserve: 80% of the 200K window.
+ *
+ * The Copilot derivation below optimises for a price cliff; the local
+ * endpoint has none, so the binding constraint there is the summarization
+ * request itself. Measured on the live endpoint (`https://…:11111`):
+ * with `thinking` enabled the generated ceiling is `thinking.budget_tokens`,
+ * NOT `max_tokens` — `max_tokens=25904, budget=16384` stops at exactly
+ * 16384 output tokens with `stop_reason: max_tokens`, and `budget=30000`
+ * returns 30000. Pi then maps that stop to `length` and
+ * `getSummarizationFailure` refuses the truncated summary
+ * (`generation hit the token cap and the summary is incomplete`).
+ *
+ * Triggering at 160K instead of Pi's 183K default leaves the clamp enough
+ * room that the 32768 budget below is reachable: at a 160K estimate
+ * `clampMaxTokensToContext` yields 32768, so the provider sends
+ * `budget = min(32768, 32768 − 1024)`. Raised reserves alone are not enough
+ * (the budget, not the trigger, is the ceiling) — both halves ship together.
+ */
+export const PI_LOCAL_COMPACTION_RESERVE_TOKENS = 40_000 as const
+
+/**
+ * Thinking budgets for LOCAL launches only.
+ *
+ * Pi merges these over its `{minimal:1024, low:2048, medium:8192, high:16384}`
+ * defaults, and `high` is the level the local rows resolve to (their rows
+ * carry no `thinkingLevelMap`, so `clampReasoning` walks `max`/`xhigh` down
+ * to `high`). 16384 is the ceiling that truncates real summaries — 5 of the
+ * 19 compactions in the reference session reported output above it, up to
+ * 21643. 32768 roughly doubles the summarization headroom and costs nothing
+ * on local inference.
+ *
+ * Deliberately NOT emitted for Copilot profiles: there the thinking budget
+ * is billed reasoning tokens on every turn, not a free local decode.
+ */
+export const PI_LOCAL_THINKING_BUDGETS = Object.freeze({
+  high: 32_768,
+}) as Readonly<Record<string, number>>
+
+/**
  * Derive Pi compaction budgets from live catalog `max_prompt_tokens`
  * ceilings AND each model's cheap-tier window — the Pi-native analogue
  * of `deriveAutoCompactWindowTokens`. Pi triggers at
@@ -662,16 +701,39 @@ export interface PiCompactionSettings {
  * safe); overrides carry each model's own value. Unknown catalog (no
  * prompt metadata) → Pi built-in defaults so a missing signal can never
  * disable compaction.
+ *
+ * LOCAL launches take a different path entirely (see
+ * `PI_LOCAL_COMPACTION_RESERVE_TOKENS`): the local catalog carries no
+ * `max_prompt_tokens`, so the price-cliff derivation has nothing to read,
+ * and the constraint that matters is the endpoint's thinking-budget
+ * ceiling. Every local row is the same 200K window, so one flat reserve
+ * covers the whole roster.
  */
 export function derivePiCompactionSettings(
   catalog: ReadonlyArray<PiCatalogModel> | undefined,
   modelIds: ReadonlyArray<string>,
+  profileId?: PiProfileId,
 ): PiCompactionSettings {
   const FALLBACK = {
     enabled: true as const,
     reserveTokens: 16384,
     keepRecentTokens: 20000,
     modelOverrides: {},
+  }
+  if (profileId !== undefined && isLocalFamily(profileId)) {
+    const localOverrides: PiCompactionSettings["modelOverrides"] = {}
+    for (const id of modelIds) {
+      localOverrides[`${PI_PROVIDER_NAME}/${id}`] = {
+        reserveTokens: PI_LOCAL_COMPACTION_RESERVE_TOKENS,
+        keepRecentTokens: 20000,
+      }
+    }
+    return {
+      enabled: true,
+      reserveTokens: PI_LOCAL_COMPACTION_RESERVE_TOKENS,
+      keepRecentTokens: 20000,
+      modelOverrides: localOverrides,
+    }
   }
   if (!catalog || catalog.length === 0) return FALLBACK
   const perModel = new Map<string, number>()
@@ -726,6 +788,12 @@ export interface PiSettingsJson {
   enabledModels: Array<string>
   defaultTools: Array<string>
   compaction: PiCompactionSettings
+  /**
+   * Per-level thinking budgets. Emitted for LOCAL launches only (see
+   * `PI_LOCAL_THINKING_BUDGETS`) — on Copilot these are billed reasoning
+   * tokens on every turn. Absent means Pi's own defaults win.
+   */
+  thinkingBudgets?: Record<string, number>
   /**
    * Per-model startup thinking levels keyed by exact `provider/modelId`.
    * Keeps the picker on tiers the catalog actually supports so Pi never
@@ -1247,7 +1315,12 @@ export function buildPiSettingsJson(opts: {
         }
       : {}),
     branchSummary: { reserveTokens: 16384, skipPrompt: false },
-    compaction: derivePiCompactionSettings(opts.catalog, modelIds),
+    compaction: derivePiCompactionSettings(opts.catalog, modelIds, opts.profileId),
+    // Local-only: unpaid local decode headroom for summarization. On Copilot
+    // these same budgets would be billed reasoning tokens every turn.
+    ...(isLocalFamily(opts.profileId)
+      ? { thinkingBudgets: { ...PI_LOCAL_THINKING_BUDGETS } }
+      : {}),
     retry: { enabled: true, maxRetries: 3, provider: { maxRetries: 0 } },
     packages: [
       ...(peers
