@@ -1,11 +1,16 @@
 /**
- * Loader-behavior tests for `src/lib/rerank.ts` with a MOCKED flashrank-js.
+ * Loader-behavior tests for `src/lib/rerank.ts` with a MOCKED cross-encoder
+ * (`~/lib/rerank-cross-encoder`).
  *
  * Real ONNX sessions crash `bun test` at teardown (SIGABRT after a green
  * run; see tests/rerank.test.ts header), so every loader interaction here
  * goes through this deterministic fake — no native code, no network, no
  * model downloads. Live-model verification is `bun run
  * scripts/verify-rerank-live.ts` (manual/CI script lane, not `bun test`).
+ *
+ * The mock targets OUR module, not `@huggingface/transformers`: the seam is
+ * the one `src/lib/rerank.ts` itself imports, so it survives a change of
+ * model library (it did — the former `flashrank-js` seam).
  *
  * Isolated (own process): the module mock is process-global.
  */
@@ -18,27 +23,25 @@ let fakeShouldThrow = false
 let fakeOrder: ((n: number) => Array<number>) | null = null
 const requestedModels: Array<string> = []
 
-mock.module("flashrank-js", () => ({
-  Reranker: {
-    create: async (opts: { model: string }) => {
-      requestedModels.push(opts.model)
-      if (fakeLatencyMs > 0) await Bun.sleep(fakeLatencyMs)
-      if (fakeShouldThrow) throw new Error("fake load failure")
-      return {
-        rerank: async (req: {
-          query: string
-          documents: Array<string>
-          topN: number
-        }) => {
-          const n = Math.min(req.topN, req.documents.length)
-          const order = fakeOrder
-            ? fakeOrder(req.documents.length)
-            : req.documents.map((_, i) => i)
-          return order.slice(0, n).map((index) => ({ index, score: 1 - index * 0.1 }))
-        },
-        dispose: async () => {},
-      }
-    },
+mock.module("~/lib/rerank-cross-encoder", () => ({
+  createCrossEncoder: async (model: string) => {
+    requestedModels.push(model)
+    if (fakeLatencyMs > 0) await Bun.sleep(fakeLatencyMs)
+    if (fakeShouldThrow) throw new Error("fake load failure")
+    return {
+      rerank: async (req: {
+        query: string
+        documents: Array<string>
+        topN: number
+      }) => {
+        const n = Math.min(req.topN, req.documents.length)
+        const order = fakeOrder
+          ? fakeOrder(req.documents.length)
+          : req.documents.map((_, i) => i)
+        return order.slice(0, n).map((index) => ({ index, score: 1 - index * 0.1 }))
+      },
+      dispose: async () => {},
+    }
   },
 }))
 
@@ -68,7 +71,7 @@ afterEach(() => {
   delete process.env.GH_ROUTER_SEARCH_MAX_WEIGHT
 })
 
-describe("loader behavior (mocked flashrank-js)", () => {
+describe("loader behavior (mocked cross-encoder)", () => {
   test("fast loader returns the fake order", async () => {
     fakeOrder = (n) => [...Array(n).keys()].reverse()
     const out = await rerankModule.rerankDocuments("q q", ["a", "b", "c"], 3)

@@ -3,8 +3,8 @@
  *
  * Run: `bun scripts/verify-rerank-live.ts`
  *
- * Uses REAL flashrank-js models (downloads tiny ~4MB + mini ~23MB on first
- * run, cached thereafter). NOT part of `bun test`: real ONNX sessions crash
+ * Uses the REAL cross-encoder models (downloads tiny ~4MB + mini ~23MB on
+ * first run, cached thereafter). NOT part of `bun test`: real ONNX sessions crash
  * `bun test` at teardown (SIGABRT after a green run) while identical `bun
  * run` scripts exit cleanly — see tests/rerank.test.ts header. This script
  * is the live-verification lane (manual + CI script step).
@@ -21,9 +21,8 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "nod
 import os from "node:os"
 import path from "node:path"
 
-import { Reranker } from "flashrank-js"
-
 import { searchCode } from "~/lib/code-search"
+import { createCrossEncoder } from "~/lib/rerank-cross-encoder"
 
 let failures = 0
 function check(name: string, cond: boolean, detail = ""): void {
@@ -37,7 +36,7 @@ function check(name: string, cond: boolean, detail = ""): void {
 // ---- 1. tiny model quality + timing ----
 {
   const t0 = Date.now()
-  const tiny = await Reranker.create({ model: "tiny" })
+  const tiny = await createCrossEncoder("tiny")
   const loadMs = Date.now() - t0
   const docs = [
     "const x = 42;",
@@ -56,7 +55,7 @@ function check(name: string, cond: boolean, detail = ""): void {
 // ---- 2. mini model loads ----
 {
   const t0 = Date.now()
-  const mini = await Reranker.create({ model: "mini" })
+  const mini = await createCrossEncoder("mini")
   console.log(`info mini load=${Date.now() - t0}ms`)
   const out = await mini.rerank({
     query: "auth token refresh",
@@ -78,6 +77,25 @@ function check(name: string, cond: boolean, detail = ""): void {
         `// retry policy around the upstream fetch\nexport const ${name[0]} = 1\n`,
       )
     }
+    // The loader is lazily warmed: the FIRST natural-language query races a
+    // cold model load (≈1s) against the 150ms rerank budget and therefore
+    // MUST fall back to BM25F — that degrade is the documented contract, not
+    // a failure. Asserting `BM25F+FlashRank` on that first query only passes
+    // on a process whose reranker was already warm, which is why this block
+    // checks both halves: cold → BM25F, then (after the load drains) warm →
+    // BM25F+FlashRank.
+    const cold = await searchCode({
+      query: "retry policy around",
+      workspace: root,
+      mode: "ranked",
+      summary: false,
+    })
+    console.log(`info NL query (cold) algorithm=${cold.ranking.algorithm} hits=${cold.results.length}`)
+    check("cold NL query falls back to BM25F", cold.ranking.algorithm === "BM25F")
+    check("cold NL query returns hits", cold.results.length >= 3)
+
+    const { drainRerankerLoads: drainForWarm } = await import("~/lib/rerank")
+    await drainForWarm()
     const t0 = Date.now()
     const nl = await searchCode({
       query: "retry policy around",
@@ -85,9 +103,9 @@ function check(name: string, cond: boolean, detail = ""): void {
       mode: "ranked",
       summary: false,
     })
-    console.log(`info NL query elapsed=${Date.now() - t0}ms hits=${nl.results.length}`)
-    check("NL query uses BM25F+FlashRank", nl.ranking.algorithm === "BM25F+FlashRank")
-    check("NL query returns hits", nl.results.length >= 3)
+    console.log(`info NL query (warm) elapsed=${Date.now() - t0}ms hits=${nl.results.length}`)
+    check("warm NL query uses BM25F+FlashRank", nl.ranking.algorithm === "BM25F+FlashRank")
+    check("warm NL query returns hits", nl.results.length >= 3)
 
     const ident = await searchCode({
       query: "retry",
@@ -103,7 +121,7 @@ function check(name: string, cond: boolean, detail = ""): void {
 
 // ---- 4. 16-way concurrent rerank (burst shape) ----
 {
-  const tiny = await Reranker.create({ model: "tiny" })
+  const tiny = await createCrossEncoder("tiny")
   const docs = ["export function refreshAuthToken() { return 1; }", "const x = 42;"]
   const t0 = Date.now()
   const results = await Promise.all(

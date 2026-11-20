@@ -27,6 +27,16 @@
  * If a future dependency genuinely needs its postinstall, trust it AND make
  * sure a failure there cannot fail the install - an install step whose success
  * depends on an upstream artifact host is not something we can promise.
+ *
+ * That promise has to hold for CONSUMERS, not just for this checkout. The
+ * `trustedDependencies` gate above is Bun-only and the `overrides` field is
+ * honoured only from a ROOT package.json, so neither exists once the package
+ * is installed by `npx`, `npm i -g`, or as somebody's dependency. On
+ * 2026-11-20 `npx github-router@latest` died on linux/x64 exactly that way:
+ * `flashrank-js` pulled transformers 3.8.1 -> ORT 1.21.0, whose postinstall
+ * 404s, and the root-only pins never applied. The invariant that matters is
+ * therefore structural - no REGULAR dependency may reach an ORT whose
+ * installer can fail - and it is pinned below.
  */
 
 import { describe, expect, test } from "bun:test"
@@ -75,17 +85,33 @@ describe("install-time dependency safety", () => {
     expect(Number(m![2])).toBeGreaterThanOrEqual(22)
   })
 
-  test("flashrank's transformers is resolved through an explicit override", () => {
-    // flashrank-js declares `@huggingface/transformers: ^3.0.0`, and 3.x pins
-    // ORT 1.21.0 - the version whose installer 404s. The override in
-    // package.json is the whole reason the resolved ORT is 1.30; drop it and
-    // the ORT version becomes a transitive pin we do not control.
-    const pkg = readJson("package.json") as { overrides?: Record<string, string> }
-    expect(pkg.overrides?.["@huggingface/transformers"]).toMatch(/^4\./)
+  test("no CONSUMER dependency tree can reach onnxruntime-node@1.21", () => {
+    // The 2026-11-20 lesson. The first fix for the ORT-1.21 404 used two
+    // ROOT-ONLY mechanisms: an `overrides` entry and Bun's
+    // `trustedDependencies` gate. Both held for this repo and for nothing
+    // else. npm honours `overrides` only from the ROOT package.json (a
+    // dependency's own overrides are ignored), and `npx` / `npm i -g` have no
+    // project file to carry an `allowScripts` policy. Consumers therefore kept
+    // resolving `flashrank-js -> @huggingface/transformers@3.8.1 ->
+    // onnxruntime-node@1.21.0` and died in the INSTALL step on linux/x64 —
+    // before any of this package's code could run. The durable fix is a
+    // DIRECT transformers-4 dependency, which pins ORT 1.30.
+    const pkg = readJson("package.json") as {
+      dependencies?: Record<string, string>
+      optionalDependencies?: Record<string, string>
+      overrides?: Record<string, string>
+    }
+    expect(pkg.dependencies?.["flashrank-js"]).toBeUndefined()
+    expect(pkg.optionalDependencies?.["flashrank-js"]).toBeUndefined()
+    expect(pkg.dependencies?.["@huggingface/transformers"]).toMatch(/^\^4\./)
+    // The override is deliberately GONE: with flashrank-js removed nothing
+    // else pulls transformers, so a root-only pin would be dead config that
+    // reads like a consumer guarantee.
+    expect(pkg.overrides?.["@huggingface/transformers"]).toBeUndefined()
     const lock = readText("bun.lock")
-    expect(/"@huggingface\/transformers":\s*"4\./.test(lock)).toBe(true)
     // No 3.x may survive anywhere, or two ORT majors would be loaded at once
     // in the same process.
     expect(/@huggingface\/transformers@3\./.test(lock)).toBe(false)
+    expect(/flashrank-js/.test(lock)).toBe(false)
   })
 })

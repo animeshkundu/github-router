@@ -1,6 +1,6 @@
 /**
  * Integration tests for the JIT rerank stage in `searchCode` (Phase 3),
- * with a MOCKED flashrank-js.
+ * with a MOCKED cross-encoder (`~/lib/rerank-cross-encoder`).
  *
  * Real ONNX sessions crash `bun test` at teardown (see
  * tests/rerank.test.ts header), so the reranker here is a deterministic
@@ -19,22 +19,20 @@ import path from "node:path"
 
 // Deterministic fake: reverses document order. A response in reverse
 // BM25F order proves the rerank stage executed.
-mock.module("flashrank-js", () => ({
-  Reranker: {
-    create: async (_opts: { model: string }) => ({
-      rerank: async (req: {
-        query: string
-        documents: Array<string>
-        topN: number
-      }) => {
-        const n = Math.min(req.topN, req.documents.length)
-        const out: Array<{ index: number; score: number }> = []
-        for (let i = n - 1; i >= 0; i--) out.push({ index: i, score: n - i })
-        return out
-      },
-      dispose: async () => {},
-    }),
-  },
+mock.module("~/lib/rerank-cross-encoder", () => ({
+  createCrossEncoder: async (_model: string) => ({
+    rerank: async (req: {
+      query: string
+      documents: Array<string>
+      topN: number
+    }) => {
+      const n = Math.min(req.topN, req.documents.length)
+      const out: Array<{ index: number; score: number }> = []
+      for (let i = n - 1; i >= 0; i--) out.push({ index: i, score: n - i })
+      return out
+    },
+    dispose: async () => {},
+  }),
 }))
 
 let searchCode: typeof import("../../src/lib/code-search").searchCode
