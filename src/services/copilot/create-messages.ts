@@ -74,7 +74,7 @@ function buildHeaders(
  * Deliberately NOT a flag on the module or on `state`: this is a per-call
  * option, so every internal caller (Advisor, peer personas, `stand_in`) keeps
  * hitting Copilot by simply not passing it. That is what keeps `local2`'s
- * Advisor on the real `gpt-6.1-sol` while its lead turns stay local.
+ * Advisor on the real `gpt-6.2-sol` while its lead turns stay local.
  */
 export interface LocalMessagesEgress {
   /** e.g. `https://localhost:11111/v1` — the `/messages` suffix is appended. */

@@ -19,7 +19,7 @@ export function cheapestAdvisorClientEnabled(
  * Remove every caller-supplied Advisor option and insert the fixed cheapest
  * family value — the BARE slug (200K default window) from the profile
  * contract, so `cheapest` pins `gpt-5.6-sol` and `cheapest2` pins
- * `gpt-6.1-sol` through this one function. Same parser semantics as the cheap
+ * `gpt-6.2-sol` through this one function. Same parser semantics as the cheap
  * variant: keeps scanning after `--`, and the fixed option is inserted before
  * the first separator so Claude Code parses it as an option.
  */

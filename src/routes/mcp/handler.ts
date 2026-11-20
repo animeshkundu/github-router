@@ -488,7 +488,7 @@ function familyOracleDescriptor(profileId: string): string | undefined {
     // Only `local2` reaches here (both local-consult members returned above).
     // It keeps a billed Copilot Oracle, so it names the contract model — a swap
     // renames itself rather than leaving the fast-profile default ("exact Opus
-    // 5.5") in the description of a gpt-6.1-sol tool.
+    // 5.5") in the description of a gpt-6.2-sol tool.
     const contract = localContractFor(profileId)
     return `${displayModelName(contract.oracleModel)} (200K context, ${contract.oracleEffort} effort)`
   }

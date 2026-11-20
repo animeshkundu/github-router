@@ -234,7 +234,7 @@ describe("the contract derives from cheapest by spread", () => {
     // submit fail the model policy.
     expect(cheapestRewriteModelFor("cheaplocal")).toBe("gpt-5.6-sol")
     expect(cheapestRewriteModelFor("cheapest")).toBe("gpt-5.6-sol")
-    expect(cheapestRewriteModelFor("cheapest2")).toBe("gpt-6.1-sol")
+    expect(cheapestRewriteModelFor("cheapest2")).toBe("gpt-6.2-sol")
     expect(cheapestRewriteModelFor("cheaplocal")).toBe(
       CHEAPEST_PROFILE_CONTRACT.rewriteModel,
     )
@@ -387,7 +387,7 @@ describe("Copilot egress is capped to {sol, luna}", () => {
     try {
       expect(() => assertCopilotModelAllowed("gpt-6-luna")).not.toThrow()
       expect(() => assertCopilotModelAllowed("gpt-5.6-sol")).not.toThrow()
-      expect(() => assertCopilotModelAllowed("gpt-6.1-sol[1m]")).not.toThrow()
+      expect(() => assertCopilotModelAllowed("gpt-6.2-sol[1m]")).not.toThrow()
       expect(() => assertCopilotModelAllowed("claude-opus-5.5")).toThrow(
         CopilotModelRestrictedError,
       )

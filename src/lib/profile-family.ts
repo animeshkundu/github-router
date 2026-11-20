@@ -4,8 +4,8 @@
  *
  * The `-2` aliases are not separate tiers: each is its base profile with a
  * declared set of Sol identities replaced (`cheapest2`: Advisor + Oracle at
- * `gpt-6.1-sol`, Advisor effort `high`; `balanced2`: lead + reviewer at
- * `gpt-6.1-sol`, Oracle `grok-4.7`). Every consumer therefore asks the family
+ * `gpt-6.2-sol`, Advisor effort `high`; `balanced2`: lead + reviewer at
+ * `gpt-6.2-sol`, Oracle `grok-4.7`). Every consumer therefore asks the family
  * helpers below rather than comparing against one literal id, which is what
  * keeps the siblings from drifting: a check written for `cheapest` covers
  * `cheapest2` by construction instead of needing a parallel branch.
@@ -189,6 +189,7 @@ export function local2AdvisorContract(): typeof LOCAL2_PROFILE_CONTRACT {
  * than guessed at.
  */
 const MODEL_DISPLAY_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  "gpt-6.2-sol": "GPT-6.2 Sol",
   "gpt-6.1-sol": "GPT-6.1 Sol",
   "gpt-5.6-sol": "GPT-5.6 Sol",
   "gpt-6-sol": "GPT-6 Sol",

@@ -47,6 +47,7 @@ export const DISCOUNT_FACTORS: Readonly<Record<string, DiscountFactorRow>> =
   Object.freeze({
     "gpt-6-sol": row(0.28, "carried from gpt-5.6-sol; re-derive on refresh"),
     "gpt-6.1-sol": row(1.0, "unmeasured: default no discount (do not carry 0.28 without spend data)"),
+    "gpt-6.2-sol": row(1.0, "unmeasured: default no discount (do not carry 0.28 without spend data)"),
     "gpt-5.6-sol": row(0.28, "0.27-0.29 across 28d/MTD/7d/pre/9-9; write-mix refuted"),
     "claude-opus-5.5": row(0.62, "carried from opus-5; re-derive on refresh"),
     "claude-opus-5": row(0.62, "0.61-0.64 across windows; 9/7 1.02 excluded as single-day artifact"),

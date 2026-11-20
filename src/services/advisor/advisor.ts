@@ -198,7 +198,7 @@ export const ADVISOR_CHEAPEST_PROFILE_EFFORT = CHEAPEST_PROFILE_ADVISOR_EFFORT
 
 /** True only when the live family Sol entry satisfies the fixed cheapest
  * transport (Responses). The family id is supplied by the caller so
- * `cheapest2`'s `gpt-6.1-sol` goes through the same gate. */
+ * `cheapest2`'s `gpt-6.2-sol` goes through the same gate. */
 function cheapestProfileAdvisorAvailable(
   model: string = ADVISOR_CHEAPEST_PROFILE_MODEL,
 ): boolean {

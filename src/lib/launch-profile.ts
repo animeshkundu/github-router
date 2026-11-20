@@ -64,8 +64,8 @@ import type { Model, ModelsResponse } from "~/services/copilot/get-models"
  *  identities replaced (see `./cheapest2-profile-contract`,
  *  `./balanced2-profile-contract`): the roster, groups, windows and delegation
  *  graph are inherited, never copied. `cheapest2` moves the Advisor/Oracle to
- *  `gpt-6.1-sol` and the Advisor effort to `high`; `balanced2` moves the
- *  lead/reviewer to `gpt-6.1-sol` and the Oracle to `grok-4.7`. `"cheaplocal"`
+ *  `gpt-6.2-sol` and the Advisor effort to `high`; `balanced2` moves the
+ *  lead/reviewer to `gpt-6.2-sol` and the Oracle to `grok-4.7`. `"cheaplocal"`
  *  is the third cheapest sibling: the same roster, groups, windows and graph,
  *  with the Advisor and Oracle served by the local Anthropic-Messages endpoint
  *  instead of a Copilot model (see `./cheaplocal-profile-contract`). Consumers
@@ -203,7 +203,7 @@ export const BALANCED_PROFILE: LaunchProfileDescriptor = Object.freeze({
   hasCoordinator: false,
 })
 
-/** The `-m cheapest2` roster: `cheapest` with the Sol tier at `gpt-6.1-sol`
+/** The `-m cheapest2` roster: `cheapest` with the Sol tier at `gpt-6.2-sol`
  *  (Advisor and Oracle) and the Advisor at `high`. The roster itself is
  *  unchanged, so it comes from the family contract rather than a copy. */
 export const CHEAPEST2_PROFILE: LaunchProfileDescriptor = Object.freeze({
@@ -232,7 +232,7 @@ export const CHEAPLOCAL_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /** The `-m balanced2` roster: `balanced` with the Sol lead/reviewer at
- *  `gpt-6.1-sol` and the Oracle at `grok-4.7`. Roster unchanged. */
+ *  `gpt-6.2-sol` and the Oracle at `grok-4.7`. Roster unchanged. */
 export const BALANCED2_PROFILE: LaunchProfileDescriptor = Object.freeze({
   id: "balanced2",
   nativeRoster: new Set(balancedContractFor("balanced2").nativeAgentNames),
@@ -271,7 +271,7 @@ export const LOCAL_PROFILE: LaunchProfileDescriptor = Object.freeze({
 })
 
 /**
- * The `-m local2` roster: `local` plus the curated `gpt-6.1-sol`/high Advisor.
+ * The `-m local2` roster: `local` plus the curated `gpt-6.2-sol`/high Advisor.
  * The Advisor and the Oracle are the only two Copilot consumers the profile
  * has, so `peers` gains the Oracle persona next to the model-free artifact
  * tools. `workers` stays absent as on `local`: a Pi worker is neither of the
@@ -513,7 +513,7 @@ export interface ModelAliasDescriptor {
   /** Real-model overrides for derived launch profiles. A `-2` profile emits
    *  the SAME bare router-owned alias as its base (so the emitted agent files
    *  stay byte-identical apart from contract data), but its declared role
-   *  model can differ — `balanced2` reviews on `gpt-6.1-sol` while sharing
+   *  model can differ — `balanced2` reviews on `gpt-6.2-sol` while sharing
    *  `gh-router-balanced-reviewer-high` with `balanced`. Resolution therefore
    *  takes the launch profile id; absent an override the base model applies. */
   realModelByProfile?: Readonly<Record<string, string>>
@@ -1131,7 +1131,7 @@ export interface CheapestPrerequisiteCheck {
  * supported endpoints. There is no `Plan` role: the lead plans directly.
  *
  * `profileId` selects the family contract, so `-m cheapest2` validates the
- * same roster against `gpt-6.1-sol` (Advisor and Oracle) with the Advisor at
+ * same roster against `gpt-6.2-sol` (Advisor and Oracle) with the Advisor at
  * `high`. Omitting it keeps every pre-existing caller on the base profile.
  *
  * `opts.peers === false` (the Pi `--no-peers` path) validates the LEAD only:
@@ -1270,7 +1270,7 @@ export interface BalancedPrerequisiteCheck {
  * no `Plan` role: the lead owns planning directly.
  *
  * `profileId` selects the family contract, so `-m balanced2` validates
- * `gpt-6.1-sol` for the lead/reviewer and `grok-4.7` for the Oracle. Omitting
+ * `gpt-6.2-sol` for the lead/reviewer and `grok-4.7` for the Oracle. Omitting
  * it keeps every pre-existing caller on the base profile.
  *
  * `opts.peers === false` (the Pi `--no-peers` path) validates the LEAD only;
@@ -1449,7 +1449,7 @@ export interface LocalPrerequisiteCheck {
  * letting the server answer for itself).
  *
  * The ONE Copilot model the family still consumes is `local2`'s Advisor:
- * `gpt-6.1-sol`, server-side, at its default context and `high` effort. That
+ * `gpt-6.2-sol`, server-side, at its default context and `high` effort. That
  * model is checked here, and only for `local2`. `local` has no advisor at the
  * type level, so passing its contract would be a programming error rather
  * than a launch to validate.

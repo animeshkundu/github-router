@@ -53,7 +53,7 @@ export type CopilotModelPolicy =
 
 /**
  * The hardcoded Copilot allow-list for `-m local2`: the Advisor and the Oracle
- * both run on `gpt-6.1-sol`, and `luna` is the cheap tier of the same declared
+ * both run on `gpt-6.2-sol`, and `luna` is the cheap tier of the same declared
  * ceiling. Anything else a teammate or a `/model` switch names is refused.
  *
  * `luna`'s one Copilot consumer on this profile is the browser page
@@ -141,12 +141,12 @@ export function effectiveLocalProfile(
 /**
  * The family token of a Copilot model id: the trailing dash-separated segment,
  * lowercased, after removing a `[1m]` accounting suffix and any `-1m` sibling
- * marker. `gpt-6.1-sol` → `sol`, `gpt-6-luna` → `luna`,
+ * marker. `gpt-6.2-sol` → `sol`, `gpt-6-luna` → `luna`,
  * `gemini-3.1-pro-preview` → `preview`, `claude-opus-5.5` → `5.5`.
  *
  * Matching on the tier token rather than a prefix keeps the allow-list honest:
- * `gpt-5.6-sol`, `gpt-6-sol` and `gpt-6.1-sol` are one family, while
- * `gpt-6-sol-like` is not silently admitted.
+ * `gpt-5.6-sol`, `gpt-6-sol`, `gpt-6.1-sol` and `gpt-6.2-sol` are one family,
+ * while `gpt-6-sol-like` is not silently admitted.
  */
 export function copilotModelFamily(modelId: string): string {
   const withoutSuffix = modelId.trim().replace(/\[[^\]]*\]$/, "").replace(/-1m$/i, "")

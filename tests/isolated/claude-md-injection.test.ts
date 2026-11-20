@@ -1254,7 +1254,7 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
 
   // `-m balanced2`: the same prose with the Sol-6.1 lead/reviewer and the
   // Grok-4.7 Oracle. Only the Oracle descriptor may name a model here, so an
-  // unexpected "GPT-6.1 Sol" would mean the digest leaked a role label.
+  // unexpected "GPT-6.2 Sol" would mean the digest leaked a role label.
   const balanced2Digest = buildOperatingDefaultsDigest({ profile: "balanced2" })
   expect(balanced2Digest).toContain("Balanced launch profile")
   expect(balanced2Digest).toContain("(Grok 4.7 200K/medium, lead-only)")
@@ -1285,8 +1285,8 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   // and Oracle labels. Nothing else may change.
   const cheapest2Digest = buildOperatingDefaultsDigest({ profile: "cheapest2" })
   expect(cheapest2Digest).toContain("Cheapest launch profile")
-  expect(cheapest2Digest).toContain("(GPT-6.1 Sol/high, lead and `reviewer`, capped)")
-  expect(cheapest2Digest).toContain("(GPT-6.1 Sol 200K/high, lead-only)")
+  expect(cheapest2Digest).toContain("(GPT-6.2 Sol/high, lead and `reviewer`, capped)")
+  expect(cheapest2Digest).toContain("(GPT-6.2 Sol 200K/high, lead-only)")
   expect(cheapest2Digest).not.toContain("GPT-5.6 Sol")
   expect(cheapest2Digest).not.toContain("`Plan`")
   expect(cheapest2Digest).toContain("All roles run at a 200K context window")
@@ -1296,10 +1296,10 @@ test("buildOperatingDefaultsDigest provides profile-specific summaries while sta
   // identity and the Advisor effort (`medium` → `high`).
   expect(cheapest2Digest).toBe(
     cheapestDigest
-      .replaceAll("GPT-5.6 Sol", "GPT-6.1 Sol")
+      .replaceAll("GPT-5.6 Sol", "GPT-6.2 Sol")
       .replace(
-        "(GPT-6.1 Sol/medium, lead and `reviewer`, capped)",
-        "(GPT-6.1 Sol/high, lead and `reviewer`, capped)",
+        "(GPT-6.2 Sol/medium, lead and `reviewer`, capped)",
+        "(GPT-6.2 Sol/high, lead and `reviewer`, capped)",
       ),
   )
 
@@ -1384,8 +1384,8 @@ test("the -2 profiles differ from their bases only in the contract-declared labe
   // or window prose fails here rather than shipping silently.
   const cheapest = buildOperatingDefaultsDirective({ profile: "cheapest" })
   const cheapest2 = buildOperatingDefaultsDirective({ profile: "cheapest2" })
-  expect(cheapest2).toBe(cheapest.replaceAll("GPT-5.6 Sol", "GPT-6.1 Sol"))
-  expect(cheapest2).toContain("is GPT-6.1 Sol (200K/high)")
+  expect(cheapest2).toBe(cheapest.replaceAll("GPT-5.6 Sol", "GPT-6.2 Sol"))
+  expect(cheapest2).toContain("is GPT-6.2 Sol (200K/high)")
 
   const balanced = buildOperatingDefaultsDirective({ profile: "balanced" })
   const balanced2 = buildOperatingDefaultsDirective({ profile: "balanced2" })

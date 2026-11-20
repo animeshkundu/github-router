@@ -281,7 +281,7 @@ describe("pi models.json local profiles", () => {
       // Only local2 has a Copilot-served row (its advisor and oracle on Sol),
       // and that row must not be sent down the Anthropic wire. `local` allows
       // no Copilot model at all, so the id must not appear.
-      const sol = rows["gpt-6.1-sol"]
+      const sol = rows["gpt-6.2-sol"]
       if (profile === "local2") {
         expect(sol).toBeDefined()
         expect(sol.api).toBe("openai-responses")
@@ -331,7 +331,7 @@ describe("pi models.json local profiles", () => {
         expect(rows[id].headers).toEqual(expected)
       }
       // A Copilot-served row is never bound to the local launch.
-      expect(rows["gpt-6.1-sol"].headers).toBeUndefined()
+      expect(rows["gpt-6.2-sol"].headers).toBeUndefined()
     }
   })
 
@@ -354,7 +354,7 @@ describe("pi models.json local profiles", () => {
     ])
     expect(piAdvisorModel("local")).toBeUndefined()
     expect(piAdvisorModel("local2")).toEqual({
-      model: "gpt-6.1-sol",
+      model: "gpt-6.2-sol",
       thinking: "high",
     })
     // The consultant EXISTS but is pinned to the local lead tier: an oracle
@@ -374,7 +374,7 @@ describe("pi models.json local profiles", () => {
     expect(piOracleThinking("local")).toBe("max")
     // `local2` keeps the contracted Copilot consultant.
     expect(piOracleEnabled("local2")).toBe(true)
-    expect(piOracleModel("local2")).toBe("gpt-6.1-sol")
+    expect(piOracleModel("local2")).toBe("gpt-6.2-sol")
     expect(piOracleThinking("local2")).toBe("high")
   })
 
@@ -398,7 +398,7 @@ describe("pi models.json local profiles", () => {
 
     // `local2` differs only in the model behind the same tool-less role.
     const local2 = buildPiAgentFiles("local2")
-    expect(local2["agents/oracle.md"]).toContain("model: gh-router/gpt-6.1-sol")
+    expect(local2["agents/oracle.md"]).toContain("model: gh-router/gpt-6.2-sol")
     expect(local2["agents/oracle.md"]).toContain('tools: ""')
   })
 
@@ -1101,7 +1101,7 @@ describe("pi derived -2 profiles", () => {
   // missed when the alias was added.
   const plain = (text: string): string =>
     text
-      .replaceAll("gpt-5.6-sol", "gpt-6.1-sol")
+      .replaceAll("gpt-5.6-sol", "gpt-6.2-sol")
       .replaceAll("grok-4.6", "grok-4.7")
       .replaceAll("Grok 4.6", "Grok 4.7")
 
@@ -1109,16 +1109,16 @@ describe("pi derived -2 profiles", () => {
     expect(piLeadModel("cheapest2")).toBe(piLeadModel("cheapest"))
     expect(piLeadThinking("cheapest2")).toBe(piLeadThinking("cheapest"))
     expect(piNativeRoles("cheapest2")).toEqual(piNativeRoles("cheapest"))
-    expect(piOracleModel("cheapest2")).toBe("gpt-6.1-sol")
+    expect(piOracleModel("cheapest2")).toBe("gpt-6.2-sol")
     expect(piOracleModel("cheapest")).toBe("gpt-5.6-sol")
     expect(piAdvisorModel("cheapest2")).toEqual({
-      model: "gpt-6.1-sol",
+      model: "gpt-6.2-sol",
       // The one non-id delta: cheapest declares medium, cheapest2 high.
       thinking: "high",
     })
     expect(piAdvisorModel("cheapest")).toEqual({ model: "gpt-5.6-sol", thinking: "medium" })
     expect([...piProfileModelIds("cheapest2")].sort()).toEqual(
-      [...piProfileModelIds("cheapest").filter((id) => id !== "gpt-5.6-sol"), "gpt-6.1-sol"].sort(),
+      [...piProfileModelIds("cheapest").filter((id) => id !== "gpt-5.6-sol"), "gpt-6.2-sol"].sort(),
     )
     for (const id of piProfileModelIds("cheapest2")) expect(id).not.toContain("[1m]")
   })
@@ -1135,7 +1135,7 @@ describe("pi derived -2 profiles", () => {
       expect(derived[key]).toBe(expected)
     }
     // The advisor is the surface that carries the raised effort.
-    expect(derived["agents/advisor.md"]).toContain("model: gh-router/gpt-6.1-sol")
+    expect(derived["agents/advisor.md"]).toContain("model: gh-router/gpt-6.2-sol")
     expect(derived["agents/advisor.md"]).toContain("thinking: high")
   })
 
@@ -1158,7 +1158,7 @@ describe("pi derived -2 profiles", () => {
   })
 
   test("balanced2 moves only the lead/reviewer Sol slots and the Grok Oracle", () => {
-    expect(piLeadModel("balanced2")).toBe("gpt-6.1-sol")
+    expect(piLeadModel("balanced2")).toBe("gpt-6.2-sol")
     expect(piLeadModel("balanced")).toBe("gpt-5.6-sol")
     expect(piLeadThinking("balanced2")).toBe(piLeadThinking("balanced"))
     expect(piOracleModel("balanced2")).toBe("grok-4.7")
@@ -1169,7 +1169,7 @@ describe("pi derived -2 profiles", () => {
     expect(derivedRoles.map((r) => ({ ...r, model: undefined }))).toEqual(
       baseRoles.map((r) => ({ ...r, model: undefined })),
     )
-    expect(derivedRoles.map((r) => r.model)).toEqual(["gpt-6-luna", "gpt-6-luna", "gpt-6.1-sol"])
+    expect(derivedRoles.map((r) => r.model)).toEqual(["gpt-6-luna", "gpt-6-luna", "gpt-6.2-sol"])
     for (const id of piProfileModelIds("balanced2")) expect(id).not.toContain("[1m]")
   })
 
@@ -1179,7 +1179,7 @@ describe("pi derived -2 profiles", () => {
     expect(Object.keys(derived)).toEqual(Object.keys(base))
     for (const key of Object.keys(base)) expect(derived[key]).toBe(plain(base[key]))
     expect(derived["agents/oracle.md"]).toContain("model: gh-router/grok-4.7")
-    expect(derived["agents/reviewer.md"]).toContain("model: gh-router/gpt-6.1-sol")
+    expect(derived["agents/reviewer.md"]).toContain("model: gh-router/gpt-6.2-sol")
   })
 
   test("balanced2 stays advisor-free across every surface", () => {
@@ -1196,13 +1196,13 @@ describe("pi derived -2 profiles", () => {
   test("models.json renders the -2 identities as bare rows at the 200K window", () => {
     const catalog = [
       { id: "gpt-6-luna", maxContextTokens: 1_050_000, maxPromptTokens: 922_000, efforts: ["high", "max"], endpoints: ["responses"] },
-      { id: "gpt-6.1-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["medium", "high"], endpoints: ["responses"] },
+      { id: "gpt-6.2-sol", maxContextTokens: 500_000, maxPromptTokens: 400_000, efforts: ["medium", "high"], endpoints: ["responses"] },
       { id: "grok-4.7", maxContextTokens: 500_000, maxPromptTokens: 300_000, efforts: ["medium"], endpoints: ["responses"] },
     ] as const
     for (const profileId of ["cheapest2", "balanced2"] as const) {
       const json = buildPiModelsJson({ serverUrl: "http://127.0.0.1:8787", profileId, catalog: [...catalog] })
       const ids = json.providers["gh-router"].models.map((m) => m.id)
-      expect(ids).toContain("gpt-6.1-sol")
+      expect(ids).toContain("gpt-6.2-sol")
       if (profileId === "balanced2") expect(ids).toContain("grok-4.7")
       for (const row of json.providers["gh-router"].models) {
         expect(row.id).not.toContain("[1m]")
@@ -1212,9 +1212,9 @@ describe("pi derived -2 profiles", () => {
         expect(row.contextWindow).toBeLessThanOrEqual(1_050_000)
       }
       // models.json rows name themselves by the bare catalog id (the display
-      // form "GPT-6.1 Sol" lives in the prose surfaces, not the picker row).
-      const sol = json.providers["gh-router"].models.find((m) => m.id === "gpt-6.1-sol")
-      expect(sol?.name).toBe("gpt-6.1-sol")
+      // form "GPT-6.2 Sol" lives in the prose surfaces, not the picker row).
+      const sol = json.providers["gh-router"].models.find((m) => m.id === "gpt-6.2-sol")
+      expect(sol?.name).toBe("gpt-6.2-sol")
     }
   })
 })

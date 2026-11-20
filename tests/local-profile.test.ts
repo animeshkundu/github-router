@@ -111,7 +111,7 @@ describe("local profile identity", () => {
     expect(contract.leadContextTokens).toBe(200_000)
     expect(contract.subagentContextTokens).toBe(200_000)
     // Advisor fields exist only on the `local2` contract.
-    expect(local2AdvisorContract().advisorModel).toBe("gpt-6.1-sol")
+    expect(local2AdvisorContract().advisorModel).toBe("gpt-6.2-sol")
     expect(local2AdvisorContract().advisorEffort).toBe("high")
   })
 })
@@ -182,7 +182,7 @@ describe("prerequisites", () => {
   test("local2 fails loudly when the Advisor model is absent", () => {
     const result = validateLocalProfilePrerequisites(undefined, "local2")
     expect(result.ok).toBe(false)
-    expect(result.missing.join("\n")).toContain("gpt-6.1-sol")
+    expect(result.missing.join("\n")).toContain("gpt-6.2-sol")
   })
 
   test("the failure message names the subcommand the user typed", () => {

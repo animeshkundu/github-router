@@ -23,6 +23,7 @@ export const EXACT_CACHE_PROBE_TARGETS: ReadonlyArray<string> = [
   "claude-haiku-4.5",
   "gpt-6-sol",
   "gpt-6.1-sol",
+  "gpt-6.2-sol",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
   "gpt-6-luna",

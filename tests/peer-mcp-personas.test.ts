@@ -1372,10 +1372,10 @@ describe("derived -2 profile rendering", () => {
     expect(derived).toBe(
       base
         .replace("cheapest launch profile", "cheapest2 launch profile")
-        .replaceAll("GPT-5.6 Sol", "GPT-6.1 Sol"),
+        .replaceAll("GPT-5.6 Sol", "GPT-6.2 Sol"),
     )
     // The Oracle is the only place the Sol identity is spelled in prose.
-    expect(derived).toContain("`mcp__peers__oracle` is GPT-6.1 Sol (200K/high)")
+    expect(derived).toContain("`mcp__peers__oracle` is GPT-6.2 Sol (200K/high)")
     expect(derived).not.toContain("GPT-5.6 Sol")
     // No stray crumb from cheap1m/standard.
     expect(derived).toContain("This is the cheapest2 launch profile")
@@ -1388,7 +1388,7 @@ describe("derived -2 profile rendering", () => {
     expect(derived).toBe(
       base
         .replace("Cheapest launch profile", "Cheapest2 launch profile")
-        .replaceAll("GPT-5.6 Sol", "GPT-6.1 Sol"),
+        .replaceAll("GPT-5.6 Sol", "GPT-6.2 Sol"),
     )
     // Advisor semantics are inherited: lead-only, non-binding, still present.
     expect(derived).toContain("Advisor is optional, non-binding")

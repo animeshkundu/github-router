@@ -171,7 +171,7 @@ mock.module("~/lib/port", () => ({
     if (arg.toLowerCase() === "cheapest") return "gpt-6-luna"
     if (arg.toLowerCase() === "balanced") return "gpt-5.6-sol"
     if (arg.toLowerCase() === "cheapest2") return "gpt-6-luna"
-    if (arg.toLowerCase() === "balanced2") return "gpt-6.1-sol"
+    if (arg.toLowerCase() === "balanced2") return "gpt-6.2-sol"
     const shorthand = arg.match(/^(\d+\.\d+)$/)?.[1]
     if (shorthand) {
       pickClaudeDefaultCalls.push(shorthand)
@@ -313,7 +313,7 @@ mock.module("~/lib/mcp-capabilities", () => ({
   balancedReviewerModel: mock(() => "gpt-5.6-sol"),
   // Local-profile Oracle (only exercised under `-m local` / `-m local2`);
   // stubbed for the same static-import-graph reason as the entries above.
-  localOracleModel: mock(() => "gpt-6.1-sol"),
+  localOracleModel: mock(() => "gpt-6.2-sol"),
   // Cheaplocal's Oracle answers from the local endpoint, so its gate has no
   // catalog to consult and is always open.
   cheaplocalOracleModel: mock((): true => true),
@@ -469,7 +469,7 @@ function createFakeChild() {
  * A live-catalog stand-in that satisfies the launch prerequisites of every
  * pinned family exercised by the alias tests: a `gpt-6-luna` lead with the
  * full high/max/xhigh ladder (the cheapest/balanced `explore` floor and the
- * cheap reviewer's `max`), the `gpt-6.1-sol` Sol tier used by cheapest2's
+ * cheap reviewer's `max`), the `gpt-6.2-sol` Sol tier used by cheapest2's
  * Advisor/Oracle and balanced2's lead/reviewer, and BOTH Grok Oracles — 4.6
  * for the cheap family and 4.7 for balanced2.
  */
@@ -483,7 +483,7 @@ function pinnedFamilyCatalog(): NonNullable<typeof state.models> {
         supported_endpoints: ["/responses"],
       },
       {
-        id: "gpt-6.1-sol",
+        id: "gpt-6.2-sol",
         capabilities: { limits: { max_context_window_tokens: 1_050_000, max_prompt_tokens: 950_000 }, supports: { tool_calls: true, reasoning_effort: ["medium", "high", "xhigh"] } },
         supported_endpoints: ["/responses"],
       },
@@ -907,7 +907,7 @@ describe("claude command", () => {
     expect(options.env.ANTHROPIC_MODEL).toBe("gemini-3.8-flash")
   })
 
-  test("`-m cheapest2` selects the BARE Luna lead and pins the 6.1 Sol Advisor", async () => {
+  test("`-m cheapest2` selects the BARE Luna lead and pins the 6.2 Sol Advisor", async () => {
     state.models = pinnedFamilyCatalog()
     const run = getRunFn()
 
@@ -931,7 +931,7 @@ describe("claude command", () => {
     // mirrored/caller-supplied value cannot make the launch show Sol 5.6.
     const advisorAt = args.indexOf("--advisor")
     expect(advisorAt).toBeGreaterThanOrEqual(0)
-    expect(args[advisorAt + 1]).toBe("gpt-6.1-sol")
+    expect(args[advisorAt + 1]).toBe("gpt-6.2-sol")
     expect(args.filter((arg: string) => arg === "--advisor")).toHaveLength(1)
     expect(args.some((arg: string) => arg.startsWith("--advisor="))).toBe(false)
     expect(args).not.toContain("opus")
@@ -941,7 +941,7 @@ describe("claude command", () => {
     expect(args.join(" ")).not.toContain("[1m]")
   })
 
-  test("`-m balanced2` selects the BARE 6.1 Sol lead and inherits the balanced client Advisor pin", async () => {
+  test("`-m balanced2` selects the BARE 6.2 Sol lead and inherits the balanced client Advisor pin", async () => {
     state.models = pinnedFamilyCatalog()
     const run = getRunFn()
 
@@ -952,12 +952,12 @@ describe("claude command", () => {
 
     expect(getClaudeCodeEnvVarsMock).toHaveBeenCalledWith(
       "http://127.0.0.1:12345",
-      "gpt-6.1-sol",
+      "gpt-6.2-sol",
       "balanced2",
       [],
     )
     const [, args, options] = spawnMock.mock.calls[0]
-    expect(options.env.ANTHROPIC_MODEL).toBe("gpt-6.1-sol")
+    expect(options.env.ANTHROPIC_MODEL).toBe("gpt-6.2-sol")
     // The balanced family reuses the cheap profile's CLIENT-side Advisor pin
     // (`balanced` has no advisor on the server path; the flag only fixes the
     // identity the client renders). balanced2's declared delta names the lead,

@@ -16,7 +16,7 @@
  *     structure + search snippets), all capped for cache-friendliness EXCEPT
  *     the user prompt, which is passed through in full.
  *   - rewriter is the family's Advisor-tier Sol (`gpt-5.6-sol` on `cheapest`,
- *     `gpt-6.1-sol` on `cheapest2`) bare 200K at medium effort, via the
+ *     `gpt-6.2-sol` on `cheapest2`) bare 200K at medium effort, via the
  *     caller's `inferSol`.
  *   - the contract leads with grounding + constraints (small models' documented
  *     weak spot) and explicitly avoids prescribing step-by-step procedure or
@@ -34,7 +34,7 @@
 
 import { isCheapestFamily } from "./profile-family"
 
-/** Base-family rewriter identity. `cheapest2` rewrites with `gpt-6.1-sol`;
+/** Base-family rewriter identity. `cheapest2` rewrites with `gpt-6.2-sol`;
  *  callers resolve the family model through `cheapestRewriteModelFor`. */
 export const CHEAPEST_REWRITE_MODEL = "gpt-5.6-sol" as const
 export const CHEAPEST_REWRITE_EFFORT = "medium" as const

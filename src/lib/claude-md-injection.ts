@@ -240,7 +240,7 @@ export interface NativeAgentAvailability {
    *  selects the cheapest-shaped restricted roster, because the local endpoint
    *  serves its own `opus`/`sonnet`/`haiku` tiers and inherits the cheapest
    *  prompts; the model labels are the tier names, and Oracle stays the
-   *  Copilot-served `gpt-6.1-sol` consult. `"local"` has no Advisor at all, so
+   *  Copilot-served `gpt-6.2-sol` consult. `"local"` has no Advisor at all, so
    *  no local clause may name one. When set,
    *  `buildNativeReachClauses` and
    *  `buildOperatingDefaultsDirective` return a short, self-contained
@@ -996,7 +996,7 @@ export function buildOperatingDefaultsDigest(
     const consultIsLocal = familyContract?.consultTransport === "local"
     // Every family here is lead-only on Oracle (none has a Plan role), so one
     // contract-derived form serves them all: `balanced` Grok 4.6 →
-    // `balanced2` Grok 4.7, `cheapest` GPT-5.6 Sol → `cheapest2` GPT-6.1 Sol,
+    // `balanced2` Grok 4.7, `cheapest` GPT-5.6 Sol → `cheapest2` GPT-6.2 Sol,
     // and local2's contract keeps Oracle on the same Copilot slug. A local
     // consult contributes no identity at all: no slug, no catalog lookup and
     // no tier. The consult still sends the effort its contract declares, but
