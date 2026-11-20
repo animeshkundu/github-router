@@ -11,23 +11,25 @@ import type { Model } from "~/services/copilot/get-models"
  *   - gpt-5.6-sol:  Default ≤ 272K ($4.00 in) vs Long > 272K ($8.00 in)
  *   - gpt-6-sol:  Default ≤ 272K ($2.00 in) vs Long > 272K ($4.00 in)
  *   - gpt-6.1-sol:  Default ≤ 272K ($2.00 in) vs Long > 272K ($4.00 in)
+ *   - gpt-6.2-sol:  Default ≤ 272K ($2.00 in) vs Long > 272K ($4.00 in)
  *   - grok-4.6:   Default ≤ 200K ($2.00 in) vs Long > 200K ($4.00 in)
  *   - grok-4.7:   Default ≤ 200K ($2.00 in) vs Long > 200K ($4.00 in)
  *
  * The live catalog carries no tier data (flat `billing.token_prices` +
  * single `limits.*` only), so this table is hardcoded by exact model id —
  * same precedent as `FALLBACK_TOKEN_PRICES`. Anything not listed here
- * runs at the 200K default window. LAST_VERIFIED 2026-10-21: the six
- * rows above were re-read from the billing doc, and the catalog input
- * prices for the two newest ids (`gpt-6.1-sol`, `grok-4.7`) were checked
- * against it the same day. Refresh the values (and the drift
- * expectations below) when the billing doc changes.
+ * runs at the 200K default window. LAST_VERIFIED 2026-11-20: `gpt-6.2-sol`
+ * was read from the billing doc (identical tier pair and prices to 6.1 Sol)
+ * and checked against the live catalog; the six earlier rows are the
+ * 2026-10-21 reading. Refresh the values (and the drift expectations
+ * below) when the billing doc changes.
  */
 export const PI_TIER_THRESHOLDS: Readonly<Record<string, number>> = Object.freeze({
   "gpt-6-luna": 272_000,
   "gpt-5.6-sol": 272_000,
   "gpt-6-sol": 272_000,
   "gpt-6.1-sol": 272_000,
+  "gpt-6.2-sol": 272_000,
   "grok-4.6": 200_000,
   "grok-4.7": 200_000,
 })
@@ -74,6 +76,7 @@ const EXPECTED_DEFAULT_INPUT_PER_1M: Readonly<Record<string, number>> =
     "gpt-5.6-sol": 400,
     "gpt-6-sol": 200,
     "gpt-6.1-sol": 200,
+    "gpt-6.2-sol": 200,
     "grok-4.6": 200,
     "grok-4.7": 200,
   })

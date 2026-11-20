@@ -453,10 +453,10 @@ describe("review regressions", () => {
     expect(resolveLeadSlugArg("cheapest")).toBe("gpt-6-luna")
     expect(resolveLeadSlugArg("balanced")).toBe("gpt-5.6-sol")
     expect(resolveLeadSlugArg("cheapest2")).toBe("gpt-6-luna")
-    expect(resolveLeadSlugArg("balanced2")).toBe("gpt-6.1-sol")
+    expect(resolveLeadSlugArg("balanced2")).toBe("gpt-6.2-sol")
 
     expect(CHEAPEST2_LEAD_MODEL).toBe("gpt-6-luna")
-    expect(BALANCED2_LEAD_MODEL).toBe("gpt-6.1-sol")
+    expect(BALANCED2_LEAD_MODEL).toBe("gpt-6.2-sol")
 
     // Trim/case normalization applies to the derived aliases too — they go
     // through the same lowercase/trim path as the base aliases.
@@ -465,7 +465,7 @@ describe("review regressions", () => {
     }
     expect(resolveLeadSlugArg("  cheapest2  ")).toBe("gpt-6-luna")
     expect(resolveLeadSlugArg("CHEAPEST2")).toBe("gpt-6-luna")
-    expect(resolveLeadSlugArg("Balanced2")).toBe("gpt-6.1-sol")
+    expect(resolveLeadSlugArg("Balanced2")).toBe("gpt-6.2-sol")
   })
 
   test("isBudgetClaudeLead's contract: it takes a resolved slug, not a raw -m arg", () => {

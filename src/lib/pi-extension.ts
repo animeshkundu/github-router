@@ -668,9 +668,10 @@ export function buildPiSkills(opts: {
         "into the `General-Purpose` brief to implement, `reviewer` to check,",
         "`General-Purpose` to apply feedback. Keep delegated tasks",
         "scoped with file:line evidence on return.",
-        "Call `subagent` directly (agent + task). Reserve `workflowScript`",
-        "workflows for genuinely parallel or scripted multi-step fanout —",
-        "our agents run foreground and background runs add spawn overhead.",
+        "Call `subagent` directly (agent + task). Independent children run in",
+        "the background by default, so fan them out in one turn and collect their",
+        "results; pass `async: false` only when you must block on that launch.",
+        "Reserve `workflowScript` workflows for scripted multi-step fanout.",
         "After any subagent work completes, always write the final answer",
         "yourself; never end on tool output or completion notices alone.",
         isBalancedFamily(opts.profileId)

@@ -57,14 +57,14 @@ describe("cheapest2 derives from cheapest", () => {
   const declared = {
     models: CHEAPEST2_PROFILE_MODELS,
     nativeModels: CHEAPEST2_PROFILE_CONTRACT.nativeModels,
-    advisorModel: "gpt-6.1-sol",
-    advisorClientModel: "gpt-6.1-sol",
+    advisorModel: "gpt-6.2-sol",
+    advisorClientModel: "gpt-6.2-sol",
     advisorEffort: "high",
-    oracleModel: "gpt-6.1-sol",
+    oracleModel: "gpt-6.2-sol",
     // The rewrite follows this sibling's Sol tier, not the base one: it was
     // the advisor slug before `rewriteModel` existed, and keeping it here
     // pins that the base `gpt-5.6-sol` default does not leak through a spread.
-    rewriteModel: "gpt-6.1-sol",
+    rewriteModel: "gpt-6.2-sol",
   }
 
   test("the whole aggregate equals the base with only the declared deltas", () => {
@@ -88,8 +88,8 @@ describe("cheapest2 derives from cheapest", () => {
 
   test("the model map changes only the two Sol slots", () => {
     expectDerived(CHEAPEST_PROFILE_MODELS, CHEAPEST2_PROFILE_MODELS, {
-      advisor: "gpt-6.1-sol",
-      oracle: "gpt-6.1-sol",
+      advisor: "gpt-6.2-sol",
+      oracle: "gpt-6.2-sol",
     })
     expect(CHEAPEST2_PROFILE_MODELS.lead).toBe(CHEAPEST_PROFILE_MODELS.lead)
     expect(CHEAPEST2_PROFILE_MODELS.explore).toBe(CHEAPEST_PROFILE_MODELS.explore)
@@ -113,13 +113,13 @@ describe("cheapest2 derives from cheapest", () => {
     )
   })
 
-  test("Pi resolves cheapest2 as cheapest with the 6.1 Sol identities", () => {
+  test("Pi resolves cheapest2 as cheapest with the 6.2 Sol identities", () => {
     expect(piLeadModel("cheapest2")).toBe(piLeadModel("cheapest"))
     expect(piLeadThinking("cheapest2")).toBe(piLeadThinking("cheapest"))
-    expect(piOracleModel("cheapest2")).toBe("gpt-6.1-sol")
+    expect(piOracleModel("cheapest2")).toBe("gpt-6.2-sol")
     expect(piOracleThinking("cheapest2")).toBe(piOracleThinking("cheapest"))
     expect(piAdvisorModel("cheapest2")).toEqual({
-      model: "gpt-6.1-sol",
+      model: "gpt-6.2-sol",
       thinking: "high",
     })
     expect(piAdvisorModel("cheapest")).toEqual({
@@ -134,14 +134,14 @@ describe("cheapest2 derives from cheapest", () => {
         ...piProfileModelIds("cheapest").filter(
           (id) => id !== "gpt-5.6-sol",
         ),
-        "gpt-6.1-sol",
+        "gpt-6.2-sol",
       ].sort(),
     )
   })
 
   test("the prompt rewrite follows the contract's Sol tier", () => {
     expect(cheapestRewriteModelFor("cheapest")).toBe("gpt-5.6-sol")
-    expect(cheapestRewriteModelFor("cheapest2")).toBe("gpt-6.1-sol")
+    expect(cheapestRewriteModelFor("cheapest2")).toBe("gpt-6.2-sol")
   })
 
   test("the server env pins bare 200K and the contracted lead effort", () => {
@@ -180,8 +180,8 @@ describe("balanced2 derives from balanced", () => {
 
   test("the model map changes the lead, reviewer, and Oracle only", () => {
     expectDerived(BALANCED_PROFILE_MODELS, BALANCED2_PROFILE_MODELS, {
-      lead: "gpt-6.1-sol",
-      reviewer: "gpt-6.1-sol",
+      lead: "gpt-6.2-sol",
+      reviewer: "gpt-6.2-sol",
       oracle: "grok-4.7",
     })
     expect(BALANCED2_PROFILE_MODELS.explore).toBe(BALANCED_PROFILE_MODELS.explore)
@@ -204,7 +204,7 @@ describe("balanced2 derives from balanced", () => {
       BALANCED_PROFILE_CONTRACT.nativeModels["General-Purpose"],
     )
     expect(BALANCED_PROFILE_CONTRACT.nativeModels.reviewer).toBe("gpt-5.6-sol")
-    expect(BALANCED2_PROFILE_CONTRACT.nativeModels.reviewer).toBe("gpt-6.1-sol")
+    expect(BALANCED2_PROFILE_CONTRACT.nativeModels.reviewer).toBe("gpt-6.2-sol")
   })
 
   test("astra is inherited untouched (declarative only on this family)", () => {
@@ -218,7 +218,7 @@ describe("balanced2 derives from balanced", () => {
   })
 
   test("Pi resolves balanced2 as balanced with the declared identities", () => {
-    expect(piLeadModel("balanced2")).toBe("gpt-6.1-sol")
+    expect(piLeadModel("balanced2")).toBe("gpt-6.2-sol")
     expect(piLeadThinking("balanced2")).toBe(piLeadThinking("balanced"))
     expect(piOracleModel("balanced2")).toBe("grok-4.7")
     expect(piOracleThinking("balanced2")).toBe(piOracleThinking("balanced"))
@@ -232,16 +232,16 @@ describe("balanced2 derives from balanced", () => {
     expect(derivedRoles.map((r) => ({ ...r, model: undefined }))).toEqual(
       baseRoles.map((r) => ({ ...r, model: undefined })),
     )
-    expect(derivedRoles.map((r) => r.model)).toEqual(["gpt-6-luna", "gpt-6-luna", "gpt-6.1-sol"])
+    expect(derivedRoles.map((r) => r.model)).toEqual(["gpt-6-luna", "gpt-6-luna", "gpt-6.2-sol"])
   })
 
   test("the server env pins bare 200K and the contracted lead effort", () => {
     const base = getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-5.6-sol", "balanced")
-    const derived = getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-6.1-sol", "balanced2")
+    const derived = getClaudeCodeEnvVars("http://127.0.0.1:8787", "gpt-6.2-sol", "balanced2")
     const { ANTHROPIC_MODEL: baseModel, ...baseRest } = base
     const { ANTHROPIC_MODEL: derivedModel, ...derivedRest } = derived
     expect(baseModel).toBe("gpt-5.6-sol")
-    expect(derivedModel).toBe("gpt-6.1-sol")
+    expect(derivedModel).toBe("gpt-6.2-sol")
     expect(derivedRest).toEqual(baseRest)
     expect(derivedRest.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe("1")
     expect(derivedRest.CLAUDE_CODE_EFFORT_LEVEL).toBe(
@@ -284,7 +284,7 @@ describe("family helpers", () => {
   })
 
   test("display names are spelled, and unknown ids pass through verbatim", () => {
-    expect(displayModelName("gpt-6.1-sol")).toBe("GPT-6.1 Sol")
+    expect(displayModelName("gpt-6.2-sol")).toBe("GPT-6.2 Sol")
     expect(displayModelName("gpt-5.6-sol")).toBe("GPT-5.6 Sol")
     expect(displayModelName("grok-4.7")).toBe("Grok 4.7")
     expect(displayModelName("grok-4.6")).toBe("Grok 4.6")

@@ -91,7 +91,7 @@ beforeEach(() => {
         id: "chatcmpl-test",
         object: "chat.completion",
         created: 0,
-        model: "gpt-6.1-sol",
+        model: "gpt-6.2-sol",
         choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop", logprobs: null }],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
       }),
@@ -176,11 +176,11 @@ describe("effectiveLocalProfile", () => {
 
 describe("copilotModelFamily", () => {
   test("reads the trailing tier token through both accounting suffixes", () => {
-    expect(copilotModelFamily("gpt-6.1-sol")).toBe("sol")
+    expect(copilotModelFamily("gpt-6.2-sol")).toBe("sol")
     expect(copilotModelFamily("gpt-6-sol")).toBe("sol")
     expect(copilotModelFamily("gpt-5.6-sol")).toBe("sol")
     expect(copilotModelFamily("gpt-6-luna")).toBe("luna")
-    expect(copilotModelFamily(" gpt-6.1-sol[1m] ")).toBe("sol")
+    expect(copilotModelFamily(" gpt-6.2-sol[1m] ")).toBe("sol")
     expect(copilotModelFamily("gpt-6-sol-1m")).toBe("sol")
   })
 
@@ -198,21 +198,21 @@ describe("isCopilotModelAllowedUnder", () => {
 
   test("unrestricted admits everything on every surface", () => {
     const policy = copilotModelPolicyForProfile("fast")!
-    for (const id of ["gpt-6.1-sol", "claude-opus-5.5", "gemini-3.1-pro-preview"]) {
+    for (const id of ["gpt-6.2-sol", "claude-opus-5.5", "gemini-3.1-pro-preview"]) {
       expect(isCopilotModelAllowedUnder(policy, id)).toBe(true)
       expect(isCopilotModelAllowedUnder(policy, id, "browse")).toBe(true)
     }
   })
 
   test("forbidden refuses every model and carves out only the browse surface", () => {
-    for (const id of ["gpt-6.1-sol", "gpt-6-luna", "claude-opus-5.5", "opus"]) {
+    for (const id of ["gpt-6.2-sol", "gpt-6-luna", "claude-opus-5.5", "opus"]) {
       expect(isCopilotModelAllowedUnder(forbidden, id)).toBe(false)
       expect(isCopilotModelAllowedUnder(forbidden, id, "browse")).toBe(true)
     }
   })
 
   test("families admits sol and luna and nothing else", () => {
-    for (const id of ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-sol[1m]", "gpt-6-luna"]) {
+    for (const id of ["gpt-6.2-sol", "gpt-6-sol", "gpt-5.6-sol[1m]", "gpt-6-luna"]) {
       expect(isCopilotModelAllowedUnder(families, id)).toBe(true)
     }
     for (const id of [
@@ -258,7 +258,7 @@ describe("assertCopilotModelAllowed", () => {
 
   test("local2 refuses an out-of-family model and names the two allowed tiers", () => {
     registerLaunch({ profileId: "local2", nonce: "y".repeat(64), secret: "sy" })
-    expect(() => assertCopilotModelAllowed("gpt-6.1-sol")).not.toThrow()
+    expect(() => assertCopilotModelAllowed("gpt-6.2-sol")).not.toThrow()
     expect(() => assertCopilotModelAllowed("gpt-6-luna")).not.toThrow()
     expect(() => assertCopilotModelAllowed("gemini-3.1-pro-preview")).toThrow(CopilotModelRestrictedError)
     expect(() => assertCopilotModelAllowed("gemini-3.1-pro-preview")).toThrow(/luna, sol/)
@@ -272,7 +272,7 @@ describe("assertCopilotMessagesBodyAllowed", () => {
 
   test("a restrictive policy inspects the raw model id", () => {
     registerLaunch({ profileId: "local2", nonce: "z".repeat(64), secret: "sz" })
-    expect(() => assertCopilotMessagesBodyAllowed(body("gpt-6.1-sol"))).not.toThrow()
+    expect(() => assertCopilotMessagesBodyAllowed(body("gpt-6.2-sol"))).not.toThrow()
     expect(() => assertCopilotMessagesBodyAllowed(body("gpt-6-luna"))).not.toThrow()
     expect(() => assertCopilotMessagesBodyAllowed(body("claude-opus-5.5"))).toThrow(CopilotModelRestrictedError)
     // The tier alias the local lead sends is not a Copilot family, so a stray
@@ -321,7 +321,7 @@ describe("Copilot egress refuses before it fetches", () => {
     ).rejects.toThrow(CopilotModelRestrictedError)
     expect(fetchCalls).toBe(0)
 
-    await createChatCompletions(chatPayload("gpt-6.1-sol") as never)
+    await createChatCompletions(chatPayload("gpt-6.2-sol") as never)
     expect(fetchCalls).toBe(1)
   })
 

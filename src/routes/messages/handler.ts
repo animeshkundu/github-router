@@ -536,7 +536,7 @@ export async function handleCompletion(c: Context) {
       ? cheapestContractFor(identity.launch?.profileId)
       : undefined
   // The cheapest family's Advisor identity follows its contract: `cheapest`
-  // pins `gpt-5.6-sol`, `cheapest2` pins `gpt-6.1-sol`. The client pin and the
+  // pins `gpt-5.6-sol`, `cheapest2` pins `gpt-6.2-sol`. The client pin and the
   // wire model are the same bare 200K slug for both siblings.
   const curatedAdvisorModel = curatedAdvisorContract?.advisorModel
   const curatedAdvisorClientModel = curatedAdvisorContract?.advisorClientModel
@@ -1210,7 +1210,7 @@ export async function handleCompletion(c: Context) {
       // LEAD turn to the operator's server instead of Copilot. Every other
       // caller of `createMessages` (the Advisor, peer personas, `stand_in`)
       // omits it and keeps hitting Copilot, which is exactly why `local2`'s
-      // Advisor stays on the real `gpt-6.1-sol` while its lead turns are free.
+      // Advisor stays on the real `gpt-6.2-sol` while its lead turns are free.
       response = await createMessages(
         nativeBody,
         requestHeaders,

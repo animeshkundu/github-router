@@ -508,7 +508,7 @@ describe("getClaudeCodeEnvVars", () => {
         ["gpt-6-luna", "cheapest", "max"],
         ["gpt-6-luna", "cheapest2", "max"],
         ["gpt-5.6-sol", "balanced", "medium"],
-        ["gpt-6.1-sol", "balanced2", "medium"],
+        ["gpt-6.2-sol", "balanced2", "medium"],
       ] as const
     ) {
       const vars = withCatalog(catalog, () =>

@@ -177,7 +177,7 @@ describe("launch profile selection", () => {
     }
 
     for (const [id, contract, oracle] of [
-      ["cheapest2", CHEAPEST2_PROFILE_CONTRACT, "gpt-6.1-sol"],
+      ["cheapest2", CHEAPEST2_PROFILE_CONTRACT, "gpt-6.2-sol"],
       ["balanced2", BALANCED2_PROFILE_CONTRACT, "grok-4.7"],
     ] as const) {
       const descriptor = profileDescriptor(id)
@@ -282,7 +282,7 @@ describe("cheap-family subagent aliases", () => {
   })
 
   test("reviewer aliases resolve per profile, base ids elsewhere", () => {
-    // `balanced2` moves its reviewer to Sol 6.1, so the same wire alias must
+    // `balanced2` moves its reviewer to Sol 6.2, so the same wire alias must
     // canonicalize to a different real id per launch profile. Everything
     // else — including a family alias used on the wrong profile — keeps the
     // base real id, so a profile id can never silently retarget another
@@ -290,9 +290,9 @@ describe("cheap-family subagent aliases", () => {
     expect(resolveModelAlias(BALANCED_REVIEWER_ALIAS_ID, "balanced2")?.realModel)
       .toBe(BALANCED2_PROFILE_MODELS.reviewer)
     expect(canonicalizeAliasModel(BALANCED_REVIEWER_ALIAS_ID, "balanced2"))
-      .toBe("gpt-6.1-sol")
+      .toBe("gpt-6.2-sol")
     expect(canonicalizeAliasModel(`${BALANCED_REVIEWER_ALIAS_ID}[1m]`, "balanced2"))
-      .toBe("gpt-6.1-sol[1m]")
+      .toBe("gpt-6.2-sol[1m]")
     expect(resolveModelAlias(BALANCED_REVIEWER_ALIAS_ID, "balanced")?.realModel)
       .toBe(BALANCED_PROFILE_MODELS.reviewer)
     expect(resolveModelAlias(BALANCED_REVIEWER_ALIAS_ID, "balanced2")?.absentEffortDefault)
@@ -662,7 +662,7 @@ describe("derived -2 startup prerequisites", () => {
     ],
   })
 
-  test("cheapest2 validates the 6.1 Sol Oracle and rejects the 5.6-only catalog", () => {
+  test("cheapest2 validates the 6.2 Sol Oracle and rejects the 5.6-only catalog", () => {
     expect(validateCheapestProfilePrerequisites(cheapest2Catalog() as never, {}, "cheapest2"))
       .toEqual({ ok: true, missing: [] })
     // The BASE profile is untouched: the same catalog still validates it.
@@ -681,11 +681,11 @@ describe("derived -2 startup prerequisites", () => {
     )
     expect(fiveOnly.ok).toBe(false)
     expect(fiveOnly.missing).toEqual([
-      "gpt-6.1-sol: absent from the live catalog",
+      "gpt-6.2-sol: absent from the live catalog",
     ])
     const message = formatCheapestPrerequisiteFailure(fiveOnly.missing, "cheapest2")
     expect(message).toContain("github-router claude -m cheapest2")
-    expect(message).toContain("gpt-6.1-sol")
+    expect(message).toContain("gpt-6.2-sol")
     expect(message).not.toContain("-m cheapest requires")
   })
 
@@ -703,8 +703,8 @@ describe("derived -2 startup prerequisites", () => {
     )
     expect(baseOnly.ok).toBe(false)
     expect(baseOnly.missing).toEqual([
-      "gpt-6.1-sol: absent from the live catalog",
-      "gpt-6.1-sol: absent from the live catalog",
+      "gpt-6.2-sol: absent from the live catalog",
+      "gpt-6.2-sol: absent from the live catalog",
       "grok-4.7: absent from the live catalog",
     ])
     const message = formatBalancedPrerequisiteFailure(baseOnly.missing, "balanced2")

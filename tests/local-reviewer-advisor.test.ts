@@ -151,7 +151,7 @@ beforeEach(() => {
   state.models = {
     object: "list",
     data: [
-      catalogModel("gpt-6.1-sol"),
+      catalogModel("gpt-6.2-sol"),
       catalogModel("gpt-5.6-sol"),
     ] as never,
   }
@@ -250,7 +250,7 @@ describe("local2 reviewer protege grant", () => {
           {
             type: "advisor_20260301",
             name: "advisor",
-            model: "gpt-6.1-sol",
+            model: "gpt-6.2-sol",
             max_uses: 3,
           },
         ]),
@@ -277,7 +277,7 @@ describe("local2 reviewer protege grant", () => {
       "/v1/messages",
       requestOptions(
         readToolBody("opus", [
-          { type: "advisor_20260301", name: "advisor", model: "gpt-6.1-sol" },
+          { type: "advisor_20260301", name: "advisor", model: "gpt-6.2-sol" },
         ]),
       ),
     )
@@ -299,7 +299,7 @@ describe("local (no Advisor) grants nothing", () => {
       "/v1/messages",
       requestOptions(
         readToolBody("opus", [
-          { type: "advisor_20260301", name: "advisor", model: "gpt-6.1-sol" },
+          { type: "advisor_20260301", name: "advisor", model: "gpt-6.2-sol" },
         ]),
         { agentId: "reviewer", beta: ADVISOR_BETA },
       ),

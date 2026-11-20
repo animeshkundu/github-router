@@ -2,7 +2,7 @@
  * Fixed identities for the literal `github-router claude -m balanced2` profile.
  *
  * `balanced2` is `balanced` with the Sol tier moved from `gpt-5.6-sol` to
- * `gpt-6.1-sol` for the lead and reviewer, and the Oracle moved from
+ * `gpt-6.2-sol` for the lead and reviewer, and the Oracle moved from
  * `grok-4.6` to `grok-4.7`. Everything else — the Luna `Explore`/
  * `General-Purpose` roles, the bare-slug 200K window, the medium lead effort,
  * the Advisor-free surface, the Oracle-only peer set and the delegation graph
@@ -31,8 +31,8 @@ import {
   type BalancedProfileNativeAgentName,
 } from "./balanced-profile-contract"
 
-/** The 6.1 Sol tier that distinguishes this profile's lead/reviewer. */
-export const BALANCED2_SOL_MODEL = "gpt-6.1-sol" as const
+/** The 6.2 Sol tier that distinguishes this profile's lead/reviewer. */
+export const BALANCED2_SOL_MODEL = "gpt-6.2-sol" as const
 /** The xAI Oracle that supersedes `balanced`'s Grok 4.6 row. */
 export const BALANCED2_ORACLE_MODEL = "grok-4.7" as const
 

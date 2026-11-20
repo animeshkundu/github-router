@@ -2,7 +2,7 @@
  * Fixed identities for the literal `github-router claude -m cheapest2` profile.
  *
  * `cheapest2` is `cheapest` with the Sol tier moved from `gpt-5.6-sol` to
- * `gpt-6.1-sol` and the Advisor raised to `high`. Everything else — the
+ * `gpt-6.2-sol` and the Advisor raised to `high`. Everything else — the
  * `gpt-6-luna`/max lead, the Luna subagents, the bare-slug 200K window, the
  * curated 24K Advisor transcript budget, the Oracle-only peer set, the
  * three-agent surface and the delegation graph — is inherited verbatim.
@@ -30,8 +30,8 @@ import {
   type CheapestProfileNativeAgentName,
 } from "./cheapest-profile-contract"
 
-/** The 6.1 Sol tier that distinguishes this profile from `cheapest`. */
-export const CHEAPEST2_SOL_MODEL = "gpt-6.1-sol" as const
+/** The 6.2 Sol tier that distinguishes this profile from `cheapest`. */
+export const CHEAPEST2_SOL_MODEL = "gpt-6.2-sol" as const
 
 export const CHEAPEST2_PROFILE_MODELS = Object.freeze({
   ...CHEAPEST_PROFILE_MODELS,

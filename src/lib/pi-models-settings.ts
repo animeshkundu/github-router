@@ -256,7 +256,7 @@ export function piOracleThinking(profileId: PiProfileId): string | undefined {
 /**
  * Advisor row. Cheapest-family launches carry one; `balanced` is advisor-free
  * by design and `local` mirrors that (no Advisor). `local2` is the one local
- * profile with an Advisor, and it is Copilot-served (`gpt-6.1-sol`) — the
+ * profile with an Advisor, and it is Copilot-served (`gpt-6.2-sol`) — the
  * Advisor always runs on a real Copilot model, never on the local endpoint.
  */
 export function piAdvisorModel(
@@ -1440,12 +1440,14 @@ function roleDescription(
   profileId: PiProfileId,
   role: PiNativeRole,
 ): string {
-  // Nested-delegation channel note: General-Purpose is the only native
-  // role with a nesting grant, so only it can consult the oracle subagent
-  // directly. Explore/reviewer are leaves; they surface open questions in
-  // their report and the lead (or General-Purpose) consults oracle. `local`
-  // may have no oracle, and the note must not name one then: an advertised
-  // target the roster lacks is a wasted turn for whoever follows it.
+  // Nested-delegation channel note: General-Purpose is the native role with
+  // the reviewer/oracle nesting grant, so only it can consult the oracle
+  // subagent directly. Explore is a leaf; the reviewer is a leaf EXCEPT
+  // where it holds the advisor edge (its description says so there). Both
+  // surface open questions in their report and the lead (or General-Purpose)
+  // consults oracle. `local` may have no oracle, and the note must not name
+  // one then: an advertised target the roster lacks is a wasted turn for
+  // whoever follows it.
   const consultNote = piOracleEnabled(profileId)
     ? " May consult the oracle subagent when a decision feels risky."
     : ""
@@ -1459,9 +1461,14 @@ function roleDescription(
       : "General implementation and follow-through on scoped tasks. May hand the result to reviewer for assessment."
     return `${base}${consultNote}`
   }
-  return isBalancedFamily(profileId)
-    ? "Behavior-changing review only: assess a change, narrow scope with search first, delegate targeted discovery to Explore rather than sweeping the repo."
-    : "Code review and assessment, including reproducing and root-causing a failure.";
+  if (isBalancedFamily(profileId)) {
+    return "Behavior-changing review only: assess a change, narrow scope with search first, delegate targeted discovery to Explore rather than sweeping the repo."
+  }
+  // Cheapest family: the advertised description has to match the grant, or
+  // the lead reads a leaf into a roster that has an advisor edge behind it.
+  return piAdvisorModel(profileId)
+    ? "Code review and assessment, including reproducing and root-causing a failure. May consult its advisor subagent on uncertainty it cannot settle by evidence."
+    : "Code review and assessment, including reproducing and root-causing a failure."
 }
 
 /**
@@ -1480,17 +1487,32 @@ function roleDescription(
   *   which is why `advisor` ships as its own file on cheapest.
   *   Shadowing deliberately does NOT inherit `contact_supervisor` on
   *   reviewer (leaf) or `defaultContext: fork` on oracle (fresh keeps
-  *   the cold-start consultant contract).
+  *   the cold-start consultant contract). Note that a strict `tools`
+  *   allowlist is no longer the whole story for core tools: a live
+  *   cheapest reviewer run, whose file never lists `contact_supervisor`,
+  *   hit that tool anyway (`contact_supervisor` in its transcript), so the
+  *   runtime does hand core slots to a background child regardless of the
+  *   allowlist. Omitting it is still the right emission — the differentiator
+  *   is the body: our reviewer's prompt never asks the supervisor for
+  *   anything, which is what kept the paging noise away.
   * - `allowedAgents` only narrows an existing nesting grant, so every
   *   delegating agent also sets `allowNestedSubagents: true` and lists
-  *   `subagent` in `tools`. Depth reaches 3 on balanced
+  *   `subagent` in `tools`. Two edges exist: General-Purpose →
+  *   reviewer/oracle, and the reviewer → its consultant (balanced:
+  *   Explore; Advisor-bearing profiles: `advisor`, the cheapest-family
+  *   protege grant that mirrors the Claude path's capped reviewer
+  *   rounds). Depth reaches 3 on balanced
   *   (lead → General-Purpose → reviewer → Explore), covered by
   *   `PI_SUBAGENT_MAX_DEPTH=3` in the launch env (default guard is 2).
-  * - `async: false` on every file: foreground children run in-process
-  *   with the parent's full tool registry. The detached background
-  *   runner demonstrably drops read/bash from its registry (observed
-  *   live as "requested unavailable child tools: [read, bash]"),
-  *   failing every strict-allowlist child it touches.
+  * - NO `async` key on any file, deliberately. pi-subagents runs a
+  *   single-agent launch in the background when the call omits `async`
+  *   (`asyncByDefault`, default true), and background children are the
+  *   ones that DO load the parent's ambient extensions
+  *   (`runs/shared/tool-availability.js`); foreground children are
+  *   in-process and never load them. Emitting `async: false` froze the
+  *   opposite policy and made parallel children impossible. Per-call
+  *   `async: false` still blocks the parent for one launch, and a host
+  *   `subagents.asyncByDefault` still wins over the default.
   * - Deliberately NO `output:`/`defaultReads`/`defaultProgress` file
   *   bindings: single-shot launches resolve relative outputs under
   *   per-run artifact dirs while `defaultReads` resolves against the
@@ -1510,24 +1532,32 @@ export function buildPiAgentFiles(
   profileId: PiProfileId,
 ): Record<string, string> {
   const files: Record<string, string> = {}
+  // The consultant this profile carries (absent on `balanced`/`local`). Read
+  // once here: it gates both the reviewer's protege edge and the prose that
+  // names it, and every surface must agree on whether the role exists.
+  const advisor = piAdvisorModel(profileId)
   for (const role of piNativeRoles(profileId)) {
     const isImplementer = role.name === "General-Purpose"
     const isReviewer = role.name === "reviewer"
     // `watchdog_diff` (diff-anchored review) is provided by the
     // pi-subagents runtime, like the delegation primitives — no extra
-    // package needed. Balanced reviewer additionally lists `subagent`:
-    // it holds the roster's other nesting grant (→ Explore) and the
-    // grant is inert without it.
+    // package needed. The reviewer lists `subagent` exactly when it holds a
+    // nesting grant: balanced (→ Explore) or an Advisor-bearing profile
+    // (→ `advisor`). The grant is inert without the tool.
     //
     // Bare comma form (no brackets), matching every pi-subagents
-    // builtin file. `contact_supervisor` appears ONLY on the writer:
-    // it is a blocked-child escalation channel, meaningless on leaves
-    // (reviewer/Explore just return; supervisor pings from them are
-    // noise that costs a turn each).
+    // builtin file. `contact_supervisor` is listed ONLY on the writer, by
+    // contract: a verdict-only leaf paging the supervisor is noise that
+    // costs a turn each, and the emitted bodies never ask a leaf to escalate.
+    // (The runtime does still hand core slots to a child whose allowlist omits
+    // them — a live cheapest reviewer transcript shows a
+    // `contact_supervisor` call from a file that never listed the tool — so
+    // the omission here is a prompt-level contract, not a capability fence.)
+    const reviewerDelegates = isBalancedFamily(profileId) || advisor !== undefined
     const tools = isImplementer
       ? "read, grep, find, ls, bash, edit, write, subagent, contact_supervisor"
       : isReviewer
-        ? isBalancedFamily(profileId)
+        ? reviewerDelegates
           ? "read, grep, find, ls, watchdog_diff, subagent"
           : "read, grep, find, ls, watchdog_diff"
         : "read, grep, find, ls, bash";
@@ -1539,14 +1569,10 @@ export function buildPiAgentFiles(
       `model: ${PI_PROVIDER_NAME}/${role.model}`,
       `thinking: ${role.thinking}`,
       "advertise: true",
-      // Foreground by default. pi-subagents launches workflow children
-      // async (detached runner) by default, and the runner's tool
-      // registry demonstrably drops read/bash (observed live:
-      // "requested unavailable child tools: [read, bash]"), failing
-      // every strict-allowlist child. Foreground children run in-process
-      // with the parent's full registry — nesting works, no spawn
-      // overhead, no runner cost. Explicit call values still win.
-      "async: false",
+      // No `async` key on purpose: omission inherits `asyncByDefault`
+      // (true upstream), which is what makes a fan-out run in parallel.
+      // Emitting `async: false` blocked the parent and made two
+      // independent children impossible in one turn.
       "systemPromptMode: replace",
       "inheritProjectContext: true",
       "defaultContext: fresh",
@@ -1580,6 +1606,15 @@ export function buildPiAgentFiles(
     if (isBalancedFamily(profileId) && isReviewer) {
       lines.push("allowNestedSubagents: true", "allowedAgents: Explore");
     }
+    // The cheapest-family protege grant, the Pi half of the contract the
+    // Claude path implements in `codex-mcp-config.ts` (`PROTEGE_APPENDICES`):
+    // the reviewer may consult the profile's Advisor directly instead of
+    // escalating a question it cannot settle. Conditional on the role
+    // existing, because `allowedAgents` naming a missing agent is a dangling
+    // target the model then wastes turns on.
+    if (advisor && isReviewer) {
+      lines.push("allowNestedSubagents: true", "allowedAgents: advisor");
+    }
     lines.push("---", "");
     if (role.name === "Explore") {
       lines.push(
@@ -1599,6 +1634,24 @@ export function buildPiAgentFiles(
         "You have no shell: cite the test commands for the lead to run rather than executing them.",
         "Do not rewrite code outside small, clearly-marked suggestions.",
       );
+      if (advisor) {
+        lines.push(
+          "You may consult the `advisor` subagent, the profile's own consultant,",
+          "on the Advisor contract the lead uses: it sees only the brief you write.",
+          "You own the verdict; the advisor is counsel, never authority: it never",
+          "approves, vetoes, or decides for you.",
+          "Budget: at most 5 advisor rounds per review — one round is one back-and-forth",
+          "exchange. Spend them only on consequential uncertainty that code, builds, or tests",
+          "cannot settle: a changed assumption, conflicting evidence, an approach that will",
+          "not converge, or a severity call with merge-blocking consequences. Never consult for",
+          "routine verification, progress narration, or completion ritual — run the check",
+          "yourself. State the question, your evidence with file:line citations, the credible",
+          "alternatives, and what evidence would change your verdict. If the advisor disagrees,",
+          "evaluate on the merits: adopt what is right with a one-line reason, defend what you",
+          "verified with evidence, and record the disagreement in your report. Do not delegate",
+          "to any other agent.",
+        );
+      }
     } else {
       lines.push(
         "You are the single writer thread. Execute the assigned task with narrow, coherent edits;",
@@ -1628,7 +1681,6 @@ export function buildPiAgentFiles(
       `model: ${PI_PROVIDER_NAME}/${oracleModel}`,
       `thinking: ${piOracleThinking(profileId) as string}`,
       "advertise: true",
-      "async: false",
       "systemPromptMode: replace",
       "inheritProjectContext: true",
       "defaultContext: fresh",
@@ -1654,8 +1706,8 @@ export function buildPiAgentFiles(
   // Advisor agent (cheapest only). Genuinely new role — the builtin has no
   // separate advisor file (`advisor` is just an alias of builtin oracle, lost
   // in shadowing). Balanced stays advisor-free: no file, no skill, no prompt,
-  // no prose — asserted by tests.
-  const advisor = piAdvisorModel(profileId);
+  // no prose — asserted by tests. `advisor` was read once at the top of this
+  // function: the reviewer's grant and description already depend on it.
   if (advisor) {
     const body = [
       "---",
@@ -1665,7 +1717,6 @@ export function buildPiAgentFiles(
       `model: ${PI_PROVIDER_NAME}/${advisor.model}`,
       `thinking: ${advisor.thinking}`,
       "advertise: true",
-      "async: false",
       "systemPromptMode: replace",
       "inheritProjectContext: true",
       "defaultContext: fresh",
@@ -1761,7 +1812,7 @@ export function buildPiAppendSystem(
     const oracle = piOracleEnabled(profileId)
     lines.push(
       `- Delegate FREELY to Explore for discovery and General-Purpose for scoped work.`,
-      `- Call subagent directly (agent + task); save workflows for genuinely parallel fanout.`,
+      `- Call subagent directly (agent + task). Children run in the background by default, so fan out independent work in one turn and collect the results; pass \`async: false\` only when you must block on that launch.`,
       isBalancedFamily(profileId)
         ? `- Send work to reviewer ONLY when the change alters behavior.`
         : `- Send finished work to reviewer for assessment.`,

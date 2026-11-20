@@ -574,7 +574,7 @@ export function cheapReviewerModel(): string | undefined {
 
 /** Sol Advisor for the cheapest family at the 200K default window. The
  *  `profileId` selects the family contract: `cheapest` gates
- *  `gpt-5.6-sol`/medium, `cheapest2` gates `gpt-6.1-sol`/high. */
+ *  `gpt-5.6-sol`/medium, `cheapest2` gates `gpt-6.2-sol`/high. */
 export function cheapestAdvisorModel(profileId?: string): string | undefined {
   const contract = cheapestContractFor(profileId)
   const found = state.models?.data.find((m) => m.id === contract.advisorModel)

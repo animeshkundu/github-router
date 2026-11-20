@@ -1034,7 +1034,7 @@ export const claude = defineCommand({
       )
     } else if (isCheapestFamily(launchProfileId)) {
       // The family's own Advisor identity: `cheapest` pins `gpt-5.6-sol`,
-      // `cheapest2` pins `gpt-6.1-sol`, both BARE (200K default window).
+      // `cheapest2` pins `gpt-6.2-sol`, both BARE (200K default window).
       extraArgs = withFixedCheapestAdvisorArg(
         extraArgs,
         cheapestAdvisorClientEnabled(process.env),
@@ -1042,7 +1042,7 @@ export const claude = defineCommand({
       )
     } else if (launchProfileId === "local2") {
       // `local2` is the only local launch with an Advisor, and it is the same
-      // `gpt-6.1-sol` the `cheapest2` Advisor pins. `local` deliberately takes
+      // `gpt-6.2-sol` the `cheapest2` Advisor pins. `local` deliberately takes
       // the branch below instead: it has no Advisor, and a caller-supplied
       // `--advisor` would advertise a router-owned tool to a server whose
       // behaviour we have refused to assume.

@@ -55,7 +55,7 @@ function setCatalog(entries: Record<string, number>): void {
 
 const WINDOWS: Record<string, number> = {
   "gpt-5.6-sol": 1_050_000,
-  "gpt-6.1-sol": 1_050_000,
+  "gpt-6.2-sol": 1_050_000,
   "gpt-6-luna": 1_050_000,
   "gemini-3.8-flash": 1_000_000,
   "grok-4.6": 500_000,
@@ -207,15 +207,15 @@ describe("selectableModelsInCatalog", () => {
 
   test("the -2 rows are the base rows with only the declared identities swapped", () => {
     setCatalog(WINDOWS)
-    expect(ids("cheapest2")).toEqual(["gpt-6.1-sol", "gpt-6-luna"])
-    expect(ids("balanced2")).toEqual(["gpt-6.1-sol", "gpt-6-luna", "grok-4.7"])
+    expect(ids("cheapest2")).toEqual(["gpt-6.2-sol", "gpt-6-luna"])
+    expect(ids("balanced2")).toEqual(["gpt-6.2-sol", "gpt-6-luna", "grok-4.7"])
     // Labels follow the id, never a literal list.
     expect(selectableModelsInCatalog("cheapest2").map((row) => row.label)).toEqual([
-      "GPT-6.1 Sol",
+      "GPT-6.2 Sol",
       "GPT-6 Luna",
     ])
     expect(selectableModelsInCatalog("balanced2").map((row) => row.label)).toEqual([
-      "GPT-6.1 Sol",
+      "GPT-6.2 Sol",
       "GPT-6 Luna",
       "Grok 4.7",
     ])
@@ -230,7 +230,7 @@ describe("selectableModelsInCatalog", () => {
       "gpt-6-luna": 1_050_000,
       "grok-4.6": 500_000,
     })
-    // Neither the 6.1 Sol tier nor Grok 4.7 is served: the affected rows are
+    // Neither the 6.2 Sol tier nor Grok 4.7 is served: the affected rows are
     // dropped, not substituted with the base identities.
     expect(ids("cheapest2")).toEqual(["gpt-6-luna"])
     expect(ids("balanced2")).toEqual(["gpt-6-luna"])
@@ -271,9 +271,9 @@ describe("selectableModelsInCatalog", () => {
       const [profile, expected] of [
         ["cheap", ["gpt-5.6-sol", "gpt-6-luna", "gemini-3.8-flash", "grok-4.6"]],
         ["cheapest", ["gpt-5.6-sol", "gpt-6-luna"]],
-        ["cheapest2", ["gpt-6.1-sol", "gpt-6-luna"]],
+        ["cheapest2", ["gpt-6.2-sol", "gpt-6-luna"]],
         ["balanced", ["gpt-5.6-sol", "gpt-6-luna", "grok-4.6"]],
-        ["balanced2", ["gpt-6.1-sol", "gpt-6-luna", "grok-4.7"]],
+        ["balanced2", ["gpt-6.2-sol", "gpt-6-luna", "grok-4.7"]],
       ] as const
     ) {
       const result = await injectModelPickerSettingsFile(settingsPath, profile)

@@ -2342,7 +2342,7 @@ export const NON_PERSONA_MCP_TOOLS: ReadonlyArray<NonPersonaMcpTool> =
               }),
             // Cheapest-family rewrite. The family's rewrite model is its
             // Advisor-tier Sol on `cheapest` (`gpt-5.6-sol`) and `cheapest2`
-            // (`gpt-6.1-sol`), and stays `gpt-5.6-sol` on `cheaplocal`, whose
+            // (`gpt-6.2-sol`), and stays `gpt-5.6-sol` on `cheaplocal`, whose
             // CONSULTANTS leave Copilot while this dispatch does not.
             // Resolved per call because the profile is per connection, while
             // the persona list is static.

@@ -115,7 +115,7 @@ describe("pi --no-peers shrinks the surface", () => {
       "gpt-6-luna",
     ])
     expect(piProfileModelIds("balanced2", { peers: false })).toEqual([
-      "gpt-6.1-sol",
+      "gpt-6.2-sol",
     ])
   })
 

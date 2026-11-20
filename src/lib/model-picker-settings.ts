@@ -163,7 +163,7 @@ function pinnedRows(
 
 // Cheapest roster is Luna (lead/GP/reviewer) + Sol (Advisor/Oracle): rows are
 // Sol and Luna only. Each sibling's Sol row follows its own contract, so
-// `cheapest2` shows GPT-6.1 Sol without a second literal list.
+// `cheapest2` shows GPT-6.2 Sol without a second literal list.
 const CHEAPEST_PICKER_MODELS = pinnedRows(
   cheapestContractFor("cheapest").advisorModel,
 )

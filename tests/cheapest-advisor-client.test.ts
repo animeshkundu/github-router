@@ -26,9 +26,9 @@ describe("withFixedCheapestAdvisorArg", () => {
   test("uses an explicit model when one is supplied", () => {
     // This is the cheapest2 delta: the caller (or launcher) passes the family
     // contract's advisor client model rather than relying on the default.
-    expect(withFixedCheapestAdvisorArg([], true, "gpt-6.1-sol")).toEqual([
+    expect(withFixedCheapestAdvisorArg([], true, "gpt-6.2-sol")).toEqual([
       "--advisor",
-      "gpt-6.1-sol",
+      "gpt-6.2-sol",
     ])
   })
 
@@ -41,12 +41,12 @@ describe("withFixedCheapestAdvisorArg", () => {
       "--advisor=sonnet",
       "--verbose",
     ]
-    expect(withFixedCheapestAdvisorArg(args, true, "gpt-6.1-sol")).toEqual([
+    expect(withFixedCheapestAdvisorArg(args, true, "gpt-6.2-sol")).toEqual([
       "-m",
       "cheapest2",
       "--verbose",
       "--advisor",
-      "gpt-6.1-sol",
+      "gpt-6.2-sol",
     ])
   })
 
@@ -100,9 +100,9 @@ describe("withFixedCheapestAdvisorArg", () => {
   })
 
   test("empty args become the fixed pair", () => {
-    expect(withFixedCheapestAdvisorArg([], true, "gpt-6.1-sol")).toEqual([
+    expect(withFixedCheapestAdvisorArg([], true, "gpt-6.2-sol")).toEqual([
       "--advisor",
-      "gpt-6.1-sol",
+      "gpt-6.2-sol",
     ])
   })
 })

@@ -159,7 +159,7 @@ export const LOCAL_PROFILE_CONTRACT = Object.freeze({
 export type LocalProfileContract = typeof LOCAL_PROFILE_CONTRACT
 
 /**
- * The `-m local2` Advisor: `gpt-6.1-sol` on Copilot, `high`, at the cheapest
+ * The `-m local2` Advisor: `gpt-6.2-sol` on Copilot, `high`, at the cheapest
  * family's default window and curated ("small digest") transcript budget.
  *
  * The lead turn stays local and free; only the Advisor consult is billed.

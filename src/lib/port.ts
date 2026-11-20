@@ -170,13 +170,13 @@ export const BUDGET_SMALL_FAST_CATALOG_ID = "claude-haiku-4.5"
  *                   launch: Sol leader at the 200K DEFAULT window, Grok
  *                   Oracle, no astra peer)
  *   - `cheapest2` → `CHEAPEST2_LEAD_MODEL` BARE (the `cheapest` sibling with
- *                   the Sol Advisor/Oracle at `gpt-6.1-sol`; same Luna lead)
+ *                   the Sol Advisor/Oracle at `gpt-6.2-sol`; same Luna lead)
  *   - `cheaplocal` → `CHEAPEST_LEAD_MODEL` BARE (the `cheapest` sibling whose
  *                   Advisor and Oracle move to the local endpoint; the lead is
  *                   still Luna on Copilot, so it resolves exactly like
  *                   `cheapest`)
  *   - `balanced2` → `BALANCED2_LEAD_MODEL` BARE (the `balanced` sibling with
- *                   the lead/reviewer at `gpt-6.1-sol` and the Grok-4.7 Oracle)
+ *                   the lead/reviewer at `gpt-6.2-sol` and the Grok-4.7 Oracle)
  *   - `local`, `local2` → `LOCAL_PROFILE_LEAD_MODEL`, the bare `opus` tier id
  *                   the LOCAL server resolves. No catalog consultation and no
  *                   `[1m]` decoration: these launches never talk to Copilot

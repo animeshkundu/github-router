@@ -205,7 +205,7 @@ Oracle remains separate and stateless. It is available to the lead and `Plan` as
 
 Standard Advisor behavior is unchanged: Sol/xhigh (high floor) on the normal Opus path and Opus escalation for lighter Claude leads.
 
-In a cheapest launch the Advisor is `gpt-5.6-sol` at medium effort via Responses, pinned to the bare slug at the 200K cost class like cheap (transcript capped at 200K with the original ask pinned). In a `cheapest2` launch it is `gpt-6.1-sol` at **high** effort — the same family wiring, the 6.1 Sol tier, and an effort declaration that matches the high effort the Claude path already forces on the wire for this family (Pi reads the declared value). Cheapest has no `Plan` subagent: the lead plans directly and reviews the final plan with the Advisor (advisory, non-binding — the lead retains decision ownership) before presenting it to the user; the lead prompt carries this as an injected directive. The cheapest `reviewer` runs `gpt-6-luna` at max effort (bare alias `gh-router-cheapest-reviewer-max`) and, as the profile's protege, may itself consult the Advisor — capped at 5 advisor rounds per review invocation with a mentor system prompt — while `Explore` and `General-Purpose` stay Advisor-free.
+In a cheapest launch the Advisor is `gpt-5.6-sol` at medium effort via Responses, pinned to the bare slug at the 200K cost class like cheap (transcript capped at 200K with the original ask pinned). In a `cheapest2` launch it is `gpt-6.2-sol` at **high** effort — the same family wiring, the 6.2 Sol tier, and an effort declaration that matches the high effort the Claude path already forces on the wire for this family (Pi reads the declared value). Cheapest has no `Plan` subagent: the lead plans directly and reviews the final plan with the Advisor (advisory, non-binding — the lead retains decision ownership) before presenting it to the user; the lead prompt carries this as an injected directive. The cheapest `reviewer` runs `gpt-6-luna` at max effort (bare alias `gh-router-cheapest-reviewer-max`) and, as the profile's protege, may itself consult the Advisor — capped at 5 advisor rounds per review invocation with a mentor system prompt — while `Explore` and `General-Purpose` stay Advisor-free.
 
 ## Cheap launch profiles (`-m cheap`, `-m cheap1m`)
 
@@ -259,9 +259,9 @@ The raw aliases `cheapest`, `cheapest2`, and `cheaplocal` select the Luna-led 20
 | Surface | `cheapest` | `cheapest2` | `cheaplocal` |
 |---|---|---|---|
 | Lead / `Explore` / `General-Purpose` / `reviewer` | `gpt-6-luna` | same | same |
-| Advisor model / effort | `gpt-5.6-sol` / medium | `gpt-6.1-sol` / **high** | local `opus` / `max` |
-| Oracle model / effort | `gpt-5.6-sol` / high | `gpt-6.1-sol` / high | local `opus` / `max` |
-| Prompt-rewrite brief (`internal-prompt-submit`) | `gpt-5.6-sol` | `gpt-6.1-sol` | `gpt-5.6-sol` |
+| Advisor model / effort | `gpt-5.6-sol` / medium | `gpt-6.2-sol` / **high** | local `opus` / `max` |
+| Oracle model / effort | `gpt-5.6-sol` / high | `gpt-6.2-sol` / high | local `opus` / `max` |
+| Prompt-rewrite brief (`internal-prompt-submit`) | `gpt-5.6-sol` | `gpt-6.2-sol` | `gpt-5.6-sol` |
 | Windows / roster / peers / graph | 200K / three natives / Oracle only | same | same |
 
 ### Local consultants (`-m cheaplocal`)
@@ -288,7 +288,7 @@ The literal raw alias `balanced` selects the Sol-led 200K tier: a `gpt-5.6-sol`/
 | `reviewer` | `gpt-5.6-sol` | high | 200K |
 | `oracle` | `grok-4.6` | medium | 200K |
 
-`balanced2` is derived from `balanced` by contract spread and moves three identities only: the **lead and `reviewer` to `gpt-6.1-sol`**, and the **Oracle to `grok-4.7`** (still `/responses`, still medium effort). `Explore` and `General-Purpose` stay Luna, the lead effort stays medium, the profile stays advisor-free, and the `reviewer` → `Explore` edge is inherited. The declarative `astra` slot is inherited unchanged (`gpt-6-astra`): no balanced launch exposes an `astra` tool, so altering it would change nothing callable and would add a capability plain `balanced` does not have.
+`balanced2` is derived from `balanced` by contract spread and moves three identities only: the **lead and `reviewer` to `gpt-6.2-sol`**, and the **Oracle to `grok-4.7`** (still `/responses`, still medium effort). `Explore` and `General-Purpose` stay Luna, the lead effort stays medium, the profile stays advisor-free, and the `reviewer` → `Explore` edge is inherited. The declarative `astra` slot is inherited unchanged (`gpt-6-astra`): no balanced launch exposes an `astra` tool, so altering it would change nothing callable and would add a capability plain `balanced` does not have.
 
 Two deliberate divergences from the fast/cheap delegation graph:
 
@@ -305,8 +305,8 @@ The raw aliases `local` and `local2` point the MAIN agent loop at a local infere
 | Lead / `reviewer` | `opus` | same |
 | `Explore` | `haiku` | same |
 | `General-Purpose` | `sonnet` | same |
-| Advisor | none (the tool is disabled, see below) | `gpt-6.1-sol` / high, served by Copilot |
-| Oracle peer | `opus` / `max`, served by the local endpoint | `gpt-6.1-sol` / high, served by Copilot |
+| Advisor | none (the tool is disabled, see below) | `gpt-6.2-sol` / high, served by Copilot |
+| Oracle peer | `opus` / `max`, served by the local endpoint | `gpt-6.2-sol` / high, served by Copilot |
 | Window / roster | 200K / the three natives above, no `Plan`, no coordinator | same |
 | MCP groups | `peers` (artifact tools + the Oracle), `search`, `browser`, `ado`, `kusto`, `cloudagent` | same |
 | Prompts | the local family's own, assumption-free | same |
@@ -317,7 +317,7 @@ Local is a third family, not a cheapest sibling: its egress and model ids differ
 
 `local` runs no Copilot model inference on an agent turn. Every Claude Code surface funnels to the local endpoint: the lead, the native Task subagents, and agent-team teammates. A teammate cannot read `ANTHROPIC_CUSTOM_HEADERS` (the agent-teams env allowlist drops it), so the per-launch synthetic credential's bearer is the channel that binds it to the launch and therefore to the local egress.
 
-`local2` adds exactly two Copilot consumers: the Advisor and the Oracle, both `gpt-6.1-sol`.
+`local2` adds exactly two Copilot consumers: the Advisor and the Oracle, both `gpt-6.2-sol`.
 
 `local` has an Oracle too, and it costs nothing: the contract declares
 `consultTransport: "local"`, so the consult is one Anthropic Messages call to the
@@ -366,7 +366,7 @@ Both profiles run at the 200K default window, enforced client-side by the seeded
 
 ### Advisor
 
-`local` never passes `--advisor` and seeds `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` (unless the operator set it), because the launcher enables the advisor tool for every launch and a router-owned tool must not be forwarded to a server whose behaviour is unmeasured. `local2` keeps the tool and pins `--advisor gpt-6.1-sol` at effort `high`, with the same curated ("small digest") transcript budget as the cheapest family. The Advisor's own turns are Copilot requests and are priced as such. Launch fails loudly when `gpt-6.1-sol` is absent from the live catalog; `local` needs no catalog entry at all.
+`local` never passes `--advisor` and seeds `CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1` (unless the operator set it), because the launcher enables the advisor tool for every launch and a router-owned tool must not be forwarded to a server whose behaviour is unmeasured. `local2` keeps the tool and pins `--advisor gpt-6.2-sol` at effort `high`, with the same curated ("small digest") transcript budget as the cheapest family. The Advisor's own turns are Copilot requests and are priced as such. Launch fails loudly when `gpt-6.2-sol` is absent from the live catalog; `local` needs no catalog entry at all.
 
 `local2` inherits both curated grants, not just the lead one, because "all of the subagents as cheapest mode" includes what the reviewer may do. The lead gets the full Advisor tool; the `reviewer` subagent gets the capped protege variant (`CHEAPEST_REVIEWER_ADVISOR_TOOL_INSTRUCTIONS`: at most 5 advisor rounds, mentor posture) over the same small-digest transcript, which is exactly what the emitted reviewer `.md` promises. Every other local subagent is stripped, and `local` grants nothing to anyone. Two strip rules back this up on a local lead: a request whose advisor behaviour is off carries neither the injected `__anthropic_advisor` tool nor Claude Code's native `advisor_*` typed tool, because the local endpoint is never assumed to understand the Anthropic server-tool type. `tests/local-reviewer-advisor.test.ts` pins all three directions: the reviewer grant, the lead grant, and the local strip.
 
@@ -398,6 +398,6 @@ Claude Code locally recognizes the literal `[1m]` suffix. The proxy adds it only
 
 ## Curated model picker
 
-The per-launch mirror's supported `modelPicker` setting advertises only live-catalog-present rows. Standard and Fast expose Sol, Luna, Gemini 3.8 Flash, and Grok 4.6; Max exposes Sol, Luna, Gemini 3.8 Flash, and Opus 5 so every row is an allowed Max lead; Cheap, the cheapest family, the balanced family, and the local family expose only bare rows (`neverOneM` everywhere — no decorated opt-in row, since the seeded `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` would clamp it to 200K anyway), with each sibling's rows built from its own contract. The local family's rows are the three bare tier ids `opus`/`sonnet`/`haiku`, and they are the one set emitted without catalog consultation, because a local id has no catalog entry to filter on. The catalog-built sibling rows are unchanged: `cheapest2` offers GPT-6.1 Sol + Luna, and `balanced2` offers GPT-6.1 Sol + Luna + Grok 4.7; `cheaplocal` exposes the `cheapest` rows unchanged, because a picker row names a lead model a `/model` switch can select and its local `opus` consultant id has no catalog entry to consult; Cheap1m exposes the same four with only the Luna row decoratable, so a `/model` switch to Luna keeps 1M accounting like its 1M Gemini lead. On 200K-lead traffic the request preprocessor still strips it upstream and subagents run on bare aliases. A Luna switch also runs at `max` effort per the shared bare-model fallback, so it is the highest-cost combination in these profiles — reachable only by explicit `/model` choice, never by default. Missing rows are omitted, not substituted. Selecting a row changes the active lead model but does not change the launch profile's roster or MCP scope. Existing user `modelPicker` configuration wins wholesale, and its valid `[1m]` rows still participate in the compaction bound. Claude Code 2.1.260 requires `behavesAs` to offer otherwise-unknown ids, so Sol/Luna use the Opus 5 client profile and Gemini/Grok use Sonnet 5 while labels and wire ids remain unchanged. Gateway discovery stays disabled because the same client filters its refresh to Claude/Anthropic ids and replaces its cache.
+The per-launch mirror's supported `modelPicker` setting advertises only live-catalog-present rows. Standard and Fast expose Sol, Luna, Gemini 3.8 Flash, and Grok 4.6; Max exposes Sol, Luna, Gemini 3.8 Flash, and Opus 5 so every row is an allowed Max lead; Cheap, the cheapest family, the balanced family, and the local family expose only bare rows (`neverOneM` everywhere — no decorated opt-in row, since the seeded `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` would clamp it to 200K anyway), with each sibling's rows built from its own contract. The local family's rows are the three bare tier ids `opus`/`sonnet`/`haiku`, and they are the one set emitted without catalog consultation, because a local id has no catalog entry to filter on. The catalog-built sibling rows are unchanged: `cheapest2` offers GPT-6.2 Sol + Luna, and `balanced2` offers GPT-6.2 Sol + Luna + Grok 4.7; `cheaplocal` exposes the `cheapest` rows unchanged, because a picker row names a lead model a `/model` switch can select and its local `opus` consultant id has no catalog entry to consult; Cheap1m exposes the same four with only the Luna row decoratable, so a `/model` switch to Luna keeps 1M accounting like its 1M Gemini lead. On 200K-lead traffic the request preprocessor still strips it upstream and subagents run on bare aliases. A Luna switch also runs at `max` effort per the shared bare-model fallback, so it is the highest-cost combination in these profiles — reachable only by explicit `/model` choice, never by default. Missing rows are omitted, not substituted. Selecting a row changes the active lead model but does not change the launch profile's roster or MCP scope. Existing user `modelPicker` configuration wins wholesale, and its valid `[1m]` rows still participate in the compaction bound. Claude Code 2.1.260 requires `behavesAs` to offer otherwise-unknown ids, so Sol/Luna use the Opus 5 client profile and Gemini/Grok use Sonnet 5 while labels and wire ids remain unchanged. Gateway discovery stays disabled because the same client filters its refresh to Claude/Anthropic ids and replaces its cache.
 
 `github-router serve` intentionally uses the Standard roster, ACL, and picker. Every non-standard alias (`fast`, `cheap`, `cheap1m`, `cheapest`, `cheapest2`, `cheaplocal`, `max`, `balanced`, `balanced2`, `local`, `local2`) is rejected there with an actionable message; use `github-router claude -m <alias>` for those profiles, or pass an explicit model id to `serve` while retaining its Standard enhancement surface.

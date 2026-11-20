@@ -504,13 +504,13 @@ describe("fast request preprocessing", () => {
   })
 
   describe("derived -2 profiles", () => {
-    test("cheapest2 is cheapest with the 6.1 Sol identities on the wire", () => {
-      // Lead stays Luna; Sol 6.1 is the Advisor/Oracle tier, so a bare
+    test("cheapest2 is cheapest with the 6.2 Sol identities on the wire", () => {
+      // Lead stays Luna; Sol 6.2 is the Advisor/Oracle tier, so a bare
       // request is accepted at the shared `high` (the Advisor's declared
       // effort is not a lead-effort seed).
       for (const [model, effort] of [
         ["gpt-6-luna", "max"],
-        ["gpt-6.1-sol", "high"],
+        ["gpt-6.2-sol", "high"],
       ] as const) {
         const parsed = JSON.parse(
           preprocessFastRequest(body(model), cheapest2Launch).body,
@@ -562,21 +562,21 @@ describe("fast request preprocessing", () => {
       }
     })
 
-    test("balanced2 leads Sol 6.1 at medium and subagents at high", () => {
+    test("balanced2 leads Sol 6.2 at medium and subagents at high", () => {
       const lead = JSON.parse(
-        preprocessFastRequest(body("gpt-6.1-sol"), balanced2Launch).body,
+        preprocessFastRequest(body("gpt-6.2-sol"), balanced2Launch).body,
       )
       expect(lead.output_config.effort).toBe("medium")
       const leadExplicit = JSON.parse(
         preprocessFastRequest(
-          body("gpt-6.1-sol", { output_config: { effort: "xhigh" } }),
+          body("gpt-6.2-sol", { output_config: { effort: "xhigh" } }),
           balanced2Launch,
         ).body,
       )
       expect(leadExplicit.output_config.effort).toBe("xhigh")
       const sub = JSON.parse(
         preprocessFastRequest(
-          body("gpt-6.1-sol", { output_config: { effort: "medium" } }),
+          body("gpt-6.2-sol", { output_config: { effort: "medium" } }),
           balanced2Launch,
           true,
         ).body,
@@ -590,7 +590,7 @@ describe("fast request preprocessing", () => {
       expect(grok.output_config.effort).toBe("medium")
     })
 
-    test("balanced2's shared reviewer alias resolves to Sol 6.1", () => {
+    test("balanced2's shared reviewer alias resolves to Sol 6.2", () => {
       for (const wire of [BALANCED_REVIEWER_ALIAS_ID, `${BALANCED_REVIEWER_ALIAS_ID}[1m]`]) {
         const sub = preprocessFastRequest(
           body(wire, { output_config: { effort: "low" } }),
@@ -599,7 +599,7 @@ describe("fast request preprocessing", () => {
         )
         expect(sub.rejectedAlias).toBeUndefined()
         const parsed = JSON.parse(sub.body)
-        expect(parsed.model).toBe("gpt-6.1-sol")
+        expect(parsed.model).toBe("gpt-6.2-sol")
         expect(parsed.output_config.effort).toBe("high")
       }
       // The base profile's alias is unchanged: profile-aware, not global.

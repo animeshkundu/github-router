@@ -897,7 +897,7 @@ describe("/mcp prompt_brief (hook channel)", () => {
     }
   })
 
-  test("a cheapest2 launch rewrites with gpt-6.1-sol, not Sol 5.6", async () => {
+  test("a cheapest2 launch rewrites with gpt-6.2-sol, not Sol 5.6", async () => {
     // Derivation regression: cheapest2 differs from cheapest only in the Sol
     // ids it declares, and the prompt brief is one of the surfaces that has
     // to follow. A hardcoded CHEAPEST_REWRITE_MODEL here would silently keep
@@ -919,7 +919,7 @@ describe("/mcp prompt_brief (hook channel)", () => {
       expect(result.isError).toBeFalsy()
       expect(text).toContain("EXECUTION BRIEF")
       expect(upstream.calls).toBe(1)
-      expect(upstream.models).toEqual(["gpt-6.1-sol"])
+      expect(upstream.models).toEqual(["gpt-6.2-sol"])
     } finally {
       unregisterLaunch(launch.launchId)
     }
@@ -4086,7 +4086,7 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
   // only moving parts are the contract's model id and effort. These tests pin
   // the wire model AND the prose identity (descriptor + instructions), because
   // a stale name there routes the model at a capability it does not have.
-  test("cheapest2 Oracle-only: gpt-6.1-sol at high, named GPT-6.1 Sol in prose", async () => {
+  test("cheapest2 Oracle-only: gpt-6.2-sol at high, named GPT-6.2 Sol in prose", async () => {
     const NONCE = "e".repeat(64)
     const launch = registerLaunch({
       profileId: "cheapest2",
@@ -4100,8 +4100,8 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       state.models = {
         object: "list",
         data: [{
-          id: "gpt-6.1-sol",
-          name: "gpt-6.1-sol",
+          id: "gpt-6.2-sol",
+          name: "gpt-6.2-sol",
           object: "model",
           vendor: "openai",
           version: "1",
@@ -4109,7 +4109,7 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
           model_picker_enabled: true,
           supported_endpoints: ["/responses"],
           capabilities: {
-            family: "gpt-6.1-sol",
+            family: "gpt-6.2-sol",
             object: "model_capabilities",
             tokenizer: "o200k_base",
             type: "chat",
@@ -4127,7 +4127,7 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       expect(tools.map((t) => t.name)).toContain("oracle")
       expect(tools.map((t) => t.name)).not.toContain("astra")
       const oracleDesc = tools.find((t) => t.name === "oracle")?.description ?? ""
-      expect(oracleDesc).toContain("GPT-6.1 Sol (200K context, high effort)")
+      expect(oracleDesc).toContain("GPT-6.2 Sol (200K context, high effort)")
       expect(oracleDesc).not.toContain("GPT-5.6 Sol")
       // cheapest2 carries an Advisor, so its Oracle legitimately points at it.
       expect(oracleDesc.toLowerCase()).toContain("advisor")
@@ -4156,9 +4156,9 @@ describe("launch-profile scoping (allowedGroups / allowedPersonas)", () => {
       )
       expect(oracleCall.status).toBe(200)
       expect(oracleUrl).toContain("/responses")
-      expect(oracleCapture.body?.model).toBe("gpt-6.1-sol")
+      expect(oracleCapture.body?.model).toBe("gpt-6.2-sol")
       expect(oracleCapture.body?.reasoning).toEqual({ effort: "high" })
-      expect(oracleCapture.body?.instructions).toContain("running on GPT-6.1 Sol")
+      expect(oracleCapture.body?.instructions).toContain("running on GPT-6.2 Sol")
     } finally {
       state.models = saved
       unregisterLaunch(launch.launchId)
@@ -4779,8 +4779,8 @@ describe("local profiles keep the Artifact surface and the Oracle split", () => 
       state.models = {
         object: "list",
         data: [{
-          id: "gpt-6.1-sol",
-          name: "gpt-6.1-sol",
+          id: "gpt-6.2-sol",
+          name: "gpt-6.2-sol",
           object: "model",
           vendor: "openai",
           version: "1",
@@ -4788,7 +4788,7 @@ describe("local profiles keep the Artifact surface and the Oracle split", () => 
           model_picker_enabled: true,
           supported_endpoints: ["/responses"],
           capabilities: {
-            family: "gpt-6.1-sol",
+            family: "gpt-6.2-sol",
             object: "model_capabilities",
             tokenizer: "o200k_base",
             type: "chat",

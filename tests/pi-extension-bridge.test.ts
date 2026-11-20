@@ -96,25 +96,35 @@ describe("pi native agent files (pi-subagents contract)", () => {
     expect(gp).toContain("allowedAgents: reviewer, oracle")
     expect(gp).toContain("tools: read, grep, find, ls, bash, edit, write, subagent, contact_supervisor")
     expect(gp).toContain("acceptanceRole: writer")
-    // Foreground by default: the detached runner drops read/bash.
-    expect(gp).toContain("async: false")
+    // Background by default: the inherited `asyncByDefault` (true) is what
+    // makes parallel fan-out possible, so no file may pin `async`.
+    expect(gp).not.toContain("async:")
     const balancedReviewer = buildPiAgentFiles("balanced")["agents/reviewer.md"]!
     expect(balancedReviewer).toContain("allowNestedSubagents: true")
     expect(balancedReviewer).toContain("allowedAgents: Explore")
     // The grant is inert without `subagent` in the same tools list.
     expect(balancedReviewer).toContain("watchdog_diff, subagent")
-    expect(balancedReviewer).toContain("async: false")
-    // Cheapest reviewer is a leaf: no dangling edge, no nesting tool.
-    expect(cheapest["agents/reviewer.md"]!).not.toContain("allowedAgents")
-    expect(cheapest["agents/reviewer.md"]!).not.toContain("subagent]")
+    expect(balancedReviewer).not.toContain("async:")
+    // The Advisor-bearing families mirror the Claude path's protege grant:
+    // the reviewer may consult the profile's own advisor.
+    expect(cheapest["agents/reviewer.md"]!).toContain("allowedAgents: advisor")
+    expect(cheapest["agents/reviewer.md"]!).toContain("allowNestedSubagents: true")
+    expect(cheapest["agents/reviewer.md"]!).toContain("watchdog_diff, subagent")
+    expect(cheapest["agents/reviewer.md"]!).toContain("at most 5 advisor rounds")
+    // ...and the edge is conditional: `balanced` has no advisor file, so its
+    // reviewer's single edge is Explore and the body names no advisor.
+    expect(balancedReviewer).not.toContain("allowedAgents: advisor")
+    expect(balancedReviewer).not.toContain("5 advisor rounds")
+    // Nothing else delegates.
     expect(cheapest["agents/explore.md"]!).not.toContain("allowedAgents")
+    expect(cheapest["agents/advisor.md"]!).not.toContain("allowedAgents")
     // The -2 aliases derive their graph from the same contract: balanced2
-    // keeps the reviewer→Explore edge on the 6.1 reviewer, cheapest2 stays
-    // a leaf.
+    // keeps the reviewer→Explore edge on the 6.2 reviewer, cheapest2 keeps
+    // the advisor edge on the Luna reviewer.
     const balanced2 = buildPiAgentFiles("balanced2")
     expect(balanced2["agents/reviewer.md"]!).toContain("allowedAgents: Explore")
-    expect(balanced2["agents/reviewer.md"]!).toContain("model: gh-router/gpt-6.1-sol")
-    expect(buildPiAgentFiles("cheapest2")["agents/reviewer.md"]!).not.toContain("allowedAgents")
+    expect(balanced2["agents/reviewer.md"]!).toContain("model: gh-router/gpt-6.2-sol")
+    expect(buildPiAgentFiles("cheapest2")["agents/reviewer.md"]!).toContain("allowedAgents: advisor")
   })
 
   test("aliases/allowedAgents use bare comma form, never YAML flow lists", () => {
@@ -166,7 +176,7 @@ describe("pi native agent files (pi-subagents contract)", () => {
       // ...which restores Explore to pure read-only (the write grant existed
       // only for the reverted bindings — observed failure otherwise).
       expect(files["agents/explore.md"]!).toContain("tools: read, grep, find, ls, bash")
-      expect(files["agents/explore.md"]!).toContain("async: false")
+      expect(files["agents/explore.md"]!).not.toContain("async:")
       expect(files["agents/explore.md"]!).toContain("Never modify files.")
     }
   })

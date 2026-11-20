@@ -529,11 +529,11 @@ describe("cheapest2 Advisor route", () => {
     })
     state.models = {
       object: "list",
-      data: [catalogModel("gpt-6-luna"), catalogModel("gpt-6.1-sol")],
+      data: [catalogModel("gpt-6-luna"), catalogModel("gpt-6.2-sol")],
     } as never
   }
 
-  test("lead dispatches the 6.1 Sol Advisor at high effort", async () => {
+  test("lead dispatches the 6.2 Sol Advisor at high effort", async () => {
     registerCheapest2()
     const calls: Array<{ url: string; body: Record<string, unknown> }> = []
     let leadCalls = 0
@@ -556,7 +556,7 @@ describe("cheapest2 Advisor route", () => {
         "anthropic-beta": "advisor-tool-2026-03-01",
         [LAUNCH_SECRET_HEADER]: CHEAPEST2_SECRET,
       },
-      body: cheapest2Request("gpt-6.1-sol"),
+      body: cheapest2Request("gpt-6.2-sol"),
     })
 
     expect(response.status).toBe(200)
@@ -569,10 +569,10 @@ describe("cheapest2 Advisor route", () => {
 
     const advisorCall = calls.find((call) => call.body.stream === false)
     expect(advisorCall).toBeDefined()
-    expect(advisorCall!.body.model).toBe("gpt-6.1-sol")
+    expect(advisorCall!.body.model).toBe("gpt-6.2-sol")
     expect(advisorCall!.url).toContain("/responses")
     // The family's Advisor effort delta: cheapest pins Sol 5.6 at medium,
-    // cheapest2 pins Sol 6.1 at high.
+    // cheapest2 pins Sol 6.2 at high.
     expect((advisorCall!.body as { reasoning?: { effort?: string } }).reasoning?.effort)
       .toBe("high")
     // The 5.6 tier must not appear anywhere on this profile's wire.
@@ -597,7 +597,7 @@ describe("cheapest2 Advisor route", () => {
     expect(response.status).toBe(400)
     const text = await response.text()
     expect(text).toContain("Cheapest Advisor model mismatch")
-    expect(text).toContain("gpt-6.1-sol")
+    expect(text).toContain("gpt-6.2-sol")
     expect(fetchMock).not.toHaveBeenCalled()
   })
 })
@@ -616,7 +616,7 @@ describe("balanced2 Advisor route", () => {
       object: "list",
       data: [
         catalogModel("gpt-6-luna"),
-        catalogModel("gpt-6.1-sol"),
+        catalogModel("gpt-6.2-sol"),
         catalogModel("grok-4.7"),
       ],
     } as never
@@ -636,7 +636,7 @@ describe("balanced2 Advisor route", () => {
         [LAUNCH_SECRET_HEADER]: BALANCED2_SECRET,
       },
       body: JSON.stringify({
-        model: "gpt-6.1-sol",
+        model: "gpt-6.2-sol",
         max_tokens: 100,
         stream: true,
         messages: [{ role: "user", content: "Inspect the repository." }],
@@ -644,7 +644,7 @@ describe("balanced2 Advisor route", () => {
           {
             type: "advisor_20260301",
             name: "advisor",
-            model: "gpt-6.1-sol",
+            model: "gpt-6.2-sol",
             input_schema: { type: "object", properties: {} },
           },
         ],
@@ -658,7 +658,7 @@ describe("balanced2 Advisor route", () => {
     // no server-side Advisor call is dispatched, even though the client asked.
     expect(calls).toHaveLength(1)
     expect(calls[0]!.url).toContain("/responses")
-    expect(calls[0]!.body.model).toBe("gpt-6.1-sol")
+    expect(calls[0]!.body.model).toBe("gpt-6.2-sol")
     expect(calls[0]!.body.stream).toBe(true)
     const forwarded = JSON.stringify(calls[0]!.body)
     expect(forwarded).not.toContain(ADVISOR_INTERNAL_TOOL_NAME)

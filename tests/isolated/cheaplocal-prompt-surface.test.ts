@@ -428,10 +428,10 @@ describe("non-cheaplocal profiles keep their own consultant wording", () => {
       ...availability(),
       profile: "cheapest2",
     } as never)
-    expect(snippet).toContain("GPT-6.1 Sol (200K/high)")
-    expect(summary).toContain("GPT-6.1 Sol (200K/high)")
+    expect(snippet).toContain("GPT-6.2 Sol (200K/high)")
+    expect(summary).toContain("GPT-6.2 Sol (200K/high)")
     expect(buildOperatingDefaultsDigest({ profile: "cheapest2", sweEnabled: false })).toContain(
-      "`advisor` (GPT-6.1 Sol/high, lead and `reviewer`, capped)",
+      "`advisor` (GPT-6.2 Sol/high, lead and `reviewer`, capped)",
     )
   })
 
@@ -440,6 +440,6 @@ describe("non-cheaplocal profiles keep their own consultant wording", () => {
       ...availability({ workerToolsAvailable: false }),
       profile: "local2",
     } as never)
-    expect(snippet).toContain("GPT-6.1 Sol (200K/high)")
+    expect(snippet).toContain("GPT-6.2 Sol (200K/high)")
   })
 })

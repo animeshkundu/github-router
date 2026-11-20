@@ -84,6 +84,10 @@ const CACHE_DIAGNOSTIC_LIMIT = 128
  * `cached_tokens=5454/5457`, and adding the explicit fields changed that to
  * 5443. Copilot's provider-managed caching already covers it, and explicit
  * mode would only trade unmarked bytes out of the implicit cache.
+ * `gpt-6.2-sol` is absent for the same reason plus one more: it is UNMEASURED.
+ * Absence means "no explicit marker", not "known worse" — priming an
+ * unverified breakpoint would be the evidence claim this set exists to
+ * prevent. Measure with `scripts/probe-prompt-cache.ts` before adding it.
  */
 const GPT56_EXPLICIT_CACHE_MODELS = new Set([
   "gpt-6-sol",

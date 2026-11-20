@@ -22,7 +22,7 @@ import { piTierThresholdFor } from "~/lib/pi-tier-windows"
  * - footer fights (statusline packages vs the router-owned AIC footer)
  * - picker offering models with no models.json row (unroutable)
  * - text-only advertisement killing native images
- * - background-runner tool gaps (async must stay foreground)
+ * - forced-foreground subagents blocking every parallel fan-out
  * - supervisor pings from leaves (noise + cost)
  * - Long-tier pricing leaking in via contextWindow
  */
@@ -64,7 +64,7 @@ const VISION_CATALOG: ReadonlyArray<PiCatalogModel> = [
     vision: false,
   },
   {
-    id: "gpt-6.1-sol",
+    id: "gpt-6.2-sol",
     maxContextTokens: 500_000,
     maxPromptTokens: 400_000,
     maxOutputTokens: 64_000,
@@ -289,12 +289,13 @@ describe("pi launch contract: sessions survive a quit", () => {
 
 describe("pi launch contract: agent files", () => {
   for (const profileId of PROFILES) {
-    test(`${profileId}: foreground nesting, honest tools, bare lists`, () => {
+    test(`${profileId}: background-by-default nesting, honest tools, bare lists`, () => {
       const files = buildPiAgentFiles(profileId)
       for (const content of Object.values(files)) {
-        // Detached background runs demonstrably lose read/bash from
-        // their registry; foreground shares the parent's full set.
-        expect(content).toContain("async: false")
+        // No `async` key: omission inherits pi-subagents' `asyncByDefault`
+        // (true), which is what lets a fan-out run in parallel. A per-call
+        // `async: false` is still available when the parent must block.
+        expect(content).not.toContain("async:")
         // Bracket form misparses in splitters; bare form everywhere.
         expect(content).not.toMatch(/^(tools|aliases|allowedAgents): \[/m)
         // No file bindings: handoff is inline prose, runs stay clean.

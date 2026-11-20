@@ -8,11 +8,11 @@ identities named below:
 | Profile | Lead | Roster | Consultants |
 |---|---|---|---|
 | `cheapest` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol 5.6/medium Advisor (plan review + capped reviewer rounds), Sol 5.6/high Oracle |
-| `cheapest2` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol 6.1/high Advisor (plan review + capped reviewer rounds), Sol 6.1/high Oracle |
+| `cheapest2` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol 6.2/high Advisor (plan review + capped reviewer rounds), Sol 6.2/high Oracle |
 | `balanced` | `gpt-5.6-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 5.6/high, may delegate Explore); no Plan | Grok 4.6/medium Oracle only — **advisor-free by design** |
-| `balanced2` | `gpt-6.1-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 6.1/high, may delegate Explore); no Plan | Grok 4.7/medium Oracle only — **advisor-free by design** |
+| `balanced2` | `gpt-6.2-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 6.2/high, may delegate Explore); no Plan | Grok 4.7/medium Oracle only — **advisor-free by design** |
 | `local` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | none: `local` runs **every** agent turn on the local server, so it carries no Oracle and no Advisor (the builtin `oracle` is disabled in settings). The browser page compressor is the one model-backed Copilot exception, shared with `local2`; web search rides Copilot's MCP endpoint without a model |
-| `local2` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | Sol 6.1/high Advisor (plan review + capped reviewer rounds), Sol 6.1/high Oracle |
+| `local2` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | Sol 6.2/high Advisor (plan review + capped reviewer rounds), Sol 6.2/high Oracle |
 
 Both `-2` profiles inherit everything else from their base: the delegation
 graph, the peer set, the prompt-rewrite brief (`cheapest` family only), the
@@ -39,7 +39,7 @@ The two local aliases are the Pi counterpart of the Claude `-m local` /
 `-m local2` launch profiles: the main loop runs against a locally running
 server that already speaks Anthropic Messages. `local` sends every role
 there, subagents included; `local2` keeps two Copilot consumers, the Oracle
-and the Advisor, both on `gpt-6.1-sol`. The endpoint is configured exactly
+and the Advisor, both on `gpt-6.2-sol`. The endpoint is configured exactly
 as the Claude launcher configures it — `--localurl <url>` > `--localport
 <port>` > `GH_ROUTER_LOCAL_BASE_URL` > `GH_ROUTER_LOCAL_PORT` > the default
 `https://localhost:11111/v1`; the two flags are a launch error together and
@@ -106,15 +106,24 @@ as are the external-CLI families `claude-code`/`codex-exec`/`cursor-agent`
 off-proxy and off-ledger), while builtin `delegate` stays enabled as the
 cheap append-mode path. `local` additionally disables builtin `oracle`,
 since it emits no replacement file.
-Every emitted agent runs foreground (`async: false`): the detached
-background runner demonstrably drops `read`/`bash` from its tool registry
-(observed live as `requested unavailable child tools: [read, bash]`),
-failing every strict-allowlist child it touches. `contact_supervisor`
-appears only on `General-Purpose` (blocked-writer escalation); leaves
-never page the supervisor.
+Every emitted agent leaves `async` unset, which inherits pi-subagents'
+`asyncByDefault` (default `true`): a `subagent` call returns a run id
+immediately and independent children run in parallel. Background children are
+also the ones that load the parent's ambient extensions (Pi core tools
+`read`/`bash` included; see `runs/shared/tool-availability.js`), so a strict
+`tools` allowlist no longer costs a child its core tools — pi-subagents 0.88.0
+stopped treating core tools as missing extension tools. Foreground is now a
+per-call choice: pass `async: false` when the parent must block on this launch,
+or set `subagents.asyncByDefault: false` host-wide. `contact_supervisor`
+appears only on `General-Purpose` (blocked-writer escalation) by contract —
+leaves deliberately never page the supervisor, even though core slots would
+let them.
 `General-Purpose` may nest `reviewer`/`oracle` (`local` grants `oracle`
 only — it has no Advisor), balanced `reviewer` may nest
-`Explore` (ceiling raised to 3 via `PI_SUBAGENT_MAX_DEPTH`). Handoff is
+`Explore`, and an Advisor-bearing `reviewer` (`cheapest`/`cheapest2`/`local2`)
+may nest `advisor` under the same capped-round protege grant the Claude path
+uses (at most 5 advisor rounds per review; ceiling raised to 3 via
+`PI_SUBAGENT_MAX_DEPTH`). Handoff is
 inline prose in the delegating brief — no `context.md`/`progress.md` file
 bindings, so runs write nothing into the repo. `--swe` without `--peers`
 emits no skills or prompts (no agents behind them). `/parallel-review`
@@ -433,6 +442,7 @@ tokens. Each Pi model row carries its cheap-tier window, so Long-tier
 | `gpt-5.6-sol` | ≤ 272K ($4.00/1M in) | 272000 |
 | `gpt-6-sol` | ≤ 272K ($2.00/1M in) | 272000 |
 | `gpt-6.1-sol` | ≤ 272K ($2.00/1M in) | 272000 |
+| `gpt-6.2-sol` | ≤ 272K ($2.00/1M in) | 272000 |
 | `grok-4.6` | ≤ 200K ($2.00/1M in) | 200000 |
 | `grok-4.7` | ≤ 200K ($2.00/1M in) | 200000 |
 | anything else | — | 200000 (fallback) |

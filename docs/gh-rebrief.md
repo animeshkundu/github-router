@@ -16,7 +16,7 @@ Profiles outside the `cheapest` family (`cheapest` or `cheapest2`): use
 `/gh-research` instead — the binary refuses and says so. Eligibility is
 `isCheapestFamily(profile)`, so both aliases are in and everything else is out.
 Rebrief reuses the family's Sol rewrite identity — `gpt-5.6-sol` on `cheapest`,
-`gpt-6.1-sol` on `cheapest2` — at the rewrite's fixed `medium` effort.
+`gpt-6.2-sol` on `cheapest2` — at the rewrite's fixed `medium` effort.
 
 ## What it does
 
@@ -28,7 +28,7 @@ User types /gh-rebrief <refined ask>            # --ask is REQUIRED, else refuse
    + 4K session context (extractive transcript tail, untrusted data)
    + grounding code search (lexical + semantic when enabled)
   → same adaptive loop as the first-prompt rewrite: one family-Sol/medium
-    inference (`gpt-5.6-sol` on cheapest, `gpt-6.1-sol` on cheapest2),
+    inference (`gpt-5.6-sol` on cheapest, `gpt-6.2-sol` on cheapest2),
     extended to a second ONLY when Sol flags needs_deep_grounding
     + names a follow-up query, <=30s wall-clock
   → <course_correction> framing for Luna (outcome, done_so_far, grounding,
@@ -88,7 +88,7 @@ Per invoke: ≤2 Sol/medium calls (extension only on Sol's explicit
 `needs_deep_grounding` flag + named follow-up) + 1 concise Luna summary +
 grounding search, ≤30s wall-clock. No per-session cap; same **model** identity
 as the first-prompt rewrite and the family Advisor (`gpt-5.6-sol` on
-`cheapest`, `gpt-6.1-sol` on `cheapest2`). The effort is the rewrite's fixed
+`cheapest`, `gpt-6.2-sol` on `cheapest2`). The effort is the rewrite's fixed
 `medium` — on `cheapest2` the Advisor itself runs `high`, so only the model
 identity is shared, not the effort.
 Opt out entirely: `GH_ROUTER_DISABLE_CHEAPEST_REWRITE=1`.
