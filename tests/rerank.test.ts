@@ -4,12 +4,14 @@
  * NATIVE-FREE BY CONSTRUCTION: real ONNX Runtime sessions crash `bun test`
  * at process teardown (SIGABRT after a green run; reproduced with a minimal
  * load+inference+dispose case, while identical `bun run` scripts exit
- * cleanly). Every test here returns before the dynamic `flashrank-js`
- * import — no native code ever loads. Loader behavior (budget race,
- * failure fallback, model selection) is covered with a mocked
- * `flashrank-js` in tests/isolated/rerank-loader.test.ts (own process);
+ * cleanly). Every test here returns before the dynamic
+ * `rerank-cross-encoder` import — no native code ever loads. Loader behavior
+ * (budget race, failure fallback, model selection) is covered with a mocked
+ * cross-encoder in tests/isolated/rerank-loader.test.ts (own process);
  * end-to-end integration in tests/isolated/code-search-rerank.test.ts;
  * live-model verification via `bun run scripts/verify-rerank-live.ts`.
+ * The encoder's own scoring/batching logic is native-free and tested in
+ * tests/rerank-cross-encoder.test.ts.
  */
 
 import { afterEach, describe, expect, test } from "bun:test"

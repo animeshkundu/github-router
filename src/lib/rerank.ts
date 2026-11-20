@@ -5,9 +5,10 @@
  * which is optimal for single-identifier queries ("where is X"). For
  * NATURAL-LANGUAGE queries ("retry around the upstream fetch") BM25F's
  * tokenized matching is weak — this module reranks the BM25F top-N with a
- * local ONNX cross-encoder (flashrank-js) so the lexical engine degrades
- * gracefully on intent-shaped queries, including the `lexical-fallback`
- * path when the semantic index isn't ready.
+ * local ONNX cross-encoder (transformers.js, via
+ * `./rerank-cross-encoder`) so the lexical engine degrades gracefully on
+ * intent-shaped queries, including the `lexical-fallback` path when the
+ * semantic index isn't ready.
  *
  * Design constraints (highest-value, lowest-risk):
  *   - NL-shaped queries ONLY (≥2 whitespace terms). Single identifiers skip
@@ -25,6 +26,8 @@
 
 import { queuedSearchCount } from "~/lib/search-concurrency"
 
+import type { RerankModel } from "./rerank-cross-encoder"
+
 type RerankerInstance = {
   rerank: (req: {
     query: string
@@ -33,8 +36,6 @@ type RerankerInstance = {
   }) => Promise<Array<{ index: number; score: number }>>
   dispose?: () => Promise<void>
 }
-
-type RerankModel = "tiny" | "mini"
 
 const RERANK_BUDGET_MS_DEFAULT = 150
 
@@ -87,8 +88,8 @@ function getReranker(model: RerankModel): Promise<RerankerInstance | null> {
   if (cached) return cached
   const p = loadChain.then(async (): Promise<RerankerInstance | null> => {
     try {
-      const { Reranker } = await import("flashrank-js")
-      return (await Reranker.create({ model })) as RerankerInstance
+      const { createCrossEncoder } = await import("./rerank-cross-encoder")
+      return await createCrossEncoder(model)
     } catch {
       return null
     }

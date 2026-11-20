@@ -24,6 +24,15 @@ Ranked mode may additionally apply a JIT cross-encoder rerank
 pure REORDER of the already-reduced set — it never drops a match — and
 `complete: true` skips it, so the floor theorem below is unaffected.
 
+The reranker lives in `src/lib/rerank-cross-encoder.ts` and talks to
+`@huggingface/transformers` DIRECTLY (a `^4` dependency, which pins
+`onnxruntime-node` 1.30). It must never be pushed back behind a package that
+declares its own transformers range: `npm` honours `overrides` only from the
+root `package.json` and Bun's `trustedDependencies` gate has no npm
+equivalent, so a transitive `^3` range becomes an ORT 1.21 postinstall that
+404s and turns `npx github-router@latest` into an install failure. See
+`tests/dependency-install-safety.test.ts`.
+
 ## The constructed ripgrep invocation
 
 `code_search` never invents matches and never drops them by heuristic in `complete` mode -

@@ -136,6 +136,40 @@ jobs:
       - name: Verify CLI help on Node.js
         run: node dist/main.js --help
 
+      # The CONSUMER install path, which nothing else in this workflow
+      # exercises: every step above installs with Bun at the repo ROOT, where
+      # `overrides` and Bun's `trustedDependencies` gate apply. Neither exists
+      # for `npx` or `npm i -g` (npm honours `overrides` only from the root
+      # package.json, and its `allowScripts` policy is project-level and
+      # explicitly unavailable to those two). On 2026-11-20 that blind spot
+      # shipped a release whose install died on linux/x64 inside
+      # `onnxruntime-node@1.21.0`'s postinstall (a 404ing CUDA download from a
+      # GitHub release path), so `npx github-router@latest` exited 1 before any
+      # of this package's code ran. Installing the packed tarball the way a
+      # user does is the only check that can see that class of failure.
+      #
+      # Do NOT set ONNXRUNTIME_NODE_INSTALL=skip: the install script is the
+      # thing under test. On linux/x64 ORT 1.30 fetches its CUDA EP from
+      # nuget.org, so this step is network-bound by design - a NuGet outage is
+      # its only expected failure mode.
+      - name: Consumer install from the packed tarball (npm, Linux)
+        if: runner.os == 'Linux' && matrix.node-version == '24'
+        shell: bash
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          # Computed from the manifest instead of parsed from `npm pack`'s
+          # stdout: prepack runs the build, so that stream also carries bun's
+          # own output. npm names a scoped tarball <scope>-<name>-<version>.
+          TARBALL="$(node -p 'const p=require("./package.json"); `${p.name.replace(/^@/,"").replace("/","-")}-${p.version}.tgz`')"
+          npm pack >/dev/null
+          test -f "$TARBALL"
+          mkdir -p "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE/$TARBALL" --no-audit --no-fund
+          ./node_modules/.bin/github-router --version
+
       - name: Serve WS relay smoke (Node)
         shell: bash
         run: |
