@@ -73,6 +73,82 @@ describe("pi bridge NUL sanitization", () => {
   })
 })
 
+describe("pi foreign agent bridge (generated extension)", () => {
+  const foreign = {
+    agents: [{ name: "ceo", description: "Owns strategy", body: "You are the CEO." }],
+    index: "Foreign agents available on demand:\n- ceo [copilot, project] — Owns strategy",
+  }
+
+  test("the section appears only when --foreign contributed something", () => {
+    // An empty bridge must not pay for a handler that can never fire, and it
+    // must not install a `session_start` listener that emits nothing.
+    expect(buildPiExtensionSource({ profileId: "cheapest" })).not.toContain("foreign_agents")
+    expect(
+      buildPiExtensionSource({
+        profileId: "cheapest",
+        foreign: { agents: [], index: "" },
+      }),
+    ).not.toContain("foreign_agents")
+    expect(buildPiExtensionSource({ profileId: "cheapest", foreign })).toContain("foreign_agents")
+  })
+
+  test("the event contract is a literal, never an import", () => {
+    const src = buildPiExtensionSource({ profileId: "cheapest", foreign })
+    // The router cannot import pi-subagents (it is a peer installed into the
+    // mirror, not a dependency), so the wire contract is pinned by value.
+    // A version bump upstream leaves the emit unanswered and the extension
+    // reports it — the failure mode is a warning, not a crash.
+    expect(src).toContain('"pi-subagents:runtime-agent-register:v1"')
+    expect(src).not.toContain("from \"pi-subagents")
+    expect(src).not.toContain("require(\"pi-subagents")
+    expect(src).toContain("const FOREIGN_VERSION = 1;")
+    // The registration shape the registry validates.
+    expect(src).toContain('systemPromptMode: "replace"')
+    expect(src).toContain("inheritProjectContext: true")
+  })
+
+  test("children skip both registration and the index section", () => {
+    const src = buildPiExtensionSource({ profileId: "cheapest", foreign })
+    // A background child runs this same extension. Registering there would
+    // duplicate every foreign name in a second registry (and fight the
+    // parent's), and the section would spend the child's context on a roster
+    // its own discovery may not even carry.
+    expect(src).toContain('if (process.env.PI_SUBAGENT_CHILD === "1") return;')
+    expect(src).toContain('sections.foreign_agents = FOREIGN_INDEX')
+  })
+
+  test("shutdown disposes, because a stale registration throws next session", () => {
+    const src = buildPiExtensionSource({ profileId: "cheapest", foreign })
+    // Registering the same name twice in one Pi process throws 'collides with
+    // runtime agent'. `/reload` recreates the extension instance while the
+    // registry may survive, so the dispose is correctness, not hygiene.
+    expect(src).toContain('pi.on("session_shutdown"')
+    expect(src).toContain("registrations.clear()")
+    expect(src).toContain("const prior = registrations.get(spec.name);")
+  })
+
+  test("the self-heal net disposes only what the registry named", () => {
+    const src = buildPiExtensionSource({ profileId: "cheapest", foreign })
+    // One colliding runtime agent breaks EVERY subagent call in the process,
+    // so the net must fire on the tool result. It keys on the registry's own
+    // error text and only ever disposes a handle this extension created.
+    expect(src).toContain("COLLISION_RE")
+    expect(src).toContain("event.toolName !== \"subagent\"")
+    expect(src).toContain("COLLISION_RE.lastIndex = 0;")
+    // Unrecognised errors are returned untouched: Pi's native error handling
+    // is the fallback, not a rewrite.
+    expect(src).toContain("if (!match) return undefined;")
+  })
+
+  test("the generated source is syntactically valid TypeScript", () => {
+    const src = buildPiExtensionSource({ profileId: "cheapest", foreign })
+    // The payload embeds JSON.stringify'd agent bodies; a stray backtick or
+    // newline in an authored artifact would produce a file that fails to
+    // load at session start, i.e. every bridged agent silently missing.
+    expect(() => new Bun.Transpiler({ loader: "ts" }).transformSync(src)).not.toThrow()
+  })
+})
+
 describe("pi native agent files (pi-subagents contract)", () => {
   for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {
     test(`${profileId}: every agent advertises, pins context, drops dead keys`, () => {

@@ -172,6 +172,12 @@ export const piArgs = {
     description:
       "Bridge Copilot (.github/copilot-instructions.md, .github/instructions/*.instructions.md) and Claude (.claude/rules/, .claude/CLAUDE.md, ~/.claude/CLAUDE.md) memory into Pi. Static repo-wide slice synthesizes into the mirror AGENTS.md; path-scoped rules lazy-attach. Set to false (--no-memory-bridge) for Pi-native discovery only.",
   },
+  foreign: {
+    type: "boolean" as const,
+    default: false,
+    description:
+      "Bridge the project's and your Claude Code and Copilot artifacts: .claude/skills + .github/skills + .copilot/skills as Pi skills, .claude/commands + .github/prompts as prompt shortcuts, and .claude/agents + .github/agents as Pi subagents announced in one compact index and loaded on demand. Authored names are kept; a name already taken by the router, a pi-subagents builtin or your own agent/skill/command is renamed (skills, prompts) or reported (agents) rather than overwritten. Foreign `model:` is ignored — every bridged agent runs on the lead model. Off by default.",
+  },
 } satisfies ArgsDef
 
 /**
@@ -414,6 +420,11 @@ export const pi = defineCommand({
     // skills or prompts — only what Pi ships plus the mode identity.
     const peersEnabled = (args as Record<string, unknown>)["peers"] !== false
     const sweEnabled = (args as Record<string, unknown>)["swe"] === true
+    // Foreign bridge: Claude Code (`.claude/`) and Copilot (`.github/`,
+    // `~/.copilot/`) skills, commands and agents translated into Pi-native
+    // form. Opt-in: it changes what the model can see at every turn (the
+    // index) and adds agents to the roster.
+    const foreignEnabled = (args as Record<string, unknown>)["foreign"] === true
     const helpersEnabled = (args as Record<string, unknown>)["helpers"] !== false
     const uiEnabled = (args as Record<string, unknown>)["ui"] !== false
     const searchEnabled =
@@ -486,6 +497,21 @@ export const pi = defineCommand({
     // to key the persistent npm-package cache: seed before Pi boots, save
     // on shutdown before the mirror is removed.
     let packagesForCache: Array<PiPackageEntry> = []
+    // Foreign-agent definitions present but NOT bridged (no `--foreign`).
+    // Only ever set on a launch without the flag, and only to report that the
+    // artifacts exist — see `countForeignAgentFiles`.
+    let foreignAvailable: number | undefined
+    // Foreign-bridge result, filled inside the launch-file block below and
+    // read by the launch card afterwards. Declared out here for the same
+    // reason as `bridgeStats`: the card is printed after the try/catch.
+    let foreignStats:
+      | {
+          agents: number
+          renamed: Array<{ from: string; to: string }>
+          skipped: Array<{ name: string; reason: string }>
+          written: { skills: number; prompts: number; overwritten: number }
+        }
+      | undefined
 
     // `/v1/messages` launch binding. Minted here, before models.json is
     // written, because the local tier rows must carry it as a per-model
@@ -633,11 +659,128 @@ export const pi = defineCommand({
         }
       }
 
+      // Peer floor (agents + consult skills) rides --peers; the SWE
+      // pipeline (delegate/advisor skills, review prompts) rides --swe AND
+      // --peers (without agents + the subagent provider its prose dangles,
+      // so peerless+swe emits none — see the heads-up below).
+      // semantic-search prose rides --search. Bare launches write none.
+      //
+      // The router's own artifacts are built and WRITTEN before the foreign
+      // bridge runs: the bridge reserves against exactly these names, so a
+      // foreign `reviewer` or `/review` can never land on the router's copy,
+      // and the reservation is against this launch's real output rather than
+      // a stale mirror copy from the previous one.
+      const routerAgentFiles = peersEnabled ? buildPiAgentFiles(profileId) : {}
+      const routerSkills = buildPiSkills({ profileId, peers: peersEnabled, swe: sweEnabled, search: searchEnabled })
+      const routerPrompts = buildPiPrompts({ profileId, swe: sweEnabled, peers: peersEnabled })
+      for (const [rel, content] of Object.entries(routerAgentFiles)) {
+        await writeTextFile(path.join(mirror, rel), content)
+      }
+      for (const skill of routerSkills) {
+        await writeTextFile(path.join(mirror, "skills", skill.dir, "SKILL.md"), skill.content)
+      }
+      for (const prompt of routerPrompts) {
+        await writeTextFile(path.join(mirror, "prompts", `${prompt.name}.md`), prompt.content)
+      }
+      await writeTextFile(path.join(mirror, "APPEND_SYSTEM.md"), buildPiAppendSystem(profileId, { peers: peersEnabled, codeSearch: surfaces.codeSearch }))
+
+      // Claude Code + Copilot artifacts (skills, prompts, agents). Skills are
+      // always bridged; prompts and agents ride `--foreign`. Collisions are
+      // resolved here, before any write and before any registration, against
+      // the router's own names above and the user's. Agents are never written
+      // as files — they become runtime registrations in the generated
+      // extension (see `PiForeignExtensionInput`).
+      let foreign: { agents: Array<{ name: string; description: string; body: string }>; index: string } | undefined
+      if (foreignEnabled) {
+        try {
+          const {
+            buildForeignAgentIndex,
+            buildReservedNames,
+            piForeignHomeDir,
+            piForeignRepoRoot,
+            planForeignArtifacts,
+            writeForeignArtifacts,
+          } = await import("./lib/pi-foreign-artifacts")
+          // The git top-level, not the cwd: launching from a subdirectory is
+          // ordinary, and every foreign root is repo-relative. The memory
+          // bridge resolves the same way for the same reason.
+          const repoRoot = await piForeignRepoRoot(process.cwd())
+          const homeDir = piForeignHomeDir()
+          const reservedNames = await buildReservedNames({
+            mirrorDir: mirror,
+            repoRoot,
+            homeDir,
+            // The stems of the agent files written just above: `agents/explore.md`
+            // publishes `Explore`, which is what Pi resolves and what a foreign
+            // `explore` must not shadow.
+            emittedAgents: Object.keys(routerAgentFiles).map((rel) => path.basename(rel, ".md")),
+            emittedSkills: routerSkills.map((skill) => skill.dir),
+            emittedPrompts: routerPrompts.map((prompt) => prompt.name),
+          })
+          const plan = await planForeignArtifacts({
+            repoRoot,
+            homeDir,
+            mirrorDir: mirror,
+            reservedNames,
+          })
+          const written = await writeForeignArtifacts(mirror, plan)
+          if (written.overwritten > 0) {
+            // A tripwire, not a feature: the planner reserves every name the
+            // router or the user already owns, so a non-zero count means the
+            // reservation scan missed something and a foreign artifact just
+            // replaced one. Say so instead of silently winning.
+            consola.warn(
+              `Pi foreign bridge: ${written.overwritten} existing file(s) were replaced. That is a bug in the name reservation, not expected behavior.`,
+            )
+          }
+          foreign = {
+            agents: plan.agents.map(({ name, description, body }) => ({ name, description, body })),
+            index: buildForeignAgentIndex(plan.agents),
+          }
+          foreignStats = {
+            agents: plan.agents.length,
+            renamed: [
+              ...plan.agents
+                .filter((agent) => agent.renamedFrom)
+                .map((agent) => ({ from: String(agent.renamedFrom), to: agent.name })),
+              ...plan.skills
+                .filter((skill) => skill.renamedFrom)
+                .map((skill) => ({ from: String(skill.renamedFrom), to: skill.name })),
+              ...plan.prompts
+                .filter((prompt) => prompt.renamedFrom)
+                .map((prompt) => ({ from: String(prompt.renamedFrom), to: prompt.name })),
+            ],
+            skipped: plan.skipped.map(({ name, reason }) => ({ name, reason })),
+            written,
+          }
+        } catch (err) {
+          consola.debug("Pi foreign bridge skipped:", err)
+        }
+      } else {
+        // The bridge is invisible by design, so a user who HAS foreign
+        // artifacts and never passes `--foreign` has no other way to learn the
+        // flag exists. Counted (a `readdir` walk), never planned: nothing is
+        // reserved and nothing is written. The count rides the launch card
+        // because `enableFileLogging()` sinks consola's stdout in TUI mode —
+        // an info line here would reach nobody.
+        try {
+          const { countForeignAgentFiles, piForeignHomeDir, piForeignRepoRoot } =
+            await import("./lib/pi-foreign-artifacts")
+          foreignAvailable = await countForeignAgentFiles({
+            repoRoot: await piForeignRepoRoot(process.cwd()),
+            homeDir: piForeignHomeDir(),
+          })
+        } catch (err) {
+          consola.debug("Pi foreign artifact probe skipped:", err)
+        }
+      }
+
       await writeTextFile(
         path.join(mirror, "extensions", "gh-router-pi", "index.ts"),
         buildPiExtensionSource({
           profileId,
           bridge: bridgeStats ? { stats: bridgeStats, scopedRules: bridgeScoped } : undefined,
+          foreign,
         }),
       )
       // Every scoped group reaches Pi through Pi's own `mcp.json` in the
@@ -669,25 +812,6 @@ export const pi = defineCommand({
           }
         }
       }
-      // Peer floor (agents + consult skills) rides --peers; the SWE
-      // pipeline (delegate/advisor skills, review prompts) rides --swe AND
-      // --peers (without agents + the subagent provider its prose dangles,
-      // so peerless+swe emits none — see the heads-up below).
-      // semantic-search prose rides --search. Bare launches write none.
-      if (peersEnabled) {
-        const agentFiles = buildPiAgentFiles(profileId)
-        for (const [rel, content] of Object.entries(agentFiles)) {
-          await writeTextFile(path.join(mirror, rel), content)
-        }
-      }
-      for (const skill of buildPiSkills({ profileId, peers: peersEnabled, swe: sweEnabled, search: searchEnabled })) {
-        await writeTextFile(path.join(mirror, "skills", skill.dir, "SKILL.md"), skill.content)
-      }
-      for (const prompt of buildPiPrompts({ profileId, swe: sweEnabled, peers: peersEnabled })) {
-        await writeTextFile(path.join(mirror, "prompts", `${prompt.name}.md`), prompt.content)
-      }
-      await writeTextFile(path.join(mirror, "APPEND_SYSTEM.md"), buildPiAppendSystem(profileId, { peers: peersEnabled, codeSearch: surfaces.codeSearch }))
-
       // Static bridge synthesis into mirror AGENTS.md (Pi-native candidate).
       // Uses the collection stashed above; idempotent via fenced replace.
       try {
@@ -830,6 +954,17 @@ export const pi = defineCommand({
         // reach the session through the helpers bundle, so the card must name
         // exactly what the mirror carries.
         mcpGroups: surfaces.groups.map((g) => g.group),
+        foreign: foreignStats
+          ? {
+              agents: foreignStats.agents,
+              skills: foreignStats.written.skills,
+              prompts: foreignStats.written.prompts,
+              renamed: foreignStats.renamed,
+              skipped: foreignStats.skipped,
+            }
+          : undefined,
+        // Present-but-unbridged count: the only discovery path for `--foreign`.
+        foreignAvailable,
         serverUrl,
       })}\n`,
     )

@@ -30,9 +30,11 @@ import {
   piUsdCostFor,
   PI_MAX_TOKENS_FALLBACK,
   PI_LOCAL_COMPACTION_RESERVE_TOKENS,
+  PI_LOCAL_CONTEXT_TOKENS,
   PI_LOCAL_THINKING_BUDGETS,
   PI_PROFILE_CONTEXT_TOKENS,
 } from "~/lib/pi-models-settings"
+import { LOCAL_PROFILE_LEAD_CONTEXT_TOKENS } from "~/lib/local-profile-contract"
 import { EFFORT_ORDER } from "~/lib/reasoning-effort"
 import { piTierThresholdFor } from "~/lib/pi-tier-windows"
 
@@ -272,7 +274,11 @@ describe("pi models.json local profiles", () => {
         })
         // Bare tier ids inherit the provider's Anthropic wire format.
         expect(row.api).toBeUndefined()
-        expect(row.contextWindow).toBe(200_000)
+        // Pi's window for the local family, NOT the Claude client's 200K:
+        // the endpoint was measured to accept ~720K, and 272K is the tier
+        // boundary the Copilot roster already budgets against.
+        expect(row.contextWindow).toBe(PI_LOCAL_CONTEXT_TOKENS)
+        expect(row.contextWindow).toBeGreaterThan(LOCAL_PROFILE_LEAD_CONTEXT_TOKENS)
         // We know nothing about the endpoint's pricing or effort ladder, so
         // neither is invented here.
         expect(row.cost).toBeUndefined()
@@ -738,6 +744,61 @@ describe("pi launch card", () => {
       ].join("\n"),
     )
   })
+
+  test("a launch without --foreign says nothing about foreign artifacts", () => {
+    // The card is the ONLY place the bridge reports itself, so an absent
+    // bridge must be absent from the card rather than reported as zeros.
+    expect(buildPiLaunchCard(full)).not.toContain("foreign")
+  })
+
+  test("--foreign reports counts, renames and skips", () => {
+    const card = buildPiLaunchCard({
+      ...full,
+      foreign: {
+        agents: 3,
+        skills: 2,
+        prompts: 1,
+        renamed: [{ from: "writer", to: "writer-user" }],
+        skipped: [{ name: "reviewer", reason: "name is owned by gh-router" }],
+      },
+    })
+    expect(card.split("\n").slice(3)).toEqual([
+      "  foreign: 3 foreign agents (lazy) · 1 prompts · 2 skills",
+      "    renamed writer → writer-user",
+      "    skipped reviewer (name taken by gh-router)",
+    ])
+  })
+
+  test("zero skills or prompts drop out of the foreign line", () => {
+    const card = buildPiLaunchCard({
+      ...full,
+      foreign: { agents: 1, skills: 0, prompts: 0, renamed: [], skipped: [] },
+    })
+    // No empty plural, no "0 skills": the line names only what arrived.
+    expect(card).toContain("  foreign: 1 foreign agents (lazy)")
+    expect(card).not.toContain("0 skills")
+    expect(card).not.toContain("renamed")
+  })
+
+  test("unbridged artifacts earn one discovery line on the card", () => {
+    // consola info is sunk by enableFileLogging() in TUI mode, so the card is
+    // the only channel that can tell a user the flag exists.
+    const card = buildPiLaunchCard({ ...full, foreignAvailable: 4 })
+    expect(card.split("\n")[3]).toBe(
+      "  foreign: 4 agent definition(s) found, not bridged · add --foreign",
+    )
+  })
+
+  test("the discovery line never appears when artifacts are absent or bridged", () => {
+    expect(buildPiLaunchCard({ ...full, foreignAvailable: 0 })).not.toContain("foreign")
+    expect(
+      buildPiLaunchCard({
+        ...full,
+        foreignAvailable: 3,
+        foreign: { agents: 3, skills: 0, prompts: 0, renamed: [], skipped: [] },
+      }),
+    ).not.toContain("not bridged")
+  })
 })
 
 describe("pi settings.json", () => {
@@ -949,7 +1010,11 @@ describe("pi compaction derivation", () => {
           profileId,
         )
         expect(s.reserveTokens).toBe(PI_LOCAL_COMPACTION_RESERVE_TOKENS)
-        expect(PI_PROFILE_CONTEXT_TOKENS - s.reserveTokens).toBe(160_000)
+        // 70% of the 272K window: 190 400 tokens of conversation before
+        // compaction, up from the 160 000 a 200K window allowed. The reserve
+        // is flat, so this trigger — not the window — is the contract.
+        expect(PI_LOCAL_CONTEXT_TOKENS - s.reserveTokens).toBe(190_400)
+        expect(PI_LOCAL_CONTEXT_TOKENS - s.reserveTokens).toBeGreaterThan(160_000)
         expect(s.modelOverrides["gh-router/opus"].reserveTokens).toBe(
           PI_LOCAL_COMPACTION_RESERVE_TOKENS,
         )
@@ -991,9 +1056,9 @@ describe("pi local compaction headroom", () => {
 
   function clampMaxTokensToContext(input: number, maxTokens: number): number {
     const margin = Math.max(CONTEXT_SAFETY_TOKENS, Math.ceil(input * CONTEXT_SAFETY_RATIO))
-    let room = PI_PROFILE_CONTEXT_TOKENS - input - margin
+    let room = PI_LOCAL_CONTEXT_TOKENS - input - margin
     if (room < MIN_OUTPUT_WITH_RATIO_MARGIN) {
-      room = Math.min(MIN_OUTPUT_WITH_RATIO_MARGIN, PI_PROFILE_CONTEXT_TOKENS - input - CONTEXT_SAFETY_TOKENS)
+      room = Math.min(MIN_OUTPUT_WITH_RATIO_MARGIN, PI_LOCAL_CONTEXT_TOKENS - input - CONTEXT_SAFETY_TOKENS)
     }
     return Math.min(maxTokens, Math.max(1, room))
   }
@@ -1009,31 +1074,82 @@ describe("pi local compaction headroom", () => {
     return { maxTokens, sentBudget, endpointCeiling: sentBudget }
   }
 
+  /**
+   * The summarization request carries `trigger − keepRecentTokens` input
+   * (`prepareCompaction` cuts at `keepRecentTokens` and summarizes everything
+   * before it), so the budget has to survive the clamp at THAT size, not at
+   * the trigger. This is the assertion the earlier draft got wrong: a 217 600
+   * trigger (reserve 54 400) looks roomy but hands the summarizer 43 736 —
+   * still short of the 65 536 it asks for — and at the old 40 000 reserve it
+   * gets 31 744, today's ceiling.
+   */
+  const KEEP_RECENT_TOKENS = 20_000
+
   test("the budget the endpoint receives is larger than the stock 16384", () => {
-    expect(PI_LOCAL_THINKING_BUDGETS["high"]).toBe(32_768)
-    const trigger = PI_PROFILE_CONTEXT_TOKENS - PI_LOCAL_COMPACTION_RESERVE_TOKENS
+    expect(PI_LOCAL_THINKING_BUDGETS["high"]).toBe(65_536)
+    const trigger = PI_LOCAL_CONTEXT_TOKENS - PI_LOCAL_COMPACTION_RESERVE_TOKENS
     const { sentBudget } = wireCeiling(trigger, PI_LOCAL_THINKING_BUDGETS["high"] as number)
-    expect(sentBudget).toBe(31_744)
-    expect(sentBudget).toBeGreaterThan(16_384)
-    // Real summaries in the reference session reached 21_643 output tokens;
+    // Even the MAIN loop's turn at the trigger gets 52 016 — more than the
+    // 31 744 today's launch sends, so no turn gets tighter.
+    expect(sentBudget).toBe(52_016)
+    expect(sentBudget).toBeGreaterThan(31_744)
+  })
+
+  test("the summarizer receives the whole budget at the trigger", () => {
+    const level = PI_LOCAL_THINKING_BUDGETS["high"] as number
+    const trigger = PI_LOCAL_CONTEXT_TOKENS - PI_LOCAL_COMPACTION_RESERVE_TOKENS
+    const summarizer = wireCeiling(trigger - KEEP_RECENT_TOKENS, level)
+    expect(summarizer.sentBudget).toBe(65_536)
+    // A history that overshoots the trigger by 5% still gets the full budget.
+    expect(wireCeiling(Math.round((trigger - KEEP_RECENT_TOKENS) * 1.05), level).sentBudget)
+      .toBe(65_218)
+    // Real summaries in the reference session reached 21 643 output tokens;
     // the old 16384 ceiling truncated them, the new one does not.
-    expect(sentBudget).toBeGreaterThan(21_643)
+    expect(summarizer.sentBudget).toBeGreaterThan(21_643)
   })
 
   test("the reserve is what makes that budget reachable", () => {
     const level = PI_LOCAL_THINKING_BUDGETS["high"] as number
     const shipped = wireCeiling(
-      PI_PROFILE_CONTEXT_TOKENS - PI_LOCAL_COMPACTION_RESERVE_TOKENS,
+      PI_LOCAL_CONTEXT_TOKENS - PI_LOCAL_COMPACTION_RESERVE_TOKENS - KEEP_RECENT_TOKENS,
       level,
     )
-    // At Pi's own 183616 trigger the clamp leaves 12288, so the provider trims
-    // the budget back to 11264 — the raised budget alone buys nothing there.
-    const unbudgeted = wireCeiling(
-      PI_PROFILE_CONTEXT_TOKENS - 16_384,
-      level,
-    )
+    // At Pi's own default trigger (window − 16384) the clamp leaves 12 288,
+    // so the provider trims the budget back to 11 264 — the raised budget
+    // alone buys nothing there. A raised window with a stale reserve is the
+    // same mistake in slower motion: 272K with the old 40 000 reserve puts the
+    // summarizer at 212 000 input, where the clamp hands it the 32 768 floor
+    // and the 64K budget is trimmed straight back to today's ceiling.
+    const unbudgeted = wireCeiling(PI_LOCAL_CONTEXT_TOKENS - 16_384, level)
     expect(unbudgeted.sentBudget).toBe(11_264)
-    expect(shipped.sentBudget).toBeGreaterThan(unbudgeted.sentBudget * 2)
+    const staleReserve = wireCeiling(212_000, level)
+    expect(staleReserve.sentBudget).toBe(31_744)
+    // The plan's original 54 400 reserve is INSIDE the same trap, just less
+    // visibly: the trigger moves to 217 600 and the summarizer gets 43 736,
+    // which is a real improvement and still not the budget that was asked for.
+    // Shipping a half-budget that looks fixed is the worse failure.
+    const halfBudget = wireCeiling(PI_LOCAL_CONTEXT_TOKENS - 54_400 - KEEP_RECENT_TOKENS, level)
+    expect(halfBudget.sentBudget).toBe(43_736)
+    expect(halfBudget.sentBudget).toBeLessThan(level)
+    expect(shipped.sentBudget).toBe(65_536)
+    expect(shipped.sentBudget).toBeGreaterThan(staleReserve.sentBudget * 2)
+  })
+
+  test("the reserve is above the boundary, not on it", () => {
+    const level = PI_LOCAL_THINKING_BUDGETS["high"] as number
+    // 73 357 is the exact reserve at which the summarizer first receives the
+    // whole budget (input 178 643). Being ON that boundary is fragile: one
+    // token of history growth erodes the budget, and a 5% overshoot costs
+    // ~10K of it. The shipped reserve must be strictly above the boundary.
+    const boundary = PI_LOCAL_CONTEXT_TOKENS - 73_357 - KEEP_RECENT_TOKENS
+    const shipped = PI_LOCAL_CONTEXT_TOKENS - PI_LOCAL_COMPACTION_RESERVE_TOKENS - KEEP_RECENT_TOKENS
+    expect(PI_LOCAL_COMPACTION_RESERVE_TOKENS).toBeGreaterThan(73_357)
+    expect(shipped).toBeLessThan(boundary)
+    // And the slack has to buy something: a 5% historical overshoot still gets
+    // essentially the whole budget, where the boundary would lose ~10K.
+    const overshoot = Math.round(shipped * 1.05)
+    expect(wireCeiling(overshoot, level).sentBudget).toBe(65_218)
+    expect(wireCeiling(Math.round(boundary * 1.05), level).sentBudget).toBeLessThan(58_000)
   })
 
   test("settings emit thinking budgets for local only", () => {
@@ -1043,7 +1159,7 @@ describe("pi local compaction headroom", () => {
         searchEnabled: false,
         browseEnabled: false,
       })
-      expect(settings.thinkingBudgets).toEqual({ high: 32_768 })
+      expect(settings.thinkingBudgets).toEqual({ high: 65_536 })
       expect(settings.compaction.reserveTokens).toBe(PI_LOCAL_COMPACTION_RESERVE_TOKENS)
     }
     for (const profileId of ["cheapest", "cheapest2", "balanced", "balanced2"] as const) {

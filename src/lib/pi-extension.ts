@@ -282,6 +282,167 @@ export interface PiBridgeExtensionInput {
   scopedRules: Array<{ file: string; body: string; globs: Array<string>; source: string }>
 }
 
+export interface PiForeignExtensionInput {
+  /** Collision-free specs from `planForeignArtifacts` (already reserved/renamed). */
+  agents: Array<{ name: string; description: string; body: string }>
+  /** The `<foreign_agents>` prompt section body; empty means "no section". */
+  index: string
+}
+
+/**
+ * Pinned pi-subagents event contract. The router cannot import the package, so
+ * the event NAME and the request shape are literals here, exactly as the
+ * upstream module defines them (`runtime-agent-events.js`:
+ * `RUNTIME_AGENT_REGISTER_EVENT`, version 1). A version bump upstream leaves
+ * this registration unanswered and the extension reports it — never a crash.
+ */
+const PI_SUBAGENTS_REGISTER_EVENT = "pi-subagents:runtime-agent-register:v1"
+const PI_SUBAGENTS_REGISTER_VERSION = 1
+
+/**
+ * Foreign Claude/Copilot agents: one registry entry each, announced in a
+ * compact prompt section, loaded on demand.
+ *
+ * Three seams, and the reasons each is the shape it is:
+ *
+ * 1. **Registration goes through the documented event**, not through pi's
+ *    `registerAgent` (there is none) and not through agent FILES. A file in
+ *    `<mirror>/agents/` would be a configured agent — a second identity that
+ *    `mergeRuntimeAgents` validates on EVERY discovery, so one collision breaks
+ *    every `subagent` call in the process. A runtime registration fails only
+ *    its own call, and can be removed at runtime.
+ * 2. **The index is a prompt SECTION**, not a chat message. A custom message
+ *    is re-emitted on every run and reaches the model as a user turn; sections
+ *    are diff-patched by Pi (`diffSystemPromptSections`), so the index is sent
+ *    once and stays cache-stable.
+ * 3. **The `tool_result` net is the backstop for what reservation cannot see**
+ *    (a user adding a colliding agent mid-session). It disposes exactly the
+ *    offender named in the registry's own error and lets the model retry;
+ *    every other error is passed through untouched.
+ *
+ * Fail-open everywhere: a Pi build without these events, a pi-subagents that
+ * is not installed, or a rejected registration all degrade to "the foreign
+ * agents are not available", never to a broken session.
+ */
+export function buildPiForeignAgentsSection(foreign: PiForeignExtensionInput): Array<string> {
+  const payload = JSON.stringify(
+    foreign.agents.map((a) => ({ name: a.name, description: a.description, body: a.body })),
+  )
+  return [
+    `  // ---- foreign agents: Claude/Copilot, lazy, collision-reserved ----`,
+    `  // No files: each spec is a RUNTIME agent in pi-subagents, so it participates`,
+    `  // in discovery without becoming a configured identity every subagent call`,
+    `  // re-validates. The index below is the only always-on context.`,
+    `  {`,
+    `    let FOREIGN = [];`,
+    `    try { FOREIGN = ${payload}; } catch { FOREIGN = []; }`,
+    `    const FOREIGN_INDEX = ${JSON.stringify(foreign.index)};`,
+    `    const FOREIGN_EVENT = ${JSON.stringify(PI_SUBAGENTS_REGISTER_EVENT)};`,
+    `    const FOREIGN_VERSION = ${PI_SUBAGENTS_REGISTER_VERSION};`,
+    `    const registrations = new Map();`,
+    `    const failures = [];`,
+    `    // Name of the offending runtime agent, from the registry's own throw text.`,
+    `    // Deliberately parsed rather than inferred: the net must never dispose a`,
+    `    // registration that is not the one the registry just named.`,
+    `    const COLLISION_RE = /^Runtime agent '([^']+)' collides with configured agent/;`,
+    `    function registerAll(ctx) {`,
+    `      for (const spec of FOREIGN) {`,
+    `        try {`,
+    `          // Re-registering the same name throws ('collides with runtime agent'),`,
+    `          // so a prior handle for this name is disposed first. Load-bearing on`,
+    `          // /reload: the extension instance is recreated but the pi-subagents`,
+    `          // registry it talks to is not necessarily torn down first.`,
+    `          const prior = registrations.get(spec.name);`,
+    `          if (prior) { try { prior.dispose(); } catch {} registrations.delete(spec.name); }`,
+    `          const request: any = { version: FOREIGN_VERSION, name: spec.name, definition: {`,
+    `            description: spec.description,`,
+    `            systemPrompt: spec.body,`,
+    `            systemPromptMode: "replace",`,
+    `            inheritProjectContext: true,`,
+    `          } };`,
+    `          try { pi.events.emit(FOREIGN_EVENT, request); } catch {}`,
+    `          const result = request.result;`,
+    `          if (result && result.ok === true && result.registration && typeof result.registration.dispose === "function") {`,
+    `            registrations.set(spec.name, result.registration);`,
+    `            continue;`,
+    `          }`,
+    `          const reason = result && result.ok === false && result.error`,
+    `            ? String(result.error.message || result.error)`,
+    `            : "pi-subagents did not answer";`,
+    `          failures.push(spec.name + ": " + reason);`,
+    `        } catch (error) {`,
+    `          failures.push(spec.name + ": " + String(error && error.message ? error.message : error));`,
+    `        }`,
+    `      }`,
+    `      if (failures.length > 0 && ctx && ctx.ui && typeof ctx.ui.notify === "function") {`,
+    `        try { ctx.ui.notify("gh-router: " + failures.length + " foreign agent(s) not bridged (" + failures.slice(0, 3).join("; ") + ")", "warning"); } catch {}`,
+    `      }`,
+    `    }`,
+    `    pi.on("session_start", async (event, ctx) => {`,
+    `      // Children must not pay for the roster: every subagent process loads`,
+    `      // this extension too (background runners mark themselves, foreground`,
+    `      // children load no ambient extensions). Registration there would also`,
+    `      // fight the parent's names in a second registry.`,
+    `      if (process.env.PI_SUBAGENT_CHILD === "1") return;`,
+    `      registerAll(ctx);`,
+    `    });`,
+    `    pi.on("session_shutdown", async () => {`,
+    `      // Load-bearing, not hygiene: a stale registration outliving this`,
+    `      // instance makes the next session's registration of the same name`,
+    `      // throw 'collides with runtime agent'.`,
+    `      for (const registration of registrations.values()) {`,
+    `        try { registration.dispose(); } catch {}`,
+    `      }`,
+    `      registrations.clear();`,
+    `    });`,
+    `    // Self-healing net: a colliding foreign agent fails EVERY subagent call in`,
+    `    // the process, so leaving it registered until the user quits is not an`,
+    `    // option. Only a registration this extension created is ever disposed,`,
+    `    // keyed by the name the registry itself reported.`,
+    `    pi.on("tool_result", async (event) => {`,
+    `      try {`,
+    `        if (!event || event.toolName !== "subagent" || event.isError !== true) return undefined;`,
+    `        const text = Array.isArray(event.content)`,
+    `          ? event.content.map((c) => (c && typeof c.text === "string" ? c.text : "")).join("\\n")`,
+    `          : "";`,
+    `        const match = COLLISION_RE.exec(text);`,
+    `        if (!match) return undefined;`,
+    `        const offender = match[1];`,
+    `        // Reset lastIndex for the shared regex: a stale index would make the`,
+    `        // next match start mid-string and silently miss.`,
+    `        COLLISION_RE.lastIndex = 0;`,
+    `        const registration = registrations.get(offender);`,
+    `        if (!registration) return undefined;`,
+    `        try { registration.dispose(); } catch {}`,
+    `        registrations.delete(offender);`,
+    `        return {`,
+    `          content: [{ type: "text", text: "Foreign agent '" + offender + "' collided with an agent configured in this session and was unregistered. Retry the call, or use a roster agent." }],`,
+    `          isError: false,`,
+    `        };`,
+    `      } catch {`,
+    `        return undefined;`,
+    `      }`,
+    `    });`,
+    `    // The compact index, as a system-prompt section. Skipped in children`,
+    `    // (they never see the roster) and when nothing was bridged.`,
+    `    if (FOREIGN_INDEX) {`,
+    `      pi.on("before_agent_start", async (event) => {`,
+    `        try {`,
+    `          if (process.env.PI_SUBAGENT_CHILD === "1") return undefined;`,
+    `          const options = event && event.systemPromptOptions;`,
+    `          if (!options || typeof options !== "object") return undefined;`,
+    `          if (!options.sections || typeof options.sections !== "object") options.sections = {};`,
+    `          options.sections.foreign_agents = FOREIGN_INDEX;`,
+    `          return undefined;`,
+    `        } catch {`,
+    `          return undefined;`,
+    `        }`,
+    `      });`,
+    `    }`,
+    `  }`,
+  ]
+}
+
 /**
  * Memory-bridge section for the generated extension: path-scoped rules
  * lazy-attach on `read/edit/write` tool results (once per rule per
@@ -408,6 +569,11 @@ export function buildPiMemoryBridgeSection(bridge: PiBridgeExtensionInput): Arra
 export function buildPiExtensionSource(opts: {
   profileId: PiProfileId
   bridge?: PiBridgeExtensionInput
+  /**
+   * Bridged foreign agents (Claude/Copilot). Empty/absent means the feature is
+   * off and the generated source carries no seam at all.
+   */
+  foreign?: PiForeignExtensionInput
 }): string {
   // Cheapest-only, like the advisor some profiles carry: the brief is the
   // front-end half of the same floor-raising surface `buildPiAppendSystem`
@@ -468,6 +634,9 @@ export function buildPiExtensionSource(opts: {
   )
   if (opts.bridge && opts.bridge.scopedRules.length + opts.bridge.stats.staticFiles > 0) {
     lines.push(...buildPiMemoryBridgeSection(opts.bridge))
+  }
+  if (opts.foreign && opts.foreign.agents.length + opts.foreign.index.length > 0) {
+    lines.push(...buildPiForeignAgentsSection(opts.foreign))
   }
   lines.push(
     // Statusline footer (always on — like Claude's operating defaults, not a

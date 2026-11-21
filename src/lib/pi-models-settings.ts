@@ -99,6 +99,32 @@ export function piThinkingLevelMapFor(
  * this constant remains the floor no role drops below.
  */
 export const PI_PROFILE_CONTEXT_TOKENS = 200_000 as const
+
+/**
+ * Pi's own window for the LOCAL family (`-m local`, `-m local2`).
+ *
+ * 272K, not 200K, and deliberately NOT `LOCAL_PROFILE_LEAD_CONTEXT_TOKENS`:
+ * that constant is the *Claude Code client's* window, pinned at 200K by the
+ * seeded `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, and nothing in this module can
+ * move it. Two clients, two windows, both true.
+ *
+ * The choice is policy, not measurement. Measured on the live endpoint this
+ * session: 105K–720K input is accepted verbatim, 730K+ is
+ * `400 prompt is too long`, so the real ceiling is ~720K and 272K sits at a
+ * 2.6× margin. 272K is also the Copilot Default-tier boundary the roster
+ * already uses (`PI_TIER_THRESHOLDS`), so every Pi profile in this repo now
+ * budgets against the same number instead of two conventions.
+ *
+ * Raising the window alone would make compaction WORSE, not better. Pi's
+ * clamp is `room = window − input − max(4096, 15% of input)`, and the
+ * summarization call's input is `trigger − keepRecentTokens`, not the trigger.
+ * Measured through Pi's own `clampMaxTokensToContext`, a 272K window only
+ * hands that call the full 65 536 once the trigger is at or under ~198.6K
+ * (reserve >= ~73.4K); at a 217 600 trigger it gets 43 736, and at 232 000 it
+ * gets 31 744 — today's truncating ceiling. The three constants move together
+ * or not at all.
+ */
+export const PI_LOCAL_CONTEXT_TOKENS = 272_000 as const
 /** Provider key used in models.json and agent `provider/model` references. */
 export const PI_PROVIDER_NAME = "gh-router" as const
 
@@ -643,7 +669,16 @@ export function buildPiModelsJson(opts: {
             name: id,
             reasoning: true as const,
             input: entry?.vision === false ? ["text"] : ["text", "image"],
-            contextWindow: piContextWindowFor(id, entry?.maxContextTokens),
+            // Local rows carry the Pi-only 272K window. `piContextWindowFor`
+            // reads the Copilot cheap-tier table, which knows nothing about
+            // the local endpoint (its three ids are not in it) and would fall
+            // back to 200K — the window this change exists to raise. A local2
+            // Copilot row (its Sol consultant) is NOT `isLocalTier`, so it
+            // keeps the tier table's number.
+            contextWindow:
+              local && isLocalTier
+                ? PI_LOCAL_CONTEXT_TOKENS
+                : piContextWindowFor(id, entry?.maxContextTokens),
             maxTokens,
             ...(entry?.cost ? { cost: entry.cost } : {}),
             ...(isLocalTier && localHeaders ? { headers: localHeaders } : {}),
@@ -669,7 +704,7 @@ export interface PiCompactionSettings {
 }
 
 /**
- * Local-family compaction reserve: 80% of the 200K window.
+ * Local-family compaction reserve: a flat 81 600 tokens for the 272K window.
  *
  * The Copilot derivation below optimises for a price cliff; the local
  * endpoint has none, so the binding constraint there is the summarization
@@ -681,13 +716,38 @@ export interface PiCompactionSettings {
  * `getSummarizationFailure` refuses the truncated summary
  * (`generation hit the token cap and the summary is incomplete`).
  *
- * Triggering at 160K instead of Pi's 183K default leaves the clamp enough
- * room that the 32768 budget below is reachable: at a 160K estimate
- * `clampMaxTokensToContext` yields 32768, so the provider sends
- * `budget = min(32768, 32768 − 1024)`. Raised reserves alone are not enough
- * (the budget, not the trigger, is the ceiling) — both halves ship together.
+ * The reserve is **flat**, not a ratio, so it is the half of this pairing
+ * that has to be recomputed whenever the window moves. 272 000 − 81 600 =
+ * 190 400 is the trigger (70% of the window, vs the 160K/80% it replaces —
+ * the absolute amount of conversation before compaction goes UP).
+ *
+ * The number is derived, not chosen. Pi clamps the summarization request to
+ * `room = window − input − max(4096, 15% · input)` and the summarizer sees
+ * `trigger − keepRecentTokens` (20 000). For the 65 536 budget below to
+ * survive that clamp, that input must stay at or under 178 642
+ * (`(272000 − 65536 − 1024) / 1.15` rounds down one token short). Read back
+ * as a reserve:
+ *
+ * | reserve | trigger | summarizer input | `budget_tokens` |
+ * |---------|---------|------------------|-----------------|
+ * |  40 000 | 232 000 |          212 000 |          31 744 |
+ * |  54 400 | 217 600 |          197 600 |          43 736 |
+ * |  73 357 | 198 643 |          178 643 |          65 535 |
+ * |  81 600 | 190 400 |          170 400 |          65 536 |
+ *
+ * 73 357 is the exact boundary and has zero slack: one token past it and the
+ * budget starts eroding, and a history that overshoots the trigger by 5%
+ * would get 55 264. 81 600 keeps ~8K of headroom, so that same 5% overshoot
+ * still receives 65 218. Ship the number with the slack, not the boundary.
+ *
+ * Both halves ship together: the budget is what the endpoint serves as
+ * `budget_tokens`, and the reserve is what keeps the clamp from eating it.
+ * The two rows above 40 000 are the ones that matter — a raised window with
+ * the OLD reserve leaves the summarizer at 31 744, and even the plan's
+ * original 54 400 caps it at 43 736, i.e. still short of the budget it asks
+ * for, from a launch that claims to have doubled its headroom.
  */
-export const PI_LOCAL_COMPACTION_RESERVE_TOKENS = 40_000 as const
+export const PI_LOCAL_COMPACTION_RESERVE_TOKENS = 81_600 as const
 
 /**
  * Thinking budgets for LOCAL launches only.
@@ -697,14 +757,24 @@ export const PI_LOCAL_COMPACTION_RESERVE_TOKENS = 40_000 as const
  * carry no `thinkingLevelMap`, so `clampReasoning` walks `max`/`xhigh` down
  * to `high`). 16384 is the ceiling that truncates real summaries — 5 of the
  * 19 compactions in the reference session reported output above it, up to
- * 21643. 32768 roughly doubles the summarization headroom and costs nothing
- * on local inference.
+ * 21643. 65536 quadruples the summarization headroom and costs nothing on
+ * local inference.
+ *
+ * The doubling from 32768 is not a reflex: the endpoint serves the request as
+ * `budget_tokens`, and at the 190 400-token trigger the summarizer sees
+ * 170 400 (`trigger − keepRecentTokens`), where the clamp still affords the
+ * full 65 536 (measured: +5% historical overshoot → 65 218). A 32 768 budget
+ * would be the tight half of what the window now allows, and at the old
+ * 40 000 reserve the second clamp pinned the request back to 31 744 — the
+ * truncating ceiling this constant exists to remove. Both numbers are
+ * measured against Pi's own `clampMaxTokensToContext` in
+ * `tests/pi-models-settings.test.ts` rather than asserted here.
  *
  * Deliberately NOT emitted for Copilot profiles: there the thinking budget
  * is billed reasoning tokens on every turn, not a free local decode.
  */
 export const PI_LOCAL_THINKING_BUDGETS = Object.freeze({
-  high: 32_768,
+  high: 65_536,
 }) as Readonly<Record<string, number>>
 
 /**
@@ -724,8 +794,8 @@ export const PI_LOCAL_THINKING_BUDGETS = Object.freeze({
  * `PI_LOCAL_COMPACTION_RESERVE_TOKENS`): the local catalog carries no
  * `max_prompt_tokens`, so the price-cliff derivation has nothing to read,
  * and the constraint that matters is the endpoint's thinking-budget
- * ceiling. Every local row is the same 200K window, so one flat reserve
- * covers the whole roster.
+ * ceiling. Every local row is the same 272K window (see
+ * `PI_LOCAL_CONTEXT_TOKENS`), so one flat reserve covers the whole roster.
  */
 export function derivePiCompactionSettings(
   catalog: ReadonlyArray<PiCatalogModel> | undefined,
@@ -1754,6 +1824,28 @@ export interface PiLaunchCardOpts {
    * from `state`, so the card can never advertise a group the mirror lacks.
    */
   mcpGroups?: Array<string> | undefined
+  /**
+   * What the foreign bridge contributed this launch, when `--foreign` is on.
+   * Absent on every other launch, so the card never mentions a surface the
+   * session does not carry. `renamed` and `skipped` are the collision report:
+   * a name the router kept (agents) or a name that had to move aside
+   * (skills, prompts) is a fact the user needs in order to address it.
+   */
+  foreign?:
+    | {
+        agents: number
+        skills: number
+        prompts: number
+        renamed: Array<{ from: string; to: string }>
+        skipped: Array<{ name: string; reason: string }>
+      }
+    | undefined
+  /**
+   * Foreign agent definitions found but not bridged (launch without
+   * `--foreign`). Reported so the flag is discoverable: the bridge leaves no
+   * trace otherwise, and consola's info level is sunk in TUI mode.
+   */
+  foreignAvailable?: number | undefined
   serverUrl: string
 }
 
@@ -1783,11 +1875,39 @@ export function buildPiLaunchCard(opts: PiLaunchCardOpts): string {
     opts.copilotVersion ? `copilot chat ${opts.copilotVersion}` : undefined,
     opts.vsCodeVersion ? `vscode ${opts.vsCodeVersion}` : undefined,
   ].filter((part): part is string => typeof part === "string" && part.length > 0)
-  return [
+  const lines = [
     `github-router v${opts.version} · pi (${opts.profileId})`,
     `  ${identity.join(" · ")}`,
     `  lead ${opts.lead} · ${opts.modelCount} models · ${surface.join(" ")} · ${opts.serverUrl}`,
-  ].join("\n")
+  ]
+  // The foreign bridge gets its own line rather than a surface token: the
+  // counts are the contract (N agents arrive lazy, nothing on disk), and the
+  // collision report has nowhere else to appear. A launch with nothing to
+  // report adds no line at all.
+  const foreign = opts.foreign
+  if (foreign) {
+    const parts = [`${foreign.agents} foreign agents (lazy)`]
+    if (foreign.prompts > 0) parts.push(`${foreign.prompts} prompts`)
+    if (foreign.skills > 0) parts.push(`${foreign.skills} skills`)
+    lines.push(`  foreign: ${parts.join(" · ")}`)
+    if (foreign.renamed.length > 0) {
+      lines.push(
+        `    renamed ${foreign.renamed.map((r) => `${r.from} → ${r.to}`).join(", ")}`,
+      )
+    }
+    if (foreign.skipped.length > 0) {
+      lines.push(
+        `    skipped ${foreign.skipped.map((s) => s.name).join(", ")} (name taken by gh-router)`,
+      )
+    }
+  } else if (opts.foreignAvailable !== undefined && opts.foreignAvailable > 0) {
+    // Never a nag: one line, only when the artifacts actually exist, and only
+    // on the launch that does not already bridge them.
+    lines.push(
+      `  foreign: ${opts.foreignAvailable} agent definition(s) found, not bridged · add --foreign`,
+    )
+  }
+  return lines.join("\n")
 }
 
 /**
