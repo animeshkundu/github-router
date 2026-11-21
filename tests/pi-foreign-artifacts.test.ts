@@ -11,6 +11,7 @@ import {
   countForeignAgentFiles,
   piForeignRepoRoot,
   piForeignSlug,
+  piForeignSourceOf,
   planForeignArtifacts,
   writeForeignArtifacts,
   type PiForeignPlan,
@@ -584,6 +585,19 @@ describe("missing descriptions", () => {
     } finally {
       await fx.cleanup()
     }
+  })
+})
+
+describe("source labelling", () => {
+  test("a Windows separator still labels the source correctly", () => {
+    // `path.join` on win32 yields `\`, while the roots are POSIX literals, so
+    // an unnormalized check labels every Windows artifact "claude" — and that
+    // label reaches both the index row and the provenance line.
+    expect(piForeignSourceOf("C:\\repo\\.github\\agents\\ceo.md")).toBe("copilot")
+    expect(piForeignSourceOf("C:\\Users\\x\\.copilot\\agents\\a.md")).toBe("copilot")
+    expect(piForeignSourceOf("C:\\repo\\.claude\\agents\\w.md")).toBe("claude")
+    expect(piForeignSourceOf("/repo/.github/agents/ceo.md")).toBe("copilot")
+    expect(piForeignSourceOf("/repo/.claude/agents/w.md")).toBe("claude")
   })
 })
 

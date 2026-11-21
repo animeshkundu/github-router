@@ -258,8 +258,17 @@ export async function piForeignRepoRoot(cwd: string): Promise<string> {
   return cwd
 }
 
-function sourceOf(file: string): "claude" | "copilot" {
-  return file.includes("/.github/") || file.includes("/.copilot/") ? "copilot" : "claude"
+/**
+ * Which product an artifact came from, from its path alone.
+ *
+ * Normalized to forward slashes first: the roots above are POSIX literals, so
+ * a Windows path (`\.github\.`) would otherwise match nothing and every
+ * artifact would be labelled Claude. The label reaches the index and the
+ * provenance line, i.e. the model's view of where an agent came from.
+ */
+export function piForeignSourceOf(file: string): "claude" | "copilot" {
+  const posix = file.replace(/\\/g, "/")
+  return posix.includes("/.github/") || posix.includes("/.copilot/") ? "copilot" : "claude"
 }
 
 function provenancePath(file: string, repoRoot: string, homeDir: string): string {
@@ -571,7 +580,7 @@ export async function planForeignArtifacts(opts: {
       ...(finalName === authored ? {} : { renamedFrom: name }),
       content: `${buildSkillFrontmatter(description)}\n${buildArtifactBody({
         body,
-        source: sourceOf(file),
+        source: piForeignSourceOf(file),
         shown,
         allowed,
       })}`,
@@ -598,7 +607,7 @@ export async function planForeignArtifacts(opts: {
     plan.prompts.push({
       name: finalName,
       ...(finalName === authored ? {} : { renamedFrom: name }),
-      content: `${buildArtifactBody({ body, source: sourceOf(file), shown, allowed: [] })}\n`,
+      content: `${buildArtifactBody({ body, source: piForeignSourceOf(file), shown, allowed: [] })}\n`,
     })
   }
 
@@ -665,11 +674,11 @@ export async function planForeignArtifacts(opts: {
       // body always ends with a newline, so an untrimmed body would fail
       // registration for EVERY bridged agent (`runtime-agent-registry.js:48`).
       body: capBytes(
-        buildArtifactBody({ body, source: sourceOf(file), shown, allowed: tools }),
+        buildArtifactBody({ body, source: piForeignSourceOf(file), shown, allowed: tools }),
         MAX_FOREIGN_AGENT_BODY_BYTES,
         "gh-router foreign-agent bridge",
       ).text.trim(),
-      source: sourceOf(file),
+      source: piForeignSourceOf(file),
       scope,
       file: shown,
       ...(finalName === authored ? {} : { renamedFrom: originalName }),
