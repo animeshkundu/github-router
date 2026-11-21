@@ -1079,7 +1079,9 @@ describe("pi local compaction headroom", () => {
    * (`prepareCompaction` cuts at `keepRecentTokens` and summarizes everything
    * before it), so the budget has to survive the clamp at THAT size, not at
    * the trigger. This is the assertion the earlier draft got wrong: a 217 600
-   * trigger looks roomy but hands the summarizer only 31 744.
+   * trigger (reserve 54 400) looks roomy but hands the summarizer 43 736 —
+   * still short of the 65 536 it asks for — and at the old 40 000 reserve it
+   * gets 31 744, today's ceiling.
    */
   const KEEP_RECENT_TOKENS = 20_000
 
@@ -1122,8 +1124,32 @@ describe("pi local compaction headroom", () => {
     expect(unbudgeted.sentBudget).toBe(11_264)
     const staleReserve = wireCeiling(212_000, level)
     expect(staleReserve.sentBudget).toBe(31_744)
+    // The plan's original 54 400 reserve is INSIDE the same trap, just less
+    // visibly: the trigger moves to 217 600 and the summarizer gets 43 736,
+    // which is a real improvement and still not the budget that was asked for.
+    // Shipping a half-budget that looks fixed is the worse failure.
+    const halfBudget = wireCeiling(PI_LOCAL_CONTEXT_TOKENS - 54_400 - KEEP_RECENT_TOKENS, level)
+    expect(halfBudget.sentBudget).toBe(43_736)
+    expect(halfBudget.sentBudget).toBeLessThan(level)
     expect(shipped.sentBudget).toBe(65_536)
     expect(shipped.sentBudget).toBeGreaterThan(staleReserve.sentBudget * 2)
+  })
+
+  test("the reserve is above the boundary, not on it", () => {
+    const level = PI_LOCAL_THINKING_BUDGETS["high"] as number
+    // 73 357 is the exact reserve at which the summarizer first receives the
+    // whole budget (input 178 643). Being ON that boundary is fragile: one
+    // token of history growth erodes the budget, and a 5% overshoot costs
+    // ~10K of it. The shipped reserve must be strictly above the boundary.
+    const boundary = PI_LOCAL_CONTEXT_TOKENS - 73_357 - KEEP_RECENT_TOKENS
+    const shipped = PI_LOCAL_CONTEXT_TOKENS - PI_LOCAL_COMPACTION_RESERVE_TOKENS - KEEP_RECENT_TOKENS
+    expect(PI_LOCAL_COMPACTION_RESERVE_TOKENS).toBeGreaterThan(73_357)
+    expect(shipped).toBeLessThan(boundary)
+    // And the slack has to buy something: a 5% historical overshoot still gets
+    // essentially the whole budget, where the boundary would lose ~10K.
+    const overshoot = Math.round(shipped * 1.05)
+    expect(wireCeiling(overshoot, level).sentBudget).toBe(65_218)
+    expect(wireCeiling(Math.round(boundary * 1.05), level).sentBudget).toBeLessThan(58_000)
   })
 
   test("settings emit thinking budgets for local only", () => {

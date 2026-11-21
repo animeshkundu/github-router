@@ -403,16 +403,27 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   (`clampMaxTokensToContext` → `adjustMaxTokensForThinking` →
   `clampMaxTokensToContext` again, `room = window − input − max(4096, 15% of
   input)`), and the summarizer sees `trigger − keepRecentTokens` (20 000).
-  With the reserve at 40 000 the trigger would be 232K and the second clamp
-  would pin `max_tokens` back to 31744 — the same truncating ceiling as before,
-  from a launch that claims to have doubled its headroom. Even 272K minus the
-  plan's original 54 400 reserve lands at 217 600, and the same clamp trims
-  that to 32768 (wire 31744): a raised window alone changes nothing, because
-  the clamp, not the window, is the ceiling. For the full 65536
-  to survive, the summarization input must stay at or under
-  `(272000 − 65536 − 1024) / 1.15 = 178 643`; 190 400 − 20 000 = 170 400
-  leaves ~12K of slack, so even a history 5% past the trigger still gets
-  65218. The main loop at the trigger is handed 52016 (vs 31744 today).
+  For the full 65536 to survive, the summarization input must stay at or under
+  `(272000 − 65536 − 1024) / 1.15 = 178 642`. Read back as a reserve, the
+  curve is not gentle:
+
+  | reserve | trigger | summarizer input | `budget_tokens` |
+  |---|---|---|---|
+  | 40 000 | 232 000 | 212 000 | 31 744 |
+  | 54 400 | 217 600 | 197 600 | 43 736 |
+  | 73 357 | 198 643 | 178 643 | 65 535 |
+  | **81 600** | **190 400** | **170 400** | **65 536** |
+
+  73 357 is the exact boundary and has no slack — one token further and the
+  budget erodes, and a history 5% past that trigger drops to 55 264. 81 600
+  keeps ~8K of headroom, so the same overshoot still gets 65 218. The two
+  rows that matter for the "did this fix anything" question are 40 000 and
+  54 400: the first leaves today's 31 744, and the second — the number the
+  plan originally proposed — still hands the summarizer only 43 736 of the
+  65 536 it asks for. A half-budget that *looks* fixed is the worse failure,
+  which is why the reserve sits 8 243 tokens above the first value that
+  would qualify. The main loop at the trigger is handed 52 016 (vs 31 744
+  today).
   `thinkingBudgets` is emitted for local profiles only; on Copilot the same
   numbers would be billed reasoning tokens on every turn.
   Both symptoms of that one ceiling are the same bug: the summarization turn

@@ -116,13 +116,13 @@ export const PI_PROFILE_CONTEXT_TOKENS = 200_000 as const
  * budgets against the same number instead of two conventions.
  *
  * Raising the window alone would make compaction WORSE, not better. Pi's
- * clamp is `room = window − input − max(4096, 15% of input)`, so with a
- * 217 600 trigger the summary request gets 32 768 of room and the 64K thinking
- * budget we just raised is trimmed straight back to 31 744 — the truncation
- * the budget exists to prevent. Measured against Pi's own
- * `clampMaxTokensToContext`, a 272K window needs the trigger at ~190K for the
- * summarization call to actually receive the 65 536 it asks for. The three
- * constants move together or not at all.
+ * clamp is `room = window − input − max(4096, 15% of input)`, and the
+ * summarization call's input is `trigger − keepRecentTokens`, not the trigger.
+ * Measured through Pi's own `clampMaxTokensToContext`, a 272K window only
+ * hands that call the full 65 536 once the trigger is at or under ~198.6K
+ * (reserve >= ~73.4K); at a 217 600 trigger it gets 43 736, and at 232 000 it
+ * gets 31 744 — today's truncating ceiling. The three constants move together
+ * or not at all.
  */
 export const PI_LOCAL_CONTEXT_TOKENS = 272_000 as const
 /** Provider key used in models.json and agent `provider/model` references. */
@@ -724,16 +724,28 @@ export interface PiCompactionSettings {
  * The number is derived, not chosen. Pi clamps the summarization request to
  * `room = window − input − max(4096, 15% · input)` and the summarizer sees
  * `trigger − keepRecentTokens` (20 000). For the 65 536 budget below to
- * survive that clamp, `input` must stay at or under 178 643
- * (`(272000 − 65536 − 1024) / 1.15`). A 271 043-token trigger would already
- * be too late; 190 400 leaves ~12K of slack so a history that overshoots the
- * trigger by a few percent still gets a full budget (measured: +5% → 65 218).
+ * survive that clamp, that input must stay at or under 178 642
+ * (`(272000 − 65536 − 1024) / 1.15` rounds down one token short). Read back
+ * as a reserve:
+ *
+ * | reserve | trigger | summarizer input | `budget_tokens` |
+ * |---------|---------|------------------|-----------------|
+ * |  40 000 | 232 000 |          212 000 |          31 744 |
+ * |  54 400 | 217 600 |          197 600 |          43 736 |
+ * |  73 357 | 198 643 |          178 643 |          65 535 |
+ * |  81 600 | 190 400 |          170 400 |          65 536 |
+ *
+ * 73 357 is the exact boundary and has zero slack: one token past it and the
+ * budget starts eroding, and a history that overshoots the trigger by 5%
+ * would get 55 264. 81 600 keeps ~8K of headroom, so that same 5% overshoot
+ * still receives 65 218. Ship the number with the slack, not the boundary.
  *
  * Both halves ship together: the budget is what the endpoint serves as
  * `budget_tokens`, and the reserve is what keeps the clamp from eating it.
- * At the OLD 40 000 reserve with the new 272K window the trigger would be
- * 232 000 and the summarizer would be handed 31 744 — the same truncating
- * ceiling as today, from a launch that claims to have doubled the headroom.
+ * The two rows above 40 000 are the ones that matter — a raised window with
+ * the OLD reserve leaves the summarizer at 31 744, and even the plan's
+ * original 54 400 caps it at 43 736, i.e. still short of the budget it asks
+ * for, from a launch that claims to have doubled its headroom.
  */
 export const PI_LOCAL_COMPACTION_RESERVE_TOKENS = 81_600 as const
 
