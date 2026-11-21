@@ -21,3 +21,9 @@ dist/
 # gate-b fixture server writes this at runtime (live ports) — never commit
 tests/fixtures/browser/manifest.runtime.json
 .claude-attachments/
+
+# Pi + plan-mode local working state (session todos, approved plans, per-repo
+# context snapshots). Machine-local scratch, and a tracked plan would go stale
+# against the code it describes.
+.pi/
+.github-router/

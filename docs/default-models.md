@@ -307,9 +307,33 @@ The raw aliases `local` and `local2` point the MAIN agent loop at a local infere
 | `General-Purpose` | `sonnet` | same |
 | Advisor | none (the tool is disabled, see below) | `gpt-6.2-sol` / high, served by Copilot |
 | Oracle peer | `opus` / `max`, served by the local endpoint | `gpt-6.2-sol` / high, served by Copilot |
-| Window / roster | 200K / the three natives above, no `Plan`, no coordinator | same |
+| Window / roster | 200K for the Claude client, 272K in `github-router pi` (see below) / the three natives above, no `Plan`, no coordinator | same |
 | MCP groups | `peers` (artifact tools + the Oracle), `search`, `browser`, `ado`, `kusto`, `cloudagent` | same |
 | Prompts | the local family's own, assumption-free | same |
+
+### Two clients, two windows (200K / 272K)
+
+The same launch profile reports **two different context windows**, because it
+drives two different clients:
+
+- **Claude Code: 200K.** Pinned by the seeded `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`,
+  which gates the client's `[1m]` unlock entirely. Nothing the proxy does can
+  move it; it is the client's own accounting.
+- **Pi: 272K.** `PI_LOCAL_CONTEXT_TOKENS` in `src/lib/pi-models-settings.ts`
+  writes `contextWindow: 272000` onto every local tier row of the mirror's
+  `models.json` (`opus`/`sonnet`/`haiku`; `local2`'s Copilot-served Sol
+  consultant is not a local tier row and keeps its own tier number). The local server's real ceiling is far above it — measured on
+  a live endpoint, 105K–720K input is accepted verbatim and 730K+ returns
+  `400 prompt is too long` — so 272K is a **policy** number at a ~2.6× margin,
+  chosen because it is also the Copilot Default-tier boundary every other Pi
+  profile budgets against.
+
+The Pi window is not a free win: it moves the compaction reserve and the
+thinking budget with it, or the summary request gets clamped back to the
+truncating ceiling this raise exists to remove. `github-router pi -m local`
+therefore emits `reserveTokens: 81600` (trigger 190.4K, 70%) and
+`thinkingBudgets: { high: 65536 }`; the derivation is in
+[`pi-launch.md`](pi-launch.md#how-it-cooperates-with-pi).
 
 Local is a third family, not a cheapest sibling: its egress and model ids differ, its roster and per-role efforts are inherited from `CHEAPEST_PROFILE_CONTRACT`, and its prompt surfaces are rendered for the local family so they name only the agents and tools it emits and make no claim about the endpoint, the model behind it, its speed or its cost. `-m cheaplocal` is the mirror image and does stay in the cheapest family: the whole session runs exactly as `cheapest` does and only the two consultants leave Copilot, so its prompt surfaces keep the cheapest roster and scrub only the sentences that would describe a consultant.
 

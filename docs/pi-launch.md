@@ -11,13 +11,16 @@ identities named below:
 | `cheapest2` | `gpt-6-luna` / max, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Luna/max, protege of the Advisor); no Plan | Sol 6.2/high Advisor (plan review + capped reviewer rounds), Sol 6.2/high Oracle |
 | `balanced` | `gpt-5.6-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 5.6/high, may delegate Explore); no Plan | Grok 4.6/medium Oracle only — **advisor-free by design** |
 | `balanced2` | `gpt-6.2-sol` / medium, 272K tier window | Explore (Luna/high), General-Purpose (Luna/max), reviewer (Sol 6.2/high, may delegate Explore); no Plan | Grok 4.7/medium Oracle only — **advisor-free by design** |
-| `local` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | none: `local` runs **every** agent turn on the local server, so it carries no Oracle and no Advisor (the builtin `oracle` is disabled in settings). The browser page compressor is the one model-backed Copilot exception, shared with `local2`; web search rides Copilot's MCP endpoint without a model |
-| `local2` | `opus` on the local server, 200K | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | Sol 6.2/high Advisor (plan review + capped reviewer rounds), Sol 6.2/high Oracle |
+| `local` | `opus` on the local server, 272K Pi window (200K for the Claude client) | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | none: `local` runs **every** agent turn on the local server, so it carries no Oracle and no Advisor (the builtin `oracle` is disabled in settings). The browser page compressor is the one model-backed Copilot exception, shared with `local2`; web search rides Copilot's MCP endpoint without a model |
+| `local2` | `opus` on the local server, 272K Pi window (200K for the Claude client) | Explore (`haiku`/high), General-Purpose (`sonnet`/max), reviewer (`opus`/max); no Plan | Sol 6.2/high Advisor (plan review + capped reviewer rounds), Sol 6.2/high Oracle |
 
 Both `-2` profiles inherit everything else from their base: the delegation
-graph, the peer set, the prompt-rewrite brief (`cheapest` family only), the
-compaction reserves, and the bare-200K accounting. `balanced2` keeps the
-declarative `astra` slot (`gpt-6-astra`, not callable on this family).
+graph, the peer set, the prompt-rewrite brief (`cheapest` family only), and
+the compaction reserves. `balanced2` keeps the declarative `astra` slot
+(`gpt-6-astra`, not callable on this family). Copilot profiles budget against
+bare Default-tier windows (272K Luna/Sol, 200K Grok); the local family budgets
+against its own 272K Pi window, described below, which is a different number
+from the 200K window the Claude client sees on the same launch.
 
 `-m cheaplocal` exists on `github-router claude` but is deliberately not a Pi
 profile. Pi binds one provider per profile in its models file, while cheaplocal
@@ -71,10 +74,20 @@ On the Pi side that means these concrete differences from a Copilot profile:
   Claude Code gets the header through `ANTHROPIC_CUSTOM_HEADERS`; Pi has no
   such channel, so `models.json` is it. Copilot-served rows deliberately
   never carry it, or their own ids would be routed to the local server.
-- Tier rows are the bare ids `opus` / `sonnet` / `haiku` at a 200K
-  `contextWindow`, with no `cost` and no `thinkingLevelMap`: a local id has
-  no catalog entry to derive either from, and the server's effort ladder is
-  unknown, so both are omitted rather than guessed.
+- Tier rows are the bare ids `opus` / `sonnet` / `haiku` at a **272K**
+  `contextWindow` (`PI_LOCAL_CONTEXT_TOKENS`), with no `cost` and no
+  `thinkingLevelMap`: a local id has no catalog entry to derive either from,
+  and the server's effort ladder is unknown, so both are omitted rather than
+  guessed. The local server's real ceiling is much higher — measured at
+  ~720K accepted input on the live endpoint, `400 prompt is too long` from
+  ~730K — so 272K is a **policy** number, not a measured limit: it matches
+  the Copilot Default-tier boundary every other Pi profile budgets against,
+  and it stays at a ~2.6× margin under the endpoint ceiling. The Claude
+  client launched with `github-router claude -m local` keeps its own 200K
+  window, pinned by the seeded `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`; the two
+  clients report two windows because they are two windows. The window, the
+  compaction reserve and the thinking budget move **together** — see
+  [Native compaction stays authoritative](#how-it-cooperates-with-pi).
 - `local` emits no `oracle` agent file. Every agent turn on this profile is
   a local turn, and a consultant is the one role that cannot be — so the
   role is absent rather than re-pointed: no file, no `gh-oracle` skill, no
@@ -161,6 +174,7 @@ plus the mode identity. Each surface rides a flag:
 | `--kusto` | auto on an Azure DevOps remote | `kusto` MCP group by the same route (key `gh-router-kusto`). A remote enables it and the flag forces it anywhere; `--kusto-cluster` only sets a default, and without one every call names the cluster it queries. There is no launch-side reachability probe: the group is served read-only by the service |
 | `--cloudagent` | auto on an Azure DevOps remote | `cloudagent` MCP group (Microsoft Cloud Agent Job API v2) by the same route (key `gh-router-cloudagent`). The git remote enables all ten tools, `create_job`, `create_pr_job` and `cancel_job` included; `--no-cloudagent` is the veto, and the create tools tell the model to confirm with the user first because a job runs a cloud agent for hours and spends compute. `--cloudagent-env prod\|ppe` selects the service. The proxy mints the Entra token itself from an existing `az login`, and the base URL is not configurable |
 | `--memory-bridge` / `--no-memory-bridge` | **on** | Copilot (`.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` `applyTo`) + Claude (`.claude/rules/`, `.claude/CLAUDE.md`, `~/.claude/CLAUDE.md`, `~/.copilot/copilot-instructions.md`) bridge. Static repo-wide slice synthesizes into the mirror `AGENTS.md` (Pi-native candidate, 24KB budget, secrets-redacted, fenced idempotent); path-scoped rules lazy-attach on matching `read/edit/write` (once/session). Auto-memory (`~/.claude/projects/<slug>/memory/MEMORY.md`, 200-line/25KB) is on-demand via `/memory` only, never auto-injected. Honors `GH_ROUTER_PI_BRIDGE=0` / `GH_ROUTER_DISABLE_PI_BRIDGE=1` and Pi's own `--no-context-files`/`-nc` passthrough. `--no-memory-bridge` = Pi-native `AGENTS.md`/`CLAUDE.md` discovery only. |
+| `--foreign` | off | Bridges the project's and your own **Claude Code and Copilot artifacts** into the Pi session: `.claude/skills` + `.github/skills` + `.copilot/skills` as Pi skills (always on this flag), `.claude/commands` + `.github/prompts` as prompt shortcuts, `.claude/agents` + `.github/agents` as Pi subagents announced in one compact index and loaded **on demand**. Authored names are kept; a name the router, a `pi-subagents` builtin, or your own agent/skill/command already owns is **renamed** (skills, prompts) or **reported and skipped** (agents) — never overwritten, never silently dropped. Foreign `model:`/`tools:`/`aliases:` are dropped (prose keeps the tool policy). See [Claude and Copilot artifacts](#claude-and-copilot-artifacts). |
 
 Always injected regardless of flags (like Claude's operating
 defaults): `models.json` (routing is load-bearing), `mcp.json` (the
@@ -367,26 +381,46 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   extension's `session_before_compact` handler observes only and always
   falls back to native.
 
-  **Local launches compact at 80% (160K), on purpose.** The local endpoint has
-  no price cliff, and the live catalog carries no `max_prompt_tokens` for the
-  `opus`/`sonnet`/`haiku` rows, so the derivation above would fall through to
-  Pi's 16384 default and trigger at 183.6K. That is too late: with `thinking`
-  enabled the endpoint caps generation at `thinking.budget_tokens`, **not**
-  `max_tokens` (measured: `max_tokens=25904, budget=16384` returns exactly
-  16384 output tokens with `stop_reason: max_tokens`; `budget=30000` returns
-  30000), and Pi turns that stop into
+  **Local launches compact at 70% (190.4K of a 272K window), on purpose.** The
+  local endpoint has no price cliff, and the live catalog carries no
+  `max_prompt_tokens` for the `opus`/`sonnet`/`haiku` rows, so the derivation
+  above would fall through to Pi's 16384 default — a trigger at 255.6K of the
+  272K window, which is too late for the reason below. With `thinking` enabled
+  the endpoint caps generation at `thinking.budget_tokens`,
+  **not** `max_tokens` (measured: `max_tokens=25904, budget=16384` returns
+  exactly 16384 output tokens with `stop_reason: max_tokens`; `budget=30000`
+  returns 30000), and Pi turns that stop into
   `Compaction failed: Summarization failed: generation hit the token cap and
-  the summary is incomplete`. At 183.6K Pi's `clampMaxTokensToContext` leaves
-  only 12288, so the provider trims the budget to 11264 — smaller than the
-  16384 it would have used, and far too small for a real summary (5 of the 19
-  compactions in the reference session reported output above 16384, up to
-  21643). So `local`/`local2` take a flat `PI_LOCAL_COMPACTION_RESERVE_TOKENS`
-  (40000 → trigger at 160K, 80% of the window) **and** emit
-  `thinkingBudgets: { high: 32768 }` (`PI_LOCAL_THINKING_BUDGETS`), which puts
-  the wire budget at 31744 — double the old ceiling, with room for both the
-  reasoning and the summary text. `thinkingBudgets` is emitted for local
-  profiles only; on Copilot the same numbers would be billed reasoning tokens
-  on every turn.
+  the summary is incomplete`. Pi then clamps the request to what the window has
+  left — at a 255.6K trigger that is under 1K of room — so the provider trims
+  the budget far below what a real summary needs (5 of the 19 compactions in
+  the reference session reported output above 16384, up to 21643). So
+  `local`/`local2` take a flat `PI_LOCAL_COMPACTION_RESERVE_TOKENS`
+  of **81600** — which, against the 272K window above, puts the trigger at
+  **190.4K (70%)** — **and** emit `thinkingBudgets: { high: 65536 }`
+  (`PI_LOCAL_THINKING_BUDGETS`). The three numbers are one equation, and it is
+  not the obvious one: Pi clamps **twice**
+  (`clampMaxTokensToContext` → `adjustMaxTokensForThinking` →
+  `clampMaxTokensToContext` again, `room = window − input − max(4096, 15% of
+  input)`), and the summarizer sees `trigger − keepRecentTokens` (20 000).
+  With the reserve at 40 000 the trigger would be 232K and the second clamp
+  would pin `max_tokens` back to 31744 — the same truncating ceiling as before,
+  from a launch that claims to have doubled its headroom. Even 272K minus the
+  plan's original 54 400 reserve lands at 217 600, and the same clamp trims
+  that to 32768 (wire 31744): a raised window alone changes nothing, because
+  the clamp, not the window, is the ceiling. For the full 65536
+  to survive, the summarization input must stay at or under
+  `(272000 − 65536 − 1024) / 1.15 = 178 643`; 190 400 − 20 000 = 170 400
+  leaves ~12K of slack, so even a history 5% past the trigger still gets
+  65218. The main loop at the trigger is handed 52016 (vs 31744 today).
+  `thinkingBudgets` is emitted for local profiles only; on Copilot the same
+  numbers would be billed reasoning tokens on every turn.
+  Both symptoms of that one ceiling are the same bug: the summarization turn
+  that produces `Compaction failed: Summarization failed: generation hit the
+  token cap and the summary is incomplete`, and an ordinary turn that ends in
+  `Response was truncated before completion` — Pi's TUI label for
+  `stopReason: "length"`. Raising the budget raises both at once; there is no
+  second knob, and no separate setting for either message.
 - **Tool choice steered in the digest, not narrowed.** Pi's own per-tool
   guidelines ship for `read`/`write`/`edit` but not for `grep`/`find`/`ls`,
   and its "use bash for ls, rg, find" rule fires only when those dedicated
@@ -671,6 +705,117 @@ Pi build that grew or dropped one degrades to "no plan mode" rather than a
 broken session. `Shift+Tab` follows the converted binding, so a terminal that
 swallows the sequence loses it too; `/plan` is the fallback that always works.
 
+## Claude and Copilot artifacts
+
+`--foreign` bridges the artifacts a project (or your home directory) already
+carries for **Claude Code** and **Copilot** into the Pi session. It is off by
+default because it is the one surface that depends entirely on files the router
+did not write and cannot validate.
+
+| Namespace | Project (`<repo>/`) | User (`$HOME/`) | Bridged as |
+|---|---|---|---|
+| skills | `.claude/skills/`, `.github/skills/` | `.claude/skills/`, `.copilot/skills/` | Pi skills in the mirror — a directory with `SKILL.md`, or a flat `.md` |
+| prompts | `.claude/commands/`, `.github/prompts/` | `.claude/commands/` | Pi prompt shortcuts in `<mirror>/prompts/` — invoked as `/name` |
+| agents | `.claude/agents/`, `.github/agents/` | `.claude/agents/`, `.copilot/agents/` | **runtime registrations** in `pi-subagents`, announced in one index section, loaded on demand |
+
+Skills always bridge, because a skill is a name and a body: the translation is
+total. Prompts and agents ride the same flag; nothing here is emitted on a bare
+launch.
+
+A launch **without** `--foreign` that still finds agent definitions says so in
+one card line — `foreign: 5 agent definition(s) found, not bridged · add
+--foreign` — and does nothing else: no reservation, no planning, no file reads.
+The bridge is invisible by design, so this count is the only way a project that
+already has `.github/agents/` learns the flag exists. It is a `readdir` walk of
+the six agent roots counting distinct stems, so it costs one walk of small
+directories per launch and a first-mate scaffold — which dual-emits each role
+into both `.github/agents` and `.claude/agents` — counts as the 8 roles it has
+rather than the 16 files it wrote.
+
+The translation is deliberately *lossy in one direction*:
+
+- **`model:` is dropped.** A foreign agent pinned to `claude-sonnet-4` or
+  `opus` would name a model this launch does not serve, and `pi-subagents`
+  refuses an unavailable model — so the agent would fail on every call. Every
+  bridged agent runs on the lead model instead, which is also the only model the
+  profile's cost contract allows.
+- **`tools:` is dropped as a restriction, kept as prose.** Pi cannot enforce a
+  foreign allowlist, and an entry it cannot resolve hard-fails the child. The
+  original list survives as one advisory line in the body.
+- **`aliases:` is dropped.** An alias is a second registry identity that can
+  collide invisibly; the authored `name:` is the only identity the bridge
+  claims.
+- **Not bridged at all:** hooks, MCP servers, `permissionMode`, `memory`,
+  `isolation`, output styles, plugins. Each is either a Claude/Copilot runtime
+  concept with no Pi counterpart or a security boundary the launch already
+  owns.
+
+Bodies are **secret-redacted** on the way through (`ghp_…`, `sk-…`, bearer
+tokens, connection strings) and capped (8 KiB per agent, 1000 chars per skill
+description, 200 chars per agent description). A foreign artifact is user
+prose that never went through the router; copying it verbatim into a second
+file tree would move any pasted token along with it.
+
+### Agents are registered, not written
+
+Foreign agents **never become files**. An agent file under the mirror's
+`agents/` directory is a *configured* agent, and `pi-subagents` re-validates
+the configured set against the runtime set on **every** discovery — one name
+collision there fails every subagent call in the process, not just the
+colliding one. Instead the generated extension emits
+`pi-subagents:runtime-agent-register:v1` once per agent at `session_start`,
+holds the returned handle, disposes it on `session_shutdown`, and disposes any
+prior handle before re-registering (a `PI` process that survives `/reload`
+would otherwise see `collides with runtime agent`).
+
+Because a runtime agent is invisible to `pi-subagents`' own catalogue, the
+extension also injects a compact `<foreign_agents>` system-prompt section
+listing each bridged name, its scope, and its description. That section is the
+model's only signal that these agents exist; it costs about 4 KiB at 200
+agents, and it tells the model to page the full roster on demand with
+`subagent({action:"list", options:{search:"<term>"}})`. Subagent child
+processes skip both the registration and the section — they inherit the lead's
+roster, and a second registry in every child would fight the parent's names.
+
+### The collision rule
+
+Three namespaces, three different failure modes, one deterministic rule per
+namespace. This is not a hypothetical: the router's own roster publishes
+`Explore`, `reviewer`, `oracle`, `gh-oracle`, `/review`, and so on, and a
+project that has been using Claude Code will have files with those names.
+
+| Namespace | Router/builtin owns the name | Name already held by your own artifact | Same name, two scopes |
+|---|---|---|---|
+| **agents** | **skip and report** — the role already exists | `<slug>-<scope>` (`writer` → `writer-user`) | project keeps the authored name, user gets `-user` |
+| **skills** | **rename** — `gh-oracle` → `gh-oracle-2` | `<slug>-2`, `-3`, … | same |
+| **prompts** | **rename** — `/review` → `/review-2` | `<slug>-2`, `-3`, … | same |
+
+Why agents skip while skills and prompts rename: an agent is a *role*. If a
+`reviewer` role already exists — the router's own, or a `pi-subagents` builtin
+— then a second entry with one purpose makes the catalogue ambiguous about
+which is authoritative, and the model has no way to tell. The skip is
+**reported on the launch card** (`skipped reviewer (name taken by
+gh-router)`), never silent. A skill or a command is *content*: the file is the
+only carrier of it, so dropping it would lose something the user wrote.
+Renaming it to `gh-oracle-2` keeps it reachable and keeps the router's copy
+byte-identical.
+
+Two more properties the rule guarantees:
+
+- **Byte-identical duplicates dedupe.** `first-mate` writes each role into
+  `.github/agents` *and* `.claude/agents` with identical bodies; the second copy
+  is reported as a duplicate instead of becoming `planner-2`.
+- **A write never replaces an existing file.** The planner reserves every name
+  before writing, and the writer counts replacements; a non-zero count is a
+  reported bug in the reservation, not a feature.
+
+Collisions are still a Pi-process-wide hazard in one residual case: an agent
+name that becomes reserved *after* the bridge planned (an extension registering
+one mid-session). The extension therefore also watches `subagent` tool results
+for the registry's own collision error, disposes exactly the registration the
+error names, and rewrites that one result so the retry succeeds — the other
+error paths are returned untouched.
+
 ## Files
 
 - `src/pi.ts` — launcher (TTY or `--print`/`--mode` headless).
@@ -682,6 +827,7 @@ swallows the sequence loses it too; `/plan` is the fallback that always works.
   `tests/pi-tier-windows.test.ts`.
 - `src/lib/pi-extension.ts` — extension source + skills + prompts + bridge lazy-attach (`tool_result`) + `/memory` + `/context`.
 - `src/lib/pi-memory-bridge.ts` — pure bridge builders (frontmatter scope, glob match, `@` imports, caps, redaction, mirror synthesis). Unit-tested in `tests/pi-memory-bridge.test.ts`.
+- `src/lib/pi-foreign-artifacts.ts` — Claude/Copilot artifact planner: name reservation, the three collision rules, runtime-agent specs, the `<foreign_agents>` index, and the mirror writer. Unit-tested in `tests/pi-foreign-artifacts.test.ts`, including a run against the real `pi-subagents` registry.
 - `src/lib/pi-paths.ts` — mirror lifecycle plus the durable session
   root (`piSessionsDir()`).
 - `src/lib/pi-version-check.ts` — install/update gate.
@@ -776,9 +922,17 @@ which is a security downgrade rather than a convenience.
 ## Verification
 
 ```bash
-bun test tests/pi-memory-bridge.test.ts tests/pi-models-settings.test.ts
+bun test tests/pi-memory-bridge.test.ts tests/pi-models-settings.test.ts \
+  tests/pi-foreign-artifacts.test.ts tests/pi-extension-bridge.test.ts \
+  tests/pi-launch-contract.test.ts
 bun run typecheck && bun run lint:all && bun run build
 ```
+
+The foreign-artifact suite includes a case that runs against the **installed
+`pi-subagents` registry** rather than a mock — registering every bridged spec,
+merging them over a configured roster, and disposing them again. It skips when
+the package is absent (CI), but on a developer machine it is what catches a
+drift in the builtin-name list.
 
 Spike note, recorded when Pi 0.87.1 was the latest release and the vendored
 worker runtime pinned v0.82.0: the launcher uses the installed Pi and is

@@ -276,6 +276,16 @@ describe("pi launch contract: sessions survive a quit", () => {
     ])
   })
 
+  test("--foreign is a router flag, not a passthrough", () => {
+    // It configures the mirror, so Pi must never see it: a forwarded
+    // `--foreign` would be an unknown-option error at launch.
+    expect(piArgs["foreign"]).toMatchObject({ type: "boolean", default: false })
+    expect(collectPiPassthroughArgs(["--foreign"], piArgs)).toEqual([])
+    // ...but a literal `--` still hands it to Pi (the escape hatch for a
+    // future Pi option of the same name). The separator itself is consumed.
+    expect(collectPiPassthroughArgs(["--", "--foreign"], piArgs)).toEqual(["--foreign"])
+  })
+
   test("the declared flags still stay with the router", () => {
     // The mirror-image assertion: a passthrough that forwarded everything
     // would hand `-m` to Pi and lose the profile resolution.

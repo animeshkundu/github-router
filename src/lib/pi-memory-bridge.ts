@@ -70,16 +70,33 @@ function byteLength(s: string): number {
   return Buffer.byteLength(s, "utf8")
 }
 
-function capBytes(s: string, max: number): { text: string; truncated: boolean } {
+/**
+ * Truncate to a UTF-8 byte budget without splitting a code point, marker
+ * included in the budget.
+ *
+ * Exported because the foreign-artifact bridge caps with the same measure Pi's
+ * own limits are stated in, and `label` keeps the truncation marker honest
+ * about which bridge did the cutting.
+ */
+export function capBytes(
+  s: string,
+  max: number,
+  label = "gh-router memory bridge",
+): { text: string; truncated: boolean } {
   if (byteLength(s) <= max) return { text: s, truncated: false }
+  // The marker is part of the budget, not extra: a caller that asserts "≤ 8
+  // KiB" means the returned string, so the head is cut short enough for the
+  // marker to fit inside `max`.
+  const marker = `\n…[truncated by ${label}]`
+  const budget = Math.max(0, max - byteLength(marker))
   let low = 0
   let high = s.length
   while (low < high) {
     const mid = Math.floor((low + high) / 2)
-    if (byteLength(s.slice(0, mid)) <= max) low = mid + 1
+    if (byteLength(s.slice(0, mid)) <= budget) low = mid + 1
     else high = mid
   }
-  return { text: `${s.slice(0, Math.max(0, low - 1))}\n…[truncated by gh-router memory bridge]` , truncated: true }
+  return { text: `${s.slice(0, Math.max(0, low - 1))}${marker}`, truncated: true }
 }
 
 /** Strip YAML frontmatter (`--- ... ---`) and return body + raw frontmatter. */
