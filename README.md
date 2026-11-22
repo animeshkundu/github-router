@@ -137,6 +137,67 @@ codex --full-auto -m gpt-5.6-sol
 
 ---
 
+## Install: one copy, self-updating
+
+`bunx github-router@latest …` / `npx github-router@latest …` re-extract a ~600 MB tree
+every time the published version changes (npm keys its `_npx` cache on the exact spec,
+so `@latest` never hits the existing one). The first launch of either form installs a
+**managed copy** under `~/.local/share/github-router/m/self/<version>/` in the
+background, and every later launch — `npx`, `bunx`, or the `github-router` shim — runs
+that copy instead. npm's `_npx` cache stays the fallback; nothing has to be relearned.
+
+```sh
+github-router update            # refresh github-router AND managed Pi, now
+github-router update --check    # what would change, install nothing
+github-router update --self     # github-router only
+github-router update --pi       # managed Pi only
+```
+
+The background refresh is throttled (hourly probe, backoff 1 h → 6 h → 24 h on
+failure), never blocks a launch, and never installs the optional payload. Failures are
+silent by design — a broken registry must not turn into a broken launch. Only a real
+failure arms that backoff: the optimistic "an attempt is starting" marker every launch
+writes does not, so `github-router update` right after a launch still installs instead
+of reporting a failure that never happened.
+
+Layout and inventory:
+
+| Path | What |
+|---|---|
+| `<APP_DIR>/m/self/<version>/` | github-router payload (immutable) |
+| `<APP_DIR>/m/pi/<version>/` | Pi payload, when the launch uses a managed Pi |
+| `<APP_DIR>/m/<kind>/current.json` | the one mutable pointer (atomic file rename) |
+| `<APP_DIR>/m/<kind>/launcher.mjs` | stable launcher, never swapped |
+| `<APP_DIR>/cli-bin/` | `github-router` shim (`.cmd`/`.ps1` on Windows) |
+| `<APP_DIR>/optional/<pkg>@<version>/` | on-demand heavy payload (see below) |
+
+`APP_DIR` is `~/.local/share/github-router` (or `GH_ROUTER_APP_DIR`). GC keeps the live
+version plus the two newest and never touches a version younger than 7 days.
+
+**Opting out.** `GH_ROUTER_NO_MANAGED_INSTALL=1` (or `--no-managed-install` in argv)
+keeps the old behaviour exactly: no adoption, no background install, `npx`/`bunx` stay
+self-contained. **An `npm install -g` tree is never adopted or modified** — it stays its
+own owner and keeps its own update path; `update` only ever writes to `m/`.
+
+**PATH.** `update` prints one copy-pasteable line if `<APP_DIR>/cli-bin` is not on
+PATH. It never edits a shell rc file, and on Windows it deliberately does not suggest
+`setx PATH "%PATH%;…"`: that folds the machine PATH into the user PATH permanently and
+truncates at 1024 characters.
+
+**Optional payload.** Reranking (`@huggingface/transformers` + ONNX) and structural
+search (`tree-sitter-wasms`) are ~547 MB, so they are **optional peers** — not part of
+the consumer install. The feature that needs one installs it on demand into
+`<APP_DIR>/optional/`, shared across every managed version, and fails open (BM25F
+rerank / regex-heuristic structural) if it cannot. `github-router update` installs them
+upfront; `--no-optional` skips them; `GH_ROUTER_NO_OPTIONAL_INSTALL=1` disables the
+on-demand path (accepts `1|true|yes|on`, like every other `GH_ROUTER_*` switch). A
+bare `update` refreshes an out-of-date payload to the newest version inside the range
+declared in `package.json#peerDependencies` — it never crosses a major. The two
+switches are independent: `GH_ROUTER_NO_MANAGED_INSTALL=1` stops the self-updater but
+still installs the optional payloads.
+
+---
+
 ## Use with any OpenAI-compatible tool
 
 Point any tool at `http://localhost:8787/v1`:
@@ -232,6 +293,7 @@ docker run -p 8787:8787 -v $(pwd)/github-router-data:/root/.local/share/github-r
 github-router start [options]    Start the proxy server
 github-router claude [options]   Start proxy + spawn Claude Code wired to it
 github-router codex [options]    Start proxy + spawn Codex CLI wired to it
+github-router update [options]   Install or refresh the managed github-router/Pi payload
 github-router auth               Authenticate with GitHub
 github-router check-usage        Show Copilot usage/quotas
 github-router debug              Print diagnostic info

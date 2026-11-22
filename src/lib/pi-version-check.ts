@@ -4,11 +4,7 @@ import path from "node:path"
 
 import consola from "consola"
 
-import {
-  resolveExecutable,
-  runCommandCapture,
-  runCommandVoid,
-} from "./exec"
+import { resolveExecutable, runCommandCapture } from "./exec"
 import { queueDetachedGlobalInstall } from "./self-update"
 import { withInstallLock } from "./update-lock"
 
@@ -71,7 +67,6 @@ export function piRegistryArgs(registry: string = resolvePiRegistry()): string[]
 const THROTTLE_HOURS = 1
 const NPM_VIEW_TIMEOUT_MS = 5000
 const PI_VERSION_TIMEOUT_MS = 3000
-const NPM_INSTALL_TIMEOUT_MS = 300_000 // 5 min — pi pulls a larger tree than claude
 
 interface PiVersionCheckCache {
   /** ISO timestamp of last check */
@@ -292,51 +287,27 @@ export async function checkPiVersion(opts: {
   }
 }
 
-/**
- * Install (or upgrade) Pi from npm under the cross-process install lock.
- * Returns `true` when this call performed the install, `false` when
- * another process holds the lock (caller skips — its install will land
- * for a later launch). Best-effort: throws on failure; callers fall
- * back to the installed version with a visible warning rather than
- * stranding the launch.
+/*
+ * `updatePi` / `ensurePiInstalled` used to live here: they ran
+ * `npm install -g @earendil-works/pi-coding-agent@<v>` and then re-probed PATH.
+ * They were removed deliberately, not refactored.
+ *
+ * Two reasons, both observed:
+ *
+ * 1. **They mutate a tree the user owns.** `-g` is not ours (user decision 4).
+ *    Rewriting it to satisfy `PI_MIN_VERSION` made the launcher's floor check a
+ *    silent `npm install -g` on every below-floor machine, which can break an
+ *    unrelated project pinned to the older Pi.
+ * 2. **`-g` cannot be updated while it is in use.** On Windows that is `EPERM`;
+ *    everywhere it needs the detached post-exit waiter. The managed install
+ *    avoids the whole problem by publishing a new directory and swapping a file
+ *    pointer, so the below-floor repair path is now
+ *    `managed-install/pi-command.ts` → `ensureManagedInstall` (see
+ *    `resolvePiCommand`), and the explicit form is `github-router update --pi`.
+ *
+ * The user-owned `pi` still keeps its own channel: `refreshPiInBackground`
+ * below queues the same detached `-g` install it always did.
  */
-export function updatePi(version: string, opts: { signal?: AbortSignal } = {}): Promise<boolean> {
-  const npmPath = resolveExecutable("npm")
-  if (!npmPath) {
-    throw new Error("npm not found on PATH; cannot install Pi automatically")
-  }
-  return withInstallLock("pi-install.lock", async () => {
-    const registry = resolvePiRegistry()
-    consola.info(`Installing ${PI_NPM_PACKAGE}@${version} from ${registry}...`)
-    await runCommandVoid(
-      [
-        npmPath,
-        "install",
-        "-g",
-        `${PI_NPM_PACKAGE}@${version}`,
-        ...piRegistryArgs(registry),
-      ],
-      { timeoutMs: NPM_INSTALL_TIMEOUT_MS, signal: opts.signal },
-    )
-  })
-}
-
-/**
- * Blocking fresh install for when Pi is absent entirely. Installs
- * `@latest`, then force re-checks; throws when Pi still is not on PATH
- * (caller exits with the install command). Only used when there is no
- * usable Pi at all — the healthy path never blocks on npm.
- */
-export async function ensurePiInstalled(opts: { signal?: AbortSignal } = {}): Promise<string> {
-  const acquired = await updatePi("latest", opts)
-  const retry = await checkPiVersion({ force: true })
-  if (retry.installed && retry.installedVersion) return retry.installedVersion
-  throw new Error(
-    acquired
-      ? "install did not place pi on PATH"
-      : "another Pi install is already running; retry in a moment",
-  )
-}
 
 /**
  * Fire-and-forget freshness refresh for a healthy Pi install. Never

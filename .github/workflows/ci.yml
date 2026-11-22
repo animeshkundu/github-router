@@ -93,6 +93,21 @@ jobs:
       - name: Test
         run: bun scripts/run-tests.ts
 
+      # The managed install, end to end, on all three OSes. Everything above
+      # exercises the pieces with fakes; this is the only step that packs the
+      # real tarball, installs it into an npx-shaped tree, runs the real
+      # `update --self`, and asserts the second launch hands off to the managed
+      # payload with exactly one banner. The Windows runner is the reason this
+      # is a matrix step and not a unit test: MAX_PATH (260) is measured against
+      # the runner's REAL default app dir there, and `rename` semantics under a
+      # live virus scanner are what the publish path is built around.
+      #
+      # `--version` inside the script pins the payload to the packed version, so
+      # this needs no new release on the registry — only network for npm.
+      - name: Managed install smoke (pack → npx-shaped tree → update → hand-off)
+        timeout-minutes: 20
+        run: bun scripts/managed-install-smoke.ts
+
   node-compat:
     needs: ci
     strategy:

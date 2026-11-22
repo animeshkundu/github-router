@@ -7,7 +7,7 @@ import consola from "consola"
 
 import type { Server } from "srvx"
 
-import { resolveExecutable, killChildProcessTree } from "./exec"
+import { buildExecInvocation, resolveExecutable, killChildProcessTree } from "./exec"
 import { DEFAULT_CODEX_MODEL } from "./port"
 import { startProcessGuard } from "./process-guard"
 import { STRIPPED_AUTH_ROUTING_ENV_KEYS } from "./stripped-env-keys"
@@ -128,6 +128,17 @@ export interface LaunchTarget {
    * subcommand from the same `serverUrl` it computed for env vars.
    */
   serverUrl?: string
+  /**
+   * Explicit argv prefix for the CLI, when the launcher resolved one itself.
+   *
+   * A managed Pi is `node <payload>/dist/bundle/cli.js`, so "the CLI is one
+   * token" no longer holds for Pi. When present these tokens replace the
+   * leading command (`["pi"]`), and the kind's own flags plus `extraArgs` are
+   * appended exactly as before — the resolver chooses WHICH executable, never
+   * what the launcher asks it to do. Absent keeps every existing caller
+   * byte-identical, which is why the `-g`/PATH paths are untouched by this.
+   */
+  execArgs?: string[]
 }
 
 /**
@@ -170,20 +181,29 @@ export function buildLaunchCommand(target: LaunchTarget): {
   const wantsPermissionMode =
     target.kind === "claude-code" &&
     target.extraArgs.some((arg) => arg === "--permission-mode" || arg.startsWith("--permission-mode="))
+  // `execArgs` REPLACES the leading command — it does not prefix it. The
+  // distinction matters: a prefix would leave a bare `claude`/`codex` token in
+  // the argv, and `resolveExecutable` below would happily rewrite it to some
+  // OTHER binary on PATH, giving the child two executables' worth of arguments.
+  // Exactly one of the two is ever used.
+  const base: string[] = target.execArgs ?? []
+  const hasPrefix = base.length > 0
+  const claudeHead: string[] = hasPrefix ? base : ["claude"]
+  const codexHead: string[] = hasPrefix ? base : ["codex"]
   const cmd: string[] =
     target.kind === "claude-code"
       ? wantsPermissionMode
-        ? ["claude", ...target.extraArgs]
-        : ["claude", "--dangerously-skip-permissions", ...target.extraArgs]
+        ? [...claudeHead, ...target.extraArgs]
+        : [...claudeHead, "--dangerously-skip-permissions", ...target.extraArgs]
       : target.kind === "pi"
         ? [
-            "pi",
+            ...(hasPrefix ? base : ["pi"]),
             "--provider",
             "gh-router",
             ...(target.model ? ["--model", target.model] : []),
             ...target.extraArgs,
           ]
-        : buildCodexCmd(target)
+        : [...codexHead, ...buildCodexCmd(target).slice(1)]
 
   // Anti-shadow: resolve the top-level CLI to an ABSOLUTE path against
   // the clean parent PATH (excluding the cwd). The spawned child's env
@@ -268,43 +288,50 @@ export function launchChild(
     process.exit(1)
   }
 
+  // ONE place decides how argv becomes a spawn, and it is the same one
+  // `runCommandCapture` uses. This used to be hand-rolled here: a `shell: true`
+  // string join on Windows that treated `"` as an escaper (it is not, for
+  // cmd.exe). A managed Pi makes the argv longer — `node <absolute payload
+  // path> …` — so a spaced install path is now the common case rather than a
+  // corner case, and `buildExecInvocation` is what gets the `.cmd`/`/s /c`/caret
+  // rules right.
+  //
+  // It can also REFUSE (win32 batch shims cannot carry `%` or `"` through
+  // cmd.exe). That refusal is separate from a spawn failure and gets its own
+  // message: the token came from the user's own command line (a `--model` with a
+  // `%`, a repo path with a quote), so "Failed to launch pi" would send them
+  // looking at the wrong thing entirely.
+  let invocation
+  try {
+    invocation = buildExecInvocation(cmd)
+  } catch (error) {
+    const msg =
+      `Cannot launch ${executable}: ${error instanceof Error ? error.message : String(error)}`
+      + `\nThe argument came from this command line. On Windows a .cmd/.bat launcher `
+      + `(such as a store-installed pi) cannot pass '%' or '"' through cmd.exe — `
+      + `remove it from the arguments, or point --pi-path at a native .exe.`
+    consola.error(msg)
+    process.stderr.write(msg + "\n")
+    server.close(true).catch(() => {})
+    if (options.onShutdown) {
+      void Promise.resolve(options.onShutdown()).catch(() => {})
+    }
+    process.exit(1)
+  }
+
   let child: ChildProcess
   try {
-    if (process.platform === "win32") {
-      if (windowsLaunchNeedsShell(cmd[0])) {
-        // A batch shim genuinely needs cmd.exe. cmd.exe stays alive as the
-        // CLI's parent for the shim's lifetime, so the tree-kill (taskkill
-        // /T) and the crash guard both reap the whole tree through it. Use
-        // the full command as a single string to avoid the DEP0190
-        // deprecation warning about shell + args.
-        const quoted = cmd.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ")
-        child = spawn(quoted, [], {
-          env,
-          stdio: "inherit",
-          shell: true,
-        })
-      } else {
-        // A real .exe (e.g. the native-installer claude.exe) needs no
-        // shell. Spawning it directly makes the CLI the DIRECT child, so
-        // child.kill()/taskkill and the crash guard target the real
-        // process instead of a cmd.exe wrapper that would orphan its
-        // node/MCP grandchildren.
-        child = spawn(cmd[0], cmd.slice(1), {
-          env,
-          stdio: "inherit",
-        })
-      }
-    } else {
-      // detached:true → the CLI leads its OWN process group, so cleanup()
-      // can kill(-pgid) the whole tree (grandchildren included). We still
-      // await its exit, so we do NOT unref(). Terminal Ctrl-C no longer
-      // reaches the child directly — the signal handlers below forward it.
-      child = spawn(cmd[0], cmd.slice(1), {
-        env,
-        stdio: "inherit",
-        detached: true,
-      })
-    }
+    // `detached:true` on POSIX → the CLI leads its OWN process group, so
+    // cleanup() can kill(-pgid) the whole tree (grandchildren included). We
+    // still await its exit, so we do NOT unref(). Terminal Ctrl-C no longer
+    // reaches the child directly — the signal handlers below forward it.
+    child = spawn(invocation.command, invocation.args, {
+      env,
+      stdio: "inherit",
+      ...(invocation.shell ? { shell: true } : {}),
+      ...(invocation.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+      ...(process.platform === "win32" ? {} : { detached: true }),
+    })
   } catch (error) {
     const msg = `Failed to launch ${executable}: ${error instanceof Error ? error.message : String(error)}`
     consola.error(msg)

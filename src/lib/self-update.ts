@@ -173,6 +173,37 @@ export async function runSelfUpdate(opts: RunSelfUpdateOpts): Promise<void> {
   if (parseBoolEnv(process.env.GH_ROUTER_NO_SELF_UPDATE) === true) return
 
   try {
+    // WHICH update mechanism depends on who owns the tree we are running from,
+    // and getting this wrong is not a style question:
+    //
+    // - `npx`/`bunx`: the tree is a disposable cache entry. `npm install -g`
+    //   from here would create a SECOND install the user never asked for (and
+    //   the next `npx` would still re-extract, so it would not even help). The
+    //   managed install is the whole point of this feature.
+    // - `npm-global`: user decision 4 — that tree is its own owner. Keep the
+    //   detached post-exit waiter verbatim.
+    // - `managed`: the bootstrap (and `github-router update`) maintain it; doing
+    //   it again here would double-schedule on every launch.
+    // - `source`: never. A dev checkout must run its own code and must not gain
+    //   a global install as a side effect.
+    //
+    // `classifyOrigin` is imported lazily: it pulls `exec` and the managed state
+    // module, and this function runs from every entry point including the tiny
+    // bootstrap-adjacent paths.
+    const { classifyOrigin } = await import("./managed-install/origin")
+    const origin = await classifyOrigin()
+
+    if (origin.origin === "npx" || origin.origin === "bunx") {
+      const { scheduleBackgroundSelfInstall } = await import("./managed-install/update")
+      const detail = await scheduleBackgroundSelfInstall({ quiet: true })
+      consola.debug(`self-update: managed path: ${detail}`)
+      return
+    }
+    if (origin.origin !== "npm-global") {
+      consola.debug(`self-update: skipped for origin ${origin.origin} (${origin.detail})`)
+      return
+    }
+
     const cache = await readCache()
     if (!opts.force && !shouldCheckNow(cache)) return
 

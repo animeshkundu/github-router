@@ -27,9 +27,16 @@ publishes, and restores. See `publish/release.sh` for details.
 
 ## Upgrading a running proxy
 
-A running proxy (`npx github-router@latest claude` from earlier) is **pinned to its
-installed version** and will NOT auto-update when a new release is published. To pick up
-a new release:
+A running proxy is **pinned to its installed version**: upgrading the files on disk does
+not change a process that is already serving. Restarting is therefore always part of the
+procedure — the difference is what has to be re-fetched, and with the managed install the
+answer is *nothing*.
+
+### Managed install (the default for `npx` / `bunx` users)
+
+The first `npx github-router@latest …` / `bunx github-router@latest …` launch installs a
+managed copy under `~/.local/share/github-router/m/self/<version>/` in the background and
+later launches run it. So:
 
 ```bash
 # 1. Confirm the new version is live on npm
@@ -44,12 +51,13 @@ ps aux | grep -E 'github-router|bun.*dist/main' | grep -v grep
 #    response is lost.
 kill <PID>
 
-# 4. Force re-fetch (npm 11 prefers-online by default; this is belt-and-suspenders
-#    for stale npx caches):
-rm -rf ~/.npm/_npx/*github-router*
+# 4. Install the new version (foreground, visible, no npm cache to clear)
+github-router update        # both, or: github-router update --self
+#    No shim on PATH? Then the same through the payload you already have:
+#    npx github-router@latest update
 
-# 5. Restart
-npx github-router@latest claude
+# 5. Restart — this now RE-EXECS into the new version instead of re-installing
+github-router claude        # or: npx github-router@latest claude
 
 # 6. Verify the new build is serving by hitting the /version endpoint with
 #    the proxy's actual port (visible in `ps` output as `--port` or implied
@@ -57,6 +65,46 @@ npx github-router@latest claude
 curl http://localhost:<PORT>/version
 # → {"name":"github-router","version":"0.3.X","gitSha":"..."}
 ```
+
+`rm -rf ~/.npm/_npx/*github-router*` is **no longer part of the ritual**. It existed
+because npm keys its `_npx` directory on the exact spec string (`github-router@latest` is
+a different key from `github-router@0.3.379`), so a bumped `@latest` re-extracts ~600 MB.
+The managed tree removes the re-extraction, not just the download: it is installed once
+per version and adopted on every later launch.
+
+Why the launch itself does not need this procedure: a background `update --self --quiet`
+runs at most hourly, is locked across processes (`managed-self.lock`), backs off 1 h → 6 h
+→ 24 h after a failure, and writes a *new* directory — a running process never holds the
+new payload open, and the pointer swap is a single atomic file rename.
+
+### `npm install -g` installs
+
+Unchanged, and deliberately a separate owner: `update` never writes to a `-g` tree, and a
+`-g` tree is never adopted. Upgrade it the way you installed it:
+
+```bash
+npm install -g github-router@latest
+# then restart the proxy as above (steps 2, 3, 5, 6)
+```
+
+The in-process self-update (`runSelfUpdate`) still queues a detached `-g` install for
+`-g`-owned trees, throttled hourly, exactly as before.
+
+### Version pinning
+
+`github-router update --version <x.y.z>` installs an exact version and moves the pointer to
+it — the rollback path as well: pass an older version and the next launch runs it. GC keeps
+the live version plus the two newest and never removes anything younger than 7 days, so a
+rollback target survives. `update --check` reports what would change without installing.
+
+### Env vars
+
+| Variable | Effect |
+|---|---|
+| `GH_ROUTER_APP_DIR` | Relocate the whole app dir (payloads, pointer, lock, optional cache, shims) |
+| `GH_ROUTER_NO_MANAGED_INSTALL=1` | Disable the managed layer entirely (no adoption, no background install) |
+| `GH_ROUTER_NO_OPTIONAL_INSTALL=1` | Never install the heavy optional payloads (rerank/structural fall back) |
+| `GH_ROUTER_NO_SELF_UPDATE=1` | Disable the `-g` self-update path |
 
 ## Tunable env vars
 

@@ -114,10 +114,15 @@ function npmViewCommand(): string[] {
   return found.cmd
 }
 
+/**
+ * Any recorded `npm install`, whichever capture mode produced it. The old
+ * Pi install went through `runCommandVoid`; the managed installer goes through
+ * `runCommandCapture` (it needs stderr for the failure message), so filtering on
+ * the mode would report "no npm install was recorded" for a test that just
+ * recorded one.
+ */
 function npmInstallCommand(): string[] {
-  const found = commands.find(
-    (c) => c.kind === "void" && c.cmd.includes("install"),
-  )
+  const found = commands.find((c) => c.cmd.includes("install"))
   if (!found) throw new Error("no `npm install` invocation was recorded")
   return found.cmd
 }
@@ -167,22 +172,58 @@ describe("the Pi version probe and install pin the registry", () => {
     )
   })
 
-  test("updatePi installs the requested version from the pinned registry", async () => {
-    const { updatePi, PI_DEFAULT_REGISTRY, PI_NPM_PACKAGE } = await loadModule()
-    await updatePi("latest")
+  // `updatePi` (npm install -g) was removed: the below-floor repair path is now
+  // the MANAGED install, which must (a) never use `-g`, (b) still pin the
+  // registry, and (c) still scrub the ambient npm env. These assert the argv the
+  // managed installer actually spawns, through the same mocked exec the old
+  // tests used.
+  test("the managed Pi install pins the registry and never installs globally", async () => {
+    const { ensureManagedInstall } = await import("../../src/lib/managed-install/install")
+    const { resolvePiRegistry, PI_NPM_PACKAGE } = await loadModule()
+    // The mocked npm installs nothing, so the entry verification fails by
+    // design; the argv is what this test is about.
+    await ensureManagedInstall({
+      kind: "pi",
+      version: "1.3.0",
+      registry: resolvePiRegistry(),
+    }).catch(() => {})
     const cmd = npmInstallCommand()
-    expect(cmd).toContain("install")
-    expect(cmd).toContain("-g")
-    expect(cmd).toContain(`${PI_NPM_PACKAGE}@latest`)
-    expect(cmd).toContain(`--registry=${PI_DEFAULT_REGISTRY}`)
+    expect(cmd).not.toContain("-g")
+    expect(cmd).not.toContain("--global")
+    expect(cmd).toContain("--no-global")
+    expect(cmd).toContain("--ignore-scripts")
+    expect(cmd).toContain(`--registry=${`https://registry.npmjs.org/`}`)
+    // The package is installed via the generated staging package.json, so the
+    // spec is not on argv — assert the generated dependency instead.
+    expect(PI_NPM_PACKAGE).toBe("@earendil-works/pi-coding-agent")
   })
 
-  test("updatePi follows the env override", async () => {
-    const { updatePi } = await loadModule()
+  test("the managed Pi install follows the registry override", async () => {
+    const { ensureManagedInstall } = await import("../../src/lib/managed-install/install")
+    const { resolvePiRegistry } = await loadModule()
     process.env.GH_ROUTER_NPM_REGISTRY = "https://mirror.example.test/npm/"
-    await updatePi("1.3.0")
-    expect(npmInstallCommand()).toContain(
-      "--registry=https://mirror.example.test/npm/",
+    await ensureManagedInstall({
+      kind: "pi",
+      version: "1.3.0",
+      registry: resolvePiRegistry(),
+      force: true,
+    }).catch(() => {})
+    expect(npmInstallCommand()).toContain("--registry=https://mirror.example.test/npm/")
+  })
+
+  test("a hostile allow_scripts in the ambient env is neutralized", async () => {
+    const { ensureManagedInstall } = await import("../../src/lib/managed-install/install")
+    process.env.npm_config_allow_scripts = "is-number"
+    try {
+      await ensureManagedInstall({ kind: "pi", version: "1.3.0", force: true }).catch(() => {})
+    } finally {
+      delete process.env.npm_config_allow_scripts
+    }
+    // The child env is not observable through this mock, so the invariant is
+    // asserted where it is enforced: `buildNpmEnv` always sets it to "".
+    const { buildNpmEnv } = await import("../../src/lib/managed-install/npm-env")
+    expect(buildNpmEnv({ npm_config_allow_scripts: "is-number" }).env.npm_config_allow_scripts).toBe(
+      "",
     )
   })
 })

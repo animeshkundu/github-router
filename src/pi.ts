@@ -8,14 +8,13 @@ import { defineCommand, type ArgsDef } from "citty"
 import consola from "consola"
 
 import {
-  ensurePiInstalled,
-  getInstalledPiVersion,
   meetsPiMinVersion,
   PI_MIN_VERSION,
   refreshPiInBackground,
   resolvePiRegistry,
-  updatePi,
 } from "./lib/pi-version-check"
+import { resolvePiCommand, type PiCommand } from "./lib/managed-install/pi-command"
+import { scheduleBackgroundPiInstall } from "./lib/managed-install/update"
 import { warnOnTierPriceDriftForModels } from "./lib/pi-tier-windows"
 import {
   AIC_LEDGER_ENV,
@@ -66,6 +65,7 @@ import {
   type PiProfileId,
 } from "./lib/pi-models-settings"
 import { launchChild } from "./lib/launch"
+import { bridgeShadowWarnings, inspectMirrorPrecedence, planSkillWrites } from "./lib/pi-mirror-guards"
 import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
 import { PATHS } from "./lib/paths"
 import { state } from "./lib/state"
@@ -129,6 +129,11 @@ export const piArgs = {
     type: "string" as const,
     description:
       "Full base URL, including the /v1 prefix, of the local inference endpoint for `-m local` / `-m local2` (e.g. http://localhost:11111/v1). Sets scheme/host/path, which --localport cannot. Mutually exclusive with --localport. Inert on every other profile.",
+  },
+  "pi-path": {
+    type: "string" as const,
+    description:
+      "Run THIS Pi instead of the one on PATH or the managed copy (absolute path to a pi binary or script). Explicit: skips the version floor, the managed install, and the background refresh.",
   },
   "update-check": {
     type: "boolean" as const,
@@ -305,37 +310,31 @@ export const pi = defineCommand({
 
     let server: Awaited<ReturnType<typeof setupAndServe>>["server"]
     let serverUrl: string
-    // Pi install / update (default-on, throttled, best-effort).
+    // Pi resolution (default-on). `--pi-path` is an explicit override: it skips
+    // every probe, the floor check, and the background refresh, because the user
+    // named a binary and does not want our opinion about it.
+    const piPath = typeof args["pi-path"] === "string" ? args["pi-path"].trim() : ""
     const updateCheck = (args as Record<string, unknown>)["update-check"] !== false
     const autoUpdate = (args as Record<string, unknown>)["auto-update"] !== false
-    // Fast foreground gate: `pi --version` is local (milliseconds) and
-    // decides everything launch-critical. Network (npm view) and installs
-    // never block a healthy launch — see below.
-    let installedVersion: string | null = null
-    // Pending fresh install when Pi is absent: started before server boot
-    // so the two overlap, joined fail-closed right after setup.
-    const pendingInstall: { promise: Promise<string> | null; abort: (() => void) | null } = {
+    const managePi = updateCheck && piPath === ""
+    let piCommand: PiCommand | null = null
+    // Resolution overlaps server boot exactly like the old absent-Pi install
+    // did: a cold managed install is ~10 s (66 MB) and there is no reason to
+    // serialize it behind setup. Without Pi there is nothing to launch, so the
+    // join below is still fail-closed.
+    const pendingResolve: { promise: Promise<PiCommand | null> | null; abort: (() => void) | null } = {
       promise: null,
       abort: null,
     }
-    if (updateCheck) {
-      try {
-        installedVersion = await getInstalledPiVersion()
-      } catch (err) {
-        consola.debug("Pi presence probe failed:", err)
-      }
-      if (installedVersion === null) {
-        // Pi absent: it must be installed before launch, but the install
-        // starts NOW so it overlaps server boot instead of following it.
-        // Joined (fail-closed) right after setup; aborted if setup fails
-        // so a doomed launch never leaves a half-written global install.
-        const controller = new AbortController()
-        pendingInstall.abort = () => controller.abort()
-        pendingInstall.promise = ensurePiInstalled({ signal: controller.signal })
-        pendingInstall.promise.catch(() => {
-          // Observed at the join below; never an unhandled rejection.
-        })
-      }
+    if (managePi) {
+      const controller = new AbortController()
+      pendingResolve.abort = () => controller.abort()
+      pendingResolve.promise = resolvePiCommand({ signal: controller.signal })
+      pendingResolve.promise.catch(() => {
+        // Observed at the join below; never an unhandled rejection.
+      })
+    } else if (piPath !== "") {
+      piCommand = await resolvePiCommand({ piPath })
     }
     try {
       // Quiet boot: with stored auth there is no interactive flow to
@@ -361,56 +360,57 @@ export const pi = defineCommand({
       server = setupResult.server
       serverUrl = setupResult.serverUrl
     } catch (error) {
-      pendingInstall.abort?.()
+      pendingResolve.abort?.()
       consola.error("Failed to start server:", error instanceof Error ? error.message : error)
       process.exit(1)
     }
 
     void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
 
-    if (pendingInstall.promise) {
-      // The blocking join: without Pi there is nothing to launch.
-      // Same failure contract as a sequential install, minus the wait.
+    if (pendingResolve.promise) {
+      // The blocking join: without a usable Pi there is nothing to launch.
       try {
-        installedVersion = await pendingInstall.promise
+        piCommand = await pendingResolve.promise
       } catch (err) {
-        consola.error(
-          `Pi is not installed and automatic install failed (${err instanceof Error ? err.message : String(err)}). Install it with \`npm install -g @earendil-works/pi-coding-agent --registry=${resolvePiRegistry()}\`, then retry.`,
-        )
-        process.exit(1)
+        consola.debug("Pi resolution failed:", err)
       } finally {
-        pendingInstall.promise = null
-        pendingInstall.abort = null
+        pendingResolve.promise = null
+        pendingResolve.abort = null
       }
     }
 
-    if (updateCheck && installedVersion !== null) {
-      if (!meetsPiMinVersion(installedVersion)) {
-        // Below the floor Pi cannot serve the roster correctly: upgrade
-        // foreground and re-verify, fail closed. `latest` needs no
-        // registry probe — npm resolves it at install time.
-        if (autoUpdate) {
-          try {
-            await updatePi("latest")
-            installedVersion = await getInstalledPiVersion()
-          } catch (err) {
-            consola.error(
-              `Installed Pi v${installedVersion} is below the supported floor and auto-upgrade failed (${err instanceof Error ? err.message : String(err)}). Upgrade manually: \`npm install -g @earendil-works/pi-coding-agent@latest --registry=${resolvePiRegistry()}\`.`,
-            )
-            process.exit(1)
-          }
-        }
-        if (!meetsPiMinVersion(installedVersion)) {
-          consola.error(
-            `Installed Pi v${installedVersion} is below the supported floor (v${PI_MIN_VERSION}). Upgrade: \`npm install -g @earendil-works/pi-coding-agent@latest --registry=${resolvePiRegistry()}\`.`,
+    if (managePi) {
+      // Two independent gates, both fail-closed: something runnable, and one
+      // above the floor. `resolvePiCommand` already prefers a managed copy over
+      // a below-floor PATH install, so landing here means neither exists.
+      if (!piCommand || piCommand.command === "") {
+        const detail = piCommand?.note ?? "no runnable `pi` was found"
+        consola.error(
+          `Cannot launch Pi: ${detail}\nInstall it with \`npm install -g @earendil-works/pi-coding-agent@latest --registry=${resolvePiRegistry()}\`, or run \`github-router update --pi\` to install the managed copy.`,
+        )
+        process.exit(1)
+      }
+      if (!meetsPiMinVersion(piCommand.version)) {
+        consola.error(
+          `Pi v${piCommand.version ?? "unknown"} (${piCommand.command}) is below the supported floor v${PI_MIN_VERSION}. Install a newer one with \`github-router update --pi\`, or pass --pi-path.`,
+        )
+        process.exit(1)
+      }
+      if (piCommand.note) consola.info(piCommand.note)
+      if (autoUpdate) {
+        if (piCommand.source === "path") {
+          // A user-owned Pi keeps its own update channel (`-g` + the detached
+          // post-exit waiter). Never rewrite a tree that is not ours.
+          refreshPiInBackground({ autoUpdate })
+        } else {
+          // Managed: refresh on its own cadence, detached. The install writes a
+          // NEW directory, so the running Pi holds nothing that is being
+          // replaced.
+          void scheduleBackgroundPiInstall().then(
+            (detail) => consola.debug(`managed Pi refresh: ${detail}`),
+            (err: unknown) => consola.debug("managed Pi refresh failed:", err),
           )
-          process.exit(1)
         }
-      } else {
-        // Healthy: freshness refreshes in the background (throttled npm
-        // probe, detached post-exit install when newer). Never blocks,
-        // never throws, never touches this session's validated install.
-        refreshPiInBackground({ autoUpdate })
       }
     }
 
@@ -492,6 +492,21 @@ export const pi = defineCommand({
     }
 
     enableFileLogging()
+
+    // Two Pi precedence rules silently defeat this launch's files, and both are
+    // invisible from the outside, so report them once each and never touch the
+    // user's files (see `inspectMirrorPrecedence`).
+    const precedence = await inspectMirrorPrecedence(mirror, process.cwd())
+    if (precedence.systemMd) {
+      consola.warn(
+        `Pi: ${path.join(mirror, "SYSTEM.md")} REPLACES Pi's default system prompt. gh-router's mode guidance is still appended to it, but any harness rules your SYSTEM.md leaves out are not restored. Remove it (or merge it into APPEND_SYSTEM.md) for the stock prompt.`,
+      )
+    }
+    if (precedence.projectAppendSystem) {
+      consola.warn(
+        `Pi: ${precedence.projectAppendSystem} exists. If this project is trusted, Pi loads it INSTEAD of the gh-router mode digest (the mirror's APPEND_SYSTEM.md). Keep one or the other.`,
+      )
+    }
 
     // The exact `packages[]` slice for this launch (flag-dependent), used
     // to key the persistent npm-package cache: seed before Pi boots, save
@@ -632,27 +647,43 @@ export const pi = defineCommand({
         (args as Record<string, unknown>)["memory-bridge"] === false
         || process.env.GH_ROUTER_PI_BRIDGE === "0"
         || process.env.GH_ROUTER_DISABLE_PI_BRIDGE === "1"
-      let bridgeStats: { staticFiles: number; scopedRules: number; imports: number; skipped: number } | undefined
+      let bridgeStats: { staticFiles: number; scopedRules: number; imports: number; skipped: number; truncated: boolean; bytes: number } | undefined
       let bridgeScoped: Array<{ file: string; body: string; globs: Array<string>; source: string }> = []
+      // The rendered block, held for the AGENTS.md write further down (the
+      // `.gh-router-bridge.json` report needs `shadowedSkills`, which is only
+      // known after the skill plan runs).
+      let bridgeSection = ""
+      let bridgeCollected: import("./lib/pi-memory-bridge").PiBridgeCollected | undefined
+      // Whether the bridge contributes prompt text this launch. Drives the
+      // digest's "follow it, do not restate it" line: naming AGENTS.md when no
+      // bridged block exists would point the model at nothing. Deliberately
+      // keyed on the RENDERED bytes, not on collection succeeding — a repo with
+      // no Copilot/Claude files collects an empty set and writes no block.
+      let bridgeActive = false
       if (!bridgeDisabled) {
         const passthrough = collectPiPassthroughArgs(rawArgs, piArgs)
         const noContext = passthrough.includes("--no-context-files") || passthrough.includes("-nc")
         if (!noContext) {
           try {
-            const { collectBridgeInputs } = await import("./lib/pi-memory-bridge")
+            const { PI_BRIDGE_STATIC_BUDGET_BYTES, buildMirrorBridgeSection, collectBridgeInputs } = await import(
+              "./lib/pi-memory-bridge"
+            )
             const collected = await collectBridgeInputs(process.cwd())
-            bridgeStats = {
-              staticFiles:
-                collected.copilotInstructions.length
-                + collected.unscopedRules.length
-                + collected.userGlobal.length,
-              scopedRules: collected.scopedRules.length,
-              imports: collected.imports.length,
-              skipped: collected.skipped.length,
-            }
+            const rendered = buildMirrorBridgeSection(collected, { repoRoot: process.cwd() })
+            bridgeCollected = collected
+            bridgeSection = rendered.section
+            // The block's real byte count and truncation state are known only
+            // after rendering, so they are reported here rather than guessed
+            // from the collection. A silent cut is the defect this surfaces
+            // (`/memory`, `/context`, the launch warning, the state file).
+            bridgeStats = rendered.stats
             bridgeScoped = collected.scopedRules
-            // Stash full collection for the AGENTS.md synthesis below.
-            ;(globalThis as Record<string, unknown>).__ghRouterBridgeCollected = collected
+            bridgeActive = rendered.stats.bytes > 0
+            if (rendered.stats.truncated) {
+              consola.warn(
+                `Pi memory bridge: the bridged AGENTS.md block hit its ${Math.round(PI_BRIDGE_STATIC_BUDGET_BYTES / 1000)} KB budget and was cut to ${rendered.stats.bytes} bytes, so some rules are incomplete or omitted this launch. Raise the budget in src/lib/pi-memory-bridge.ts, or move detail into .claude/rules/ so it attaches on demand instead.`,
+              )
+            }
           } catch (err) {
             consola.debug("Pi memory bridge collection skipped:", err)
           }
@@ -676,13 +707,26 @@ export const pi = defineCommand({
       for (const [rel, content] of Object.entries(routerAgentFiles)) {
         await writeTextFile(path.join(mirror, rel), content)
       }
-      for (const skill of routerSkills) {
+      // A user skill of the same name wins: the mirror was seeded from
+      // `~/.pi/agent` before this loop, so overwriting here would silently
+      // destroy the user's own `gh-oracle`/`gh-delegate` skill.
+      const skillPlan = await planSkillWrites(mirror, routerSkills)
+      for (const skill of skillPlan.write) {
         await writeTextFile(path.join(mirror, "skills", skill.dir, "SKILL.md"), skill.content)
+      }
+      const shadowedSkills = skillPlan.shadowed.map(({ dir, file }) => ({ dir, file }))
+      if (shadowedSkills.length > 0) {
+        consola.warn(
+          `Pi skills: kept your ${shadowedSkills.map((s) => `\`${s.dir}\``).join(", ")} instead of the router's copy (${shadowedSkills[0]?.file}). Remove the user skill to get the router's version back.`,
+        )
       }
       for (const prompt of routerPrompts) {
         await writeTextFile(path.join(mirror, "prompts", `${prompt.name}.md`), prompt.content)
       }
-      await writeTextFile(path.join(mirror, "APPEND_SYSTEM.md"), buildPiAppendSystem(profileId, { peers: peersEnabled, codeSearch: surfaces.codeSearch }))
+      await writeTextFile(
+        path.join(mirror, "APPEND_SYSTEM.md"),
+        buildPiAppendSystem(profileId, { peers: peersEnabled, codeSearch: surfaces.codeSearch, bridge: bridgeActive }),
+      )
 
       // Claude Code + Copilot artifacts (skills, prompts, agents). Skills are
       // always bridged; prompts and agents ride `--foreign`. Collisions are
@@ -813,14 +857,13 @@ export const pi = defineCommand({
         }
       }
       // Static bridge synthesis into mirror AGENTS.md (Pi-native candidate).
-      // Uses the collection stashed above; idempotent via fenced replace.
-      try {
-        const collected = (globalThis as Record<string, unknown>).__ghRouterBridgeCollected as
-          | import("./lib/pi-memory-bridge").PiBridgeCollected
-          | undefined
-        if (collected) {
-          const { buildMirrorBridgeSection, mergeBridgeIntoAgentsMd } = await import("./lib/pi-memory-bridge")
-          const { section } = buildMirrorBridgeSection(collected, { repoRoot: process.cwd() })
+      // The block was rendered above (its bytes decide whether the digest names
+      // AGENTS.md at all); this writes it and records the report. Idempotent via
+      // fenced replace, and an empty section strips a stale block this launcher
+      // wrote on a previous run against a repo that has since lost its rules.
+      if (bridgeCollected) {
+        try {
+          const { mergeBridgeIntoAgentsMd } = await import("./lib/pi-memory-bridge")
           const agentsPath = path.join(mirror, "AGENTS.md")
           let existing: string | undefined
           try {
@@ -828,19 +871,39 @@ export const pi = defineCommand({
           } catch {
             existing = undefined
           }
-          await writeTextFile(agentsPath, mergeBridgeIntoAgentsMd(existing, section))
+          // Whether the user already keeps their own instructions in this
+          // mirror's AGENTS.md. If so, Pi has been reading AGENTS.md (and
+          // skipping CLAUDE.md) since long before this launch, and the bridge
+          // is not the reason the user's CLAUDE.md is unread.
+          const userText = mergeBridgeIntoAgentsMd(existing, "").trim()
+          const merged = mergeBridgeIntoAgentsMd(existing, bridgeSection)
+          if (merged !== (existing ?? "")) await writeTextFile(agentsPath, merged)
+          // Pi reads exactly ONE context file per directory, in the order
+          // `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`. Both
+          // directions of that rule hurt here, and neither is visible from the
+          // outside, so each is reported once and nothing is repaired.
+          const shadowWarnings = bridgeShadowWarnings(precedence, {
+            bridgeActive,
+            mirrorDir: mirror,
+            userOwnsAgentsMd: userText.length > 0,
+          })
+          for (const warning of shadowWarnings) consola.warn(warning)
           await writeJsonFile(path.join(mirror, ".gh-router-bridge.json"), {
             stats: bridgeStats ?? null,
+            deduped: bridgeCollected.deduped ?? 0,
+            shadowedSkills,
             scopedRuleFiles: bridgeScoped.map((r) => r.file),
+            // Everything a launch silently overrode or was overridden by, so the
+            // next "why is my rule missing?" question has an answer on disk.
+            precedence: {
+              agentsOverride: precedence.agentsOverride ? path.join(mirror, "AGENTS.override.md") : null,
+              userClaudeMd: precedence.userClaudeMd,
+              systemMd: precedence.systemMd ? path.join(mirror, "SYSTEM.md") : null,
+              projectAppendSystem: precedence.projectAppendSystem,
+            },
           })
-        }
-      } catch (err) {
-        consola.debug("Pi memory bridge synthesis skipped:", err)
-      } finally {
-        try {
-          delete (globalThis as Record<string, unknown>).__ghRouterBridgeCollected
-        } catch {
-          // ignore
+        } catch (err) {
+          consola.debug("Pi memory bridge synthesis skipped:", err)
         }
       }
     } catch (err) {
@@ -979,6 +1042,14 @@ export const pi = defineCommand({
     launchChild(
       {
         kind: "pi",
+        // Who to run. A managed Pi is `node <payload>/…/cli.js`, so this is an
+        // argv PREFIX and `buildLaunchCommand` appends `--provider gh-router`
+        // and the model/extra args after it. Undefined (the `--no-update-check`
+        // path) keeps the historic `pi`-on-PATH behaviour.
+        execArgs:
+          piCommand && piCommand.command !== ""
+            ? [piCommand.command, ...piCommand.args]
+            : undefined,
         envVars: {
           ...getPiLaunchEnvVars(mirror),
           GH_ROUTER_HOOK_MCP_URL: serverUrl,

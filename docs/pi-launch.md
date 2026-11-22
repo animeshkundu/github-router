@@ -173,7 +173,7 @@ plus the mode identity. Each surface rides a flag:
 | `--ado` | auto on an Azure DevOps remote | `ado` MCP group (key `gh-router-ado` -> `<serverUrl>/mcp/ado`, read-only unless `--ado-write`). Gated on its own predicate only, exactly as on the Claude side, so neither `--no-peers` nor `--no-helpers` removes it |
 | `--kusto` | auto on an Azure DevOps remote | `kusto` MCP group by the same route (key `gh-router-kusto`). A remote enables it and the flag forces it anywhere; `--kusto-cluster` only sets a default, and without one every call names the cluster it queries. There is no launch-side reachability probe: the group is served read-only by the service |
 | `--cloudagent` | auto on an Azure DevOps remote | `cloudagent` MCP group (Microsoft Cloud Agent Job API v2) by the same route (key `gh-router-cloudagent`). The git remote enables all ten tools, `create_job`, `create_pr_job` and `cancel_job` included; `--no-cloudagent` is the veto, and the create tools tell the model to confirm with the user first because a job runs a cloud agent for hours and spends compute. `--cloudagent-env prod\|ppe` selects the service. The proxy mints the Entra token itself from an existing `az login`, and the base URL is not configurable |
-| `--memory-bridge` / `--no-memory-bridge` | **on** | Copilot (`.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` `applyTo`) + Claude (`.claude/rules/`, `.claude/CLAUDE.md`, `~/.claude/CLAUDE.md`, `~/.copilot/copilot-instructions.md`) bridge. Static repo-wide slice synthesizes into the mirror `AGENTS.md` (Pi-native candidate, 24KB budget, secrets-redacted, fenced idempotent); path-scoped rules lazy-attach on matching `read/edit/write` (once/session). Auto-memory (`~/.claude/projects/<slug>/memory/MEMORY.md`, 200-line/25KB) is on-demand via `/memory` only, never auto-injected. Honors `GH_ROUTER_PI_BRIDGE=0` / `GH_ROUTER_DISABLE_PI_BRIDGE=1` and Pi's own `--no-context-files`/`-nc` passthrough. `--no-memory-bridge` = Pi-native `AGENTS.md`/`CLAUDE.md` discovery only. |
+| `--memory-bridge` / `--no-memory-bridge` | **on** | Copilot (`.github/copilot-instructions.md`, `.github/instructions/*.instructions.md` `applyTo`) + Claude (`.claude/rules/`, `.claude/CLAUDE.md`, `~/.claude/CLAUDE.md`, `~/.copilot/copilot-instructions.md`) bridge. The static repo-wide slice is written **into the mirror `AGENTS.md`** (Pi-native candidate, fenced, idempotent), which Pi loads as the `project_context` system-prompt section on every turn — so the block is written as instruction text and nothing else: one heading per source group, one `` `path` — body `` line per file (repo- or `~`-relative, bodies verbatim), no title, no provenance comments. Bodies are **inlined rather than progressive-disclosed on purpose**: a rule that only loads if the model chooses to read a skill is not a rule. Cost is capped at 24 KB with a 1.5 KB floor per group (the lazy scoped-rule list counts as a group and keeps a floor too, so an oversized static slice cannot make those rules unreachable for the session), so one huge file cannot starve the rest down to a marker; whatever still cannot fit is reported as a single named `Omitted for budget (n)` row rather than one row per file, which would spend the budget on markers. A truncation is never silent — it lands in `/memory`, `/context`, `.gh-router-bridge.json` and a launch warning. Secrets are redacted **before** each body is capped, and duplicate sources (symlink, hard link, `@` import re-reaching a base file) are collected once. Path-scoped rules lazy-attach on matching `read/edit/write` (once/session). When the bridge writes nothing, no block is emitted at all — and a block left over from an earlier launch against a repo that has since lost its rules is **removed**, so it cannot keep costing bytes for guidance that no longer exists. Auto-memory (`~/.claude/projects/<slug>/memory/MEMORY.md`, 200-line/25KB) is on-demand via `/memory` only, never auto-injected. `/memory` and `/context` are registered whenever the bridge is **enabled**, not only when it found something: they are diagnostics, and the launch most likely to need them is the one that bridged nothing (measured on the real binary — a repo with no Copilot/Claude files had no `/memory` at all, so Pi sent the text to the model as a prompt instead of running a command). Precedence is reported, never repaired, in both directions: a user `AGENTS.override.md` in the mirror (which shadows `AGENTS.md`), a user `CLAUDE.md` the bridged `AGENTS.md` now outranks (Pi reads one context file per directory, so this is the cost of writing the block at all), a user `SYSTEM.md` (which replaces Pi's prompt), a trusted `<cwd>/.pi/APPEND_SYSTEM.md` (which outranks the mirror's digest), and a same-named user skill (which beats the router's copy) each warn once, and each is recorded under `precedence` in `.gh-router-bridge.json`. Honors `GH_ROUTER_PI_BRIDGE=0` / `GH_ROUTER_DISABLE_PI_BRIDGE=1` and Pi's own `--no-context-files`/`-nc` passthrough. `--no-memory-bridge` = Pi-native `AGENTS.md`/`CLAUDE.md` discovery only. |
 | `--foreign` | off | Bridges the project's and your own **Claude Code and Copilot artifacts** into the Pi session: `.claude/skills` + `.github/skills` + `.copilot/skills` as Pi skills (always on this flag), `.claude/commands` + `.github/prompts` as prompt shortcuts, `.claude/agents` + `.github/agents` as Pi subagents announced in one compact index and loaded **on demand**. Authored names are kept; a name the router, a `pi-subagents` builtin, or your own agent/skill/command already owns is **renamed** (skills, prompts) or **reported and skipped** (agents) — never overwritten, never silently dropped. Foreign `model:`/`tools:`/`aliases:` are dropped (prose keeps the tool policy). See [Claude and Copilot artifacts](#claude-and-copilot-artifacts). |
 
 Always injected regardless of flags (like Claude's operating
@@ -454,6 +454,18 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   alone would not fix the order. The line is gated on
   `surfaces.codeSearch` — the same predicate that publishes the MCP group — so
   a launch without search is never pointed at a tool it does not have.
+
+  **The bridged-context contract, only when there is a block.** When the memory
+  bridge wrote a section into the mirror `AGENTS.md`, the digest adds
+  `PI_CONTEXT_CONTRACT_LINE`: follow those rules, cite the one that changed a
+  decision, and do not restate them to the user. The measured reason is not
+  stylistic — a study of LLM-authored agent files found they raised cost ~23%
+  with no success gain, because the model paraphrases the file back instead of
+  using it. One sentence is cheaper than any restructuring and is the whole
+  behavioural delta that reading `AGENTS.md` is supposed to buy. Gated on the
+  block actually existing: naming `AGENTS.md` on a launch whose bridge is off
+  (or whose `-nc` disabled context files) would point the model at guidance
+  this launch does not have.
 - **Pi lifecycle respected.** Version floor Pi ≥ 1.3.0 (`PI_MIN_VERSION`,
   `src/lib/pi-version-check.ts`) / Node ≥ 22.19. Startup never waits on npm:
   a fast local `pi --version` probe gates
@@ -466,6 +478,36 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   (offline/CI); `--no-auto-update` disables the background refresh
   (the floor is still enforced).   Throttle state lives in
   `~/.local/share/github-router/last-pi-update-check`.
+
+  **Which Pi runs** (`resolvePiCommand`, `src/lib/managed-install/pi-command.ts`).
+  Four sources, strict precedence, and the reason the order is this one:
+
+  1. `--pi-path <cmd>`. An explicit user choice. Never floor-checked — the user
+     asked for that exact binary, and a floor check would make the flag useless
+     for testing a candidate build. Their problem to debug, not ours to override.
+  2. `pi` on PATH, **not** the router's own shim (`isOurShim` marker check), at
+     or above the floor. This is the `npm i -g pi` / brew / vendor user: they own
+     that install, and it is already the binary they run by hand.
+  3. The managed Pi pointer, at or above the floor.
+  4. Managed install (`m/pi/<version>/`), joined fail-closed before launch.
+
+  A PATH `pi` **below** the floor neither runs nor aborts: it falls through to
+  3/4 and the launch logs one line naming both versions and the floor, because
+  silently running the managed copy while the user stares at their own
+  `pi --version` is worse than either alone. `--no-update-check` turns 3/4 into
+  "no install at all": with nothing runnable, the launch fails closed and prints
+  the two commands that fix it.
+
+  The managed payload is spawned as `node <payload>/…/cli.js`, with the target
+  read from the installed package's own `bin` map (`piBinEntry`) because Pi has
+  already moved it once. `LaunchTarget.execArgs` carries that prefix and
+  `launch.buildExecInvocation` turns it into a spawn, so a spaced install path
+  works and Windows never routes `node.exe` through `cmd.exe`.
+
+  `github-router update --pi` (or a bare `github-router update`) refreshes the
+  managed Pi immediately. The background refresh only ever refreshes an
+  **already live** payload, so a machine that never asked for a managed Pi never
+  accumulates one.
   Boot is quiet by design: with stored auth, setup chatter is held
   back and one three-line card (version · account · lead/models/surface)
   replaces it; `--verbose`/`--show-token` restore full logs, and
@@ -837,7 +879,8 @@ error paths are returned untouched.
   derivation, price-drift guard. Unit-tested in
   `tests/pi-tier-windows.test.ts`.
 - `src/lib/pi-extension.ts` — extension source + skills + prompts + bridge lazy-attach (`tool_result`) + `/memory` + `/context`.
-- `src/lib/pi-memory-bridge.ts` — pure bridge builders (frontmatter scope, glob match, `@` imports, caps, redaction, mirror synthesis). Unit-tested in `tests/pi-memory-bridge.test.ts`.
+- `src/lib/pi-memory-bridge.ts` — pure bridge builders (frontmatter scope, glob match, `@` imports, caps, redaction, mirror synthesis, realpath/inode dedupe). Unit-tested in `tests/pi-memory-bridge.test.ts`.
+- `src/lib/pi-mirror-guards.ts` — Pi precedence reports (`AGENTS.override.md` shadowing us, a user `CLAUDE.md` we shadow, `SYSTEM.md`, trusted `.pi/APPEND_SYSTEM.md`) and the skill-collision planner. Reports; never deletes or renames a user file. Unit-tested in `tests/pi-memory-bridge.test.ts`.
 - `src/lib/pi-foreign-artifacts.ts` — Claude/Copilot artifact planner: name reservation, the three collision rules, runtime-agent specs, the `<foreign_agents>` index, and the mirror writer. Unit-tested in `tests/pi-foreign-artifacts.test.ts`, including a run against the real `pi-subagents` registry.
 - `src/lib/pi-paths.ts` — mirror lifecycle plus the durable session
   root (`piSessionsDir()`).
@@ -988,9 +1031,20 @@ configuration and falls through to the `.npmrc` cascade, which is exactly
 where npm's own error message says the setting belongs - so an operator
 who allowlists a package for install scripts in `.npmrc` keeps that
 allowlist, and their shell export still applies to their own npm use. The
-router's other npm invocations are `npm install -g` (Pi's own install and
-update), which the rule exempts because global installs have no project
-context to protect.
+router's other npm invocations are the **managed** installs
+(`~/.local/share/github-router/m/<kind>/<version>/`, the router payload and the
+managed Pi), which have no `.npmrc` of their own and rely on the same
+`npm_config_allow_scripts=""` for exactly the reason above - measured on
+npm 11.20.0: `npm_config_allow_scripts=is-number npm install --prefix /tmp/x
+--ignore-scripts` exits with `npm error code EALLOWSCRIPTS`, while the same
+command with the variable emptied installs. `--ignore-scripts` does **not**
+neutralize it; only an empty value does. `buildNpmEnv`
+(`src/lib/managed-install/npm-env.ts`) always emits the empty string, and
+`tests/isolated/managed-install.test.ts` asserts a real install succeeds under a
+hostile `npm_config_*` environment. `npm install -g` (a user's own Pi install)
+is not the router's any more: `updatePi` was removed, because `-g` mutates a
+user-owned tree and cannot update a `-g` install that is currently in use on
+Windows.
 
 ## npm registry and publish-age, for the Pi child only
 

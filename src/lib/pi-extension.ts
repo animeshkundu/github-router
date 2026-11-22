@@ -278,7 +278,16 @@ export function buildPiStatuslineFooterSection(): Array<string> {
 }
 
 export interface PiBridgeExtensionInput {
-  stats: { staticFiles: number; scopedRules: number; imports: number; skipped: number }
+  stats: {
+    staticFiles: number
+    scopedRules: number
+    imports: number
+    skipped: number
+    /** The block hit the byte budget; surfaced so a cut is never silent. */
+    truncated?: boolean
+    /** Bytes of the emitted fenced block. */
+    bytes?: number
+  }
   scopedRules: Array<{ file: string; body: string; globs: Array<string>; source: string }>
 }
 
@@ -539,8 +548,8 @@ export function buildPiMemoryBridgeSection(bridge: PiBridgeExtensionInput): Arra
     `        description: "Show bridged memory inventory and auto-memory locations (on-demand; nothing auto-injected)",`,
     `        handler: async (_args, ctx) => {`,
     `          try {`,
-    `            const s = (BRIDGE && BRIDGE.stats) || { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0 };`,
-    `            const lines = ["Memory bridge (gh-router)", " Static files: " + s.staticFiles, " Scoped rules (lazy): " + s.scopedRules, " Imports: " + s.imports, " Skipped: " + s.skipped, " Auto-memory: ~/.claude/projects/<slug>/memory/MEMORY.md (on-demand read only)", " Pi memory: ~/.pi/agent/memory/ (your own pi-memory install, snapshotted)"];`,
+    `            const s = (BRIDGE && BRIDGE.stats) || { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0, truncated: false, bytes: 0 };`,
+    `            const lines = ["Memory bridge (gh-router)", " Static files: " + s.staticFiles, " Scoped rules (lazy): " + s.scopedRules, " Imports: " + s.imports, " Skipped: " + s.skipped, " Mirror AGENTS.md block: " + (s.bytes || 0) + " bytes" + (s.truncated ? " (TRUNCATED to the budget)" : ""), " Auto-memory: ~/.claude/projects/<slug>/memory/MEMORY.md (on-demand read only)", " Pi memory: ~/.pi/agent/memory/ (your own pi-memory install, snapshotted)"];`,
     `            try {`,
     `              const files = (BRIDGE.scopedRules || []).map((r) => r.file);`,
     `              if (files.length > 0) lines.push(" Scoped files:", ...files.slice(0, 20).map((f) => "  - " + f));`,
@@ -556,8 +565,8 @@ export function buildPiMemoryBridgeSection(bridge: PiBridgeExtensionInput): Arra
     `        description: "Show what the gh-router memory bridge loaded",`,
     `        handler: async (_args, ctx) => {`,
     `          try {`,
-    `            const s = (BRIDGE && BRIDGE.stats) || { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0 };`,
-    `            ctx.ui.notify("Bridge context: " + s.staticFiles + " static, " + s.scopedRules + " scoped (attached " + attached.size + "), " + s.imports + " imports, " + s.skipped + " skipped. Native AGENTS.md/CLAUDE.md still load via Pi.", "info");`,
+    `            const s = (BRIDGE && BRIDGE.stats) || { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0, truncated: false, bytes: 0 };`,
+    `            ctx.ui.notify("Bridge context: " + s.staticFiles + " static, " + s.scopedRules + " scoped (attached " + attached.size + "), " + s.imports + " imports, " + s.skipped + " skipped, " + (s.bytes || 0) + " bytes in the mirror AGENTS.md" + (s.truncated ? " (TRUNCATED)" : "") + ". Native AGENTS.md/CLAUDE.md still load via Pi.", "info");`,
     `          } catch {}`,
     `        },`,
     `      });`,
@@ -632,7 +641,15 @@ export function buildPiExtensionSource(opts: {
       : []),
     `export default function (pi) {`,
   )
-  if (opts.bridge && opts.bridge.scopedRules.length + opts.bridge.stats.staticFiles > 0) {
+  // Emitted whenever the bridge is merely ENABLED, not only when it found
+  // something. `/memory` and `/context` are diagnostics, and a diagnostic that
+  // disappears exactly when the thing it describes is empty is useless: "why is
+  // my rule not in the prompt?" is the question you ask on a launch that
+  // bridged nothing. Measured on the real binary: a repo with no Copilot/Claude
+  // files got no `/memory`, so Pi handed the text to the MODEL (90 turns)
+  // instead of running a command. The lazy `tool_result` hook inside the section
+  // still gates itself on there being scoped rules.
+  if (opts.bridge) {
     lines.push(...buildPiMemoryBridgeSection(opts.bridge))
   }
   if (opts.foreign && opts.foreign.agents.length + opts.foreign.index.length > 0) {

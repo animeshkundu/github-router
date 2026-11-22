@@ -16,6 +16,7 @@ import path from "node:path"
 import consola from "consola"
 
 import { PATHS } from "../paths"
+import { installedOptional } from "../managed-install/optional"
 import {
   TREE_SITTER_GRAMMAR_FILES,
   TREE_SITTER_RUNTIME_FILE,
@@ -53,8 +54,16 @@ export function provisionTreeSitterAssets(): Promise<void> {
 function provisionImpl(): boolean {
   try {
     const require = createRequire(import.meta.url)
-    const grammarPackage = require.resolve("tree-sitter-wasms/package.json")
-    const grammarRoot = path.join(path.dirname(grammarPackage), "out")
+    // Prefer the shared `<APP_DIR>/optional` copy: `tree-sitter-wasms` is an
+    // optional peer, so in a consumer install the package tree has no grammars
+    // at all and `require.resolve` would throw here, silently disabling
+    // structural ranking on every machine.
+    const grammarRoot = (() => {
+      const shared = installedOptional("tree-sitter-wasms")
+      if (shared) return path.join(shared, "out")
+      const grammarPackage = require.resolve("tree-sitter-wasms/package.json")
+      return path.join(path.dirname(grammarPackage), "out")
+    })()
     const runtime = require.resolve("web-tree-sitter/tree-sitter.wasm")
     const destination = PATHS.TREE_SITTER_ASSETS_DIR
     mkdirSync(destination, { recursive: true })

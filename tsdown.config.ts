@@ -33,6 +33,40 @@ export default defineConfig([
     },
   },
   {
+    // Bootstrap build: separate entry, published as `bin`.
+    //
+    // This file runs on EVERY invocation (including the ~13 per-turn Claude Code
+    // hooks), and its whole job is to decide whether to hand off to the managed
+    // payload or run this tree's `main.js`. Two options are load-bearing:
+    //   - `noExternal: () => true` inlines the small decision layer, so the
+    //     bootstrap needs no `node_modules` lookup of its own — it must work
+    //     from a tree the OS is about to reap.
+    //   - `main.js` is imported through a COMPUTED specifier in `src/bin.ts`, so
+    //     neither this bundle nor its dependency graph ever contains the app.
+    //     A static import would be folded in and `dist/bin.js` would become the
+    //     40 MB app, defeating the hand-off.
+    // Both are asserted by `tests/isolated/bin-bootstrap.test.ts`.
+    entry: ["src/bin.ts"],
+
+    format: ["esm"],
+    target: "es2022",
+    platform: "node",
+    fixedExtension: false, // keep .js — see the note on the first entry
+
+    sourcemap: true,
+    clean: false,
+    nodeProtocol: false,
+
+    env: {
+      NODE_ENV: "production",
+    },
+
+    noExternal: () => true,
+    outputOptions: {
+      codeSplitting: false,
+    },
+  },
+  {
     // Bridge build: separate entry. The bridge is the native-messaging
     // host the browser extension talks to (spawned by Chrome / Edge,
     // not by github-router). It exposes a localhost WS so github-router
