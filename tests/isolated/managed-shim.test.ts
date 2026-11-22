@@ -135,6 +135,11 @@ describe("ensureShims", () => {
       expect((await fs.stat(shim)).mode & 0o111).not.toBe(0)
     }
 
+    // Same launcher, same bytes: nothing to do. This is the assertion that caught
+    // the Windows bug — `writeShim` compared `stat().mode` against the shim's
+    // requested 0o755, which on Windows can never match (no mode bits), so it
+    // reported `updated` on EVERY call and an install could never settle. The mode
+    // repair is keyed on the host platform now, so the outcome is stable.
     const second = await ensureShims("self", launcher, "linux")
     expect(second.map((r) => r.outcome)).toEqual(["unchanged"])
 

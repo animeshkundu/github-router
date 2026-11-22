@@ -216,11 +216,18 @@ async function writeShim(body: ShimBody): Promise<ShimResult> {
     // bit (unzip, a copy, a restore from a backup, an inconsistent umask) is
     // `permission denied` forever while this branch keeps saying "unchanged".
     // Cheap to check, and the only repair opportunity we get.
+    //
+    // Keyed on the HOST (`process.platform`), not on `body`'s flavour: the mode
+    // bits belong to the filesystem, not to the shim body. On Windows
+    // `fs.stat().mode` is derived from the read-only attribute, so a 0o755 request
+    // can never be satisfied there and this branch reported `updated` on every
+    // call, forever — a caller that trusts the outcome sees an install that never
+    // settles. Windows shims are `.cmd`/`.ps1` and need no executable bit.
     const mode = await fs.stat(body.path).then(
       (st) => st.mode & 0o777,
       () => null,
     )
-    if (mode === null || (mode & body.mode) !== body.mode) {
+    if (process.platform !== "win32" && (mode === null || (mode & body.mode) !== body.mode)) {
       await fs.chmod(body.path, body.mode).catch(() => {})
       return { path: body.path, outcome: "updated" }
     }
