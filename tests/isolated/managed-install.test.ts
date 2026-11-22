@@ -215,10 +215,12 @@ describe("ensureManagedInstall: adopt-before-install", () => {
     expect(pointer?.version).toBe(version)
     // Nothing was installed: no package.json was generated, and no node_modules
     // beyond the fake we placed.
-    expect(await fs.readdir(versionDir("self", version))).toEqual([
-      ".installed.json",
-      "node_modules",
-    ])
+    //
+    // Order-insensitive: `readdir` guarantees no order on any platform, and this
+    // assertion failed on the Linux job with the same two names reversed. What it
+    // means is "exactly these entries", so that is what it must say.
+    const entries = await fs.readdir(versionDir("self", version))
+    expect(entries.toSorted()).toEqual([".installed.json", "node_modules"])
   })
 
   test("a version dir with an entry but no marker is NOT adopted", async () => {
@@ -427,8 +429,15 @@ describe("the install lock reports what actually failed", () => {
     //
     // `GH_ROUTER_APP_DIR` pointing UNDER a regular file is the deterministic
     // stand-in for "the create failed for its own reason": both the mkdir and the
-    // open fail with ENOTDIR, with no dependency on permissions, on being root, or
-    // on the platform's EISDIR/EEXIST split for a directory at the lock path.
+    // open fail with a path-component error, with no dependency on permissions,
+    // on being root, or on the platform's EISDIR/EEXIST split for a directory at
+    // the lock path.
+    //
+    // The CODE differs by platform (POSIX `ENOTDIR`, Windows `ENOENT` — its
+    // path resolver does not distinguish "a file is in the way" from "no such
+    // thing"), and this test is about the MEANING, not the errno: any non-EEXIST
+    // failure must be `failed`, never `locked`. Pinning `ENOTDIR` made a correct
+    // implementation fail the Windows job.
     const root = await freshApp("lock-enotdir")
     const blocker = path.join(root, "not-a-dir")
     await fs.writeFile(blocker, "x")
@@ -437,7 +446,9 @@ describe("the install lock reports what actually failed", () => {
     const result = await withInstallLockResult("managed-self.lock", async () => {})
     expect(result.outcome).toBe("failed")
     expect(result.outcome === "failed" ? String(result.error) : "").toContain("could not create the install lock")
-    expect(result.outcome === "failed" ? (result.error as NodeJS.ErrnoException).code : "").toBe("ENOTDIR")
+    const code = result.outcome === "failed" ? ((result.error as NodeJS.ErrnoException).code ?? "") : ""
+    expect(code).not.toBe("EEXIST")
+    expect(["ENOTDIR", "ENOENT"]).toContain(code)
   })
 
   test("a holder does not delete a lock that was stolen from it", async () => {

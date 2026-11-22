@@ -35,16 +35,24 @@ describe("writeFileAtomic", () => {
     expect(leftovers).toEqual([])
   })
 
-  test("creates the destination 0o600 by default and honours an explicit mode", async () => {
-    const dir = await tmpDir()
-    const secret = path.join(dir, "token")
-    await writeFileAtomic(secret, "s3cret")
-    expect((await fs.stat(secret)).mode & 0o777).toBe(0o600)
+  test.skipIf(process.platform === "win32")(
+    "creates the destination 0o600 by default and honours an explicit mode",
+    async () => {
+      // POSIX-only by nature: Windows has no mode bits. `fs.stat().mode` there is
+      // derived from the read-only attribute, so 0o600 and 0o644 are
+      // indistinguishable and this assertion cannot mean anything. The behaviour
+      // it guards (the atomic write passes `mode` through) is still exercised on
+      // Windows by the replace/leftover tests above.
+      const dir = await tmpDir()
+      const secret = path.join(dir, "token")
+      await writeFileAtomic(secret, "s3cret")
+      expect((await fs.stat(secret)).mode & 0o777).toBe(0o600)
 
-    const worldReadable = path.join(dir, "pointer.json")
-    await writeFileAtomic(worldReadable, "{}", { mode: 0o644 })
-    expect((await fs.stat(worldReadable)).mode & 0o777).toBe(0o644)
-  })
+      const worldReadable = path.join(dir, "pointer.json")
+      await writeFileAtomic(worldReadable, "{}", { mode: 0o644 })
+      expect((await fs.stat(worldReadable)).mode & 0o777).toBe(0o644)
+    },
+  )
 
   test("a pre-placed symlink at a temp name is never written through", async () => {
     const dir = await tmpDir()

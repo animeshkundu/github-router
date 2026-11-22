@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { existsSync } from "node:fs"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -59,12 +60,32 @@ afterEach(async () => {
 })
 
 describe("findPackageRoot", () => {
+  /**
+   * Compare two paths as "same directory" without depending on which SPELLING a
+   * platform hands back.
+   *
+   * `fs.realpath` on Windows returns the 8.3 short name (`C:\Users\RUNNER~1\…`)
+   * where the fixture was built under the long one (`C:\Users\runneradmin\…`),
+   * and the filesystem is case-insensitive on top of that. macOS answers
+   * `/private/var/…` for a tree built under `/var/…`. `findPackageRoot` returns that
+   * resolved spelling BY DESIGN (it realpaths the entry before walking up), so
+   * comparing it to an unresolved literal tests the platform's path renderer
+   * instead of the function. Realpath both sides, then case-fold.
+   *
+   * Not circular: if the walk returned the wrong directory, the realpaths differ.
+   */
+  async function expectSameDir(actual: string | undefined, expected: string): Promise<void> {
+    expect(actual).toBeDefined()
+    expect(existsSync(actual!)).toBe(true)
+    expect((await fs.realpath(actual!)).toLowerCase()).toBe(
+      (await fs.realpath(expected)).toLowerCase(),
+    )
+  }
+
   test("walks up to the github-router package.json", async () => {
     const root = await tmpApp("pkg")
     const entry = await fakeTree(root)
-    expect(findPackageRoot(entry)).toBe(
-      await fs.realpath(path.join(root, "node_modules", "github-router")),
-    )
+    await expectSameDir(findPackageRoot(entry), path.join(root, "node_modules", "github-router"))
   })
 
   test("a look-alike package name is not this package", async () => {
@@ -78,8 +99,9 @@ describe("findPackageRoot", () => {
   test("the scoped alias counts as this package", async () => {
     const root = await tmpApp("pkg3")
     const entry = await fakeTree(root, "@animeshkundu/github-router")
-    expect(findPackageRoot(entry)).toBe(
-      await fs.realpath(path.join(root, "node_modules", "@animeshkundu/github-router")),
+    await expectSameDir(
+      findPackageRoot(entry),
+      path.join(root, "node_modules", "@animeshkundu", "github-router"),
     )
   })
 

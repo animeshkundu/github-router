@@ -129,7 +129,12 @@ describe("pi-memory-bridge imports + caps", () => {
       readFile,
       "/home/u",
     )
-    expect(out.map((e) => e.file)).toEqual(["/repo/b.md", "/repo/c.md"])
+    // Basename-based, not an exact path: `/repo/b.md` goes through `path.resolve`,
+    // which renders `D:\\repo\\b.md` on Windows. The property under test is "b then
+    // c, each once, cycle closed" — the spelling of the prefix is the platform's
+    // business.
+    expect(out.map((e) => path.basename(e.file))).toEqual(["b.md", "c.md"])
+    expect(out.length).toBeLessThanOrEqual(10)
   })
 
   test("caps memory index at 200 lines", () => {
@@ -438,6 +443,31 @@ describe("pi-memory-bridge extension", () => {
     expect(bare).not.toContain("tool_result")
   })
 
+  test("/memory and /context exist even when the bridge collected nothing", async () => {
+    // These two are diagnostics, and a diagnostic that vanishes exactly when the
+    // thing it describes is empty is useless: "why is my rule not in the prompt?"
+    // is the question you ask on a launch that bridged nothing. Measured on the
+    // real binary — a repo with no Copilot/Claude files had no `/memory`, so Pi
+    // sent the text to the MODEL (90 turns) instead of running a command.
+    const shown = await runGeneratedExtension(
+      buildPiExtensionSource({
+        profileId: "cheapest",
+        bridge: { stats: { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0, truncated: false, bytes: 0 }, scopedRules: [] },
+      }),
+    )
+    expect(shown.has("memory")).toBe(true)
+    expect(shown.has("context")).toBe(true)
+    expect(shown.get("memory")).toContain("0 bytes")
+    // Nothing path-scoped to attach. The lazy hook is still registered, but it
+    // must no-op on the FIRST line rather than scan an empty rule list on every
+    // tool result — the hook runs on every read/edit/write of the session.
+    const src = buildPiExtensionSource({
+      profileId: "cheapest",
+      bridge: { stats: { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0, truncated: false, bytes: 0 }, scopedRules: [] },
+    })
+    expect(src).toContain("!Array.isArray(BRIDGE.scopedRules) || BRIDGE.scopedRules.length === 0) return undefined")
+  })
+
   test("bridge section builder is fail-open text", () => {
     const lines = buildPiMemoryBridgeSection({
       stats: { staticFiles: 0, scopedRules: 1, imports: 0, skipped: 0, truncated: false, bytes: 0 },
@@ -526,7 +556,8 @@ describe("pi-memory-bridge precedence guards", () => {
     }
   })
 
-  test("a user skill of the same name is kept, not overwritten", async () => {    const root = await fs.mkdtemp(path.join(os.tmpdir(), "gh-bridge-skills-"))
+  test("a user skill of the same name is kept, not overwritten", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "gh-bridge-skills-"))
     const mirror = path.join(root, "mirror")
     try {
       await fs.mkdir(path.join(mirror, "skills", "gh-oracle"), { recursive: true })
@@ -548,18 +579,23 @@ describe("pi-memory-bridge precedence guards", () => {
 })
 
 describe("pi-memory-bridge shadow warnings", () => {
-  const mirror = "/m"
+  // `path.join`, not a literal: the function echoes `userClaudeMd` verbatim into
+  // the message, so a POSIX-shaped fixture would make the Windows assertion assert
+  // the fixture rather than the behaviour.
+  const mirror = path.join(path.sep, "m")
   const none = { agentsOverride: false, systemMd: false, projectAppendSystem: null, userClaudeMd: null }
 
   test("both directions of Pi's one-context-file rule are reported", () => {
     const warnings = bridgeShadowWarnings(
-      { ...none, agentsOverride: true, userClaudeMd: "/m/CLAUDE.md" },
+      { ...none, agentsOverride: true, userClaudeMd: path.join(mirror, "CLAUDE.md") },
       { bridgeActive: true, mirrorDir: mirror },
     )
     expect(warnings).toHaveLength(2)
-    expect(warnings[0]).toContain("/m/AGENTS.override.md")
+    // Built with `path.join`, not a literal: the message names a real path, and on
+    // Windows `path.join("/m", "AGENTS.override.md")` is `\m\AGENTS.override.md`.
+    expect(warnings[0]).toContain(path.join(mirror, "AGENTS.override.md"))
     expect(warnings[0]).toContain("NOT loaded")
-    expect(warnings[1]).toContain("/m/CLAUDE.md")
+    expect(warnings[1]).toContain(path.join(mirror, "CLAUDE.md"))
     expect(warnings[1]).toContain("NOT loaded")
   })
 
@@ -569,7 +605,7 @@ describe("pi-memory-bridge shadow warnings", () => {
     // the user to fix a problem that does not exist.
     expect(
       bridgeShadowWarnings(
-        { ...none, agentsOverride: true, userClaudeMd: "/m/CLAUDE.md" },
+        { ...none, agentsOverride: true, userClaudeMd: path.join(mirror, "CLAUDE.md") },
         { bridgeActive: false, mirrorDir: mirror },
       ),
     ).toEqual([])
@@ -580,7 +616,7 @@ describe("pi-memory-bridge shadow warnings", () => {
     // the bridge is not the reason the user's CLAUDE.md goes unread. The
     // override warning still fires: that one IS ours to report.
     const warnings = bridgeShadowWarnings(
-      { ...none, agentsOverride: true, userClaudeMd: "/m/CLAUDE.md" },
+      { ...none, agentsOverride: true, userClaudeMd: path.join(mirror, "CLAUDE.md") },
       { bridgeActive: true, mirrorDir: mirror, userOwnsAgentsMd: true },
     )
     expect(warnings).toHaveLength(1)

@@ -212,7 +212,12 @@ describe("resolvePiCommand precedence", () => {
     await fakeManagedPi("path-managed", "50.0.0")
     const resolved = await withPathPrefix(dir, () => resolvePiCommand())
     expect(resolved?.source).toBe("path")
-    expect(resolved?.command).toBe(pi)
+    // Case-insensitive on Windows: `resolveExecutable` builds candidate names from
+    // `PATHEXT` (`.COM;.EXE;.BAT;.CMD`), so for a `pi.cmd` on disk it returns
+    // `pi.CMD`. `existsSync` is case-insensitive there, `spawn` runs it fine, and
+    // the on-disk spelling is not recoverable without reading the directory — so
+    // the platform's case folding is the correct comparison, not a fixed literal.
+    expect(resolved?.command.toLowerCase()).toBe(pi.toLowerCase())
   })
 
   test("2b. a below-floor user pi falls through to the managed copy and explains why", async () => {

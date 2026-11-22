@@ -91,7 +91,12 @@ describe("ensureLauncher", () => {
     const first = await ensureLauncher("self")
     expect(first.written).toBe(true)
     expect(first.path).toBe(launcherPath("self"))
-    expect((await fs.stat(first.path)).mode & 0o111).not.toBe(0)
+    // POSIX only: Windows has no execute bit (`fs.stat().mode` there reflects the
+    // read-only attribute, so this reads 0 for a perfectly executable .mjs). The
+    // launcher is invoked as `node launcher.mjs` there, which needs no bit.
+    if (process.platform !== "win32") {
+      expect((await fs.stat(first.path)).mode & 0o111).not.toBe(0)
+    }
     expect(await fs.readFile(first.path, "utf8")).toBe(launcherSource())
 
     const second = await ensureLauncher("self")
@@ -309,23 +314,31 @@ describe("the emitted launcher, executed for real", () => {
     expect(stdout).toContain("payload-ran")
   })
 
-  test("a payload killed by a signal is reported as that signal, never as exit 0", async () => {
-    // The launcher installs forwarding handlers for SIGINT/SIGTERM/SIGHUP. Node
-    // does not re-raise a signal that has a listener, so a naive
-    // `process.kill(process.pid, signal)` on the child's death is a no-op that
-    // falls through to exit 0 — a killed session looks like a clean run to a
-    // supervisor. The listeners must be removed first.
-    await useTempAppDir()
-    await writeFakePayload("1.2.3", 'process.kill(process.pid, "SIGTERM")\n')
-    await writePointer({ kind: "self", version: "1.2.3" })
-    const { path: launcher } = await ensureLauncher("self")
+  test.skipIf(process.platform === "win32")(
+    "a payload killed by a signal is reported as that signal, never as exit 0",
+    async () => {
+      // The launcher installs forwarding handlers for SIGINT/SIGTERM/SIGHUP. Node
+      // does not re-raise a signal that has a listener, so a naive
+      // `process.kill(process.pid, signal)` on the child's death is a no-op that
+      // falls through to exit 0 — a killed session looks like a clean run to a
+      // supervisor. The listeners must be removed first.
+      //
+      // POSIX only: Windows has no signals. `process.kill` there terminates the
+      // process immediately with the exception code as the exit status, so there
+      // is no `signal` and no 128+n convention to preserve — the property this
+      // test exists to protect does not exist on that platform.
+      await useTempAppDir()
+      await writeFakePayload("1.2.3", 'process.kill(process.pid, "SIGTERM")\n')
+      await writePointer({ kind: "self", version: "1.2.3" })
+      const { path: launcher } = await ensureLauncher("self")
 
-    const result = await runLauncher(launcher, [])
-    const killedBySignal = result.signal === "SIGTERM"
-    const shellConvention = result.code === 143
-    expect(killedBySignal || shellConvention).toBe(true)
-    expect(result.code).not.toBe(0)
-  })
+      const result = await runLauncher(launcher, [])
+      const killedBySignal = result.signal === "SIGTERM"
+      const shellConvention = result.code === 143
+      expect(killedBySignal || shellConvention).toBe(true)
+      expect(result.code).not.toBe(0)
+    },
+  )
 
   test("a stale runtimeHint below the payload's engines floor is skipped for node on PATH", async () => {
     // The "launcher stopped working after a node upgrade" bug: the hint is a

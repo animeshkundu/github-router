@@ -127,7 +127,13 @@ describe("ensureShims", () => {
     expect(first.map((r) => r.outcome)).toEqual(["written"])
     const shim = first[0]!.path
     expect(shim).toBe(path.join(root, "cli-bin", "github-router"))
-    expect((await fs.stat(shim)).mode & 0o111).not.toBe(0)
+    // POSIX only: Windows has no execute bit. This is the POSIX shim body
+    // (`#!/bin/sh`), which only ever runs on a POSIX host, so its bit is part of
+    // what "installed correctly" means there — and meaningless on Windows, where
+    // `fs.stat().mode` reports the read-only attribute instead.
+    if (process.platform !== "win32") {
+      expect((await fs.stat(shim)).mode & 0o111).not.toBe(0)
+    }
 
     const second = await ensureShims("self", launcher, "linux")
     expect(second.map((r) => r.outcome)).toEqual(["unchanged"])
@@ -171,7 +177,7 @@ describe("ensureShims", () => {
   })
 })
 
-describe("the POSIX shim, executed for real", () => {
+describe.skipIf(process.platform === "win32")("the POSIX shim, executed for real", () => {
   test("forwards argv and the child's exit code through the launcher", async () => {
     await useTempAppDir()
     // Echo argv so the shim's "$@" forwarding is observable, then a chosen code.
@@ -221,11 +227,21 @@ describe("the POSIX shim, executed for real", () => {
 
 describe("isOnPath / pathHint", () => {
   test("matches an exact entry and ignores trailing separators", () => {
-    const dir = path.join(os.homedir(), ".local", "bin")
-    expect(isOnPath(dir, { PATH: `/usr/bin:${dir}:/bin` }, "linux")).toBe(true)
-    expect(isOnPath(dir, { PATH: `/usr/bin:${dir}/:/bin` }, "linux")).toBe(true)
-    expect(isOnPath(dir, { PATH: `/usr/bin:/bin` }, "linux")).toBe(false)
-    expect(isOnPath(dir, { Path: `C:\\Windows;${dir}` }, "win32")).toBe(true)
+    // Per-platform fixtures, not one string reused for both: a Windows PATH is
+    // `;`-separated and an entry there contains its own drive colon
+    // (`C:\Users\…`), so dropping a Windows path into a `:`-joined string splits
+    // it at the drive letter and the assertion tests nothing. Each platform is
+    // exercised with the shapes it actually has.
+    const posix = "/opt/ghr/cli-bin"
+    expect(isOnPath(posix, { PATH: `/usr/bin:${posix}:/bin` }, "linux")).toBe(true)
+    expect(isOnPath(posix, { PATH: `/usr/bin:${posix}/:/bin` }, "linux")).toBe(true)
+    expect(isOnPath(posix, { PATH: "/usr/bin:/bin" }, "linux")).toBe(false)
+
+    const win = "C:\\Apps\\ghr\\cli-bin"
+    expect(isOnPath(win, { Path: `C:\\Windows;${win}` }, "win32")).toBe(true)
+    expect(isOnPath(win, { Path: `C:\\Windows;${win}\\` }, "win32")).toBe(true)
+    expect(isOnPath(win, { Path: "C:\\Windows" }, "win32")).toBe(false)
+
     // Case-insensitive on Windows only.
     expect(isOnPath("C:\\Tools", { PATH: "c:\\tools" }, "win32")).toBe(true)
     expect(isOnPath("/Tools", { PATH: "/tools" }, "linux")).toBe(false)

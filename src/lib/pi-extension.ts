@@ -641,7 +641,15 @@ export function buildPiExtensionSource(opts: {
       : []),
     `export default function (pi) {`,
   )
-  if (opts.bridge && opts.bridge.scopedRules.length + opts.bridge.stats.staticFiles > 0) {
+  // Emitted whenever the bridge is merely ENABLED, not only when it found
+  // something. `/memory` and `/context` are diagnostics, and a diagnostic that
+  // disappears exactly when the thing it describes is empty is useless: "why is
+  // my rule not in the prompt?" is the question you ask on a launch that
+  // bridged nothing. Measured on the real binary: a repo with no Copilot/Claude
+  // files got no `/memory`, so Pi handed the text to the MODEL (90 turns)
+  // instead of running a command. The lazy `tool_result` hook inside the section
+  // still gates itself on there being scoped rules.
+  if (opts.bridge) {
     lines.push(...buildPiMemoryBridgeSection(opts.bridge))
   }
   if (opts.foreign && opts.foreign.agents.length + opts.foreign.index.length > 0) {
