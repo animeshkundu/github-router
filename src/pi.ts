@@ -8,14 +8,13 @@ import { defineCommand, type ArgsDef } from "citty"
 import consola from "consola"
 
 import {
-  ensurePiInstalled,
-  getInstalledPiVersion,
   meetsPiMinVersion,
   PI_MIN_VERSION,
   refreshPiInBackground,
   resolvePiRegistry,
-  updatePi,
 } from "./lib/pi-version-check"
+import { resolvePiCommand, type PiCommand } from "./lib/managed-install/pi-command"
+import { scheduleBackgroundPiInstall } from "./lib/managed-install/update"
 import { warnOnTierPriceDriftForModels } from "./lib/pi-tier-windows"
 import {
   AIC_LEDGER_ENV,
@@ -129,6 +128,11 @@ export const piArgs = {
     type: "string" as const,
     description:
       "Full base URL, including the /v1 prefix, of the local inference endpoint for `-m local` / `-m local2` (e.g. http://localhost:11111/v1). Sets scheme/host/path, which --localport cannot. Mutually exclusive with --localport. Inert on every other profile.",
+  },
+  "pi-path": {
+    type: "string" as const,
+    description:
+      "Run THIS Pi instead of the one on PATH or the managed copy (absolute path to a pi binary or script). Explicit: skips the version floor, the managed install, and the background refresh.",
   },
   "update-check": {
     type: "boolean" as const,
@@ -305,37 +309,31 @@ export const pi = defineCommand({
 
     let server: Awaited<ReturnType<typeof setupAndServe>>["server"]
     let serverUrl: string
-    // Pi install / update (default-on, throttled, best-effort).
+    // Pi resolution (default-on). `--pi-path` is an explicit override: it skips
+    // every probe, the floor check, and the background refresh, because the user
+    // named a binary and does not want our opinion about it.
+    const piPath = typeof args["pi-path"] === "string" ? args["pi-path"].trim() : ""
     const updateCheck = (args as Record<string, unknown>)["update-check"] !== false
     const autoUpdate = (args as Record<string, unknown>)["auto-update"] !== false
-    // Fast foreground gate: `pi --version` is local (milliseconds) and
-    // decides everything launch-critical. Network (npm view) and installs
-    // never block a healthy launch — see below.
-    let installedVersion: string | null = null
-    // Pending fresh install when Pi is absent: started before server boot
-    // so the two overlap, joined fail-closed right after setup.
-    const pendingInstall: { promise: Promise<string> | null; abort: (() => void) | null } = {
+    const managePi = updateCheck && piPath === ""
+    let piCommand: PiCommand | null = null
+    // Resolution overlaps server boot exactly like the old absent-Pi install
+    // did: a cold managed install is ~10 s (66 MB) and there is no reason to
+    // serialize it behind setup. Without Pi there is nothing to launch, so the
+    // join below is still fail-closed.
+    const pendingResolve: { promise: Promise<PiCommand | null> | null; abort: (() => void) | null } = {
       promise: null,
       abort: null,
     }
-    if (updateCheck) {
-      try {
-        installedVersion = await getInstalledPiVersion()
-      } catch (err) {
-        consola.debug("Pi presence probe failed:", err)
-      }
-      if (installedVersion === null) {
-        // Pi absent: it must be installed before launch, but the install
-        // starts NOW so it overlaps server boot instead of following it.
-        // Joined (fail-closed) right after setup; aborted if setup fails
-        // so a doomed launch never leaves a half-written global install.
-        const controller = new AbortController()
-        pendingInstall.abort = () => controller.abort()
-        pendingInstall.promise = ensurePiInstalled({ signal: controller.signal })
-        pendingInstall.promise.catch(() => {
-          // Observed at the join below; never an unhandled rejection.
-        })
-      }
+    if (managePi) {
+      const controller = new AbortController()
+      pendingResolve.abort = () => controller.abort()
+      pendingResolve.promise = resolvePiCommand({ signal: controller.signal })
+      pendingResolve.promise.catch(() => {
+        // Observed at the join below; never an unhandled rejection.
+      })
+    } else if (piPath !== "") {
+      piCommand = await resolvePiCommand({ piPath })
     }
     try {
       // Quiet boot: with stored auth there is no interactive flow to
@@ -361,56 +359,57 @@ export const pi = defineCommand({
       server = setupResult.server
       serverUrl = setupResult.serverUrl
     } catch (error) {
-      pendingInstall.abort?.()
+      pendingResolve.abort?.()
       consola.error("Failed to start server:", error instanceof Error ? error.message : error)
       process.exit(1)
     }
 
     void runSelfUpdate({ selfUpdate: args["self-update"] !== false })
 
-    if (pendingInstall.promise) {
-      // The blocking join: without Pi there is nothing to launch.
-      // Same failure contract as a sequential install, minus the wait.
+    if (pendingResolve.promise) {
+      // The blocking join: without a usable Pi there is nothing to launch.
       try {
-        installedVersion = await pendingInstall.promise
+        piCommand = await pendingResolve.promise
       } catch (err) {
-        consola.error(
-          `Pi is not installed and automatic install failed (${err instanceof Error ? err.message : String(err)}). Install it with \`npm install -g @earendil-works/pi-coding-agent --registry=${resolvePiRegistry()}\`, then retry.`,
-        )
-        process.exit(1)
+        consola.debug("Pi resolution failed:", err)
       } finally {
-        pendingInstall.promise = null
-        pendingInstall.abort = null
+        pendingResolve.promise = null
+        pendingResolve.abort = null
       }
     }
 
-    if (updateCheck && installedVersion !== null) {
-      if (!meetsPiMinVersion(installedVersion)) {
-        // Below the floor Pi cannot serve the roster correctly: upgrade
-        // foreground and re-verify, fail closed. `latest` needs no
-        // registry probe — npm resolves it at install time.
-        if (autoUpdate) {
-          try {
-            await updatePi("latest")
-            installedVersion = await getInstalledPiVersion()
-          } catch (err) {
-            consola.error(
-              `Installed Pi v${installedVersion} is below the supported floor and auto-upgrade failed (${err instanceof Error ? err.message : String(err)}). Upgrade manually: \`npm install -g @earendil-works/pi-coding-agent@latest --registry=${resolvePiRegistry()}\`.`,
-            )
-            process.exit(1)
-          }
-        }
-        if (!meetsPiMinVersion(installedVersion)) {
-          consola.error(
-            `Installed Pi v${installedVersion} is below the supported floor (v${PI_MIN_VERSION}). Upgrade: \`npm install -g @earendil-works/pi-coding-agent@latest --registry=${resolvePiRegistry()}\`.`,
+    if (managePi) {
+      // Two independent gates, both fail-closed: something runnable, and one
+      // above the floor. `resolvePiCommand` already prefers a managed copy over
+      // a below-floor PATH install, so landing here means neither exists.
+      if (!piCommand || piCommand.command === "") {
+        const detail = piCommand?.note ?? "no runnable `pi` was found"
+        consola.error(
+          `Cannot launch Pi: ${detail}\nInstall it with \`npm install -g @earendil-works/pi-coding-agent@latest --registry=${resolvePiRegistry()}\`, or run \`github-router update --pi\` to install the managed copy.`,
+        )
+        process.exit(1)
+      }
+      if (!meetsPiMinVersion(piCommand.version)) {
+        consola.error(
+          `Pi v${piCommand.version ?? "unknown"} (${piCommand.command}) is below the supported floor v${PI_MIN_VERSION}. Install a newer one with \`github-router update --pi\`, or pass --pi-path.`,
+        )
+        process.exit(1)
+      }
+      if (piCommand.note) consola.info(piCommand.note)
+      if (autoUpdate) {
+        if (piCommand.source === "path") {
+          // A user-owned Pi keeps its own update channel (`-g` + the detached
+          // post-exit waiter). Never rewrite a tree that is not ours.
+          refreshPiInBackground({ autoUpdate })
+        } else {
+          // Managed: refresh on its own cadence, detached. The install writes a
+          // NEW directory, so the running Pi holds nothing that is being
+          // replaced.
+          void scheduleBackgroundPiInstall().then(
+            (detail) => consola.debug(`managed Pi refresh: ${detail}`),
+            (err: unknown) => consola.debug("managed Pi refresh failed:", err),
           )
-          process.exit(1)
         }
-      } else {
-        // Healthy: freshness refreshes in the background (throttled npm
-        // probe, detached post-exit install when newer). Never blocks,
-        // never throws, never touches this session's validated install.
-        refreshPiInBackground({ autoUpdate })
       }
     }
 
@@ -979,6 +978,14 @@ export const pi = defineCommand({
     launchChild(
       {
         kind: "pi",
+        // Who to run. A managed Pi is `node <payload>/…/cli.js`, so this is an
+        // argv PREFIX and `buildLaunchCommand` appends `--provider gh-router`
+        // and the model/extra args after it. Undefined (the `--no-update-check`
+        // path) keeps the historic `pi`-on-PATH behaviour.
+        execArgs:
+          piCommand && piCommand.command !== ""
+            ? [piCommand.command, ...piCommand.args]
+            : undefined,
         envVars: {
           ...getPiLaunchEnvVars(mirror),
           GH_ROUTER_HOOK_MCP_URL: serverUrl,

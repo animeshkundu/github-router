@@ -85,6 +85,36 @@ describe("install-time dependency safety", () => {
     expect(Number(m![2])).toBeGreaterThanOrEqual(22)
   })
 
+  test("the heavy payloads are optional peers, and this repo dev-depends on them", () => {
+    // Why the shape, not just "they are somewhere": the install-size goal is
+    // 586 MB → 66 MB for every CONSUMER, and the only lever is moving them out
+    // of `dependencies`. Two facts were measured, and both are load-bearing:
+    //
+    //   1. an OPTIONAL PEER is installed for nobody — npm and bun, root and
+    //      non-root — so `peerDependenciesMeta.optional` alone would mean "no
+    //      consumer ever has reranking or structural search";
+    //   2. a devDependency on an optional peer DOES resolve under both npm and
+    //      bun, which is what keeps this checkout (and CI) fully featured.
+    //
+    // Consumers get the payload on demand from `<APP_DIR>/optional` instead —
+    // `src/lib/managed-install/optional.ts`.
+    const pkg = readJson("package.json") as {
+      dependencies?: Record<string, string>
+      devDependencies?: Record<string, string>
+      peerDependencies?: Record<string, string>
+      peerDependenciesMeta?: Record<string, { optional?: boolean }>
+    }
+    for (const name of ["@huggingface/transformers", "tree-sitter-wasms"]) {
+      expect(pkg.dependencies?.[name]).toBeUndefined()
+      expect(pkg.peerDependencies?.[name]).toBeDefined()
+      expect(pkg.peerDependenciesMeta?.[name]?.optional).toBe(true)
+      // Same range in both places: a devDependency that drifted from the peer
+      // range would let CI pass on a version consumers are told they need.
+      expect(pkg.devDependencies?.[name]).toBe(pkg.peerDependencies?.[name])
+    }
+    expect(pkg.peerDependencies?.["@huggingface/transformers"]).toMatch(/^\^4\./)
+  })
+
   test("no CONSUMER dependency tree can reach onnxruntime-node@1.21", () => {
     // The 2026-11-20 lesson. The first fix for the ORT-1.21 404 used two
     // ROOT-ONLY mechanisms: an `overrides` entry and Bun's
@@ -103,7 +133,11 @@ describe("install-time dependency safety", () => {
     }
     expect(pkg.dependencies?.["flashrank-js"]).toBeUndefined()
     expect(pkg.optionalDependencies?.["flashrank-js"]).toBeUndefined()
-    expect(pkg.dependencies?.["@huggingface/transformers"]).toMatch(/^\^4\./)
+    // `@huggingface/transformers` moved to optional peer + devDependency (the
+    // payload diet); the invariant that matters here is that it is NOT a
+    // regular dependency, because a regular dependency is what a consumer
+    // installs unconditionally. Asserted in the diet test above.
+    expect(pkg.dependencies?.["@huggingface/transformers"]).toBeUndefined()
     // The override is deliberately GONE: with flashrank-js removed nothing
     // else pulls transformers, so a root-only pin would be dead config that
     // reads like a consumer guarantee.

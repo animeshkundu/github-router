@@ -7,7 +7,20 @@ import consola from "consola"
 
 import { sanitizeCloudAgentHooksInSettingsFile } from "./cloudagent-hook-settings"
 
+/**
+ * The app-data root.
+ *
+ * `GH_ROUTER_APP_DIR` is honoured here as well as in
+ * `managed-install/paths.ts` — the two resolve the same directory and MUST agree,
+ * or a relocated install would put the managed payload, pointer, lock and shims
+ * under the override while the token, hooks and toolbelt stayed in `~/.local`:
+ * an `update` that reports success and a CLI that cannot find its own credentials.
+ * Only an absolute path is accepted; a relative or empty value falls back to the
+ * default rather than scattering state relative to whatever cwd a hook ran in.
+ */
 function appDir(): string {
+  const override = process.env.GH_ROUTER_APP_DIR?.trim()
+  if (override && path.isAbsolute(override)) return override
   return path.join(os.homedir(), ".local", "share", "github-router")
 }
 

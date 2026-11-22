@@ -4,6 +4,7 @@ import path from "node:path"
 
 import consola from "consola"
 
+import { RENAME_RETRY_DELAYS_MS, renameWithRetry as renameTempWithRetry } from "./atomic-file"
 import { LOCAL_CONSULT_REDACTION_LINE } from "./local-consult-redaction"
 import { MAX_PARALLELISM_RULE } from "./max-profile-prompts"
 import { isUnderClaudeConfigMirror, PATHS } from "./paths"
@@ -1119,11 +1120,10 @@ const MAX_CLAUDE_MD_BYTES = 1 * 1024 * 1024 // 1 MiB
  * Bounded retry budget for the temp → rename step on Windows where
  * `fs.rename` can transiently fail with EBUSY / EPERM / EACCES when
  * CLAUDE.md is open in an editor, scanned by AV, or indexed by the
- * search service. Mirrors the verify-on-rename-fail pattern at
- * `paths.ts:795-818`. POSIX renames almost never fail this way; the
- * cost on Linux/macOS is one extra `lstat` in the unhappy path.
+ * search service. The retry policy now lives in `./atomic-file` so this and the
+ * managed-install pointer share one schedule; re-exported below because
+ * `injected-skills/write.ts` and `code-search` reach it through this module.
  */
-const RENAME_RETRY_DELAYS_MS = [50, 200, 500] as const
 
 /**
  * Grep-able error-code prefix. Every warn-and-continue path here
@@ -1353,36 +1353,17 @@ export async function renameWithRetry(
   desiredContent: string,
 ): Promise<boolean> {
   let lastErr: unknown
-  for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt++) {
-    try {
-      await fs.rename(tempPath, target)
-      return true
-    } catch (err) {
+  const renamed = await renameTempWithRetry(tempPath, target, {
+    acceptedContent: desiredContent,
+    onExhausted: (err) => {
       lastErr = err
-      // Don't sleep after the final attempt.
-      if (attempt < RENAME_RETRY_DELAYS_MS.length) {
-        await new Promise<void>((resolve) =>
-          setTimeout(resolve, RENAME_RETRY_DELAYS_MS[attempt]),
-        )
-      }
-    }
-  }
-
-  // All retries exhausted. Verify-on-fail: did a racer land the same
-  // bytes we wanted? (Matches the paths.ts:795-818 pattern.)
-  try {
-    const observed = await fs.readFile(target, "utf8")
-    if (observed === desiredContent) {
-      await fs.unlink(tempPath).catch(() => {})
-      consola.debug(
-        `${ERROR_CODE}: rename failed but target already holds expected content (racer-won-race): ${
-          lastErr instanceof Error ? lastErr.message : String(lastErr)
-        }`,
-      )
-      return true
-    }
-  } catch {
-    // Fall through to final cleanup + caller-side warn.
+    },
+  })
+  if (renamed) {
+    // A racer may have won with identical bytes, in which case our temp is
+    // still on disk. Cheap and idempotent either way.
+    await fs.unlink(tempPath).catch(() => {})
+    return true
   }
 
   // Fail-closed: no copyFile fallback (would follow symlinks/hardlinks

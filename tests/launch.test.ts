@@ -386,6 +386,74 @@ describe("buildLaunchCommand", () => {
   })
 })
 
+describe("execArgs — a CLI that is not one token (managed Pi)", () => {
+  // A managed Pi is spawned as `node <payload>/dist/bundle/cli.js`, so the
+  // assumption baked into every branch above ("cmd[0] is the CLI") stops
+  // holding. `execArgs` is the prefix that replaces that leading command; the
+  // kind's own flags still come from the launcher, because the resolver chooses
+  // WHICH executable runs and never what the launcher asks it to do.
+  const payload = "/home/u/.local/share/github-router/m/pi/1.6.0/node_modules/pi/dist/bundle/cli.js"
+
+  test("pi: the prefix replaces `pi` and the provider flags still follow", () => {
+    const target: LaunchTarget = {
+      kind: "pi",
+      model: "gpt-5",
+      envVars: {},
+      extraArgs: ["--resume"],
+      execArgs: [process.execPath, payload],
+    }
+    const { cmd } = buildLaunchCommand(target)
+    // Nothing bare is left for the anti-shadow resolver to rewrite.
+    expect(cmd.slice(0, 2)).toEqual([process.execPath, payload])
+    expect(cmd).toContain("--provider")
+    expect(cmd[cmd.indexOf("--provider") + 1]).toBe("gh-router")
+    expect(cmd.slice(cmd.indexOf("--model"))).toEqual(["--model", "gpt-5", "--resume"])
+    // A path with spaces must survive verbatim: buildExecInvocation, not a
+    // string join, is what turns this into a spawn.
+    expect(cmd.filter((part) => part === payload)).toHaveLength(1)
+  })
+
+  test("pi: the node runtime is never shell-wrapped, even on Windows", () => {
+    // `node.exe` is a real executable: routing it through cmd.exe would make the
+    // proxy's tree-kill target a cmd.exe wrapper and never the CLI.
+    expect(windowsLaunchNeedsShell(process.execPath)).toBe(false)
+  })
+
+  test("an empty/absent execArgs keeps the old argv byte-identical", () => {
+    const withoutPrefix: LaunchTarget = { kind: "pi", envVars: {}, extraArgs: ["-x"] }
+    const withEmpty: LaunchTarget = { kind: "pi", envVars: {}, extraArgs: ["-x"], execArgs: [] }
+    expect(buildLaunchCommand(withEmpty).cmd).toEqual(buildLaunchCommand(withoutPrefix).cmd)
+    expect(baseCmd(buildLaunchCommand(withoutPrefix).cmd)).toBe("pi")
+  })
+
+  test("claude-code/codex: the prefix REPLACES the name instead of stacking on it", () => {
+    // A prefix plus the bare name would leave a second executable token in the
+    // argv, which `resolveExecutable` may rewrite to a DIFFERENT binary on PATH.
+    const claude: LaunchTarget = {
+      kind: "claude-code",
+      envVars: {},
+      extraArgs: [],
+      execArgs: ["/opt/managed/claude"],
+    }
+    expect(buildLaunchCommand(claude).cmd).toEqual([
+      "/opt/managed/claude",
+      "--dangerously-skip-permissions",
+    ])
+
+    const codex: LaunchTarget = {
+      kind: "codex",
+      envVars: {},
+      extraArgs: ["-x"],
+      execArgs: ["/opt/managed/codex"],
+    }
+    const cmd = buildLaunchCommand(codex).cmd
+    expect(cmd[0]).toBe("/opt/managed/codex")
+    expect(cmd).not.toContain("codex")
+    expect(cmd).toContain("workspace-write")
+    expect(cmd.at(-1)).toBe("-x")
+  })
+})
+
 describe("windowsLaunchNeedsShell — drop the cmd.exe intermediary", () => {
   test("batch shims (.cmd/.bat) still need cmd.exe", () => {
     expect(windowsLaunchNeedsShell("C:/path/claude.cmd")).toBe(true)

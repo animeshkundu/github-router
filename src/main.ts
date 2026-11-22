@@ -3,7 +3,22 @@
 import { defineCommand, runMain, showUsage } from "citty"
 import consola from "consola"
 
+import { setManagedDiagnosticReporter } from "./lib/managed-install/diagnostics"
 import { getPackageVersion } from "./lib/version"
+
+/**
+ * Point the managed-install layer's diagnostic sink at consola.
+ *
+ * That layer is also imported by `dist/bin.js`, a separate bundle, so it cannot
+ * import consola itself without ending up with a second, differently-configured
+ * instance writing to a different place. The bootstrap leaves the sink empty (its
+ * messages are deliberately silent); once the real CLI is running, they go here.
+ */
+setManagedDiagnosticReporter((level, message) => {
+  if (level === "warn") consola.warn(message)
+  else if (level === "info") consola.info(message)
+  else consola.debug(message)
+})
 
 process.on("unhandledRejection", (error) => {
   consola.error("Unhandled rejection:", error)
@@ -89,6 +104,7 @@ const main = defineCommand({
     "check-usage": () => import("./check-usage").then((m) => m.checkUsage),
     index: () => import("./index-cmd").then((m) => m.indexCmd),
     debug: () => import("./debug").then((m) => m.debug),
+    update: () => import("./update").then((m) => m.update),
     "internal-stop-hook": () =>
       import("./internal-stop-hook").then((m) => m.internalStopHook),
     "internal-prompt-submit": () =>

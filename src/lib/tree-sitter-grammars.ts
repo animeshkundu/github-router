@@ -45,6 +45,7 @@ import {
   TREE_SITTER_RUNTIME_FILE,
 } from "~/lib/tree-sitter-assets/files"
 import { stableTreeSitterAssetsComplete } from "~/lib/tree-sitter-assets/provision"
+import { installedOptional, scheduleOptionalInstall } from "~/lib/managed-install/optional"
 
 // ============================================================
 // Constants
@@ -296,10 +297,22 @@ let _grammarBundle: GrammarBundle | undefined
  */
 export function resolveGrammarRoot(): string | null {
   if (stableTreeSitterAssetsComplete()) return PATHS.TREE_SITTER_ASSETS_DIR
+  // `tree-sitter-wasms` is an optional PEER (49 MB of prebuilt grammars), so in a
+  // consumer install it is usually absent from the package tree and present
+  // once per machine under APP_DIR (see `managed-install/optional.ts`). The
+  // shared copy wins over the package tree for the same reason the stable
+  // assets do: it survives the npx/bunx temp tree being reaped.
+  const shared = installedOptional("tree-sitter-wasms")
+  if (shared) return path.join(shared, "out")
   try {
     const pkgPath = require.resolve("tree-sitter-wasms/package.json")
     return path.join(path.dirname(pkgPath), "out")
   } catch {
+    // Nothing anywhere: ask for the shared copy once per process (detached,
+    // unref'd) so the next launch has it, and fall back to the regex heuristic
+    // for now. Never fatal, never blocking — this call is on the structural
+    // search path and an agent hits it every turn.
+    scheduleOptionalInstall("tree-sitter-wasms", process.argv[1])
     return null
   }
 }

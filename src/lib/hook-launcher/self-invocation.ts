@@ -15,12 +15,18 @@
  * from that single answer.
  */
 
-import { readFileSync, realpathSync } from "node:fs"
-import os from "node:os"
+import { readFileSync } from "node:fs"
 import path from "node:path"
 
 import { PACKAGE_ROOT_FLAG } from "../package-root"
 import { PATHS } from "../paths"
+// Re-exported so existing importers (and the tests that pin its
+// resolved-vs-unresolved behaviour) keep working; the implementation moved to
+// `../volatile-root` so the bootstrap bundle can use it without this module's
+// dependency graph.
+import { isUnderVolatileRoot } from "../volatile-root"
+
+export { isUnderVolatileRoot }
 import { provisionHookLauncher } from "./provision"
 
 /** The binary + script + package root a persisted command should name. */
@@ -175,34 +181,3 @@ function currentPackageRoot(): string | undefined {
   return undefined
 }
 
-/**
- * Whether a path sits under a directory the OS is entitled to clean out from
- * under a running session: the per-user temp dir on every platform, which is
- * where `bunx` (unlike `npx`, which uses a cache under $HOME) installs.
- *
- * Both sides are compared in resolved AND unresolved form. macOS reports
- * `$TMPDIR` as `/var/folders/…` while a process sees `/private/var/folders/…`,
- * so a single-form prefix test silently never matches; and `realpathSync`
- * fails on a path that does not exist, which would otherwise make the answer
- * depend on whether the file happens to be there.
- */
-export function isUnderVolatileRoot(target: string): boolean {
-  try {
-    const prefixes = new Set<string>()
-    for (const root of [os.tmpdir(), realpathIfPossible(os.tmpdir())]) {
-      prefixes.add(root.endsWith(path.sep) ? root : root + path.sep)
-    }
-    const targets = [target, realpathIfPossible(target)]
-    return targets.some((t) => [...prefixes].some((p) => t.startsWith(p)))
-  } catch {
-    return false
-  }
-}
-
-function realpathIfPossible(p: string): string {
-  try {
-    return realpathSync(p)
-  } catch {
-    return p
-  }
-}

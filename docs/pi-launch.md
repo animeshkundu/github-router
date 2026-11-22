@@ -466,6 +466,36 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   (offline/CI); `--no-auto-update` disables the background refresh
   (the floor is still enforced).   Throttle state lives in
   `~/.local/share/github-router/last-pi-update-check`.
+
+  **Which Pi runs** (`resolvePiCommand`, `src/lib/managed-install/pi-command.ts`).
+  Four sources, strict precedence, and the reason the order is this one:
+
+  1. `--pi-path <cmd>`. An explicit user choice. Never floor-checked — the user
+     asked for that exact binary, and a floor check would make the flag useless
+     for testing a candidate build. Their problem to debug, not ours to override.
+  2. `pi` on PATH, **not** the router's own shim (`isOurShim` marker check), at
+     or above the floor. This is the `npm i -g pi` / brew / vendor user: they own
+     that install, and it is already the binary they run by hand.
+  3. The managed Pi pointer, at or above the floor.
+  4. Managed install (`m/pi/<version>/`), joined fail-closed before launch.
+
+  A PATH `pi` **below** the floor neither runs nor aborts: it falls through to
+  3/4 and the launch logs one line naming both versions and the floor, because
+  silently running the managed copy while the user stares at their own
+  `pi --version` is worse than either alone. `--no-update-check` turns 3/4 into
+  "no install at all": with nothing runnable, the launch fails closed and prints
+  the two commands that fix it.
+
+  The managed payload is spawned as `node <payload>/…/cli.js`, with the target
+  read from the installed package's own `bin` map (`piBinEntry`) because Pi has
+  already moved it once. `LaunchTarget.execArgs` carries that prefix and
+  `launch.buildExecInvocation` turns it into a spawn, so a spaced install path
+  works and Windows never routes `node.exe` through `cmd.exe`.
+
+  `github-router update --pi` (or a bare `github-router update`) refreshes the
+  managed Pi immediately. The background refresh only ever refreshes an
+  **already live** payload, so a machine that never asked for a managed Pi never
+  accumulates one.
   Boot is quiet by design: with stored auth, setup chatter is held
   back and one three-line card (version · account · lead/models/surface)
   replaces it; `--verbose`/`--show-token` restore full logs, and
@@ -988,9 +1018,20 @@ configuration and falls through to the `.npmrc` cascade, which is exactly
 where npm's own error message says the setting belongs - so an operator
 who allowlists a package for install scripts in `.npmrc` keeps that
 allowlist, and their shell export still applies to their own npm use. The
-router's other npm invocations are `npm install -g` (Pi's own install and
-update), which the rule exempts because global installs have no project
-context to protect.
+router's other npm invocations are the **managed** installs
+(`~/.local/share/github-router/m/<kind>/<version>/`, the router payload and the
+managed Pi), which have no `.npmrc` of their own and rely on the same
+`npm_config_allow_scripts=""` for exactly the reason above - measured on
+npm 11.20.0: `npm_config_allow_scripts=is-number npm install --prefix /tmp/x
+--ignore-scripts` exits with `npm error code EALLOWSCRIPTS`, while the same
+command with the variable emptied installs. `--ignore-scripts` does **not**
+neutralize it; only an empty value does. `buildNpmEnv`
+(`src/lib/managed-install/npm-env.ts`) always emits the empty string, and
+`tests/isolated/managed-install.test.ts` asserts a real install succeeds under a
+hostile `npm_config_*` environment. `npm install -g` (a user's own Pi install)
+is not the router's any more: `updatePi` was removed, because `-g` mutates a
+user-owned tree and cannot update a `-g` install that is currently in use on
+Windows.
 
 ## npm registry and publish-age, for the Pi child only
 

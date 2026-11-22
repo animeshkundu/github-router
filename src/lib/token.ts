@@ -1,7 +1,7 @@
 import consola from "consola"
-import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 
+import { readFileWithRetry, writeFileAtomic } from "~/lib/atomic-file"
 import { PATHS } from "~/lib/paths"
 import {
   CopilotTokenExchangeError,
@@ -24,111 +24,38 @@ import { state } from "./state"
 const readGithubToken = () => fs.readFile(PATHS.GITHUB_TOKEN_PATH, "utf8")
 
 /**
- * Transient filesystem errors from a read that raced the temp+rename write.
- *
- * On Windows a read landing in that window fails with one of these even
- * though a perfectly good file exists microseconds later. Treating one as
- * fatal at startup would cost a launch for no reason.
- */
-const TRANSIENT_READ_CODES = new Set(["EPERM", "EBUSY", "EACCES", "ENOENT"])
-
-function isTransientReadError(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException | undefined)?.code
-  return typeof code === "string" && TRANSIENT_READ_CODES.has(code)
-}
-
-/**
  * Read the credential file, retrying briefly through a racing rename.
  *
- * Same delays and the same reasoning as {@link RENAME_RETRY_DELAYS_MS} on the
- * write side: the contending handle closes almost immediately, so a short
- * bounded retry converts a spurious launch failure into a non-event. A
- * persistent failure still propagates — the caller must not believe a
- * credential was read when it was not.
+ * A read landing in the window between `writeTokenFileAtomic`'s `rename` and the
+ * OS finishing the directory update fails with `ENOENT`/`EBUSY`/`EPERM` even
+ * though a perfectly good file exists microseconds later. Treating one as fatal
+ * at startup would cost a launch for no reason; a persistent failure still
+ * propagates, because the caller must not believe a credential was read when it
+ * was not. The retry policy now lives in `~/lib/atomic-file` so the managed
+ * installer shares it.
  */
 async function readGithubTokenWithRetry(): Promise<string> {
-  let lastErr: unknown
-  for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt++) {
-    try {
-      return await readGithubToken()
-    } catch (err) {
-      lastErr = err
-      if (!isTransientReadError(err)) throw err
-      if (attempt < RENAME_RETRY_DELAYS_MS.length) {
-        await new Promise<void>((resolve) =>
-          setTimeout(resolve, RENAME_RETRY_DELAYS_MS[attempt]),
-        )
-      }
-    }
-  }
-  throw lastErr
+  return readFileWithRetry(PATHS.GITHUB_TOKEN_PATH)
 }
 
 /**
- * Backoff for a transient Windows rename failure. On Windows `fs.rename` over
- * an existing destination transiently fails with EPERM / EBUSY / EACCES when
- * anything else holds the target open for a moment (antivirus, the search
- * indexer, a backup agent). Nothing is wrong and the handle closes microseconds
- * later — but without a retry, a scan landing on the wrong millisecond throws
- * out of a credential write and costs the user a re-auth. Same delays as
- * `renameWithRetry` in `~/lib/claude-md-injection`, which documents the
- * underlying behavior at length.
- */
-const RENAME_RETRY_DELAYS_MS = [50, 200, 500] as const
-
-/**
- * Replace a credential file atomically: temp + rename, with bounded retry.
+ * Replace a credential file atomically: temp + fsync + rename, with bounded
+ * retry through a transient Windows lock.
  *
- * A plain `fs.writeFile` truncates the destination before it writes, so a
- * crash, a full disk, or a kill mid-write leaves a truncated token on disk and
- * forces the user through a re-auth. `rename` within the same directory is
- * atomic on both NTFS and POSIX, so a reader sees either the old token or the
- * new one, never a partial.
- *
- * The temp name uses `randomBytes`, not `Math.random()`: this names a file that
- * briefly holds a credential, and a predictable name in a shared directory
- * invites a pre-creation race. Combined with `flag: "wx"` (fail if it exists)
- * the write refuses to follow anything an attacker pre-placed, rather than
- * silently writing the token through a planted symlink.
- *
- * Permissions: the temp file is created 0o600, and `rename` carries that mode
- * with it on POSIX — so the destination's mode is preserved, not weakened.
- * (On Windows `chmod` is a no-op anyway; see `chmodIfPossible` in `~/lib/paths`.
- * Both token files live under `CLAUDE_RUNTIME_DIR`, which is chmod'd 0o700, so
- * directory ACLs are what actually protect them there.)
+ * Behaviour is unchanged since this was moved to `~/lib/atomic-file`: a plain
+ * `fs.writeFile` truncates the destination before writing, so a crash, full
+ * disk or kill mid-write left a truncated token and forced a re-auth. The temp
+ * file is created with `flag: "wx"` in the destination's own directory, so a
+ * pre-placed symlink at a predictable name gets `EEXIST` rather than a write
+ * through the attacker's link, and the rename stays same-directory and atomic.
+ * Mode 0o600 rides the rename on POSIX; on Windows it is a no-op and the
+ * enclosing `CLAUDE_RUNTIME_DIR` (0o700) ACLs are what protect the file.
  */
 export async function writeTokenFileAtomic(
   filePath: string,
   token: string,
 ): Promise<void> {
-  const tmp = `${filePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`
-  try {
-    await fs.writeFile(tmp, token, { mode: 0o600, flag: "wx" })
-
-    let lastErr: unknown
-    let renamed = false
-    for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt++) {
-      try {
-        await fs.rename(tmp, filePath)
-        renamed = true
-        break
-      } catch (err) {
-        lastErr = err
-        // Don't sleep after the final attempt.
-        if (attempt < RENAME_RETRY_DELAYS_MS.length) {
-          await new Promise<void>((resolve) =>
-            setTimeout(resolve, RENAME_RETRY_DELAYS_MS[attempt]),
-          )
-        }
-      }
-    }
-    // A persistent failure (permissions, full disk) still throws: the caller
-    // must not believe a credential was stored when it was not.
-    if (!renamed) throw lastErr
-  } catch (err) {
-    await fs.unlink(tmp).catch(() => {})
-    throw err
-  }
+  await writeFileAtomic(filePath, token, { mode: 0o600 })
 }
 
 const writeGithubToken = (token: string) =>

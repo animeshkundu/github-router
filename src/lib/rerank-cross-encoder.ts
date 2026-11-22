@@ -36,6 +36,15 @@
  * inside its lazily-started load chain, so a proxy boot never pays for ONNX.
  */
 
+import path from "node:path"
+import { pathToFileURL } from "node:url"
+
+import {
+  installedOptional,
+  optionalInstallDisabled,
+  scheduleOptionalInstall,
+} from "~/lib/managed-install/optional"
+
 export type RerankModel = "tiny" | "mini"
 
 /**
@@ -175,6 +184,67 @@ export function makeCrossEncoder(parts: {
 }
 
 /**
+ * Load transformers.js, preferring the shared `<APP_DIR>/optional` copy.
+ *
+ * The package is an optional PEER (547 MB with its ONNX runtime), so it is
+ * normally absent from the installed tree and present once per machine under
+ * APP_DIR. Resolution order, and why:
+ *
+ * 1. `optional/` copy — the payload the on-demand installer published. It is
+ *    versioned and shared across github-router versions, so a version bump does
+ *    not re-download it.
+ * 2. The package tree's own `node_modules` — the developer checkout, and the
+ *    `npm i -g` case where the peer resolved.
+ * 3. Bare specifier — last resort, so a hoisted layout still works.
+ *
+ * A failure to load is NOT an error here: `rerank.ts` treats a rejection from
+ * this function as "reranking unavailable" and keeps BM25F order, which is the
+ * documented degradation. What must not happen is a hang or a crash on the
+ * import, so each candidate is tried in turn.
+ */
+async function loadTransformers(): Promise<{
+  AutoModelForSequenceClassification: {
+    from_pretrained: (id: string, options?: Record<string, unknown>) => Promise<unknown>
+  }
+  AutoTokenizer: { from_pretrained: (id: string) => Promise<unknown> }
+}> {
+  type TransformersModule = Awaited<typeof import("@huggingface/transformers")>
+  const load = async (specifier: string): Promise<TransformersModule | null> => {
+    try {
+      return (await import(/* @vite-ignore */ specifier)) as TransformersModule
+    } catch {
+      return null
+    }
+  }
+
+  const shared = installedOptional("@huggingface/transformers")
+  if (shared) {
+    const entry = pathToFileURL(path.join(shared, "dist/transformers.node.mjs")).href
+    const loaded = await load(entry)
+    if (loaded) return loaded as unknown as Awaited<ReturnType<typeof loadTransformers>>
+  }
+
+  const local = await load("@huggingface/transformers")
+  if (local) return local as unknown as Awaited<ReturnType<typeof loadTransformers>>
+
+  // Nothing installed: ask for it once, in the background, and fail the way an
+  // absent payload has always failed. This is the "on demand" half of the
+  // optional payload — `github-router update` installs it upfront, and a machine
+  // that never asked for it gets it the first time a search actually wants it.
+  // The spawn is unref'd and once-per-process, so this costs one process on one
+  // turn and BM25F order on that same turn.
+  scheduleOptionalInstall("@huggingface/transformers", process.argv[1])
+  if (optionalInstallDisabled()) {
+    throw new Error(
+      "@huggingface/transformers is not installed and GH_ROUTER_NO_OPTIONAL_INSTALL is set; reranking falls back to BM25F",
+    )
+  }
+  throw new Error(
+    "@huggingface/transformers is not installed; reranking falls back to BM25F (run `github-router update` to install it)",
+  )
+}
+
+/**
  * Download (or load from the transformers cache) one model tier.
  *
  * Throws on a network/cache failure — callers treat that as "reranking
@@ -183,9 +253,8 @@ export function makeCrossEncoder(parts: {
  */
 export async function createCrossEncoder(model: RerankModel): Promise<CrossEncoder> {
   const info = RERANK_MODELS[model]
-  const { AutoModelForSequenceClassification, AutoTokenizer } = await import(
-    "@huggingface/transformers"
-  )
+  const transformers = await loadTransformers()
+  const { AutoModelForSequenceClassification, AutoTokenizer } = transformers
   // The dtype rides only on the model: it selects which ONNX file of the repo
   // is fetched. transformers.js ignores it for tokenizers, and its
   // `PretrainedTokenizerOptions` type rejects the key outright, so passing a
