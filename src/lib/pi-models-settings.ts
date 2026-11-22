@@ -1911,13 +1911,32 @@ export function buildPiLaunchCard(opts: PiLaunchCardOpts): string {
 }
 
 /**
+ * Registered with Pi inside the digest, only when the memory bridge actually
+ * wrote a block into the mirror's `AGENTS.md`.
+ *
+ * Why a line at all: the block is a permanent per-turn prompt cost, and the
+ * measured failure mode of agent-authored project instructions is restatement —
+ * a study of LLM-generated AGENTS.md files found ~23% higher cost with no
+ * success gain, because the model paraphrases the file back at the user. One
+ * sentence stating the contract (follow it, cite it, do not repeat it) is
+ * cheaper than any restructuring and is the whole behavioural delta we want
+ * from "having read AGENTS.md".
+ *
+ * Emitted only when `bridge` is true: naming AGENTS.md on a launch whose bridge
+ * is off (or whose `-nc` disabled context files) would point the model at
+ * guidance this launch does not have.
+ */
+export const PI_CONTEXT_CONTRACT_LINE =
+  "- Your project instructions below come from `AGENTS.md` in this agent dir. Follow them and cite the rule when it changes a decision; do not restate them back to the user."
+
+/**
  * Short operating digest appended to APPEND_SYSTEM.md (prompt-cache-stable).
  * Mode identity — always injected. Peer consult sentences drop out under
  * `peers: false` so the digest never names tools that don't exist.
  */
 export function buildPiAppendSystem(
   profileId: PiProfileId,
-  opts: { peers?: boolean; codeSearch?: boolean } = {},
+  opts: { peers?: boolean; codeSearch?: boolean; bridge?: boolean } = {},
 ): string {
   const peers = opts.peers !== false;
   const advisor = peers ? piAdvisorModel(profileId) : undefined;
@@ -1927,6 +1946,7 @@ export function buildPiAppendSystem(
     `- Lead owns planning directly; there is no Plan subagent.`,
     PI_TOOL_PREFERENCE_LINE,
     ...(opts.codeSearch === true ? [PI_SEARCH_ORDER_LINE] : []),
+    ...(opts.bridge === true ? [PI_CONTEXT_CONTRACT_LINE] : []),
   ];
   if (peers) {
     const oracle = piOracleEnabled(profileId)

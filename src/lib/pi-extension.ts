@@ -278,7 +278,16 @@ export function buildPiStatuslineFooterSection(): Array<string> {
 }
 
 export interface PiBridgeExtensionInput {
-  stats: { staticFiles: number; scopedRules: number; imports: number; skipped: number }
+  stats: {
+    staticFiles: number
+    scopedRules: number
+    imports: number
+    skipped: number
+    /** The block hit the byte budget; surfaced so a cut is never silent. */
+    truncated?: boolean
+    /** Bytes of the emitted fenced block. */
+    bytes?: number
+  }
   scopedRules: Array<{ file: string; body: string; globs: Array<string>; source: string }>
 }
 
@@ -539,8 +548,8 @@ export function buildPiMemoryBridgeSection(bridge: PiBridgeExtensionInput): Arra
     `        description: "Show bridged memory inventory and auto-memory locations (on-demand; nothing auto-injected)",`,
     `        handler: async (_args, ctx) => {`,
     `          try {`,
-    `            const s = (BRIDGE && BRIDGE.stats) || { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0 };`,
-    `            const lines = ["Memory bridge (gh-router)", " Static files: " + s.staticFiles, " Scoped rules (lazy): " + s.scopedRules, " Imports: " + s.imports, " Skipped: " + s.skipped, " Auto-memory: ~/.claude/projects/<slug>/memory/MEMORY.md (on-demand read only)", " Pi memory: ~/.pi/agent/memory/ (your own pi-memory install, snapshotted)"];`,
+    `            const s = (BRIDGE && BRIDGE.stats) || { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0, truncated: false, bytes: 0 };`,
+    `            const lines = ["Memory bridge (gh-router)", " Static files: " + s.staticFiles, " Scoped rules (lazy): " + s.scopedRules, " Imports: " + s.imports, " Skipped: " + s.skipped, " Mirror AGENTS.md block: " + (s.bytes || 0) + " bytes" + (s.truncated ? " (TRUNCATED to the budget)" : ""), " Auto-memory: ~/.claude/projects/<slug>/memory/MEMORY.md (on-demand read only)", " Pi memory: ~/.pi/agent/memory/ (your own pi-memory install, snapshotted)"];`,
     `            try {`,
     `              const files = (BRIDGE.scopedRules || []).map((r) => r.file);`,
     `              if (files.length > 0) lines.push(" Scoped files:", ...files.slice(0, 20).map((f) => "  - " + f));`,
@@ -556,8 +565,8 @@ export function buildPiMemoryBridgeSection(bridge: PiBridgeExtensionInput): Arra
     `        description: "Show what the gh-router memory bridge loaded",`,
     `        handler: async (_args, ctx) => {`,
     `          try {`,
-    `            const s = (BRIDGE && BRIDGE.stats) || { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0 };`,
-    `            ctx.ui.notify("Bridge context: " + s.staticFiles + " static, " + s.scopedRules + " scoped (attached " + attached.size + "), " + s.imports + " imports, " + s.skipped + " skipped. Native AGENTS.md/CLAUDE.md still load via Pi.", "info");`,
+    `            const s = (BRIDGE && BRIDGE.stats) || { staticFiles: 0, scopedRules: 0, imports: 0, skipped: 0, truncated: false, bytes: 0 };`,
+    `            ctx.ui.notify("Bridge context: " + s.staticFiles + " static, " + s.scopedRules + " scoped (attached " + attached.size + "), " + s.imports + " imports, " + s.skipped + " skipped, " + (s.bytes || 0) + " bytes in the mirror AGENTS.md" + (s.truncated ? " (TRUNCATED)" : "") + ". Native AGENTS.md/CLAUDE.md still load via Pi.", "info");`,
     `          } catch {}`,
     `        },`,
     `      });`,

@@ -65,6 +65,7 @@ import {
   type PiProfileId,
 } from "./lib/pi-models-settings"
 import { launchChild } from "./lib/launch"
+import { bridgeShadowWarnings, inspectMirrorPrecedence, planSkillWrites } from "./lib/pi-mirror-guards"
 import { registerLaunch, unregisterLaunch } from "./lib/launch-registry"
 import { PATHS } from "./lib/paths"
 import { state } from "./lib/state"
@@ -492,6 +493,21 @@ export const pi = defineCommand({
 
     enableFileLogging()
 
+    // Two Pi precedence rules silently defeat this launch's files, and both are
+    // invisible from the outside, so report them once each and never touch the
+    // user's files (see `inspectMirrorPrecedence`).
+    const precedence = await inspectMirrorPrecedence(mirror, process.cwd())
+    if (precedence.systemMd) {
+      consola.warn(
+        `Pi: ${path.join(mirror, "SYSTEM.md")} REPLACES Pi's default system prompt. gh-router's mode guidance is still appended to it, but any harness rules your SYSTEM.md leaves out are not restored. Remove it (or merge it into APPEND_SYSTEM.md) for the stock prompt.`,
+      )
+    }
+    if (precedence.projectAppendSystem) {
+      consola.warn(
+        `Pi: ${precedence.projectAppendSystem} exists. If this project is trusted, Pi loads it INSTEAD of the gh-router mode digest (the mirror's APPEND_SYSTEM.md). Keep one or the other.`,
+      )
+    }
+
     // The exact `packages[]` slice for this launch (flag-dependent), used
     // to key the persistent npm-package cache: seed before Pi boots, save
     // on shutdown before the mirror is removed.
@@ -631,27 +647,43 @@ export const pi = defineCommand({
         (args as Record<string, unknown>)["memory-bridge"] === false
         || process.env.GH_ROUTER_PI_BRIDGE === "0"
         || process.env.GH_ROUTER_DISABLE_PI_BRIDGE === "1"
-      let bridgeStats: { staticFiles: number; scopedRules: number; imports: number; skipped: number } | undefined
+      let bridgeStats: { staticFiles: number; scopedRules: number; imports: number; skipped: number; truncated: boolean; bytes: number } | undefined
       let bridgeScoped: Array<{ file: string; body: string; globs: Array<string>; source: string }> = []
+      // The rendered block, held for the AGENTS.md write further down (the
+      // `.gh-router-bridge.json` report needs `shadowedSkills`, which is only
+      // known after the skill plan runs).
+      let bridgeSection = ""
+      let bridgeCollected: import("./lib/pi-memory-bridge").PiBridgeCollected | undefined
+      // Whether the bridge contributes prompt text this launch. Drives the
+      // digest's "follow it, do not restate it" line: naming AGENTS.md when no
+      // bridged block exists would point the model at nothing. Deliberately
+      // keyed on the RENDERED bytes, not on collection succeeding — a repo with
+      // no Copilot/Claude files collects an empty set and writes no block.
+      let bridgeActive = false
       if (!bridgeDisabled) {
         const passthrough = collectPiPassthroughArgs(rawArgs, piArgs)
         const noContext = passthrough.includes("--no-context-files") || passthrough.includes("-nc")
         if (!noContext) {
           try {
-            const { collectBridgeInputs } = await import("./lib/pi-memory-bridge")
+            const { PI_BRIDGE_STATIC_BUDGET_BYTES, buildMirrorBridgeSection, collectBridgeInputs } = await import(
+              "./lib/pi-memory-bridge"
+            )
             const collected = await collectBridgeInputs(process.cwd())
-            bridgeStats = {
-              staticFiles:
-                collected.copilotInstructions.length
-                + collected.unscopedRules.length
-                + collected.userGlobal.length,
-              scopedRules: collected.scopedRules.length,
-              imports: collected.imports.length,
-              skipped: collected.skipped.length,
-            }
+            const rendered = buildMirrorBridgeSection(collected, { repoRoot: process.cwd() })
+            bridgeCollected = collected
+            bridgeSection = rendered.section
+            // The block's real byte count and truncation state are known only
+            // after rendering, so they are reported here rather than guessed
+            // from the collection. A silent cut is the defect this surfaces
+            // (`/memory`, `/context`, the launch warning, the state file).
+            bridgeStats = rendered.stats
             bridgeScoped = collected.scopedRules
-            // Stash full collection for the AGENTS.md synthesis below.
-            ;(globalThis as Record<string, unknown>).__ghRouterBridgeCollected = collected
+            bridgeActive = rendered.stats.bytes > 0
+            if (rendered.stats.truncated) {
+              consola.warn(
+                `Pi memory bridge: the bridged AGENTS.md block hit its ${Math.round(PI_BRIDGE_STATIC_BUDGET_BYTES / 1000)} KB budget and was cut to ${rendered.stats.bytes} bytes, so some rules are incomplete or omitted this launch. Raise the budget in src/lib/pi-memory-bridge.ts, or move detail into .claude/rules/ so it attaches on demand instead.`,
+              )
+            }
           } catch (err) {
             consola.debug("Pi memory bridge collection skipped:", err)
           }
@@ -675,13 +707,26 @@ export const pi = defineCommand({
       for (const [rel, content] of Object.entries(routerAgentFiles)) {
         await writeTextFile(path.join(mirror, rel), content)
       }
-      for (const skill of routerSkills) {
+      // A user skill of the same name wins: the mirror was seeded from
+      // `~/.pi/agent` before this loop, so overwriting here would silently
+      // destroy the user's own `gh-oracle`/`gh-delegate` skill.
+      const skillPlan = await planSkillWrites(mirror, routerSkills)
+      for (const skill of skillPlan.write) {
         await writeTextFile(path.join(mirror, "skills", skill.dir, "SKILL.md"), skill.content)
+      }
+      const shadowedSkills = skillPlan.shadowed.map(({ dir, file }) => ({ dir, file }))
+      if (shadowedSkills.length > 0) {
+        consola.warn(
+          `Pi skills: kept your ${shadowedSkills.map((s) => `\`${s.dir}\``).join(", ")} instead of the router's copy (${shadowedSkills[0]?.file}). Remove the user skill to get the router's version back.`,
+        )
       }
       for (const prompt of routerPrompts) {
         await writeTextFile(path.join(mirror, "prompts", `${prompt.name}.md`), prompt.content)
       }
-      await writeTextFile(path.join(mirror, "APPEND_SYSTEM.md"), buildPiAppendSystem(profileId, { peers: peersEnabled, codeSearch: surfaces.codeSearch }))
+      await writeTextFile(
+        path.join(mirror, "APPEND_SYSTEM.md"),
+        buildPiAppendSystem(profileId, { peers: peersEnabled, codeSearch: surfaces.codeSearch, bridge: bridgeActive }),
+      )
 
       // Claude Code + Copilot artifacts (skills, prompts, agents). Skills are
       // always bridged; prompts and agents ride `--foreign`. Collisions are
@@ -812,14 +857,13 @@ export const pi = defineCommand({
         }
       }
       // Static bridge synthesis into mirror AGENTS.md (Pi-native candidate).
-      // Uses the collection stashed above; idempotent via fenced replace.
-      try {
-        const collected = (globalThis as Record<string, unknown>).__ghRouterBridgeCollected as
-          | import("./lib/pi-memory-bridge").PiBridgeCollected
-          | undefined
-        if (collected) {
-          const { buildMirrorBridgeSection, mergeBridgeIntoAgentsMd } = await import("./lib/pi-memory-bridge")
-          const { section } = buildMirrorBridgeSection(collected, { repoRoot: process.cwd() })
+      // The block was rendered above (its bytes decide whether the digest names
+      // AGENTS.md at all); this writes it and records the report. Idempotent via
+      // fenced replace, and an empty section strips a stale block this launcher
+      // wrote on a previous run against a repo that has since lost its rules.
+      if (bridgeCollected) {
+        try {
+          const { mergeBridgeIntoAgentsMd } = await import("./lib/pi-memory-bridge")
           const agentsPath = path.join(mirror, "AGENTS.md")
           let existing: string | undefined
           try {
@@ -827,19 +871,39 @@ export const pi = defineCommand({
           } catch {
             existing = undefined
           }
-          await writeTextFile(agentsPath, mergeBridgeIntoAgentsMd(existing, section))
+          // Whether the user already keeps their own instructions in this
+          // mirror's AGENTS.md. If so, Pi has been reading AGENTS.md (and
+          // skipping CLAUDE.md) since long before this launch, and the bridge
+          // is not the reason the user's CLAUDE.md is unread.
+          const userText = mergeBridgeIntoAgentsMd(existing, "").trim()
+          const merged = mergeBridgeIntoAgentsMd(existing, bridgeSection)
+          if (merged !== (existing ?? "")) await writeTextFile(agentsPath, merged)
+          // Pi reads exactly ONE context file per directory, in the order
+          // `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`. Both
+          // directions of that rule hurt here, and neither is visible from the
+          // outside, so each is reported once and nothing is repaired.
+          const shadowWarnings = bridgeShadowWarnings(precedence, {
+            bridgeActive,
+            mirrorDir: mirror,
+            userOwnsAgentsMd: userText.length > 0,
+          })
+          for (const warning of shadowWarnings) consola.warn(warning)
           await writeJsonFile(path.join(mirror, ".gh-router-bridge.json"), {
             stats: bridgeStats ?? null,
+            deduped: bridgeCollected.deduped ?? 0,
+            shadowedSkills,
             scopedRuleFiles: bridgeScoped.map((r) => r.file),
+            // Everything a launch silently overrode or was overridden by, so the
+            // next "why is my rule missing?" question has an answer on disk.
+            precedence: {
+              agentsOverride: precedence.agentsOverride ? path.join(mirror, "AGENTS.override.md") : null,
+              userClaudeMd: precedence.userClaudeMd,
+              systemMd: precedence.systemMd ? path.join(mirror, "SYSTEM.md") : null,
+              projectAppendSystem: precedence.projectAppendSystem,
+            },
           })
-        }
-      } catch (err) {
-        consola.debug("Pi memory bridge synthesis skipped:", err)
-      } finally {
-        try {
-          delete (globalThis as Record<string, unknown>).__ghRouterBridgeCollected
-        } catch {
-          // ignore
+        } catch (err) {
+          consola.debug("Pi memory bridge synthesis skipped:", err)
         }
       }
     } catch (err) {
