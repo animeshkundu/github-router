@@ -312,19 +312,40 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   the per-launch override (Pi gives it precedence over the env var), and
   the user's own `PI_CODING_AGENT_SESSION_DIR` export is stripped from the
   parent env for the same isolation reason `PI_CODING_AGENT_DIR` is.
-- **Persistent npm-package cache.** A fresh mirror would force Pi to
-  reinstall every `packages[]` entry from the registry on each boot
-  (seconds + `added N packages` noise that bypasses npm's loglevel, since
-  Pi spawns npm with inherited stdio). Instead the launcher pre-seeds
-  `<mirror>/npm` from `~/.local/share/github-router/pi-packages/<hash>/`
-  (keyed by the exact flag-dependent package set) and saves the installed
-  tree back on shutdown. Repeat launches with the same flags install
-  nothing. Entries older than 24 hours are treated as a miss so unpinned
-  packages refresh daily rather than weekly — that window is the worst-case
-  staleness of every extension in the launch, and the install it saves costs
-  ~5 s, so one refresh a day is paid back by every other launch that day.
-  Override with `GH_ROUTER_PI_PACKAGE_CACHE_HOURS` (e.g. `168` restores the
-  old week); opt out with `GH_ROUTER_PI_NO_PACKAGE_CACHE=1`.
+- **Persistent npm-package cache, shared by link.** A fresh mirror would
+  force Pi to reinstall every `packages[]` entry from the registry on each
+  boot (seconds + `added N packages` noise that bypasses npm's loglevel,
+  since Pi spawns npm with inherited stdio). Instead `<mirror>/npm` is a
+  directory link (a `junction` on Windows, which needs no elevation) to
+  `~/.local/share/github-router/pi-packages/<hash>/npm`, keyed by the exact
+  flag-dependent package set. Pi installs into that durable tree directly,
+  so repeat launches with the same flags install nothing and no bytes are
+  copied in either direction.
+
+  The earlier design copied the tree in at boot and back out on shutdown,
+  which could not work: the copy measured 27 s in and 32 s out for 88 MB /
+  14.6k files, while the launcher arms a 5 s shutdown fail-safe, so every
+  save was killed mid-copy and left a truncated entry with a FRESH mtime.
+  The next launch trusted that mtime, Pi found its `packages[]` missing, and
+  reinstalled everything. Hence three rules that hold in this code: nothing
+  runs on the shutdown path, a tree that must be discarded is renamed aside
+  rather than `rm -rf`'d on the launch path, and a seed validates before it
+  links instead of trusting an mtime.
+
+  Validation is two-part: every configured npm package must have its
+  `package.json` on disk, and only then must every key in npm's hidden
+  `.package-lock.json` exist (a lock that outruns its own tree is an install
+  interrupted mid-write). A missing lockfile is treated as unverified, not
+  invalid, because `package-lock=false` in a user `.npmrc` never writes one.
+  A passed validation is stamped in `<entry>/.pi-cache-ok`, so the walk runs
+  once per window rather than every boot; any destructive step drops the
+  stamp first. Entries older than 24 hours are a miss AND are retired, since
+  a linked stale tree would let Pi skip the install and the cache could
+  never refresh — that window is the worst-case staleness of every
+  extension in the launch, and the install it saves costs ~5 s, so one
+  refresh a day is paid back by every other launch that day. Override with
+  `GH_ROUTER_PI_PACKAGE_CACHE_HOURS` (e.g. `168` restores the old week); opt
+  out with `GH_ROUTER_PI_NO_PACKAGE_CACHE=1`.
 - **Subagents via `pi-subagents` + our agents.** The `gh-router-pi`
   extension registers no model-facing tools; every consult and search tool
   arrives through native MCP as `mcp__gh-router-peers__oracle`,
