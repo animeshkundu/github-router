@@ -38,11 +38,7 @@ import {
   removeOwnPiAgentMirror,
   sweepStalePiAgentMirrors,
 } from "./lib/pi-paths"
-import {
-  seedPiPackageCache,
-  savePiPackageCache,
-  sweepStalePiPackageCaches,
-} from "./lib/pi-package-cache"
+import { seedPiPackageCache, sweepStalePiPackageCaches } from "./lib/pi-package-cache"
 import {
   buildPiExtensionSource,
   buildPiPrompts,
@@ -61,7 +57,6 @@ import {
   piLeadModel,
   piProfileModelIds,
   piUsdCostFor,
-  type PiPackageEntry,
   type PiProfileId,
 } from "./lib/pi-models-settings"
 import { launchChild } from "./lib/launch"
@@ -508,10 +503,6 @@ export const pi = defineCommand({
       )
     }
 
-    // The exact `packages[]` slice for this launch (flag-dependent), used
-    // to key the persistent npm-package cache: seed before Pi boots, save
-    // on shutdown before the mirror is removed.
-    let packagesForCache: Array<PiPackageEntry> = []
     // Foreign-agent definitions present but NOT bridged (no `--foreign`).
     // Only ever set on a launch without the flag, and only to report that the
     // artifacts exist — see `countForeignAgentFiles`.
@@ -627,16 +618,18 @@ export const pi = defineCommand({
       await writeJsonFile(keybindingsPath, {
         ...mergePiKeybindingsSettings(userKeybindings, buildPiKeybindingsJson()),
       })
-      // Pre-seed <mirror>/npm from the durable package cache so Pi's
+      // Point <mirror>/npm at the durable package cache entry so Pi's
       // per-boot `packages[]` install is a no-op on a hit (faster + silent:
-      // npm's `added N packages` summary bypasses npm_config_loglevel).
-      // Misses (cold/stale/flag-changed cache) install from the registry
-      // as before and are saved back on shutdown for the next launch.
-      packagesForCache = [...builtSettings.packages]
-      const cacheHit = await seedPiPackageCache(mirror, packagesForCache)
-      if (cacheHit) {
-        consola.debug("Pi package cache hit: mirror pre-seeded, skipping registry install.")
-      }
+      // npm's `added N packages` summary bypasses npm_config_loglevel). The
+      // entry IS the tree Pi installs into — no copy in either direction, so
+      // nothing here can be truncated by the launcher's 5 s shutdown budget.
+      // A miss (cold/stale/flag-changed cache) installs into the entry, which
+      // is exactly what makes the next launch a hit; a cache that cannot be
+      // set up (no symlink privilege) installs into the mirror as before.
+      const seed = await seedPiPackageCache(mirror, builtSettings.packages)
+      // Cold is normal and a fallback is survivable, so neither warns; both
+      // are worth one line under --debug when a launch looks slow.
+      consola.debug(`Pi package cache: ${seed.reason}.`)
 
       // Memory bridge collection runs BEFORE the extension build so scoped
       // rules + stats can be embedded for lazy attach + /memory + /context.
@@ -1078,11 +1071,12 @@ export const pi = defineCommand({
           await stopKeepAwake()
           await disposeBluebirdClients()
           await disposeAdoClients()
-          // Persist this launch's installed <mirror>/npm for the next
-          // launch's pre-seed (keyed by the exact packages[] slice), then
-          // remove the per-launch mirror as before. Best-effort, never
-          // fatal — a failed save just means the next boot reinstalls.
-          await savePiPackageCache(mirror, packagesForCache)
+          // No package-cache work here on purpose. Pi installs into the
+          // durable entry through the mirror's `npm` link, so there is nothing
+          // to copy back, and the next seed validates whatever this launch
+          // left. Anything heavy here would be cut short by the launcher's 5 s
+          // shutdown fail-safe — the 32 s copy this replaced was truncated on
+          // every single exit. Just remove the per-launch mirror.
           await removeOwnPiAgentMirror()
           await removeAicLedgerFile()
         },

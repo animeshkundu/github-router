@@ -5,8 +5,25 @@ import path from "node:path"
 
 import consola from "consola"
 
+// Only the env predicate, no path helpers: `pi-package-cache` imports `PATHS`
+// from `./paths`, so this edge cannot close a cycle back onto this module.
+import { piPackageCacheEnabled } from "./pi-package-cache"
+import { PATHS } from "./paths"
+
+/**
+ * The app-data root, taken from the ONE resolver in `paths.ts`.
+ *
+ * This module used to carry its own `os.homedir()/"..."/github-router` copy,
+ * which silently ignored `GH_ROUTER_APP_DIR`. That was survivable while
+ * everything here was per-launch scratch, but the package cache made it a
+ * correctness bug: `piPackageCacheDir` honours the override and lands under
+ * `<override>/pi-packages`, while mirrors stayed under `~/.local/share`, so
+ * the cache's in-use scan looked for other launches in a directory nothing
+ * writes to and could never see one. Two resolvers for one directory is the
+ * bug; `paths.ts` documents the same hazard for the managed install.
+ */
 function appDir(): string {
-  return path.join(os.homedir(), ".local", "share", "github-router")
+  return PATHS.APP_DIR
 }
 
 /** Where the user's real Pi agent dir lives (`PI_CODING_AGENT_DIR` wins). */
@@ -61,6 +78,13 @@ export function piSessionsDir(): string {
  * Copy failures of individual user files are debug-logged and skipped —
  * a corrupt user file must not strand the launch. Throws only when the
  * mirror directory itself cannot be created.
+ *
+ * `npm/` is the one entry this copy does NOT own when the package cache is
+ * on: `seedPiPackageCache` replaces `<mirror>/npm` with a link into the
+ * durable cache, so copying the user's own `npm` tree there first would be a
+ * full 27 s copy (88 MB / 14.6k files, measured) of a tree deleted moments
+ * later. With the cache disabled the copy stays, because nothing else would
+ * populate that path.
  */
 export async function ensurePiAgentMirror(): Promise<string> {
   const mirror = piMirrorDir()
@@ -89,11 +113,16 @@ export async function ensurePiAgentMirror(): Promise<string> {
   // profile and break its fixed roster contract. Opt back in with
   // GH_ROUTER_PI_KEEP_USER_EXTENSIONS=1.
   const keepUserExtensions = process.env.GH_ROUTER_PI_KEEP_USER_EXTENSIONS === "1"
+  // The launcher owns `<mirror>/npm` when the cache is on (it becomes a link
+  // into the durable entry), so mirroring the user's npm tree there would be a
+  // full 27 s copy of a tree we are about to replace.
+  const cacheOwnsNpm = piPackageCacheEnabled()
   const SKIP = new Set([
     "auth.json",
     "sessions",
     "models-store.json",
     ...(keepUserExtensions ? [] : ["extensions"]),
+    ...(cacheOwnsNpm ? ["npm"] : []),
   ])
   await Promise.all(
     entries
