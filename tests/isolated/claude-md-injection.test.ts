@@ -26,6 +26,9 @@ const {
   OPERATING_DEFAULTS_DIGEST,
   buildOperatingDefaultsDirective,
   buildOperatingDefaultsDigest,
+  GATHERING_DIGEST_SENTENCE,
+  GATHERING_DIRECTIVE_CLAUSE,
+  GATHERING_SUBAGENT_CLAUSE,
   findMarkerBlocks,
   __testExports,
 } = await import("../../src/lib/claude-md-injection")
@@ -901,6 +904,75 @@ test("digest and directive complement rather than duplicate each other", () => {
 
   // The digest must say where the rest lives, or the split silently drops it.
   expect(digest).toContain("CLAUDE.md")
+})
+
+// The gathering steer: search ordering, batching, and bash bounds.
+//
+// Scoped deliberately to the families whose LEAD gathers. On balanced and
+// standard the pipeline sends discovery to `Explore` first, so telling the lead
+// to search first contradicts its own pipeline; `max` renders a different
+// directive body entirely and its byte budget is pinned elsewhere.
+test("the gathering steer rides on exactly the gathering families", () => {
+  const gathering = ["cheapest", "cheapest2", "cheaplocal", "local", "local2"] as const
+  for (const profile of gathering) {
+    const directive = buildOperatingDefaultsDirective({ profile })
+    const digest = buildOperatingDefaultsDigest({ profile })
+    expect(directive).toContain(GATHERING_DIRECTIVE_CLAUSE)
+    expect(digest).toContain(GATHERING_DIGEST_SENTENCE)
+  }
+  for (const profile of ["balanced", "balanced2", "fast", "max", "standard"] as const) {
+    const directive = buildOperatingDefaultsDirective({ profile })
+    const digest = buildOperatingDefaultsDigest({ profile })
+    expect(directive).not.toContain(GATHERING_DIRECTIVE_CLAUSE)
+    expect(digest).not.toContain(GATHERING_DIGEST_SENTENCE)
+  }
+})
+
+// Claude Code's Bash `timeout` is NOT Pi's. It takes MILLISECONDS, defaults to
+// 2 minutes, and a foreground command that expires is MOVED TO THE BACKGROUND
+// and keeps running, printing a path to its output. Pi's `bash` instead takes
+// seconds, has no default, and KILLS the process tree at the bound. The two
+// surfaces therefore cannot share a sentence: "the process is killed" is false
+// here, and "read the output file it names" is impossible on Pi.
+test("the gathering steer states Claude Code's own timeout mechanics", () => {
+  expect(GATHERING_DIRECTIVE_CLAUSE).toContain("moves to the background")
+  expect(GATHERING_DIRECTIVE_CLAUSE).toContain("read the output file it names")
+  expect(GATHERING_DIRECTIVE_CLAUSE).not.toContain("killed")
+  expect(GATHERING_DIRECTIVE_CLAUSE).not.toContain("seconds")
+})
+
+// The two halves of the search rule, which the model will otherwise collapse
+// into one: the `code` tool ranks by meaning, the `Grep` tool returns exact
+// hits. Naming only one leaves the other's job unassigned.
+test("the gathering steer assigns both the ranked search and the exact-search tool", () => {
+  for (const surface of [GATHERING_DIRECTIVE_CLAUSE, GATHERING_DIGEST_SENTENCE]) {
+    expect(surface).toContain("`code`")
+    expect(surface).toContain("`Grep`")
+    // Shelling out is what the clause exists to stop: it costs a turn, skips
+    // the tool's own result limits, and duplicates a binary already on PATH.
+    expect(surface).toMatch(/Never shell out to `grep`|instead of shelling out/)
+  }
+  // Batching is stated on both surfaces, because it is the clause with the
+  // largest measured effect (one round trip instead of N) and the one a
+  // resident-digest reader most needs.
+  for (const surface of [GATHERING_DIRECTIVE_CLAUSE, GATHERING_DIGEST_SENTENCE]) {
+    expect(surface.toLowerCase()).toContain("batch")
+  }
+})
+
+// The style rule is global: the directive tells future writing to avoid em
+// dashes, so any new prose on either surface must comply, and both are ASCII.
+test("the gathering steer is ASCII and carries no em dash", () => {
+  for (const surface of [
+    GATHERING_DIRECTIVE_CLAUSE,
+    GATHERING_DIGEST_SENTENCE,
+    GATHERING_SUBAGENT_CLAUSE,
+  ]) {
+    expect(surface).not.toContain("\u2014")
+    expect(surface).not.toContain("\u2013")
+    // eslint-disable-next-line no-control-regex
+    expect(/^[\x09\x0a\x0d\x20-\x7e]*$/.test(surface)).toBe(true)
+  }
 })
 
 // Peer-finding-1 regression pin (codex_critic + gemini_critic, independently).

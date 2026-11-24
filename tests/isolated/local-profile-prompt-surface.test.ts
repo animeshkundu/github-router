@@ -20,6 +20,8 @@ import { describe, expect, test } from "bun:test"
 import {
   buildOperatingDefaultsDigest,
   buildOperatingDefaultsDirective,
+  GATHERING_DIGEST_SENTENCE,
+  GATHERING_DIRECTIVE_CLAUSE,
 } from "~/lib/claude-md-injection"
 import {
   buildPeerAwarenessSnippet,
@@ -300,6 +302,37 @@ describe("search guidance matches the launch's backend", () => {
     expect(surfaces.directive).not.toContain("LOCAL LEXICAL")
     expect(surfaces.snippet).toContain("local ColBERT")
     expect(surfaces.summary).toContain("local ColBERT")
+  })
+
+  test("the gathering discipline is stated on the profiles whose lead gathers", () => {
+    // `local`/`local2` search for themselves before delegating, so the ordering,
+    // the batching rule, and the bash bounds rule all belong in their surfaces.
+    for (const profile of ["local", "local2"] as const) {
+      const surfaces = text(profile)
+      expect(surfaces.directive).toContain(GATHERING_DIRECTIVE_CLAUSE)
+      expect(surfaces.digest).toContain(GATHERING_DIGEST_SENTENCE.trimEnd())
+      // The three facts it must not lose: the shell-grep ban, the concurrency
+      // rule, and the background-at-timeout recovery.
+      expect(surfaces.directive).toContain("Never shell out to `grep` or `rg`")
+      expect(surfaces.directive).toContain("batch independent searches")
+      expect(surfaces.directive).toContain("moves to the background")
+    }
+  })
+
+  test("non-gathering profiles never inherit the clause", () => {
+    // Balanced and standard delegate discovery first, so the Claude-side clause
+    // — which bundles the ordering with the batching and bounds rules — is not
+    // theirs to carry. (Pi splits them: its digest gives `balanced*` the
+    // search-order line alone and withholds batching and bounds.)
+    for (const profile of ["balanced", "balanced2", "fast"] as const) {
+      expect(buildOperatingDefaultsDirective({ profile, sweEnabled: true })).not.toContain(
+        GATHERING_DIRECTIVE_CLAUSE,
+      )
+      expect(buildOperatingDefaultsDigest({ profile, sweEnabled: true })).not.toContain(
+        GATHERING_DIGEST_SENTENCE.trimEnd(),
+      )
+    }
+    expect(buildOperatingDefaultsDirective()).not.toContain(GATHERING_DIRECTIVE_CLAUSE)
   })
 })
 

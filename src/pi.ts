@@ -718,7 +718,16 @@ export const pi = defineCommand({
       }
       await writeTextFile(
         path.join(mirror, "APPEND_SYSTEM.md"),
-        buildPiAppendSystem(profileId, { peers: peersEnabled, codeSearch: surfaces.codeSearch, bridge: bridgeActive }),
+        buildPiAppendSystem(profileId, {
+          peers: peersEnabled,
+          // Unconditional: `resolvePiSurfaces` pushes the `search` group on every
+          // launch, so the `code` tool is always in the roster and its ordering
+          // always deserves a line. `semanticReady` is the narrower question of
+          // which engine will answer it, and only picks the variant.
+          codeTool: true,
+          semanticReady: surfaces.codeSearch,
+          bridge: bridgeActive,
+        }),
       )
 
       // Claude Code + Copilot artifacts (skills, prompts, agents). Skills are

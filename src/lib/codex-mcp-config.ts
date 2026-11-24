@@ -4,6 +4,7 @@ import path from "node:path"
 
 import consola from "consola"
 
+import { GATHERING_SUBAGENT_CLAUSE } from "./claude-md-injection"
 import {
   FAST_PROFILE_MODELS,
   FAST_PROFILE_NATIVE_AGENT_NAMES,
@@ -896,6 +897,10 @@ function pinnedExplorePrompt(opts: {
   semanticAvailable: boolean
   is200K?: boolean
   bluebirdEnabled?: boolean
+  /** Emit the gathering steer (batching, bound, no shell grep). Set on the
+   *  cheapest and local families, whose leads gather for themselves and whose
+   *  Explore subagent is the discovery workhorse. */
+  gatherSteer?: boolean
 }): string {
   // After the "…and " parallel prefix the guidance continues the sentence
   // (lowercase); standalone it opens one (capitalized).
@@ -911,6 +916,7 @@ function pinnedExplorePrompt(opts: {
     + "This is read-only work. Do not modify files, do not propose diffs, and do not delegate to other agents. You cannot ask clarifying questions mid-run: ground every answer in repository evidence. If the request is ambiguous, explore the most probable interpretations and record the ambiguity in your report. "
     + `Start broad, then converge. ${parallel}${searchGuidance} Confirm every claim at the source before you report it. `
     + "Stop when further searching stops changing your answer. When you can name the exact files and lines a change would touch, you are done. "
+    + (opts.gatherSteer === true ? `${GATHERING_SUBAGENT_CLAUSE} ` : "")
     + "Report what the repository contains, not what it ought to contain. Do not design a solution or recommend an approach. Return a self-contained result the lead can act on immediately without needing to re-run your discovery.\n\n"
     + "Return format:\n"
     + "Answer: a direct response to what was asked, in a few sentences.\n"
@@ -979,7 +985,7 @@ function pinnedGeneralPurposeDescription(
   return head + GENERAL_PURPOSE_DESC_TAIL + (is200K ? DESC_200K_NOTE : "")
 }
 
-function pinnedGeneralPurposePrompt(opts?: { is200K?: boolean; planAgent?: boolean }): string {
+function pinnedGeneralPurposePrompt(opts?: { is200K?: boolean; planAgent?: boolean; gatherSteer?: boolean }): string {
   return "You are an autonomous execution specialist for mixed, multi-step work. Your mission is to take an open-ended task from investigation through implementation to a verified end state within this turn. "
     + "Keep going until the task is genuinely done. Do not stop at a diagnosis, a partial fix, or a plan when the request asked for a change. Ground discovery in repository truth. For low-risk ambiguities, choose the interpretation most consistent with the repository, proceed, and record it as an assumption in your report. For material intent gaps that would alter product behavior or security, surface concrete options and a recommendation to the lead. "
     + (opts?.planAgent === false
@@ -989,6 +995,7 @@ function pinnedGeneralPurposePrompt(opts?: { is200K?: boolean; planAgent?: boole
     + "Investigate before you act. Confirm your assumptions against the actual code rather than against the request's description of it. After every command, read the real output and let it decide the next step. When something fails, diagnose the specific cause before trying again. If repeated attempts fail for the same reason and no new information has emerged, stop retrying: re-examine the underlying assumption and take a different path. "
     + "Escalate rather than expand. If the task turns out to require a change the lead did not sanction, complete the sanctioned part and report the rest as a recommendation. If the task collapses to pure discovery or a single settled edit, do that slice and report the remainder as a recommendation. Do not expand scope. Match the conventions, structure, and test style already present in the files you touch. The lead owns final integration. "
     + "Verify before you report. Run the builds, linters, or test commands relevant to what you changed. Quote the command run, exit status, and concise decisive output verbatim; if output is long, summarize the middle and quote the pass/fail lines. "
+    + (opts?.gatherSteer === true ? `${GATHERING_SUBAGENT_CLAUSE} ` : "")
     + "Report your changes and test output directly to the caller. Post-integration review is owned by the lead. Return a self-contained result the lead can act on immediately.\n\n"
     + "Return format:\n"
     + "Outcome: what is now true, and whether the task is complete.\n"
@@ -1093,6 +1100,10 @@ function pinnedReviewerPrompt(
     /** The cheapest-family protege grant: absent when the launch has no
      *  Advisor, otherwise the consultant the profile may describe. */
     advisorKind?: ProtegeAdvisorKind
+    /** The gathering steer. The Claude reviewer holds `Bash`, so unlike Pi's
+     *  (which has no shell grant) it does run the slow builds and tests the
+     *  bound exists for. */
+    gatherSteer?: boolean
   },
 ): string {
   // Balanced-only: the reviewer narrows scope with search first, then
@@ -1114,6 +1125,7 @@ function pinnedReviewerPrompt(
     + "Judge against the bar the repository already holds itself to, not an abstract ideal. Do not soften a real finding, and do not manufacture findings to appear thorough. If the change is correct and verified, say so. "
     + delegation
     + protege
+    + (opts?.gatherSteer === true ? `${GATHERING_SUBAGENT_CLAUSE} ` : "")
     + "Return a self-contained result the lead can act on immediately.\n\n"
     + "Return format. Line one must be exactly one of:\n"
     + "VERDICT: SHIP\n"
@@ -1422,7 +1434,7 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
   const out: PeerAgentDefinitions = {
     Explore: {
       description: pinnedExploreDescription(false, true),
-      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled }),
+      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled, gatherSteer: true }),
       tools: readSearchTools,
       model: exploreModel,
       effort: effort("Explore"),
@@ -1430,14 +1442,14 @@ function buildCheapestProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinit
     },
     "General-Purpose": {
       description: pinnedGeneralPurposeDescription(false, false, true, false),
-      prompt: pinnedGeneralPurposePrompt({ is200K: true, planAgent: false }),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true, planAgent: false, gatherSteer: true }),
       model: generalModel,
       effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
     },
     reviewer: {
       description: pinnedReviewerDescription(false, false, true, advisorKind),
-      prompt: pinnedReviewerPrompt(semanticAvailable, { is200K: true, advisorKind }),
+      prompt: pinnedReviewerPrompt(semanticAvailable, { is200K: true, advisorKind, gatherSteer: true }),
       model: reviewerModel,
       effort: effort("reviewer"),
       tools: readSearchTools,
@@ -1532,7 +1544,7 @@ function buildLocalProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
   const out: PeerAgentDefinitions = {
     Explore: {
       description: pinnedExploreDescription(false, true),
-      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled }),
+      prompt: pinnedExplorePrompt({ explicit: false, semanticAvailable, is200K: true, bluebirdEnabled: opts.bluebirdEnabled, gatherSteer: true }),
       tools: readSearchTools,
       model: exploreModel,
       effort: effort("Explore"),
@@ -1540,7 +1552,7 @@ function buildLocalProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
     },
     "General-Purpose": {
       description: pinnedGeneralPurposeDescription(false, false, true, false),
-      prompt: pinnedGeneralPurposePrompt({ is200K: true, planAgent: false }),
+      prompt: pinnedGeneralPurposePrompt({ is200K: true, planAgent: false, gatherSteer: true }),
       model: generalModel,
       effort: effort("General-Purpose"),
       ...(searchMcpServers ? { mcpServers: searchMcpServers } : {}),
@@ -1550,6 +1562,7 @@ function buildLocalProfileAgentDefinitions(opts: BuildOpts): PeerAgentDefinition
       prompt: pinnedReviewerPrompt(semanticAvailable, {
         is200K: true,
         advisorKind: protegeAdvisor ? "copilot-served" : undefined,
+        gatherSteer: true,
       }),
       model: reviewerModel,
       effort: effort("reviewer"),
