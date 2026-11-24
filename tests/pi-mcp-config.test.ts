@@ -169,6 +169,16 @@ describe("resolvePiSurfaces", () => {
       // Under `deferred` exposure this line is the model's only pre-search
       // signal for what the server is, so it has to say something.
       expect(g.description.length).toBeGreaterThan(40)
+      // ...and for `search` it has to FIT. Pi clips a server summary at 250
+      // chars (`MAX_SERVER_DESCRIPTION_CHARS`, dist/extensions/mcp/index.js);
+      // the previous 272-char description lost its closing clause to that cut
+      // and no test noticed, because the only assertion was a lower bound.
+      // `peers` and `cloudagent` are longer and still clipped, which is a
+      // separate defect: `peers` is assembled from the live allow-list, so
+      // trimming it here would drop persona names the lead needs.
+      if (g.group === "search") {
+        expect(g.description.length).toBeLessThanOrEqual(250)
+      }
     }
   })
 

@@ -17,8 +17,11 @@ import {
   mergePiKeybindingsSettings,
   PI_THINKING_CYCLE_ACTION,
   PI_THINKING_CYCLE_REBIND,
+  PI_PARALLEL_TOOL_LINE,
   PI_SEARCH_ORDER_LINE,
+  PI_SEARCH_ORDER_LEXICAL_LINE,
   PI_TOOL_PREFERENCE_LINE,
+  PI_TOOL_TIMEOUT_LINE,
   piProfileModelIds,
 } from "~/lib/pi-models-settings"
 import { resolvePiSurfaces } from "~/lib/pi-mcp-config"
@@ -459,44 +462,66 @@ describe("pi digest: native tools first, shell when it is the better tool", () =
   })
 })
 
-describe("pi digest: semantic search narrows, rg/grep answers what meaning cannot", () => {
-  test("the line rides only when this launch serves `code`", () => {
-    // A launch without `--search` (and without Bluebird) has no `code` tool in
-    // the roster, so naming it would be a dead pointer — the exact failure the
-    // digest exists to prevent.
+describe("pi digest: search order follows the code tool, not --search", () => {
+  test("the line rides whenever the `code` tool is in the roster", () => {
+    // The `search` MCP group is pushed unconditionally, so the tool exists on
+    // every launch while `--search` defaults off. Gating the order line on the
+    // flag left the tool undocumented on the stock launch, which is exactly the
+    // launch that reaches for `grep` first.
     for (const profileId of ["cheapest", "local", "balanced2"] as const) {
-      expect(buildPiAppendSystem(profileId, { codeSearch: true })).toContain(
-        PI_SEARCH_ORDER_LINE,
+      expect(buildPiAppendSystem(profileId, { codeTool: true })).toContain(
+        PI_SEARCH_ORDER_LEXICAL_LINE,
       )
-      expect(buildPiAppendSystem(profileId, { codeSearch: false })).not.toContain(
-        PI_SEARCH_ORDER_LINE,
+      // Absent means the caller does not claim the tool: no pointer, no lie.
+      expect(buildPiAppendSystem(profileId)).not.toContain(PI_SEARCH_ORDER_LEXICAL_LINE)
+      expect(buildPiAppendSystem(profileId, { codeTool: false })).not.toContain(
+        PI_SEARCH_ORDER_LEXICAL_LINE,
       )
-      // Absent means no code search: the default must not advertise one.
-      expect(buildPiAppendSystem(profileId)).not.toContain(PI_SEARCH_ORDER_LINE)
     }
   })
 
-  test("the ordering is semantic first and names the shell fallback", () => {
-    // Both halves are load-bearing, same as the tool-preference steer: the
-    // ordering alone would leave the model grepping for concepts, and the
-    // fallback alone would not say which way round they go.
-    expect(PI_SEARCH_ORDER_LINE).toContain("semantic")
-    expect(PI_SEARCH_ORDER_LINE).toContain("first")
-    for (const tool of ["rg", "grep"]) {
-      expect(PI_SEARCH_ORDER_LINE).toContain(tool)
+  test("semanticReady selects the semantic variant and never the lexical one", () => {
+    // Defaulting to lexical is the load-bearing half: a launch that did not opt
+    // into semantic search must not be told its index ranks by meaning.
+    for (const profileId of ["cheapest", "local", "balanced2"] as const) {
+      const semantic = buildPiAppendSystem(profileId, { codeTool: true, semanticReady: true })
+      expect(semantic).toContain(PI_SEARCH_ORDER_LINE)
+      expect(semantic).not.toContain(PI_SEARCH_ORDER_LEXICAL_LINE)
+      const lexical = buildPiAppendSystem(profileId, { codeTool: true, semanticReady: false })
+      expect(lexical).toContain(PI_SEARCH_ORDER_LEXICAL_LINE)
+      expect(lexical).not.toContain(PI_SEARCH_ORDER_LINE)
     }
-    // Meaning cannot answer these; the model must know the shell still owns them.
-    for (const job of ["every occurrence", "exact token", "regex", "filename"]) {
-      expect(PI_SEARCH_ORDER_LINE).toContain(job)
+  })
+
+  test("both variants name tool_search and the engine label, and ban shell grep", () => {
+    for (const line of [PI_SEARCH_ORDER_LINE, PI_SEARCH_ORDER_LEXICAL_LINE]) {
+      // `code` is published with `exposure: "deferred"`, so naming it without
+      // `tool_search` is a pointer at a tool the model cannot call yet.
+      expect(line).toContain("tool_search")
+      expect(line).toContain("source")
+      expect(line).toContain("rg")
+      expect(line).toContain("grep -r")
+      expect(line).toContain("ripgrep")
+      for (const job of ["every occurrence", "exact token", "regex", "filename"]) {
+        expect(line).toContain(job)
+      }
+      // The ordering itself: the tool leads, the shell answers.
+      expect(line.indexOf("`code`")).toBeLessThan(line.indexOf("rg/grep"))
     }
-    expect(PI_SEARCH_ORDER_LINE.indexOf("semantic")).toBeLessThan(
-      PI_SEARCH_ORDER_LINE.indexOf("rg/grep"),
-    )
+  })
+
+  test("the semantic variant states what a fallback source means, not why it happened", () => {
+    // `lexical-fallback` is returned both mid-index and when ColBERT is
+    // disabled or unprovisioned, so a causal claim ("the index was cold")
+    // would be false on a real path and send the model into a pointless retry.
+    expect(PI_SEARCH_ORDER_LINE).toContain("semantic did not run")
+    expect(PI_SEARCH_ORDER_LINE).not.toContain("cold")
   })
 
   test("the surface flag follows --search and Bluebird, not the profile", () => {
-    // `surfaces.codeSearch` is the same predicate the MCP config uses to
-    // publish the group, so digest and roster cannot disagree.
+    // `surfaces.codeSearch` is the semantic-engine opt-in the MCP config uses;
+    // it now selects the digest VARIANT, while the roster decides whether the
+    // line rides at all.
     for (const bluebirdEnabled of [false, true]) {
       const on = resolvePiSurfaces({
         profileId: "local",
@@ -531,9 +556,59 @@ describe("pi digest: semantic search narrows, rg/grep answers what meaning canno
         expect(on.codeSearch).toBe(true)
         expect(off.codeSearch).toBe(false)
       }
-      expect(buildPiAppendSystem("local", { codeSearch: on.codeSearch })).toContain(
-        PI_SEARCH_ORDER_LINE,
-      )
+      expect(
+        buildPiAppendSystem("local", { codeTool: true, semanticReady: on.codeSearch }),
+      ).toContain(PI_SEARCH_ORDER_LINE)
     }
+  })
+})
+
+describe("pi digest: batch independent calls and bound slow ones", () => {
+  test("the four gathering profiles carry both lines, peers or not", () => {
+    for (const profileId of ["cheapest", "cheapest2", "local", "local2"] as const) {
+      for (const peers of [true, false]) {
+        const digest = buildPiAppendSystem(profileId, { peers })
+        expect(digest).toContain(PI_PARALLEL_TOOL_LINE)
+        expect(digest).toContain(PI_TOOL_TIMEOUT_LINE)
+      }
+    }
+  })
+
+  test("balanced delegates discovery first and carries neither line", () => {
+    // Balanced's pipeline sends discovery to `Explore` before the lead searches,
+    // so an ordering steer here would fight its own pipeline.
+    for (const profileId of ["balanced", "balanced2"] as const) {
+      const digest = buildPiAppendSystem(profileId, { codeTool: true })
+      expect(digest).not.toContain(PI_PARALLEL_TOOL_LINE)
+      expect(digest).not.toContain(PI_TOOL_TIMEOUT_LINE)
+    }
+  })
+
+  test("the batching line states both the rule and its exclusion", () => {
+    // `Promise.all` over one message's tool calls is the mechanism; without the
+    // exclusion the steer buys same-file edit races and dependent-argument
+    // failures instead of round trips.
+    expect(PI_PARALLEL_TOOL_LINE).toContain("concurrently")
+    expect(PI_PARALLEL_TOOL_LINE).toContain("one round trip")
+    expect(PI_PARALLEL_TOOL_LINE).toContain("dependent calls")
+  })
+
+  test("the bounds line names the tools that take a timeout and the no-default fact", () => {
+    expect(PI_TOOL_TIMEOUT_LINE).toContain("`bash`")
+    expect(PI_TOOL_TIMEOUT_LINE).toContain("`powershell`")
+    expect(PI_TOOL_TIMEOUT_LINE).toContain("timeout")
+    expect(PI_TOOL_TIMEOUT_LINE).toContain("neither has a default")
+    // No model-side cancel exists: the process dies at the bound, so "stop it"
+    // would instruct the model to do something it cannot do.
+    expect(PI_TOOL_TIMEOUT_LINE).not.toContain("stop it")
+  })
+
+  test("the digest stays near its pre-change size", () => {
+    // The digest is a per-turn cost on every launch. The three new lines are
+    // ~840 bytes on the stock (lexical) path; more than that means something
+    // else crept in.
+    const stock = buildPiAppendSystem("local", { peers: true, codeTool: true, semanticReady: false })
+    const before = buildPiAppendSystem("local", { peers: true })
+    expect(Buffer.byteLength(stock) - Buffer.byteLength(before)).toBeLessThanOrEqual(860)
   })
 })

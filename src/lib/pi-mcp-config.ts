@@ -124,7 +124,13 @@ export function readMcpServerKeys(raw: string): Array<string> | null {
  */
 const GROUP_DESCRIPTIONS: Record<string, string> = {
   peers: "Cross-lab adversarial reviewers (codex_critic, codex_reviewer, gemini_critic, gemini_reviewer, opus_critic) plus oracle, a stateless expert consultant. Reach for a critic when a plan or a diff needs a second lab's judgement; reach for oracle when repository evidence alone cannot settle a self-contained technical trade-off.",
-  search: "Code and web search for this workspace. code is semantic-first with a labelled lexical fallback and reports which engine answered; web runs a Copilot-backed web search. Reach for code before broad file reads when you are locating code by meaning rather than by exact text.",
+  // Pi clips a server summary at 250 chars (`MAX_SERVER_DESCRIPTION_CHARS`,
+  // dist/extensions/mcp/index.js) and the previous 272-char string lost its last
+  // clause to that cut. Under `deferred` exposure this line is the model's only
+  // signal before it loads the tool, so every clause has to fit. It also cannot
+  // promise semantic-first: the stock launch is lexical (no `--search`), so it
+  // states what is true either way.
+  search: "Code and web search for this workspace: code ranks the tree by meaning or lexical match and says which engine answered, while web runs a Copilot-backed search. Reach for code before broad file reads.",
   workers: "Autonomous worker subagents that run their own agent loop on a scoped task: explore reads and searches, review also runs commands to verify, implement edits files in an isolated git worktree and returns the diff. Reach for a worker when the task is big enough that its context should not land in yours.",
   browser: "Drive a real Chrome or Edge tab: open, navigate, read the page, screenshot, click, type, evaluate JavaScript. Reach for it when the answer lives in a web UI rather than in the repository.",
   ado: "Azure DevOps for the open repository: repositories, work items, pipelines and wikis.",

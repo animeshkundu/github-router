@@ -155,22 +155,63 @@ export const PI_TOOL_PREFERENCE_LINE =
   "- Use the dedicated tools where they fit — read/write/edit for files and grep/find/ls for search — instead of shelling out to cat, sed, or python; but reach for rg, jq, ast-grep, git, and the build/test commands whenever those are the better tool for the job."
 
 /**
- * The search-order steer, emitted only when this launch serves `code`.
+ * The search-order steer, emitted whenever the `code` tool is in the roster.
  *
- * The tool's own description already says semantic-first with a labelled
- * lexical fallback, but a description is read once at roster time and the
- * model still reaches for `grep` first on exact strings. This sentence is the
- * ordering, stated where it is read every turn: narrow by meaning first,
- * because a semantic hit set is ranked and small, then fall back to
- * `rg`/`grep` for what meaning cannot answer — every occurrence, a literal
- * token, a regex, a filename.
+ * Two variants, because the tool answers with two different engines and a
+ * digest that claims the wrong one is worse than silence. `semanticReady`
+ * (the launch opted into `--search` or Bluebird) selects the first; every
+ * other launch gets the second. The lexical variant is the default so the
+ * digest never claims a meaning-ranked index that nothing provisioned: the
+ * stock launch publishes `code` (`pi-mcp-config.ts` pushes the `search` group
+ * unconditionally) while `--search` defaults off, so this is the common path.
  *
- * Only emitted when the launch actually serves the tool (`surfaces.codeSearch`,
- * i.e. `--search` or Bluebird). Naming a tool that is not in the roster is the
- * failure mode the digest exists to avoid.
+ * Both variants carry the same four jobs that ranking cannot do — every
+ * occurrence, an exact token, a regex, a filename — because the tool's own
+ * description is read once at roster time while the digest is read every
+ * turn, and without the split the model greps for concepts and reads the
+ * whole tree for symbols. Both also carry the `tool_search` hint: the server is
+ * published with `exposure: "deferred"`, so the tool does not exist in the
+ * model's surface until it loads it, and naming `code` alone is a dead pointer.
+ *
+ * Neither variant claims why a fallback happened. `lexical-fallback` is
+ * returned both mid-index and when ColBERT is disabled or unprovisioned
+ * (`unified-code-search.ts`: `semanticOffNotice()` rides the same source
+ * label), so the text says what the label means and leaves the cause to the
+ * `notice`.
  */
 export const PI_SEARCH_ORDER_LINE =
-  "- When code search is available, narrow with semantic `code` search first — it ranks by meaning and returns a small relevant set — then reach for rg/grep for what meaning cannot answer: every occurrence, an exact token, a regex, or a filename."
+  "- Search `code` first, before reading broadly: load it with `tool_search`, then semantic mode for intent and `lexical`/`exact` for a symbol, file, error, route, flag, or config key. `source`/`notice` say which engine answered; `lexical-fallback` means semantic did not run, not that the symbol is absent. Take what ranking cannot answer to rg/grep: every occurrence, an exact token, a regex, a filename. Never shell out to `grep -r`: the `grep` tool already runs ripgrep, and `rg -uu` is the only search that needs bash."
+
+/** The lexical-backend sibling of {@link PI_SEARCH_ORDER_LINE}, for a launch
+ *  whose `code` tool answers without a semantic index. */
+export const PI_SEARCH_ORDER_LEXICAL_LINE =
+  "- Search `code` first, before reading broadly: load it with `tool_search`. Semantic is off on this launch (`--search` turns it on), so it answers lexically and a `lexical-fallback` source is the expected state, not a miss. Take what it cannot answer to rg/grep: every occurrence, an exact token, a regex, a filename. Never shell out to `grep -r`: the `grep` tool already runs ripgrep."
+
+/**
+ * The batching steer. Pi runs every tool call from one assistant message
+ * concurrently with no semaphore (`src/vendor/pi/agent/agent-loop.ts`,
+ * `executeToolCallsParallel` -> `Promise.all`), and its own system prompt never
+ * mentions batching, so a model that issues one call per turn pays a full
+ * round trip per lookup. The second half is not a hedge: two edits of the same
+ * file in one batch race, and a call whose arguments come from an earlier
+ * result cannot be batched at all.
+ */
+export const PI_PARALLEL_TOOL_LINE =
+  "- Batch independent tool calls into one message: they run concurrently, so N reads, searches, or `ls` calls cost one round trip instead of N turns. Keep dependent calls and two edits of the same file in separate turns."
+
+/**
+ * The bounded-call steer. `timeout` is the ONLY per-call bound Pi exposes, and
+ * only `bash`/`powershell` take it; its schema documents "no default timeout"
+ * (`dist/core/tools/bash.js`), so an unbounded command can hold the turn
+ * indefinitely. There is no global tool timeout, concurrency cap, or
+ * forced-sequential setting in `schemas/settings.schema.json`, and the model
+ * cannot cancel a running call (`killProcessTree` runs at the bound or on the
+ * user's abort), so the instruction is to choose the bound up front rather
+ * than to stop a call later: an expired bound kills the process tree and
+ * returns, which is the outcome the digest wants.
+ */
+export const PI_TOOL_TIMEOUT_LINE =
+  "- Pass `timeout` (seconds) to `bash` and `powershell`: neither has a default, and the process is killed at the bound rather than left running. Read an expired bound as a signal that the command was too broad: narrow it and re-issue instead of re-running with a longer limit."
 
 /**
  * The Copilot-backed family contract for a Pi profile. `cheapest2` and
@@ -1606,6 +1647,9 @@ export function buildPiAgentFiles(
   // once here: it gates both the reviewer's protege edge and the prose that
   // names it, and every surface must agree on whether the role exists.
   const advisor = piAdvisorModel(profileId)
+  // Same predicate as the digest's `gatheringSteer`: the four profiles whose
+  // leads gather for themselves, plus the subagents that gather for them.
+  const gatheringSteer = isCheapestFamily(profileId) || isLocalFamily(profileId)
   for (const role of piNativeRoles(profileId)) {
     const isImplementer = role.name === "General-Purpose"
     const isReviewer = role.name === "reviewer"
@@ -1686,19 +1730,49 @@ export function buildPiAgentFiles(
       lines.push("allowNestedSubagents: true", "allowedAgents: advisor");
     }
     lines.push("---", "");
+    // Gathering steer for the leads that gather, plus the three subagents that
+    // gather for them on those profiles. `gatheringSteer` mirrors the digest's
+    // gate so a profile does not get the ordering in one surface and not the
+    // other. Every line here is a fact about this harness: `grep` is ripgrep
+    // (`dist/core/tools/grep.js` passes `--hidden` but keeps `.gitignore`), the
+    // parallel executor has no semaphore, and `bash`/`powershell` default to no
+    // timeout. The reviewer gets the search line alone: it holds no shell
+    // grant, so a `timeout` instruction would be a dead pointer.
+    const gatherSteer = gatheringSteer
+      ? [
+          "`grep` runs ripgrep and `find` walks the tree: narrow the `path` or `glob` before you",
+          "read, and never shell out to `grep -r`.",
+        ]
+      : []
+    const batchSteer = gatheringSteer
+      ? ["Batch independent searches and reads into one turn; they run concurrently."]
+      : []
+    // `timeout` is a `bash`/`powershell` parameter. Only roles that hold a shell
+    // get it: the reviewer does not (`tools:` omits bash), so an instruction to
+    // pass one would be a dead pointer in its own prompt.
+    const boundsSteer = gatheringSteer
+      ? ["Pass `bash` a `timeout` (seconds) for anything that can hang: there is no default."]
+      : []
     if (role.name === "Explore") {
       lines.push(
         "You are a read-only scout. Never modify files.",
         "Use bash only for non-interactive inspection.",
+        // Placed after the tool note and before "Search first, read second", so
+        // the narrowing rule lands before the instruction to read.
+        ...gatherSteer,
         "Search first, read second: return the smallest sufficient evidence — entry points,",
         "key types and functions, data flow, files likely to need changes, constraints and",
         "open questions — with exact file paths and line ranges.",
+        ...batchSteer,
+        ...boundsSteer,
       );
     } else if (isReviewer) {
       lines.push(
         "You are a disciplined review subagent. Inspect the actual change; verify from code,",
         "tests, and docs — never guess. Cover intent match, correctness and edge cases,",
         "test coverage, side effects, and minimality.",
+        ...gatherSteer,
+        ...batchSteer,
         "Report findings with file:line evidence ranked P0 (blocker) / P1 (should fix) / P2 (nit),",
         "ending with one of: Merge verdict: BLOCK, Merge verdict: OK, Merge verdict: OK with notes.",
         "You have no shell: cite the test commands for the lead to run rather than executing them.",
@@ -1727,6 +1801,9 @@ export function buildPiAgentFiles(
         "You are the single writer thread. Execute the assigned task with narrow, coherent edits;",
         "the lead remains the decision authority. Work from the brief's pasted context,",
         "then implement minimally and verify by running the relevant tests.",
+        ...gatherSteer,
+        ...batchSteer,
+        ...boundsSteer,
         "If the work reveals an unapproved decision you cannot safely resolve, stop and escalate",
         "instead of guessing; never leave placeholders or TODOs.",
         "Hand behavior-changing results to reviewer when asked; otherwise summarize the diff,",
@@ -1933,19 +2010,40 @@ export const PI_CONTEXT_CONTRACT_LINE =
  * Short operating digest appended to APPEND_SYSTEM.md (prompt-cache-stable).
  * Mode identity — always injected. Peer consult sentences drop out under
  * `peers: false` so the digest never names tools that don't exist.
+ *
+ * `codeTool` answers "is the `code` search tool in this launch's roster", NOT
+ * "did `--search` opt into a semantic index". The `search` MCP group is pushed
+ * unconditionally (`pi-mcp-config.ts`), so the tool is in every session while
+ * `--search` defaults off; gating the search-order line on the flag left the
+ * tool undocumented on the stock launch, which is the one that needs the
+ * ordering most. `semanticReady` only picks which of the two order lines it
+ * gets, and defaults to the lexical one rather than claiming an engine nothing
+ * provisioned.
+ *
+ * The search, batching, and bounded-call lines ride the cheapest and local
+ * families, the four profiles whose leads do their own gathering; `balanced*`
+ * delegates discovery first, so an ordering steer there would fight its
+ * pipeline. `codeTool: false` omits the search line entirely: a pointer to a
+ * tool the session does not have is the failure this digest exists to avoid.
  */
 export function buildPiAppendSystem(
   profileId: PiProfileId,
-  opts: { peers?: boolean; codeSearch?: boolean; bridge?: boolean } = {},
+  opts: { peers?: boolean; codeTool?: boolean; semanticReady?: boolean; bridge?: boolean } = {},
 ): string {
   const peers = opts.peers !== false;
   const advisor = peers ? piAdvisorModel(profileId) : undefined;
+  // Gathering guidance is for the leads that gather. Balanced/balanced2 send
+  // discovery to `Explore` first, so it is deliberately absent there.
+  const gatheringSteer = isCheapestFamily(profileId) || isLocalFamily(profileId)
   const lines = [
     `# gh-router ${profileId} mode`,
     "",
     `- Lead owns planning directly; there is no Plan subagent.`,
     PI_TOOL_PREFERENCE_LINE,
-    ...(opts.codeSearch === true ? [PI_SEARCH_ORDER_LINE] : []),
+    ...(opts.codeTool === true
+      ? [opts.semanticReady === true ? PI_SEARCH_ORDER_LINE : PI_SEARCH_ORDER_LEXICAL_LINE]
+      : []),
+    ...(gatheringSteer ? [PI_PARALLEL_TOOL_LINE, PI_TOOL_TIMEOUT_LINE] : []),
     ...(opts.bridge === true ? [PI_CONTEXT_CONTRACT_LINE] : []),
   ];
   if (peers) {

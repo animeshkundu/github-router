@@ -611,6 +611,53 @@ export const DIRECT_EVIDENCE_CONTRACT_POINTER =
   "This launch has no consultant: settle unresolved questions with direct evidence (search, read, build, test, or run) and state competing hypotheses explicitly before choosing. Full how-to is in your CLAUDE.md project instructions.\n\n"
 
 /**
+ * Gathering discipline for the leads that gather for themselves (the cheapest
+ * and local families). Prepended to the mirrored CLAUDE.md, so the lead and
+ * every descendant that reads it get the full rule; the digest carries a
+ * condensed copy.
+ *
+ * Written as a decision rule, not an exhortation. Each half names the tool and
+ * the case that selects it, because "use the best search" is not actionable and
+ * because the two search surfaces genuinely differ: `code` ranks the whole tree
+ * and returns a few files (so it answers "where does X live" in one call),
+ * while `Grep` is ripgrep and answers the sets ranking cannot express.
+ *
+ * It deliberately does NOT assert that a semantic backend exists. `local` and
+ * `local2` are lexical launches unless the operator passed `--search`, and the
+ * profile-specific ladder further down the same directive is the authority on
+ * which modes this launch has; a general clause that promised semantic would
+ * contradict it, and a model that reads "semantic for intent", tries it, and
+ * gets `lexical-fallback` concludes the index is broken and retries.
+ *
+ * The parallelism half states the exclusion in the same sentence as the rule.
+ * Claude Code runs one assistant message's tool calls concurrently, which is
+ * what makes batching worth saying; two edits of one file in that batch race,
+ * and a call whose arguments come from an earlier result cannot be batched at
+ * all. Omitting the exclusion produces exactly those two failures.
+ *
+ * Both bounds claims are Claude Code's own documented behaviour: `timeout` is
+ * optional and the command that exceeds it moves to the background and keeps
+ * running, so re-running it is the wrong recovery. That is the opposite of Pi's
+ * `bash`, which kills the process tree at the bound, which is why the two
+ * front-ends cannot share this sentence.
+ */
+export const GATHERING_DIRECTIVE_CLAUSE =
+  "Search before you read: `code` ranks the workspace and returns a few files, so ask it first for symbols, filenames, errors, routes, flags, and config keys, and for intent where this launch serves a semantic backend (the search strategy below says which modes this one has), then use the `Grep` tool with a narrow `glob` or `path` for what ranking cannot answer: every occurrence, an exact token, a regex. Never shell out to `grep` or `rg`, because the `Grep` tool already runs ripgrep. Prefer several narrow searches to one broad sweep, and batch independent searches, reads, and subagent launches into one turn because they run concurrently; keep dependent calls and same-file edits in separate turns. Give a slow build, test, or install an explicit Bash `timeout`: at the default it moves to the background, so read the output file it names instead of re-running the command. "
+
+/** Digest-sized condensation of {@link GATHERING_DIRECTIVE_CLAUSE}. */
+export const GATHERING_DIGEST_SENTENCE =
+  "Search `code` before reading broadly, then `Grep` with a narrow `glob` for exact hits instead of shelling out; batch independent reads, searches, and subagent launches into one turn; give a slow command an explicit Bash `timeout` and read the background output instead of re-running it. "
+
+/**
+ * Subagent-prompt form of the gathering rule, for the Explore/General-Purpose
+ * prompts on the same profiles. Shorter than the directive: a subagent is
+ * dispatched for one question, so it needs the tool split and the bound, not
+ * the delegation reasoning.
+ */
+export const GATHERING_SUBAGENT_CLAUSE =
+  "Batch independent searches and reads in one turn, give slow commands an explicit Bash `timeout` and read the background output instead of re-running them, and never shell out to `grep`/`rg` because the `Grep` tool already runs ripgrep."
+
+/**
  * Build the operating-defaults directive for one launch, naming only the
  * natives that launch actually emitted.
  *
@@ -794,6 +841,7 @@ export function buildOperatingDefaultsDirective(
         + (hasAdvisor ? "; before presenting the final plan to the user, consult `advisor` once for a framing check. " : ". ")
         + disciplineOpener
         + "verify by execution rather than memory; before a non-trivial task, write a short plan (steps, files involved, the check settling each step) and execute it; persist through tool failures with a rephrased attempt before asking the user; stop searching when further results stop changing the answer; tag claims verified, inferred, or unverified — never state that something passes, compiles, or is covered without observed output. "
+        + GATHERING_DIRECTIVE_CLAUSE
         + "Delegation graph: the lead may invoke all three; `General-Purpose` may invoke `reviewer`; " + leadLeaf + " cannot invoke native subagents.\n\n"
         + (hasAdvisor
           ? consultIsLocal
@@ -1034,7 +1082,7 @@ export function buildOperatingDefaultsDigest(
       ? `; (4) \`astra\` (GPT-6 Astra 200K/${isCheap ? "medium" : "high"}, lead-only) only as a last resort when direct evidence, Advisor, and Oracle cannot produce a defensible path (at most 1-2 calls per decision).`
       : "."
     const delegation = isCheapest || isLocal
-      ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. In plan mode, produce the plan and acceptance criteria directly${hasAdvisor ? "; before presenting the final plan to the user, consult `advisor` once for a framing check." : "."} Plan briefly before non-trivial acts, verify by execution, tag unverified claims, and stop searching when results stop changing the answer. Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
+      ? `${profileLabel} launch profile. The lead owns the outcome and handles straightforward work directly: use \`Explore\` for discovery spanning more than a couple of files, \`General-Purpose\` for mixed multi-step execution, and \`reviewer\` for behavior-changing or risk-sensitive changes. In plan mode, produce the plan and acceptance criteria directly${hasAdvisor ? "; before presenting the final plan to the user, consult `advisor` once for a framing check." : "."} Plan briefly before non-trivial acts, verify by execution, tag unverified claims, and stop searching when results stop changing the answer. ${GATHERING_DIGEST_SENTENCE}Handle trivial and surgical edits directly. Stop named teammates when finished.\n\n`
         + (hasAdvisor
           ? CHEAPEST_CONSULT_CONTRACT_POINTER
           : hasOracle

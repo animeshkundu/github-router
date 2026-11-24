@@ -16,6 +16,7 @@ import {
   writePeerMcpRuntimeFiles,
 } from "../../src/lib/codex-mcp-config"
 import { PEER_AGENT_MD_FILENAME } from "../../src/lib/paths"
+import { GATHERING_SUBAGENT_CLAUSE } from "../../src/lib/claude-md-injection"
 import { MCP_GROUPS } from "../../src/lib/peer-mcp-personas"
 import {
   BROWSE_LOW_ALIAS_ID,
@@ -1056,6 +1057,19 @@ describe("buildPeerAgentDefinitions", () => {
       ]) expect(agents[absent]).toBeUndefined()
     })
 
+    test("the pinned Explore, General-Purpose and reviewer prompts carry the gathering steer", () => {
+      // `cheapest` is the family whose lead gathers for itself and whose
+      // Explore is the discovery workhorse. The steer must reach all three:
+      // General-Purpose reads and searches before it edits, and this reviewer
+      // holds `Bash` -- it is the agent that runs the slow build the timeout
+      // bound exists for. (Pi's reviewer is the asymmetric one: its `tools:`
+      // line omits bash, so only the search and batching rules reach it there.)
+      const agents = buildCheapestAgents()
+      for (const name of ["Explore", "General-Purpose", "reviewer"] as const) {
+        expect(agents[name]!.prompt).toContain(GATHERING_SUBAGENT_CLAUSE)
+      }
+    })
+
     test("pins BARE alias role models (no [1m], no catalog-resolvable id) and the fixed efforts", () => {
       const agents = buildCheapestAgents()
       expect(agents.Explore!.model).toBe(CHEAPEST_EXPLORE_ALIAS_ID)
@@ -1147,6 +1161,13 @@ describe("buildPeerAgentDefinitions", () => {
       expect(agents.Explore!.effort).toBe("high")
       expect(agents["General-Purpose"]!.effort).toBe("max")
       expect(agents.reviewer!.effort).toBe("max")
+    })
+
+    test("the local subagent prompts carry the gathering steer", () => {
+      const agents = buildLocalAgents()
+      for (const name of ["Explore", "General-Purpose", "reviewer"] as const) {
+        expect(agents[name]!.prompt).toContain(GATHERING_SUBAGENT_CLAUSE)
+      }
     })
 
     test("no emitted role carries a router-owned alias, and no browse worker at all", () => {
@@ -1270,6 +1291,12 @@ describe("buildPeerAgentDefinitions", () => {
       const lexical = buildBalancedAgents()
       expect(lexical.Explore!.prompt).toContain("local exact lexical")
       expect(lexical.Explore!.prompt).not.toContain("meaning-ranked")
+      // Balanced delegates discovery to Explore before the LEAD searches, so
+      // its subagent prompts keep the pre-existing wording without the new
+      // gathering steer. Only the families whose lead gathers carry it.
+      for (const name of ["Explore", "General-Purpose"] as const) {
+        expect(lexical[name]!.prompt).not.toContain(GATHERING_SUBAGENT_CLAUSE)
+      }
       const semantic = buildBalancedAgents({ semanticSearchAvailable: true })
       expect(semantic.Explore!.prompt).toContain("local ColBERT semantic search")
       expect(semantic.Explore!.prompt).toContain("lexical fallback")

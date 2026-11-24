@@ -167,7 +167,7 @@ plus the mode identity. Each surface rides a flag:
 | `--helpers` / `--no-helpers` | **on** (peers-gated) | Helpful bundle, extensions-only filtered: allowlisted `pi-agent-extensions` (`sessions`, `ask-user`, `todos`, `handoff`, `context`, `answer`, `cwd-history`, `session-breakdown`, `notify` — no `review`/`loop`/`workflow`/`control`/footer and no `files` picker, whose `ctrl+shift+o` would collide with the UI's extra-detail toggle), plus `pi-web-access` only when neither `--search` nor `--browse` is on (else it double-pays our ColBERT/browser surfaces). `--no-helpers` keeps `pi-subagents` + `gh-router-pi` only. Peerless launches skip the bundle (no delegation floor). |
 | `--ui` / `--no-ui` | **on** | Claude-Code look: Pi follows the terminal's own palette (`theme: system`, `terminalTheme: true`) — the same colours the terminal uses for every other tool, and light/dark switches are tracked automatically. The six genuine Claude Code palettes still ship themes-only from `better-claude-code-ui` (`claude-code-dark` `#D77757` coral, `claude-code-light`, …), one `/settings` pick away. cc-ui chrome derives from the active theme (`themeAdaptive: true`), tool rows collapse to one line (`summary`/`count` modes) on transparent backgrounds, and finished thinking collapses to `Thought for Xs` (`thinkingMode: live`). Bash row labels stay **off**: upstream's `model` default adds a tool field plus an instruction line to every turn, a standing token cost for a cosmetic. Thinking blocks hidden via native `hideThinkingBlock` regardless of this flag (the cc-ui `Thought for Xs` one-liner has no off switch upstream — it is the minimum). Presentational only, zero model cost. `--no-ui` restores stock Pi rendering. `pi-code` behaviors stay a manual recipe — its `/memory` + `/context` commands would collide with the router-owned pair (Pi offers no per-command filtering inside one extension). |
 | `--swe` | off | Pipeline surface: `gh-delegate` (+`gh-advisor` wherever the profile carries an Advisor) skills, `review` / `parallel-review` (+`plan-review` on the same profiles) prompts |
-| `--search` | off | ColBERT provision + the `gh-search-first` skill prose. The `code` tool itself is published on every launch (see the MCP section), so this flag now owns only the ColBERT-specific advice, which would be wrong on a Bluebird or lexical backend |
+| `--search` | off | ColBERT provision + the `gh-search-first` skill prose. The `code` tool itself is published on every launch (see the MCP section), so this flag now owns only the ColBERT-specific advice, which would be wrong on a Bluebird or lexical backend. It also selects which search-order line the digest carries (`PI_SEARCH_ORDER_LINE` with it, `PI_SEARCH_ORDER_LEXICAL_LINE` without): the line follows the tool, not the flag |
 | `--browse` | off | Browser MCP group when a supported browser is installed |
 | `--bluebird` | auto on an Azure DevOps remote | Routes the `code` tool's `semantic` and `lexical` modes to Bluebird server-side. The tool is already on the `search` group, so nothing extra is emitted; the description and the runtime `source` label say which engine answered. `gh-search-first` prose and `pi-web-access` deliberately stay on `--search`: neither is Bluebird's job |
 | `--ado` | auto on an Azure DevOps remote | `ado` MCP group (key `gh-router-ado` -> `<serverUrl>/mcp/ado`, read-only unless `--ado-write`). Gated on its own predicate only, exactly as on the Claude side, so neither `--no-peers` nor `--no-helpers` removes it |
@@ -463,18 +463,38 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   the build/test commands when those are the better instrument. No tool is
   removed from the roster to enforce it.
 
-  **Search order, only when the launch serves it.** When this launch publishes
-  the `code` group (`--search` or Bluebird), the digest adds one more line
-  (`PI_SEARCH_ORDER_LINE`): narrow with semantic `code` search first, then
-  reach for `rg`/`grep` for what meaning cannot answer — every occurrence, an
-  exact token, a regex, a filename. The tool's own description already says
-  semantic-first with a labelled lexical fallback, but a description is read
-  once at roster time while the digest is read every turn, and without the
-  ordering the model reaches for `grep` first on exact strings. Both halves
-  matter: semantic-only would leave concepts un-grepped, and the fallback
-  alone would not fix the order. The line is gated on
-  `surfaces.codeSearch` — the same predicate that publishes the MCP group — so
-  a launch without search is never pointed at a tool it does not have.
+  **Search order, whenever the launch serves the tool.** The `search` group is
+  pushed unconditionally, so `code` is in the roster on every launch while
+  `--search` defaults off. The digest adds one line, and which one depends on
+  the engine, not the flag: `PI_SEARCH_ORDER_LINE` when semantic search is
+  actually opted in, `PI_SEARCH_ORDER_LEXICAL_LINE` otherwise. Both say load
+  it with `tool_search` (the group is published with `exposure: "deferred"`,
+  so naming the tool without that step points at something the model cannot
+  call yet), take intent to the ranked search, and take what ranking cannot
+  answer to `rg`/`grep` — every occurrence, an exact token, a regex, a
+  filename. Both also say never to shell out to `grep -r`: the `grep` tool
+  already runs ripgrep. The lexical variant additionally says that semantic is
+  off on this launch and that a `lexical-fallback` source is the expected
+  state, because a model told only "semantic first" on a lexical launch
+  concludes the index is broken and retries. The rewrite lives in the line
+  rather than the tool description because a description is read once at
+  roster time while the digest is read every turn.
+
+  **Batching and bounds, on the families whose lead gathers.** `cheapest`,
+  `cheapest2`, `local`, and `local2` carry two more lines. `PI_PARALLEL_TOOL_LINE`
+  says batch independent calls into one message because the harness runs them
+  concurrently (`executeToolCallsParallel` unless a tool declares sequential
+  execution), so N reads or searches cost one round trip instead of N turns,
+  while dependent calls and two edits of the same file stay in separate turns.
+  `PI_TOOL_TIMEOUT_LINE` says pass `timeout` to `bash`/`powershell`, which take
+  seconds and have **no** default; Pi kills the process tree at the bound
+  rather than leaving it running, so an expired bound is re-issued smaller
+  instead of waited on. `balanced`/`balanced2` are excluded: their pipeline
+  sends discovery to `Explore` first, so an ordering and batching steer on the
+  lead would fight the pipeline the rest of their digest describes. The same
+  three rules ride on the pinned `Explore` and `General-Purpose` prompts in
+  those four families; `reviewer` there gets the search and batching lines
+  only, because it has no `bash` grant.
 
   **The bridged-context contract, only when there is a block.** When the memory
   bridge wrote a section into the mirror `AGENTS.md`, the digest adds

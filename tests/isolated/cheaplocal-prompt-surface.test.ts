@@ -24,6 +24,8 @@ import {
   CHEAPEST_CONSULT_CONTRACT,
   CHEAPEST_CONSULT_CONTRACT_POINTER,
   CHEAPLOCAL_CONSULT_CONTRACT,
+  GATHERING_DIGEST_SENTENCE,
+  GATHERING_DIRECTIVE_CLAUSE,
 } from "~/lib/claude-md-injection"
 import { buildPeerAgentDefinitions } from "~/lib/codex-mcp-config"
 import { LOCAL_CONSULT_REDACTION_LINE } from "~/lib/local-consult-redaction"
@@ -245,6 +247,16 @@ describe("the lead and natives are described as the models they are", () => {
 
   test("no stale `code_search` tool name", () => {
     expect(joined()).not.toContain("`code_search`")
+  })
+
+  test("cheaplocal carries the gathering discipline like the rest of its family", () => {
+    // It is a cheapest-family launch, so it inherits the same directive arm; a
+    // future `isCheapestFamily` narrowing that dropped it would silently lose
+    // the ordering on the one profile whose lead runs on Copilot but whose
+    // subagents must not.
+    const surfaces = text()
+    expect(surfaces.directive).toContain(GATHERING_DIRECTIVE_CLAUSE)
+    expect(surfaces.digest).toContain(GATHERING_DIGEST_SENTENCE.trimEnd())
   })
 })
 
