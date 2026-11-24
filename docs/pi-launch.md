@@ -488,13 +488,18 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   while dependent calls and two edits of the same file stay in separate turns.
   `PI_TOOL_TIMEOUT_LINE` says pass `timeout` to `bash`/`powershell`, which take
   seconds and have **no** default; Pi kills the process tree at the bound
-  rather than leaving it running, so an expired bound is re-issued smaller
-  instead of waited on. `balanced`/`balanced2` are excluded: their pipeline
+  rather than leaving it running, so an expired bound is treated as a signal
+  that the command was too broad and re-issued narrower, with a bound past the
+  expected run for work that is genuinely long. `balanced`/`balanced2` are
+  excluded: their pipeline
   sends discovery to `Explore` first, so an ordering and batching steer on the
   lead would fight the pipeline the rest of their digest describes. The same
   three rules ride on the pinned `Explore` and `General-Purpose` prompts in
   those four families; `reviewer` there gets the search and batching lines
-  only, because it has no `bash` grant.
+  only, because its `tools:` line has no `bash` grant and a bound it cannot set
+  would be a dead pointer. (Claude Code's reviewer is the asymmetric one: it
+  holds `Bash` and runs the slow builds the bound exists for, so there it gets
+  all three.)
 
   **The bridged-context contract, only when there is a block.** When the memory
   bridge wrote a section into the mirror `AGENTS.md`, the digest adds

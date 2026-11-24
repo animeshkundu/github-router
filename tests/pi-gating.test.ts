@@ -497,6 +497,33 @@ describe("pi digest: search order follows the code tool, not --search", () => {
     }
   })
 
+  test("exactly one order line ever rides, or none", () => {
+    // The ternary is what guarantees this, and it is the kind of guarantee that
+    // decays into two conditional spreads. Both lines in one digest is not a
+    // cosmetic duplicate: the semantic variant says semantic answers first while
+    // the lexical one says semantic is off, so the model would read a
+    // contradiction and spend a turn deciding which half to believe.
+    const count = (haystack: string, needle: string): number =>
+      haystack.split(needle).length - 1
+    for (const profileId of [
+      "cheapest",
+      "cheapest2",
+      "local",
+      "local2",
+      "balanced",
+      "balanced2",
+    ] as const) {
+      for (const codeTool of [true, false]) {
+        for (const semanticReady of [true, false]) {
+          const digest = buildPiAppendSystem(profileId, { codeTool, semanticReady })
+          const orderLines =
+            count(digest, PI_SEARCH_ORDER_LINE) + count(digest, PI_SEARCH_ORDER_LEXICAL_LINE)
+          expect(orderLines).toBe(codeTool ? 1 : 0)
+        }
+      }
+    }
+  })
+
   test("both variants name tool_search and the engine label, and ban shell grep", () => {
     for (const line of [PI_SEARCH_ORDER_LINE, PI_SEARCH_ORDER_LEXICAL_LINE]) {
       // `code` is published with `exposure: "deferred"`, so naming it without
