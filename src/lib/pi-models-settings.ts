@@ -211,7 +211,7 @@ export const PI_PARALLEL_TOOL_LINE =
  * returns, which is the outcome the digest wants.
  */
 export const PI_TOOL_TIMEOUT_LINE =
-  "- Pass `timeout` (seconds) to `bash` and `powershell`: neither has a default, and the process is killed at the bound rather than left running. Read an expired bound as a signal that the command was too broad: narrow it and re-issue instead of re-running with a longer limit."
+  "- Pass `timeout` (seconds) to `bash` and `powershell`: neither has a default, and the process is killed at the bound rather than left running. Read an expired bound as a signal that the command was too broad: narrow it and re-issue, unless the work is genuinely long, in which case bound it past the expected run."
 
 /**
  * The Copilot-backed family contract for a Pi profile. `cheapest2` and

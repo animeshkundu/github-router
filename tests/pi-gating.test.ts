@@ -10,6 +10,7 @@ import {
   buildPiSkills,
 } from "~/lib/pi-extension"
 import {
+  buildPiAgentFiles,
   buildPiAppendSystem,
   buildPiKeybindingsJson,
   buildPiModelsJson,
@@ -473,6 +474,9 @@ describe("pi digest: search order follows the code tool, not --search", () => {
         PI_SEARCH_ORDER_LEXICAL_LINE,
       )
       // Absent means the caller does not claim the tool: no pointer, no lie.
+      // THIS is the gate's anchor, not the positive assertion above: if a future
+      // caller stops passing `codeTool`, only this line notices that the steer
+      // silently disappeared.
       expect(buildPiAppendSystem(profileId)).not.toContain(PI_SEARCH_ORDER_LEXICAL_LINE)
       expect(buildPiAppendSystem(profileId, { codeTool: false })).not.toContain(
         PI_SEARCH_ORDER_LEXICAL_LINE,
@@ -574,6 +578,26 @@ describe("pi digest: batch independent calls and bound slow ones", () => {
     }
   })
 
+  test("the reviewer subagent is told to search and batch but never to bound a shell", () => {
+    // Pi's reviewer `tools:` line is `read, grep, find, ls, watchdog_diff` (no
+    // bash), so a `timeout` instruction would be a dead pointer in its own
+    // prompt. Its Claude Code sibling DOES hold Bash and gets all three rules,
+    // which is why this asymmetry is Pi-only and worth pinning: a future
+    // consistency edit that spreads `boundsSteer` to every role would pass
+    // every presence assertion and reintroduce the dead pointer silently.
+    for (const profileId of ["cheapest", "local"] as const) {
+      const files = buildPiAgentFiles(profileId)
+      const reviewer = files["agents/reviewer.md"]!
+      expect(reviewer).toContain("never shell out to `grep -r`")
+      expect(reviewer).toContain("Batch independent searches")
+      expect(reviewer).not.toContain("Pass `bash` a `timeout`")
+      // The two roles that do hold a shell get the bound.
+      for (const role of ["agents/explore.md", "agents/general-purpose.md"] as const) {
+        expect(files[role]).toContain("Pass `bash` a `timeout`")
+      }
+    }
+  })
+
   test("balanced delegates discovery first and carries neither line", () => {
     // Balanced's pipeline sends discovery to `Explore` before the lead searches,
     // so an ordering steer here would fight its own pipeline.
@@ -605,10 +629,12 @@ describe("pi digest: batch independent calls and bound slow ones", () => {
 
   test("the digest stays near its pre-change size", () => {
     // The digest is a per-turn cost on every launch. The three new lines are
-    // ~840 bytes on the stock (lexical) path; more than that means something
-    // else crept in.
+    // ~915 bytes on the stock (lexical) path; more than that means something
+    // else crept in. Deliberately a DELTA against the same profile with the
+    // option off, not a magic absolute: it catches an accidental extra line or
+    // a run-away clause without pinning the whole digest's wording.
     const stock = buildPiAppendSystem("local", { peers: true, codeTool: true, semanticReady: false })
     const before = buildPiAppendSystem("local", { peers: true })
-    expect(Buffer.byteLength(stock) - Buffer.byteLength(before)).toBeLessThanOrEqual(860)
+    expect(Buffer.byteLength(stock) - Buffer.byteLength(before)).toBeLessThanOrEqual(960)
   })
 })

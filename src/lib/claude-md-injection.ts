@@ -646,7 +646,7 @@ export const GATHERING_DIRECTIVE_CLAUSE =
 
 /** Digest-sized condensation of {@link GATHERING_DIRECTIVE_CLAUSE}. */
 export const GATHERING_DIGEST_SENTENCE =
-  "Search `code` before reading broadly, then `Grep` with a narrow `glob` for exact hits instead of shelling out; batch independent reads, searches, and subagent launches into one turn; give a slow command an explicit Bash `timeout` and read the background output instead of re-running it. "
+  "Search `code` before reading broadly, then `Grep` with a narrow `glob` for exhaustive hits instead of shelling out; batch independent reads, searches, and subagent launches into one turn; give a slow command an explicit Bash `timeout` and read the background output instead of re-running it. "
 
 /**
  * Subagent-prompt form of the gathering rule, for the Explore/General-Purpose
