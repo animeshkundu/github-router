@@ -490,10 +490,11 @@ Pi allows `--no-peers`. Do not "fix" this back into parity.
   seconds and have **no** default; Pi kills the process tree at the bound
   rather than leaving it running, so an expired bound is treated as a signal
   that the command was too broad and re-issued narrower, with a bound past the
-  expected run for work that is genuinely long. `balanced`/`balanced2` are
-  excluded: their pipeline
-  sends discovery to `Explore` first, so an ordering and batching steer on the
-  lead would fight the pipeline the rest of their digest describes. The same
+  expected run for work that is genuinely long. `balanced`/`balanced2` carry
+  neither of these two: their pipeline sends discovery to `Explore` first, so a
+  batching and bounds steer on the lead would fight the pipeline the rest of
+  their digest describes. They do keep the search-order line above, which is
+  about which engine answers rather than about who gathers first. The same
   three rules ride on the pinned `Explore` and `General-Purpose` prompts in
   those four families; `reviewer` there gets the search and batching lines
   only, because its `tools:` line has no `bash` grant and a bound it cannot set

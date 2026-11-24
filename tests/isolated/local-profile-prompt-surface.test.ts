@@ -320,9 +320,10 @@ describe("search guidance matches the launch's backend", () => {
   })
 
   test("non-gathering profiles never inherit the clause", () => {
-    // Balanced and standard delegate discovery first; an ordering steer there
-    // would contradict their own pipeline, and the clause names tools
-    // (`Grep`, Bash `timeout`) that are only meaningful once the lead searches.
+    // Balanced and standard delegate discovery first, so the Claude-side clause
+    // — which bundles the ordering with the batching and bounds rules — is not
+    // theirs to carry. (Pi splits them: its digest gives `balanced*` the
+    // search-order line alone and withholds batching and bounds.)
     for (const profile of ["balanced", "balanced2", "fast"] as const) {
       expect(buildOperatingDefaultsDirective({ profile, sweEnabled: true })).not.toContain(
         GATHERING_DIRECTIVE_CLAUSE,

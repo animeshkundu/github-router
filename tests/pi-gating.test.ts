@@ -625,13 +625,18 @@ describe("pi digest: batch independent calls and bound slow ones", () => {
     }
   })
 
-  test("balanced delegates discovery first and carries neither line", () => {
-    // Balanced's pipeline sends discovery to `Explore` before the lead searches,
-    // so an ordering steer here would fight its own pipeline.
+  test("balanced delegates discovery first and carries neither batching nor bounds", () => {
+    // Balanced's pipeline sends discovery to `Explore` before the lead gathers,
+    // so a batching and bounds steer on the lead would fight its own pipeline.
     for (const profileId of ["balanced", "balanced2"] as const) {
       const digest = buildPiAppendSystem(profileId, { codeTool: true })
       expect(digest).not.toContain(PI_PARALLEL_TOOL_LINE)
       expect(digest).not.toContain(PI_TOOL_TIMEOUT_LINE)
+      // ...but it keeps the search-order line. Which engine answers, and when
+      // ranking is the wrong instrument, is true no matter who gathers first;
+      // dropping it here would leave `code` undocumented on a launch that has
+      // it. Pinned because "balanced is excluded" is an easy over-correction.
+      expect(digest).toContain(PI_SEARCH_ORDER_LEXICAL_LINE)
     }
   })
 

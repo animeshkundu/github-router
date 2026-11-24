@@ -2020,11 +2020,14 @@ export const PI_CONTEXT_CONTRACT_LINE =
  * gets, and defaults to the lexical one rather than claiming an engine nothing
  * provisioned.
  *
- * The search, batching, and bounded-call lines ride the cheapest and local
- * families, the four profiles whose leads do their own gathering; `balanced*`
- * delegates discovery first, so an ordering steer there would fight its
- * pipeline. `codeTool: false` omits the search line entirely: a pointer to a
- * tool the session does not have is the failure this digest exists to avoid.
+ * The search-order line rides every profile that has the tool, `balanced*`
+ * included: which engine answers, and when to reach for `rg` instead, is true
+ * regardless of who gathers first. The batching and bounded-call steer is the
+ * narrower one — only `cheapest*` and `local*`, whose leads do their own
+ * gathering; `balanced*` sends discovery to `Explore` first, so those two
+ * would fight its pipeline. `codeTool: false` omits the search line entirely:
+ * a pointer to a tool the session does not have is the failure this digest
+ * exists to avoid.
  */
 export function buildPiAppendSystem(
   profileId: PiProfileId,
