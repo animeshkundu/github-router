@@ -102,13 +102,47 @@ async function fetchJson(
  * the base URL (`http://127.0.0.1:PORT`); use `startManagedServer` below
  * for process lifecycle, or point at an externally managed server.
  */
+/**
+ * Health-check cache TTL (ms). Override with `GH_ROUTER_SERVICE_HEALTH_TTL_MS`
+ * (a non-negative integer; 0 = always re-check). Caches only HEALTHY
+ * results — an unhealthy verdict is always re-probed, so a restarted
+ * server is picked up immediately instead of serving 30s of false
+ * negatives.
+ */
+export function serviceHealthTtlMs(): number {
+  const raw = Number(process.env.GH_ROUTER_SERVICE_HEALTH_TTL_MS)
+  if (Number.isSafeInteger(raw) && raw >= 0) return raw
+  return 30_000
+}
+
 export class NextPlaidClient {
   readonly baseUrl: string
   private readonly timeoutMs: number
+  private cachedHealth: ServiceHealth | null = null
+  private lastHealthAt = 0
 
   constructor(baseUrl: string, timeoutMs = DEFAULT_TIMEOUT_MS) {
     this.baseUrl = baseUrl.replace(/\/+$/, "")
     this.timeoutMs = timeoutMs
+  }
+
+  /**
+   * Throw unless the server is healthy NOW (within the TTL cache).
+   * Pre-flight for every query-path call so a dead/wedged server fails
+   * fast here — with a clear error — instead of timing out mid-search.
+   */
+  async ensureHealthy(): Promise<ServiceHealth> {
+    const now = Date.now()
+    const cached = this.cachedHealth
+    if (cached?.ok === true && now - this.lastHealthAt < serviceHealthTtlMs()) {
+      return cached
+    }
+    // Unhealthy-or-stale: re-probe (a restarted server must be picked up).
+    const h = await this.health()
+    this.cachedHealth = h
+    this.lastHealthAt = now
+    if (!h.ok) throw new Error("next-plaid server unhealthy")
+    return h
   }
 
   async health(): Promise<ServiceHealth> {
@@ -291,6 +325,132 @@ export class NextPlaidClient {
   }
 }
 
+/** Sampled child-process memory (best-effort; null when unmeasurable). */
+export interface ServerMemorySample {
+  rssBytes: number
+  /** Windows commit charge (PagedMemorySize); null on other platforms. */
+  commitBytes: number | null
+}
+
+function intEnv(name: string, fallback: number): number {
+  const raw = Number(process.env[name])
+  return Number.isSafeInteger(raw) && raw > 0 ? raw : fallback
+}
+
+/** Memory thresholds for proactive server restart (operator-tunable). */
+export function serviceMemoryLimits(): { maxRssBytes: number; maxCommitBytes: number } {
+  return {
+    maxRssBytes: intEnv("GH_ROUTER_SERVICE_MAX_RSS_MB", 4096) * 1024 * 1024,
+    maxCommitBytes: intEnv("GH_ROUTER_SERVICE_MAX_COMMIT_MB", 6144) * 1024 * 1024,
+  }
+}
+
+/**
+ * RSS (+ Windows commit charge) of a child pid. One shell-out (5s cap),
+ * so callers MUST cache (see `isServerMemoryOverLimit`). Returns null when
+ * the pid is gone or the platform tooling is unavailable — unmeasurable
+ * reads as "not over" (fail open; the health gate still applies).
+ */
+export async function sampleChildMemory(pid: number): Promise<ServerMemorySample | null> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null
+  try {
+    const { execFile } = await import("node:child_process")
+    const run = (cmd: string, args: Array<string>): Promise<string> =>
+      new Promise((resolve, reject) => {
+        execFile(cmd, args, { timeout: 5000, windowsHide: true }, (err, stdout) => {
+          if (err) reject(err)
+          else resolve(stdout)
+        })
+      })
+    if (process.platform === "win32") {
+      const out = await run("powershell", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `$p=Get-Process -Id ${pid} -ErrorAction Stop; "$($p.WorkingSet64) $($p.PagedMemorySize64)"`,
+      ])
+      const parts = out.trim().split(/\s+/)
+      const rss = Number(parts[0])
+      const commit = Number(parts[1])
+      if (!Number.isFinite(rss) || rss <= 0) return null
+      return {
+        rssBytes: rss,
+        commitBytes: Number.isFinite(commit) && commit > 0 ? commit : null,
+      }
+    }
+    const out = await run("ps", ["-o", "rss=", "-p", String(pid)])
+    const kb = Number(out.trim())
+    if (!Number.isFinite(kb) || kb <= 0) return null
+    return { rssBytes: kb * 1024, commitBytes: null }
+  } catch {
+    return null
+  }
+}
+
+let _memSampleAt = 0
+let _memOverLimit = false
+
+/** Test-only: reset the memory-sample cache. */
+export function __resetServerMemoryCacheForTests(): void {
+  _memSampleAt = 0
+  _memOverLimit = false
+}
+
+/**
+ * True when the managed server's sampled memory exceeds the limits.
+ * Samples at most once per 60s (a powershell/ps shell-out per query would
+ * add unacceptable latency to the hot search path). No managed process
+ * (test fakes) or unmeasurable sample reads as false.
+ */
+export async function isServerMemoryOverLimit(server: ManagedServer): Promise<boolean> {
+  const now = Date.now()
+  if (now - _memSampleAt < 60_000) return _memOverLimit
+  _memSampleAt = now
+  const pid = server.process?.pid
+  if (pid === undefined) {
+    _memOverLimit = false
+    return false
+  }
+  const sample = await sampleChildMemory(pid)
+  if (!sample) {
+    _memOverLimit = false
+    return false
+  }
+  const limits = serviceMemoryLimits()
+  _memOverLimit =
+    sample.rssBytes > limits.maxRssBytes ||
+    (sample.commitBytes !== null && sample.commitBytes > limits.maxCommitBytes)
+  return _memOverLimit
+}
+
+/** Lifetime restart accounting for the managed server. */
+export interface ServerStats {
+  restartsTotal: number
+  lastRestartAt: string | null
+  lastRestartReason: string | null
+}
+
+const _serverStats: ServerStats = { restartsTotal: 0, lastRestartAt: null, lastRestartReason: null }
+
+/** Record a proactive server restart (memory pressure, query budget). */
+export function recordServerRestart(reason: string): void {
+  _serverStats.restartsTotal += 1
+  _serverStats.lastRestartAt = new Date().toISOString()
+  _serverStats.lastRestartReason = reason
+}
+
+/** Snapshot of server restart accounting (observability seam). */
+export function getServerStats(): ServerStats {
+  return { ..._serverStats }
+}
+
+/** Test-only: reset server stats. */
+export function __resetServerStatsForTests(): void {
+  _serverStats.restartsTotal = 0
+  _serverStats.lastRestartAt = null
+  _serverStats.lastRestartReason = null
+}
+
 /** Queue-full signal: retry after backoff, never fatal. */
 export class ServiceBusyError extends Error {
   readonly index: string
@@ -298,6 +458,47 @@ export class ServiceBusyError extends Error {
     super(`next-plaid index ${index} busy (queue full); retry after backoff`)
     this.name = "ServiceBusyError"
     this.index = index
+  }
+}
+
+/**
+ * Server-process death during a long populate/encode. Thrown (instead of a
+ * bare `fetch failed / ECONNREFUSED`) when the managed `next-plaid-api`
+ * child exits while the router still has work to send it. Carries the exit
+ * code, signal, and the captured stderr tail so the `index` command can
+ * print an actionable diagnostic instead of a generic connection error.
+ *
+ * Stderr is truncated server-side (never full source — the server only ever
+ * logs paths, not code) and truncated again here to the last 2 KB.
+ */
+export class ServerCrashedError extends Error {
+  readonly exitCode: number | null
+  readonly signal: string | null
+  readonly stderrTail: string
+  /**
+   * Crash-time context supplied by the caller (units sent, files parsed,
+   * elapsed). Tells "died on batch 6 of 12K files" apart from "died after
+   * 11K units" — load-bearing for distinguishing a poison input / early
+   * external kill from a progressive leak.
+   */
+  readonly detail: string
+  constructor(opts: {
+    exitCode?: number | null
+    signal?: string | null
+    stderrTail?: string
+    detail?: string
+  }) {
+    super(
+      `next-plaid server crashed during encode` +
+        (opts.exitCode !== undefined && opts.exitCode !== null ? ` (exit code ${opts.exitCode})` : "") +
+        (opts.signal ? ` (signal ${opts.signal})` : "") +
+        (opts.detail ? ` [${opts.detail}]` : ""),
+    )
+    this.name = "ServerCrashedError"
+    this.exitCode = opts.exitCode ?? null
+    this.signal = opts.signal ?? null
+    this.stderrTail = (opts.stderrTail ?? "").slice(-2048)
+    this.detail = opts.detail ?? ""
   }
 }
 
@@ -385,6 +586,15 @@ export interface ManagedServer {
   client: NextPlaidClient
   /** Graceful shutdown (SIGTERM, wait, SIGKILL escalation). */
   stop: () => Promise<void>
+  /**
+   * Managed child process (optional for backward-compat with test fakes).
+   * Callers use this to detect server death DURING a long populate — the
+   * startup path already gates on health, but a 30-minute encode can
+   * outlive the server (OOM / access violation / Windows commit limit).
+   */
+  process?: ChildProcess
+  /** Last 4 KB of server stderr (paths only, never source). */
+  stderrTail?: () => string
 }
 
 /** Find a free loopback port (TOCTOU-racy by nature; retry on collision). */
@@ -489,7 +699,15 @@ export async function startManagedServer(
         // Any HTTP answer (even unhealthy) proves the socket is live;
         // model load completes asynchronously — readiness follows.
         void h
-        if (h.ok) return { url, client, stop: () => stopServer(child) }
+        if (h.ok) {
+          return {
+            url,
+            client,
+            stop: () => stopServer(child),
+            process: child,
+            stderrTail: () => stderrTail,
+          }
+        }
       } catch {
         // Not listening yet — keep polling.
       }
@@ -582,7 +800,12 @@ export function serverParallelSessions(foreground = false): number {
   } catch {
     // keep default
   }
-  if (foreground) return Math.max(1, cpus)
+  // Foreground `index` is capped at 8 sessions (not all cores): each ONNX
+  // session duplicates model state (~100-200 MB) plus batch-queue buffers,
+  // so 16 sessions on a 16-core box can exceed 12 GB working set and trip
+  // Windows commit-charge limits / RADAR_PRE_LEAK_64 on large repos. 8 is
+  // still 2x the background share and 2x the colgrep default.
+  if (foreground) return Math.max(1, Math.min(cpus, 8))
   // Encode sessions duplicate model state; 25% keeps a background server
   // from saturating an interactive box (mirrors colbertParallelSessions).
   return Math.max(1, Math.floor(cpus * 0.25))
