@@ -102,9 +102,18 @@ jobs:
       # the runner's REAL default app dir there, and `rename` semantics under a
       # live virus scanner are what the publish path is built around.
       #
+      # It also installs an optional payload with that same real npm, because an
+      # optional install that fails is a WARNING with exit code 0 — there is no
+      # red tick to catch it. That is exactly how the `^^0.1.13` quoting bug
+      # shipped: `npm view <pkg>@^0.1.13` reached npm corrupted, resolution
+      # failed with EINVALIDTAGNAME, and every Windows machine simply never got
+      # the payload while `update` reported success. The assertion is therefore
+      # the payload ON DISK plus a retired older-schema backoff ladder, not the
+      # exit code and not the log.
+      #
       # `--version` inside the script pins the payload to the packed version, so
       # this needs no new release on the registry — only network for npm.
-      - name: Managed install smoke (pack → npx-shaped tree → update → hand-off)
+      - name: Managed install smoke (pack → npx-shaped tree → update → hand-off → optional payload)
         timeout-minutes: 20
         run: bun scripts/managed-install-smoke.ts
 

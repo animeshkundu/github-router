@@ -364,12 +364,137 @@ async function main(): Promise<void> {
   if (gcRun.code !== 0) fail(`update --check exited ${gcRun.code}`)
   else if (!fs.existsSync(payloadEntry)) fail("update --check removed the live payload")
   else ok("live payload survived --check")
+
+  // ---------------------------------------------------------------------
+  // Optional payload install, end to end, with the REAL npm.
+  //
+  // This is the step that would have caught the shipped Windows bug. Every
+  // other assertion about it was fake-based or unit-level, and the failure was
+  // invisible at the CLI boundary: an optional payload that cannot install is a
+  // WARNING with exit code 0, so there was no red tick, no non-zero exit, and
+  // no test reading the disk. `npm view <pkg>@^0.1.13` reached npm as
+  // `@^^0.1.13`, resolution failed with EINVALIDTAGNAME, and the machine simply
+  // never got the payload.
+  //
+  // So the assertion is the payload on disk. Not the exit code, not the log.
+  // ---------------------------------------------------------------------
+  step("optional payload installs through the real npm")
+  const optionalEnv = { ...smokeEnv, GH_ROUTER_NO_MANAGED_INSTALL: "1" }
+  const optionalRun = run(
+    process.execPath,
+    [entry, "update", "--optional-only", "--optional-pkg", SMOKE_OPTIONAL.pkg],
+    { env: optionalEnv },
+  )
+  const optionalOut = `${optionalRun.stdout}${optionalRun.stderr}`
+  process.stdout.write(`  ${optionalOut.trim().split(/\r?\n/).join("\n  ")}\n`)
+  if (optionalOut.includes("EINVALIDTAGNAME")) {
+    // The exact signature of the shipped bug, named so the failure report says
+    // what broke instead of "payload missing".
+    fail("npm rejected the version range with EINVALIDTAGNAME (the argv was corrupted before it reached npm)")
+  }
+  const optionalState = (() => {
+    try {
+      return readOptionalState()
+    } catch (err) {
+      fail(`optional install wrote no usable install-state.json: ${String(err)}`)
+      return null
+    }
+  })()
+  const optionalEntry = optionalState?.packages?.[SMOKE_OPTIONAL.pkg]
+  const resolvedVersion = optionalEntry?.version
+  if (!resolvedVersion) {
+    fail(
+      `no resolved version recorded for ${SMOKE_OPTIONAL.pkg}; `
+        + `lastError=${JSON.stringify(optionalEntry?.lastError ?? null)}`,
+    )
+  } else if (optionalState?.schemaVersion !== 2) {
+    fail(`install-state.json stamped schemaVersion ${String(optionalState?.schemaVersion)}, expected 2`)
+  } else {
+    const payload = optionalPayloadDir(resolvedVersion)
+    const required = path.join(payload, ...SMOKE_OPTIONAL.requiredFile.split("/"))
+    if (!fs.existsSync(required)) {
+      fail(`payload incomplete: ${required} is missing`)
+    } else if (optionalEntry?.consecutiveFailures !== 0) {
+      fail(`${SMOKE_OPTIONAL.pkg} installed but recorded ${String(optionalEntry?.consecutiveFailures)} failures`)
+    } else {
+      const wasm = countFilesWithSuffix(payload, ".wasm")
+      if (wasm < 2) fail(`payload has ${wasm} .wasm files; the grammar bundle should have dozens`)
+      else ok(`${SMOKE_OPTIONAL.pkg}@${resolvedVersion}: ${wasm} .wasm files, schema 2, 0 failures recorded`)
+    }
+  }
+
+  // A ladder written by the broken build must not survive the upgrade that
+  // fixes it. Without the schema bump the payload stays missing for up to 24h
+  // per startup and the only escape is `--force`, which nothing tells the user
+  // about. Simulated the way a machine actually looks after the bug: no
+  // `schemaVersion`, a far-future `nextAttemptAt`, and no payload on disk.
+  step("a backoff ladder from an older build is retired, not waited out")
+  const stateFile = path.join(appDir, "optional", "install-state.json")
+  if (resolvedVersion) {
+    fs.rmSync(optionalPayloadDir(resolvedVersion), { recursive: true, force: true })
+  }
+  // The parent exists after any attempt; create it anyway so this step reports
+  // the ladder behaviour instead of throwing ENOENT when the step above failed.
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true })
+  fs.writeFileSync(
+    stateFile,
+    `${JSON.stringify(
+      {
+        packages: {
+          [SMOKE_OPTIONAL.pkg]: {
+            lastAttemptAt: new Date().toISOString(),
+            consecutiveFailures: 3,
+            nextAttemptAt: "2099-01-01T00:00:00.000Z",
+            lastError: `npm view ${SMOKE_OPTIONAL.pkg}@^^0.1.13 failed (exit 1): EINVALIDTAGNAME`,
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  )
+  const healed = run(
+    process.execPath,
+    [entry, "update", "--optional-only", "--optional-pkg", SMOKE_OPTIONAL.pkg],
+    { env: optionalEnv },
+  )
+  if (`${healed.stdout}${healed.stderr}`.includes("backing off")) {
+    fail("an inherited 2099 ladder still suppressed the attempt; the schema migration did not fire")
+  } else {
+    const healedEntry = (() => {
+      try {
+        return readOptionalState().packages?.[SMOKE_OPTIONAL.pkg]
+      } catch {
+        return undefined
+      }
+    })()
+    const healedVersion = healedEntry?.version
+    const healedPayload = healedVersion ? optionalPayloadDir(healedVersion) : ""
+    if (!healedVersion || !fs.existsSync(healedPayload)) {
+      fail(`payload was not reinstalled under a retired ladder (version ${String(healedVersion)})`)
+    } else if (healedEntry?.consecutiveFailures !== 0) {
+      fail(`healed state still records ${String(healedEntry?.consecutiveFailures)} failures`)
+    } else {
+      ok(`retired the inherited ladder and reinstalled ${SMOKE_OPTIONAL.pkg}@${healedVersion}`)
+    }
+  }
 }
 
-/** Real path when it exists, else the input — for symlinked temp dirs. */
+/**
+ * Real path when it exists, else the input, for symlinked temp dirs.
+ *
+ * `.native` on purpose. The JS implementation does NOT expand Windows 8.3 short
+ * names, so on a machine whose `TEMP` is `C:\Users\ANIKUN~1.FAR\AppData\Local\Temp`
+ * (measured on a Win11 box where `os.tmpdir()` reports exactly that) it returns
+ * the short form for a path this process created in the short form, while the
+ * CHILD process the launcher spawns reports the long form. The two sides of the
+ * `launcher → payload` comparison then differ by nothing but spelling, and the
+ * smoke fails for a reason unrelated to what it tests. `realpathSync.native`
+ * asks the OS, which resolves both spellings to one answer.
+ */
 function realpath(target: string): string {
   try {
-    return fs.realpathSync(target)
+    return fs.realpathSync.native(target)
   } catch {
     return target
   }
@@ -399,6 +524,73 @@ function dirSize(dir: string): number {
   }
   walk(dir)
   return total
+}
+
+/**
+ * The optional payload the smoke installs for real, and what must appear.
+ *
+ * `tree-sitter-wasms` and not `@huggingface/transformers` on purpose. The bug
+ * this step exists for is a `^`-bearing range rejected by cmd.exe quoting, both
+ * payloads use one (`^0.1.13`, `^4.3.2`), and their resolution path is the SAME
+ * code — so the smaller payload proves it at 50 MB / ~5 s per matrix cell
+ * instead of 480 MB / ~12 s. The transformers range stays covered by the unit
+ * tests, which run on all three platforms.
+ */
+const SMOKE_OPTIONAL = {
+  pkg: "tree-sitter-wasms",
+  // Directory name under `<APP_DIR>/optional/`, per `sanitized()` there.
+  dirPrefix: "tree-sitter-wasms@",
+  requiredFile: "out/tree-sitter-typescript.wasm",
+} as const
+
+/** `<APP_DIR>/optional/<pkg>@<version>/node_modules/<pkg>/`. */
+function optionalPayloadDir(version: string): string {
+  return path.join(
+    appDir,
+    "optional",
+    `${SMOKE_OPTIONAL.dirPrefix}${version}`,
+    "node_modules",
+    SMOKE_OPTIONAL.pkg,
+  )
+}
+
+interface OptionalStateFile {
+  schemaVersion?: number
+  packages?: Record<
+    string,
+    {
+      version?: string
+      consecutiveFailures?: number
+      nextAttemptAt?: string
+      lastError?: string
+      lastSuccessAt?: string
+    }
+  >
+}
+
+function readOptionalState(): OptionalStateFile {
+  const file = path.join(appDir, "optional", "install-state.json")
+  return JSON.parse(fs.readFileSync(file, "utf8")) as OptionalStateFile
+}
+
+/** Count files whose name ends with `suffix`, for a payload completeness check. */
+function countFilesWithSuffix(dir: string, suffix: string): number {
+  let count = 0
+  const walk = (current: string): void => {
+    let entries: Array<fs.Dirent>
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.name.endsWith(suffix)) count++
+    }
+  }
+  walk(dir)
+  return count
 }
 
 let exitCode = 0
