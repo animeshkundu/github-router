@@ -196,6 +196,12 @@ declared in `package.json#peerDependencies` — it never crosses a major. The tw
 switches are independent: `GH_ROUTER_NO_MANAGED_INSTALL=1` stops the self-updater but
 still installs the optional payloads.
 
+The range is resolved with `npm view <pkg>@<range>`, so the argument reaches npm as a
+`^`-bearing spec. On Windows that argument travels through a quoted `cmd.exe`
+envelope that must not caret-escape it (`docs/pi-launch.md`), and
+`<APP_DIR>/optional/install-state.json` carries a schema version so a failed install's
+backoff ladder cannot outlive a release that fixes the failure.
+
 ---
 
 ## Use with any OpenAI-compatible tool

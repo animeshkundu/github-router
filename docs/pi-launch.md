@@ -1129,3 +1129,38 @@ parent env.
 Neither variable is gated on `GH_ROUTER_PI_VERBOSE_NPM`. That flag is about
 log noise; folding reachability into it would point an operator who asked for
 stock npm output back at the feed that cannot serve the install.
+
+## Windows: how an npm argument reaches the child
+
+Everything above goes through `runCommandCapture`, and so do the router's own
+optional payloads (`npm view` to resolve a range, `npm install` to fetch it). On
+Windows that helper routes a `.cmd` shim through one `cmd.exe /d /s /v:OFF /c`
+envelope. Every token in that envelope is double-quoted, and inside quotes
+`cmd.exe` parses `& | < > ( ) ^ !` as literal data, so `quoteBatchArg` quotes and
+does **not** caret-escape. It used to do both, which delivered
+`tree-sitter-wasms@^^0.1.13` to npm: `npm view` exited 1 with `EINVALIDTAGNAME`,
+`resolveOptionalVersion` returned nothing, and both optional payloads stayed
+uninstalled on every Windows machine while `update` reported success. The
+unquoted `shell:true` fallback (`quoteWinArg`) is the opposite case and must keep
+its caret pass.
+
+`tests/exec.test.ts` now hands arguments to a real child through a `.cmd` shim and
+asserts the argv it received, because the previous `echo [%~1]` shim normalised
+the corruption away. A regression is a red `windows-latest` job, not a report from
+a user.
+
+`<APP_DIR>/optional/install-state.json` carries a `schemaVersion`. A schema this
+build does not recognise drops the per-package backoff ladder
+(`consecutiveFailures`, `nextAttemptAt`, `lastError`) and keeps only what
+describes the disk (`lastAttemptAt`, `lastSuccessAt`, `version`), so a failure a
+release caused cannot outlive the release that fixes it.
+
+A resolution failure records npm's own diagnosis, not a generic message. Under
+`--json` npm puts its error **envelope on stdout** and leaves stderr empty
+(`{"error":{"code":"EINVALIDTAGNAME","summary":…}}`), so the message is parsed
+from that envelope and falls back to the first stderr line only for a non-JSON
+failure. The text is third-party input: it is collapsed to one line, stripped of
+control/ANSI sequences, has any `scheme://user:token@` userinfo replaced, and is
+capped, before it reaches the state file or the terminal. The user-facing line
+names the next attempt time and the `--force` escape, because a 24h ladder behind
+a bare "backing off" is indistinguishable from a broken install.

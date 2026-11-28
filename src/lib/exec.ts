@@ -13,9 +13,19 @@
  *   1. **Metacharacter injection** (`& | < > ^ ( ) ! %`). A naive
  *      "quote only tokens with spaces" scheme lets `pkg@latest&calc`
  *      run `calc` as a second command. `buildExecInvocation` applies
- *      real cmd.exe quoting (argv-quote + caret-escape) and fails
- *      closed on `%` (which cannot be reliably escaped on the cmd
- *      command line).
+ *      real cmd.exe quoting and fails closed on `%` (which cannot be
+ *      reliably escaped on the cmd command line).
+ *
+ *      The quoted batch envelope and the unquoted `shell:true` fallback
+ *      need *different* escaping, and this is the distinction the whole
+ *      module hangs on. Inside the `/s` envelope every token is
+ *      double-quoted, so cmd.exe parses `& | < > ( ) ^ !` as literal data
+ *      and nothing may be caret-escaped — a caret there reaches the child
+ *      as a caret, which corrupted every semver range (`^0.1.13` arrived as
+ *      `^^0.1.13` and npm rejected it with `EINVALIDTAGNAME`). In an
+ *      UNQUOTED command string the same characters would be operators, so
+ *      `quoteWinArg` does caret-escape them. `quoteBatchArg` must never do
+ *      it; `quoteWinArg` must always do it.
  *
  *   2. **CWD shadowing.** `cmd.exe` resolves a bare `npm` from the
  *      current directory before PATH, so an untrusted repo can plant
@@ -163,6 +173,13 @@ export function resolveExecutable(
  *      quotes from phase 1 — so `cmd.exe` is never in quote-mode, strips
  *      the carets, and hands the argv-quoted string to the program.
  *
+ * Phase 2 is required HERE and only here, because this produces an
+ * UNQUOTED command string: without the carets cmd.exe would treat `&`, `|`,
+ * `<`, `>` as operators and `^` as its escape. It is the exact opposite of
+ * `quoteBatchArg`, whose tokens are already double-quoted inside the `/s`
+ * envelope — caret-escaping there delivers the carets to the child as data.
+ * Do not copy this pass into that function (see the module header).
+ *
  * `%` is special: it cannot be reliably escaped on the `cmd.exe`
  * *command line* (caret does not stop `%VAR%` expansion there). Rather
  * than mis-escape, we **throw** — our callers never pass `%`, so this
@@ -223,10 +240,16 @@ function assertSafeBatchToken(value: string, kind: "executable" | "argument"): v
 
 function quoteBatchArg(arg: string): string {
   assertSafeBatchToken(arg, "argument")
-  // `/s` removes the envelope's outer quotes before cmd parses this token.
-  // Quotes keep spaces, parentheses, and `!` (with /v:OFF) literal; the four
-  // always-active operators and the caret itself still need caret escaping.
-  return `"${arg.replaceAll("^", "^^").replace(/[&|<>]/g, "^$&")}"`
+  // Quote and nothing else. `/s` strips the envelope's outer quotes before
+  // cmd.exe parses this token, so the token is double-quoted when cmd.exe reads
+  // it: `& | < > ( )` are literal inside quotes, `/v:OFF` makes `!` literal, and
+  // `^` is literal rather than cmd's escape character. Caret-escaping here — the
+  // previous implementation doubled `^` and prefixed `&|<>` — is what delivered
+  // `tree-sitter-wasms@^^0.1.13` to npm and failed every `^`-range install.
+  // Injection is still closed: this function quotes every token unconditionally
+  // (no "quote only if it has a space" heuristic) and `assertSafeBatchToken`
+  // refuses `%`, `"`, and control characters outright.
+  return `"${arg}"`
 }
 
 function windowsCmdExe(): string {

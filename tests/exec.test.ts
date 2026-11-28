@@ -86,7 +86,7 @@ describe("buildExecInvocation", () => {
       expect(inv.windowsVerbatimArguments).toBe(true)
       expect(inv.args.slice(0, 4)).toEqual(["/d", "/s", "/v:OFF", "/c"])
       expect(inv.args[4]).toBe(
-        `""${executable}" "view" "pkg name" "a^&b" "x^|y" "(z)" "x!y" "x^^y""`,
+        `""${executable}" "view" "pkg name" "a&b" "x|y" "(z)" "x!y" "x^y""`,
       )
     } finally {
       if (savedSystemRoot === undefined) delete process.env.SystemRoot
@@ -166,11 +166,41 @@ describe("quoteWinArg — injection safety", () => {
   })
 
   test("a bare '&calc' argument cannot inject a second command", () => {
+    // Unresolved bare commands take the `shell:true` fallback, whose command
+    // string is UNQUOTED — there the '&' must be caret-escaped, so cmd.exe
+    // treats it literally instead of starting a second command. This is the
+    // one path that still needs carets; `quoteBatchArg` must not add them.
     const inv = buildExecInvocation(["npm", "view", "pkg@latest&calc"], "win32")
-    // The '&' in the command line is caret-escaped, so cmd.exe treats it
-    // literally instead of starting a new command.
     expect(inv.command).toContain("^&")
     expect(inv.command).not.toMatch(/[^^]&calc/)
+  })
+
+  test("the batch envelope quotes metacharacters instead of escaping them", () => {
+    // A resolved `.cmd` shim takes the `/s /c` envelope, where every token is
+    // already double-quoted, so `&` must arrive as `&` and `^` as `^`. Adding
+    // carets here is what turned `tree-sitter-wasms@^0.1.13` into `@^^0.1.13`
+    // and failed every `^`-range install on Windows. Injection is still closed
+    // by the quoting itself, which the live argv test below proves end to end.
+    const executable = "C:\\Program Files\\nodejs\\npm.cmd"
+    const savedSystemRoot = process.env.SystemRoot
+    const savedSystemRootUpper = process.env.SYSTEMROOT
+    const savedComSpec = process.env.ComSpec
+    process.env.SystemRoot = "C:\\Windows"
+    process.env.SYSTEMROOT = "C:\\Windows"
+    delete process.env.ComSpec
+    try {
+      const inv = buildExecInvocation([executable, "pkg@latest&calc", "x^y"], "win32")
+      expect(inv.args[4]).toBe(`""${executable}" "pkg@latest&calc" "x^y""`)
+      expect(inv.args[4]).not.toContain("^&")
+      expect(inv.args[4]).not.toContain("^^")
+    } finally {
+      if (savedSystemRoot === undefined) delete process.env.SystemRoot
+      else process.env.SystemRoot = savedSystemRoot
+      if (savedSystemRootUpper === undefined) delete process.env.SYSTEMROOT
+      else process.env.SYSTEMROOT = savedSystemRootUpper
+      if (savedComSpec === undefined) delete process.env.ComSpec
+      else process.env.ComSpec = savedComSpec
+    }
   })
 
   test("refuses '%' (unescapable on the cmd command line) by throwing", () => {
@@ -189,6 +219,7 @@ describe("runCommandCapture: Windows batch shims", () => {
   let tmpDir = ""
   let shim = ""
   let injected = ""
+  let argvShim = ""
 
   beforeAll(async () => {
     if (!isWin) return
@@ -211,6 +242,20 @@ describe("runCommandCapture: Windows batch shims", () => {
       ].join("\r\n") + "\r\n",
       "utf8",
     )
+
+    // A shim that hands its arguments to a real child process and prints the
+    // argv that child SAW. The `echo [%~1]` shim above cannot catch a quoting
+    // bug: `%~1` strips the surrounding quotes and cmd's `echo` swallows stray
+    // carets, so a doubly-escaped argument looks perfect there. This one is the
+    // only shape that observes what the target program actually receives.
+    const dump = path.join(tmpDir, "argv.mjs")
+    await fs.writeFile(dump, "console.log(JSON.stringify(process.argv.slice(2)))\n", "utf8")
+    argvShim = path.join(tmpDir, "argv shim.cmd")
+    await fs.writeFile(
+      argvShim,
+      `@ECHO OFF\r\n"${process.execPath}" "${dump}" %*\r\n`,
+      "utf8",
+    )
   })
 
   afterAll(async () => {
@@ -218,31 +263,63 @@ describe("runCommandCapture: Windows batch shims", () => {
   })
 
   test.if(isWin)(
-    "executes a spaced .cmd path and preserves quoted metacharacters as data",
+    "executes a spaced .cmd path and preserves quoted spaces and parentheses",
     async () => {
-      const result = await runCommandCapture([
-        shim,
-        "hello world",
-        "a&b",
-        "a|b",
-        "a>b",
-        "a<b",
-        "(a)",
-        "a^b",
-        "a!b",
-      ])
+      // Deliberately narrow. cmd's `echo` re-parses what it is given, so this
+      // shim can NOT prove metacharacter fidelity: `a&b` comes back truncated,
+      // `a^b` loses its caret, and `a|b` fails outright even when the argument
+      // arrives intact. The argv-fidelity claim therefore lives in the next
+      // test, which hands the tokens to a real child process; this one only
+      // pins that a `.cmd` path containing a space is executable and that a
+      // spaced token survives as one argument.
+      const result = await runCommandCapture([shim, "hello world", "(a)", "a!b"])
       expect(result.code).toBe(0)
-      expect(result.stdout.split(/\r?\n/).filter(Boolean)).toEqual([
-        "[hello world]",
-        "[a&b]",
-        "[a|b]",
-        "[a>b]",
-        "[a<b]",
-        "[(a)]",
-        "[a^b]",
-        "[a!b]",
-      ])
+      // The shim echoes eight `%~N` slots; the five unfilled ones print `[]`.
+      const lines = result.stdout.split(/\r?\n/).filter((line) => line !== "" && line !== "[]")
+      expect(lines).toEqual(["[hello world]", "[(a)]", "[a!b]"])
       expect(await fs.exists(injected)).toBe(false)
+    },
+  )
+
+  test.if(isWin)(
+    "delivers argv verbatim through the /s envelope, carets included",
+    async () => {
+      // The regression this pins: `^` used to be doubled inside the quoted
+      // envelope, so npm received `tree-sitter-wasms@^^0.1.13`, rejected it with
+      // EINVALIDTAGNAME, and every optional payload (`OPTIONAL_VERSION_RANGE` is
+      // `^4.3.2` / `^0.1.13`) failed to install on Windows before downloading a
+      // byte. A version range plus a path with a space covers the shapes the
+      // real callers pass.
+      const args = [
+        "tree-sitter-wasms@^0.1.13",
+        "@huggingface/transformers@^4.3.2",
+        "my pkg@^1.0.0&x",
+        "a&b",
+        "c|d",
+        "e>f",
+        "g<h",
+        "(h)",
+        "i!j",
+        "x^^y",
+      ]
+      const result = await runCommandCapture([argvShim, ...args])
+      expect(result.code).toBe(0)
+      expect(JSON.parse(result.stdout.trim())).toEqual(args)
+    },
+  )
+
+  test.if(isWin)(
+    "a '&' argument reaches the child literally and starts no second command",
+    async () => {
+      // The other half of the same envelope change: quoting, not caret-escaping,
+      // is what neutralises the operator now. The payload below would create a
+      // file if cmd.exe ever treated the '&' as a command separator.
+      const marker = path.join(tmpDir, "INJECTED2.txt")
+      const arg = `x&echo injected>${marker}`
+      const result = await runCommandCapture([argvShim, arg])
+      expect(result.code).toBe(0)
+      expect(JSON.parse(result.stdout.trim())).toEqual([arg])
+      expect(await fs.exists(marker)).toBe(false)
     },
   )
 
